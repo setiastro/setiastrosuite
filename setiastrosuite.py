@@ -67,7 +67,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Editing Suite V1.2.1')
+        self.setWindowTitle('Seti Astro\'s Suite V1.3')
 
 
 class StatisticalStretchTab(QWidget):
