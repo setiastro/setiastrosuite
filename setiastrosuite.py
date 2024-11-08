@@ -5417,11 +5417,11 @@ def calculate_orientation(header):
         print("CD matrix elements not found in the header.")
         return None
 
-# Set the directory for the images in the /imgs folder
+# Determine the path to the "imgs" folder based on the environment
 if getattr(sys, 'frozen', False):  # Check if running as a PyInstaller bundle
-    phase_folder = os.path.join(sys._MEIPASS, "imgs")  # Use PyInstaller's temporary directory with /imgs
+    imgs_folder = os.path.join(sys._MEIPASS, "imgs")  # Use PyInstaller's temporary folder
 else:
-    phase_folder = os.path.join(os.path.dirname(__file__), "imgs")  # Use the directory of the script file with /imgs
+    imgs_folder = os.path.join(os.path.dirname(__file__), "imgs")  # Use the script's directory
 
 
 # Set precision for Decimal operations
@@ -5581,7 +5581,10 @@ class CalculationThread(QThread):
 
         return phase_percentage, phase_image_name
 
-
+def get_lunar_phase_image_path(phase_image_name):
+    # Build the full path to the lunar phase image using the correct folder
+    phase_image_path = os.path.join(imgs_folder, phase_image_name)
+    return phase_image_path
 
 class WhatsInMySky(QWidget):
     def __init__(self):
@@ -5755,7 +5758,7 @@ class WhatsInMySky(QWidget):
         self.lunar_phase_label.setText(f"Lunar Phase: {phase_percentage}% illuminated")
 
         # Load and display the lunar phase image
-        phase_image_path = os.path.join("imgs", phase_image_name)
+        phase_image_path = get_lunar_phase_image_path(phase_image_name)
         if os.path.exists(phase_image_path):
             pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lunar_phase_image_label.setPixmap(pixmap)
