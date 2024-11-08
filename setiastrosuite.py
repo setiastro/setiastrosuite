@@ -1,14 +1,36 @@
+# Standard library imports
 import os
 import sys
 import time
 import json
 import csv
 import math
+from datetime import datetime
+from decimal import getcontext
 from urllib.parse import quote
 import webbrowser
+import warnings
+import shutil
+
+# Third-party library imports
 import requests
 import numpy as np
+import pandas as pd
 import cv2
+from PIL import Image, ImageDraw, ImageFont
+
+# Astropy and Astroquery imports
+from astropy.io import fits
+from astropy.time import Time
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_body, get_sun
+import astropy.units as u
+from astropy.wcs import WCS
+from astroquery.simbad import Simbad
+from astroquery.mast import Mast
+from astroquery.vizier import Vizier
+import tifffile as tiff
+import pytz
+from astropy.utils.data import conf
 
 # PyQt5 imports
 from PyQt5.QtWidgets import (
@@ -16,30 +38,16 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, 
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
-    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QGraphicsTextItem
+    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie
 )
 from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint
 
-# PIL (Pillow) imports
-from PIL import Image, ImageDraw, ImageFont
-
-# Astropy and Astroquery imports
-from astropy.io import fits
-import tifffile as tiff
-from astroquery.simbad import Simbad
-from astroquery.mast import Mast
-from astroquery.vizier import Vizier
-from astropy.coordinates import SkyCoord, Angle
-import astropy.units as u
-from astropy.wcs import WCS
-from astropy.utils.data import conf
-
-# Math imports
+# Math functions
 from math import sqrt
-
 
 
 class AstroEditingSuite(QWidget):
@@ -60,6 +68,7 @@ class AstroEditingSuite(QWidget):
         self.tabs.addTab(HaloBGonTab(), "Halo-B-Gon")  # Placeholder
         self.tabs.addTab(ContinuumSubtractTab(), "Continuum Subtraction")
         self.tabs.addTab(MainWindow(),"What's In My Image")
+        self.tabs.addTab(WhatsInMySky(),"What's In My Sky")
         
 
         # Add the tab widget to the main layout
@@ -67,7 +76,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.3')
+        self.setWindowTitle('Seti Astro\'s Suite V1.4')
 
 
 class StatisticalStretchTab(QWidget):
@@ -5408,7 +5417,577 @@ def calculate_orientation(header):
         print("CD matrix elements not found in the header.")
         return None
 
+# Set the directory for the images in the /imgs folder
+if getattr(sys, 'frozen', False):  # Check if running as a PyInstaller bundle
+    phase_folder = os.path.join(sys._MEIPASS, "imgs")  # Use PyInstaller's temporary directory with /imgs
+else:
+    phase_folder = os.path.join(os.path.dirname(__file__), "imgs")  # Use the directory of the script file with /imgs
 
+
+# Set precision for Decimal operations
+getcontext().prec = 24
+
+# Suppress warnings
+warnings.filterwarnings("ignore")
+
+
+class CalculationThread(QThread):
+    calculation_complete = pyqtSignal(pd.DataFrame, str)
+    lunar_phase_calculated = pyqtSignal(int, str)  # phase_percentage, phase_image_name
+    lst_calculated = pyqtSignal(str)
+    status_update = pyqtSignal(str)
+
+    def __init__(self, latitude, longitude, date, time, timezone, min_altitude, catalog_filters, object_limit):
+        super().__init__()
+        self.latitude = latitude
+        self.longitude = longitude
+        self.date = date
+        self.time = time
+        self.timezone = timezone
+        self.min_altitude = min_altitude
+        self.catalog_filters = catalog_filters
+        self.object_limit = object_limit
+
+    def get_catalog_file_path(self):
+        # Define a user-writable location for the catalog (e.g., in the user's home directory)
+        user_catalog_path = os.path.join(os.path.expanduser("~"), "celestial_catalog.csv")
+
+        # Check if we are running in a PyInstaller bundle
+        if not os.path.exists(user_catalog_path):
+            bundled_catalog = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(__file__)), "celestial_catalog.csv")
+            if os.path.exists(bundled_catalog):
+                # Copy the bundled catalog to a writable location
+                shutil.copyfile(bundled_catalog, user_catalog_path)
+
+        return user_catalog_path  # Return the path to the user-writable catalog
+
+    def run(self):
+        try:
+            # Convert date and time to astropy Time
+            datetime_str = f"{self.date} {self.time}"
+            local = pytz.timezone(self.timezone)
+            naive_datetime = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+            local_datetime = local.localize(naive_datetime)
+            astropy_time = Time(local_datetime)
+
+            # Define observer's location
+            location = EarthLocation(lat=self.latitude * u.deg, lon=self.longitude * u.deg, height=0 * u.m)
+
+            # Calculate Local Sidereal Time
+            lst = astropy_time.sidereal_time('apparent', self.longitude * u.deg)
+
+            # Calculate lunar phase
+            phase_percentage, phase_image_name = self.calculate_lunar_phase(astropy_time, location)
+
+            # Emit lunar phase data
+            self.lunar_phase_calculated.emit(phase_percentage, phase_image_name)
+
+            # Determine the path to celestial_catalog.csv, compatible with both PyInstaller and normal environments
+            catalog_file = os.path.join(
+                getattr(sys, '_MEIPASS', os.path.dirname(__file__)), "celestial_catalog.csv"
+            )
+
+            # Load celestial catalog from CSV
+            if not os.path.exists(catalog_file):
+                self.calculation_complete.emit(pd.DataFrame(), "Catalog file not found.")
+                return
+
+            df = pd.read_csv(catalog_file, encoding='ISO-8859-1')
+
+            # Apply catalog filters
+            df = df[df['Catalog'].isin(self.catalog_filters)]
+            df.dropna(subset=['RA', 'Dec'], inplace=True)
+
+            # Filter objects by RA within +/- 6 hours of LST
+            ra_threshold = 6  # Hours
+            lst_ra_lower = (lst.hour - ra_threshold) % 24
+            lst_ra_upper = (lst.hour + ra_threshold) % 24
+
+            if lst_ra_lower < lst_ra_upper:
+                df = df[(df['RA'] >= lst_ra_lower) & (df['RA'] <= lst_ra_upper)]
+            else:
+                df = df[(df['RA'] >= lst_ra_lower) | (df['RA'] <= lst_ra_upper)]
+
+            # Check altitude and calculate additional metrics
+            altaz_frame = AltAz(obstime=astropy_time, location=location)
+            altitudes, azimuths, minutes_to_transit, degrees_from_moon = [], [], [], []
+
+            moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
+
+            for _, row in df.iterrows():
+                sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
+                altaz = sky_coord.transform_to(altaz_frame)
+                altitudes.append(altaz.alt.deg)
+                azimuths.append(altaz.az.deg)
+                minutes_to_transit.append(abs((sky_coord.ra - lst).hour * 60))
+                degrees_from_moon.append(sky_coord.separation(moon).deg)
+
+            # Add new calculated columns
+            df['Altitude'] = altitudes
+            df['Azimuth'] = azimuths
+            df['Minutes to Transit'] = minutes_to_transit
+            df['Degrees from Moon'] = degrees_from_moon
+
+            # Filter by minimum altitude and limit results
+            df = df[df['Altitude'] >= self.min_altitude].head(self.object_limit)
+
+            self.calculation_complete.emit(df, "Calculation complete.")
+        except Exception as e:
+            self.calculation_complete.emit(pd.DataFrame(), f"Error: {str(e)}")
+
+    def calculate_lunar_phase(self, astropy_time, location):
+        moon = get_body("moon", astropy_time, location)
+        sun = get_sun(astropy_time)
+        elongation = moon.separation(sun).deg
+
+        # Determine lunar phase percentage
+        phase_percentage = (1 - np.cos(np.radians(elongation))) / 2 * 100
+        phase_percentage = round(phase_percentage)
+
+        # Determine if it is waxing or waning
+        future_time = astropy_time + (6 * u.hour)
+        future_moon = get_body("moon", future_time, location)
+        future_sun = get_sun(future_time)
+        future_elongation = future_moon.separation(future_sun).deg
+        is_waxing = future_elongation > elongation
+
+        # Select appropriate lunar phase image based on phase angle
+        phase_image_name = "new_moon.png"  # Default
+
+        if 0 <= elongation < 9:
+            phase_image_name = "new_moon.png"
+        elif 9 <= elongation < 18:
+            phase_image_name = "waxing_crescent_1.png" if is_waxing else "waning_crescent_5.png"
+        elif 18 <= elongation < 27:
+            phase_image_name = "waxing_crescent_2.png" if is_waxing else "waning_crescent_4.png"
+        elif 27 <= elongation < 36:
+            phase_image_name = "waxing_crescent_3.png" if is_waxing else "waning_crescent_3.png"
+        elif 36 <= elongation < 45:
+            phase_image_name = "waxing_crescent_4.png" if is_waxing else "waning_crescent_2.png"
+        elif 45 <= elongation < 54:
+            phase_image_name = "waxing_crescent_5.png" if is_waxing else "waning_crescent_1.png"
+        elif 54 <= elongation < 90:
+            phase_image_name = "first_quarter.png"
+        elif 90 <= elongation < 108:
+            phase_image_name = "waxing_gibbous_1.png" if is_waxing else "waning_gibbous_4.png"
+        elif 108 <= elongation < 126:
+            phase_image_name = "waxing_gibbous_2.png" if is_waxing else "waning_gibbous_3.png"
+        elif 126 <= elongation < 144:
+            phase_image_name = "waxing_gibbous_3.png" if is_waxing else "waning_gibbous_2.png"
+        elif 144 <= elongation < 162:
+            phase_image_name = "waxing_gibbous_4.png" if is_waxing else "waning_gibbous_1.png"
+        elif 162 <= elongation <= 180:
+            phase_image_name = "full_moon.png"
+
+        return phase_percentage, phase_image_name
+
+
+
+class WhatsInMySky(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
+        self.settings = {}  # Initialize empty settings dictionary
+        self.initUI()  # Build the UI
+        self.load_settings()  # Load settings after UI is built
+        self.object_limit = self.settings.get("object_limit", 100)
+
+    def initUI(self):
+        layout = QGridLayout()
+        fixed_width = 150
+
+        # Latitude, Longitude, Date, Time, Time Zone
+        self.latitude_entry, self.longitude_entry, self.date_entry, self.time_entry, self.timezone_combo = self.setup_basic_info_fields(layout, fixed_width)
+
+        # Minimum Altitude, Catalog Filters, RA/Dec format
+        self.min_altitude_entry, self.catalog_vars, self.ra_dec_format = self.setup_filters(layout, fixed_width)
+
+        # Calculate Button, Status Label, Sidereal Time, Treeview for Results, Custom Object and Save Buttons
+        self.setup_controls(layout, fixed_width)
+
+        self.setLayout(layout)
+        self.setMinimumWidth(1000)  # Ensures a wide enough starting window
+
+    def setup_basic_info_fields(self, layout, fixed_width):
+        self.latitude_entry = QLineEdit()
+        self.latitude_entry.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Latitude:"), 0, 0)
+        layout.addWidget(self.latitude_entry, 0, 1)
+
+        self.longitude_entry = QLineEdit()
+        self.longitude_entry.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Longitude:"), 1, 0)
+        layout.addWidget(self.longitude_entry, 1, 1)
+
+        self.date_entry = QLineEdit()
+        self.date_entry.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Date (YYYY-MM-DD):"), 2, 0)
+        layout.addWidget(self.date_entry, 2, 1)
+
+        self.time_entry = QLineEdit()
+        self.time_entry.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Time (HH:MM):"), 3, 0)
+        layout.addWidget(self.time_entry, 3, 1)
+
+        self.timezone_combo = QComboBox()
+        self.timezone_combo.addItems(pytz.all_timezones)
+        self.timezone_combo.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Time Zone:"), 4, 0)
+        layout.addWidget(self.timezone_combo, 4, 1)
+
+        return self.latitude_entry, self.longitude_entry, self.date_entry, self.time_entry, self.timezone_combo
+
+    def setup_filters(self, layout, fixed_width):
+        self.min_altitude_entry = QLineEdit()
+        self.min_altitude_entry.setFixedWidth(fixed_width)
+        layout.addWidget(QLabel("Min Altitude (0-90 degrees):"), 5, 0)
+        layout.addWidget(self.min_altitude_entry, 5, 1)
+
+        catalog_frame = QScrollArea()
+        catalog_widget = QWidget()
+        catalog_layout = QGridLayout()
+        self.catalog_vars = {}
+        for i, catalog in enumerate(["Messier", "NGC", "IC", "Caldwell", "Abell", "Sharpless", "LBN", "LDN", "PNG", "User"]):
+            chk = QCheckBox(catalog)
+            chk.setChecked(True)
+            catalog_layout.addWidget(chk, i // 5, i % 5)
+            self.catalog_vars[catalog] = chk
+        catalog_widget.setLayout(catalog_layout)
+        catalog_frame.setWidget(catalog_widget)
+        catalog_frame.setFixedWidth(fixed_width + 250)
+        layout.addWidget(QLabel("Catalog Filters:"), 6, 0)
+        layout.addWidget(catalog_frame, 6, 1)
+
+        # RA/Dec format setup
+        self.ra_dec_degrees = QRadioButton("Degrees")
+        self.ra_dec_hms = QRadioButton("H:M:S / D:M:S")
+        ra_dec_group = QButtonGroup()
+        ra_dec_group.addButton(self.ra_dec_degrees)
+        ra_dec_group.addButton(self.ra_dec_hms)
+        self.ra_dec_degrees.setChecked(True)  # Default to Degrees format
+        ra_dec_layout = QHBoxLayout()
+        ra_dec_layout.addWidget(self.ra_dec_degrees)
+        ra_dec_layout.addWidget(self.ra_dec_hms)
+        layout.addWidget(QLabel("RA/Dec Format:"), 7, 0)
+        layout.addLayout(ra_dec_layout, 7, 1)
+
+        # Connect the radio buttons to the update function
+        self.ra_dec_degrees.toggled.connect(self.update_ra_dec_format)
+        self.ra_dec_hms.toggled.connect(self.update_ra_dec_format)
+
+        return self.min_altitude_entry, self.catalog_vars, self.ra_dec_degrees
+
+    def setup_controls(self, layout, fixed_width):
+        # Calculate button
+        calculate_button = QPushButton("Calculate")
+        calculate_button.setFixedWidth(fixed_width)
+        layout.addWidget(calculate_button, 8, 0)
+        calculate_button.clicked.connect(self.start_calculation)
+
+        # Status label
+        self.status_label = QLabel("Status: Idle")
+        layout.addWidget(self.status_label, 9, 0, 1, 2)
+
+        # Sidereal time label
+        self.lst_label = QLabel("Local Sidereal Time: {:.3f}".format(0.0))
+        layout.addWidget(self.lst_label, 10, 0, 1, 2)
+
+        # Lunar phase image and label
+        self.lunar_phase_image_label = QLabel()
+        layout.addWidget(self.lunar_phase_image_label, 0, 2, 4, 1)  # Position it appropriately
+
+        self.lunar_phase_label = QLabel("Lunar Phase: N/A")
+        layout.addWidget(self.lunar_phase_label, 4, 2)
+
+        # Treeview for results (expand dynamically)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels([
+            "Name", "RA", "Dec", "Altitude", "Azimuth", "Minutes to Transit", "Before/After Transit",
+            "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Size (arcmin)"
+        ])
+        self.tree.setSortingEnabled(True)
+        self.tree.header().setSectionResizeMode(QHeaderView.Stretch)
+        self.tree.sortByColumn(5, Qt.AscendingOrder)
+        layout.addWidget(self.tree, 11, 0, 1, 3)
+        self.tree.itemDoubleClicked.connect(self.on_row_double_click)
+
+        # Buttons at the bottom
+        add_object_button = QPushButton("Add Custom Object")
+        add_object_button.setFixedWidth(fixed_width)
+        layout.addWidget(add_object_button, 12, 0)
+        add_object_button.clicked.connect(self.add_custom_object)
+
+        save_button = QPushButton("Save to CSV")
+        save_button.setFixedWidth(fixed_width)
+        layout.addWidget(save_button, 12, 1)
+        save_button.clicked.connect(self.save_to_csv)
+
+        # Allow the main window to expand
+        layout.setColumnStretch(2, 1)  # Makes the right column (with tree widget) expand as the window grows
+
+
+    def start_calculation(self):
+        # Gather the inputs
+        latitude = float(self.latitude_entry.text())
+        longitude = float(self.longitude_entry.text())
+        date_str = self.date_entry.text()
+        time_str = self.time_entry.text()
+        timezone_str = self.timezone_combo.currentText()
+        min_altitude = float(self.min_altitude_entry.text())
+        catalog_filters = [catalog for catalog, var in self.catalog_vars.items() if var.isChecked()]
+        object_limit = self.object_limit
+
+        # Set up and start the calculation thread
+        self.calc_thread = CalculationThread(
+            latitude, longitude, date_str, time_str, timezone_str,
+            min_altitude, catalog_filters, object_limit
+        )
+        self.calc_thread.calculation_complete.connect(self.on_calculation_complete)
+        self.calc_thread.lunar_phase_calculated.connect(self.update_lunar_phase)
+        self.calc_thread.lst_calculated.connect(self.update_lst)
+        self.calc_thread.status_update.connect(self.update_status)
+        self.update_status("Calculating...")
+        self.calc_thread.start()
+
+
+    def update_lunar_phase(self, phase_percentage, phase_image_name):
+        # Update the lunar phase label
+        self.lunar_phase_label.setText(f"Lunar Phase: {phase_percentage}% illuminated")
+
+        # Load and display the lunar phase image
+        phase_image_path = os.path.join("imgs", phase_image_name)
+        if os.path.exists(phase_image_path):
+            pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.lunar_phase_image_label.setPixmap(pixmap)
+        else:
+            print(f"Image not found: {phase_image_path}")        
+
+    def on_calculation_complete(self, df, message):
+        # Handle the data received from the calculation thread
+        self.update_status(message)
+        if not df.empty:
+            self.tree.clear()
+            for _, row in df.iterrows():
+                # Prepare RA and Dec display based on selected format
+                ra_display = row['RA']
+                dec_display = row['Dec']
+
+                if self.ra_dec_hms.isChecked():
+                    # Convert degrees to H:M:S format
+                    sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg)
+                    ra_display = sky_coord.ra.to_string(unit=u.hour, sep=':')
+                    dec_display = sky_coord.dec.to_string(unit=u.deg, sep=':')
+
+                # Calculate Before/After Transit string
+                before_after = "Before" if row['Minutes to Transit'] <= 720 else "After"
+
+                # Ensure Size (arcmin) displays correctly as a string
+                size_arcmin = row.get('Info', '')
+                if pd.notna(size_arcmin):
+                    size_arcmin = str(size_arcmin)  # Ensure it's treated as a string
+
+                # Populate each row with the calculated data
+                values = [
+                    str(row['Name']) if pd.notna(row['Name']) else '',  # Ensure Name is a string or empty
+                    str(ra_display),  # RA in either H:M:S or degrees format
+                    str(dec_display),  # Dec in either H:M:S or degrees format
+                    str(row['Altitude']) if pd.notna(row['Altitude']) else '',  # Altitude as string or empty
+                    str(row['Azimuth']) if pd.notna(row['Azimuth']) else '',  # Azimuth as string or empty
+                    str(int(row['Minutes to Transit'])) if pd.notna(row['Minutes to Transit']) else '',  # Minutes to Transit as integer string
+                    before_after,  # Before/After Transit (already a string)
+                    str(round(row['Degrees from Moon'], 2)) if pd.notna(row['Degrees from Moon']) else '',  # Degrees from Moon as rounded string or empty
+                    row.get('Alt Name', '') if pd.notna(row.get('Alt Name', '')) else '',  # Alt Name as string or empty
+                    row.get('Type', '') if pd.notna(row.get('Type', '')) else '',  # Type as string or empty
+                    str(row.get('Magnitude', '')) if pd.notna(row.get('Magnitude', '')) else '',  # Magnitude as string or empty
+                    str(size_arcmin) if pd.notna(size_arcmin) else ''  # Size in arcmin as string or empty
+                ]
+
+                # Use SortableTreeWidgetItem instead of QTreeWidgetItem
+                item = SortableTreeWidgetItem(values)
+                self.tree.addTopLevelItem(item)
+
+
+    def update_status(self, message):
+        self.status_label.setText(f"Status: {message}")
+
+    def update_lst(self, message):
+        self.lst_label.setText(message)
+
+
+    def save_settings(self, latitude, longitude, date, time, timezone, min_altitude):
+        """Save the user-provided settings to a JSON file."""
+        settings = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "date": date,
+            "time": time,
+            "timezone": timezone,
+            "min_altitude": min_altitude,
+            "object_limit": self.object_limit
+        }
+        with open(self.settings_file, 'w') as f:
+            json.dump(settings, f)
+        print("Settings saved:", settings)
+
+    def load_settings(self):
+        """Load settings from the JSON file if it exists."""
+        if os.path.exists(self.settings_file):
+            with open(self.settings_file, 'r') as f:
+                self.settings = json.load(f)
+            # Populate fields with loaded settings
+            self.latitude_entry.setText(str(self.settings.get("latitude", "")))
+            self.longitude_entry.setText(str(self.settings.get("longitude", "")))
+            self.date_entry.setText(self.settings.get("date", ""))
+            self.time_entry.setText(self.settings.get("time", ""))
+            self.timezone_combo.setCurrentText(self.settings.get("timezone", "UTC"))
+            self.min_altitude_entry.setText(str(self.settings.get("min_altitude", "0")))
+            self.object_limit = self.settings.get("object_limit", 100)
+        else:
+            self.settings = {}
+
+
+    def open_settings(self):
+        object_limit, ok = QInputDialog.getInt(self, "Settings", "Enter number of objects to display:", value=self.object_limit, min=1, max=1000)
+        if ok:
+            self.object_limit = object_limit
+
+    def treeview_sort_column(self, tv, col, reverse):
+        l = [(tv.set(k, col), k) for k in tv.get_children('')]
+        try:
+            l.sort(key=lambda t: float(t[0]) if t[0] else float('inf'), reverse=reverse)
+        except ValueError:
+            l.sort(reverse=reverse)
+
+        for index, (val, k) in enumerate(l):
+            tv.move(k, '', index)
+
+        tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
+
+    def on_row_double_click(self, item: QTreeWidgetItem, column: int):
+        """Handle double-clicking an item in the tree view."""
+        object_name = item.text(0).replace(" ", "")  # Assuming the name is in the first column
+        search_url = f"https://www.astrobin.com/search/?q={object_name}"
+        print(f"Opening URL: {search_url}")  # Debugging output
+        webbrowser.open(search_url)
+
+    def add_custom_object(self):
+        # Gather information for the custom object
+        name, ok_name = QInputDialog.getText(self, "Add Custom Object", "Enter object name:")
+        if not ok_name or not name:
+            return
+
+        ra, ok_ra = QInputDialog.getDouble(self, "Add Custom Object", "Enter RA (in degrees):", decimals=3)
+        if not ok_ra:
+            return
+
+        dec, ok_dec = QInputDialog.getDouble(self, "Add Custom Object", "Enter Dec (in degrees):", decimals=3)
+        if not ok_dec:
+            return
+
+        # Create the custom object entry
+        new_object = {
+            "Name": name,
+            "RA": ra,
+            "Dec": dec,
+            "Catalog": "User Defined",
+            "Alt Name": "User Defined",
+            "Type": "Custom",
+            "Magnitude": "",
+            "Info": ""
+        }
+
+        # Load the catalog, add the custom object, and save it back
+        df = pd.read_csv(self.calc_thread.catalog_file, encoding='ISO-8859-1')
+        df = pd.concat([df, pd.DataFrame([new_object])], ignore_index=True)
+        df.to_csv(self.calc_thread.catalog_file, index=False, encoding='ISO-8859-1')
+        self.update_status(f"Added custom object: {name}")
+
+    def update_ra_dec_format(self):
+        """Update the RA/Dec format in the tree based on the selected radio button."""
+        is_degrees_format = self.ra_dec_degrees.isChecked()  # Check if degrees format is selected
+
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            ra_value = item.text(1)  # RA is in the second column
+            dec_value = item.text(2)  # Dec is in the third column
+
+            try:
+                if is_degrees_format:
+                    # Convert H:M:S to degrees only if in H:M:S format
+                    if ":" in ra_value:
+                        # Conversion from H:M:S format to degrees
+                        sky_coord = SkyCoord(ra=ra_value, dec=dec_value, unit=(u.hourangle, u.deg))
+                        ra_display = str(round(sky_coord.ra.deg, 3))
+                        dec_display = str(round(sky_coord.dec.deg, 3))
+                    else:
+                        # Already in degrees format; no conversion needed
+                        ra_display = ra_value
+                        dec_display = dec_value
+                else:
+                    # Convert degrees to H:M:S only if in degrees format
+                    if ":" not in ra_value:
+                        # Conversion from degrees to H:M:S format
+                        ra_deg = float(ra_value)
+                        dec_deg = float(dec_value)
+                        sky_coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                        ra_display = sky_coord.ra.to_string(unit=u.hour, sep=':')
+                        dec_display = sky_coord.dec.to_string(unit=u.deg, sep=':')
+                    else:
+                        # Already in H:M:S format; no conversion needed
+                        ra_display = ra_value
+                        dec_display = dec_value
+
+            except ValueError as e:
+                print(f"Conversion error: {e}")
+                ra_display = ra_value
+                dec_display = dec_value
+            except Exception as e:
+                print(f"Unexpected error: {e}")
+                ra_display = ra_value
+                dec_display = dec_value
+
+            # Update item with the new RA/Dec display format
+            item.setText(1, ra_display)
+            item.setText(2, dec_display)
+
+
+
+    def save_to_csv(self):
+        # Ask user where to save the CSV file
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save CSV File", "", "CSV files (*.csv);;All Files (*)")
+        if file_path:
+            # Extract data from QTreeWidget
+            columns = [self.tree.headerItem().text(i) for i in range(self.tree.columnCount())]
+            data = [columns]
+            for i in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(i)
+                row = [item.text(j) for j in range(self.tree.columnCount())]
+                data.append(row)
+
+            # Convert data to DataFrame and save as CSV
+            df = pd.DataFrame(data[1:], columns=data[0])
+            df.to_csv(file_path, index=False)
+            self.update_status(f"Data saved to {file_path}")
+
+class SortableTreeWidgetItem(QTreeWidgetItem):
+    def __lt__(self, other):
+        # Get the column index being sorted
+        column = self.treeWidget().sortColumn()
+
+        # Columns with numeric data for custom sorting (adjust column indices as needed)
+        numeric_columns = [3, 4, 5, 7, 10]  # Altitude, Azimuth, Minutes to Transit, Degrees from Moon, Magnitude
+
+        # Check if the column is in numeric_columns for numeric sorting
+        if column in numeric_columns:
+            try:
+                # Attempt to compare as floats
+                return float(self.text(column)) < float(other.text(column))
+            except ValueError:
+                # If conversion fails, fall back to string comparison
+                return self.text(column) < other.text(column)
+        else:
+            # Default string comparison for other columns
+            return self.text(column) < other.text(column)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
