@@ -1,0 +1,1 @@
+pyinstaller --onefile --add-data "xisf.py;."  --add-data "xisfliberator.png;." --icon=xisfliberator.ico --windowed --exclude-module torch --exclude-module torchvision --exclude-module tkinter  xisfviewer.py
