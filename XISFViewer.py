@@ -322,12 +322,8 @@ class XISFViewer(QWidget):
         output_path, _ = QFileDialog.getSaveFileName(self, "Save Image As", "", "XISF (*.xisf);;FITS (*.fits);;TIFF (*.tif);;PNG (*.png)")
         
         if output_path:
-
-
             # Determine if we should save the stretched image or the original
             image_to_save = self.stretched_image if self.save_stretched_checkbox.isChecked() and self.stretched_image is not None else self.image_data
-
-            # Rest of the save logic remains the same, but use `image_to_save` instead of `self.image_data`
             _, ext = os.path.splitext(output_path)
             
             # Determine bit depth and color mode
@@ -411,20 +407,12 @@ class XISFViewer(QWidget):
                         header['CD2_1'] = 0.0
                         header['CD2_2'] = header['CDELT2']
 
-                    # Ensure numeric types for SIP distortion keywords if present
-                    sip_keywords = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
-                    for sip_key in sip_keywords:
-                        if sip_key in self.image_meta['XISFProperties']:
-                            try:
-                                value = self.image_meta['XISFProperties'][sip_key]['value']
-                                header[sip_key] = int(value) if isinstance(value, str) and value.isdigit() else float(value)
-                            except ValueError:
-                                pass  # Ignore any invalid conversion
-
-                    # Save the prepared FITS file
+                    # Duplicate the mono image to create a 3-channel image if it’s mono
                     if self.is_mono:
-                        image_data_fits = self.prepare_mono_image_for_fits(image_to_save)
-                        header['NAXIS'] = 2  # Mono images have 2 dimensions
+                        image_data_fits = np.stack([image_to_save[:, :, 0]] * 3, axis=-1)  # Create 3-channel from mono
+                        image_data_fits = np.transpose(image_data_fits, (2, 0, 1))  # Reorder to (channels, height, width)
+                        header['NAXIS'] = 3
+                        header['NAXIS3'] = 3  # Channels (RGB)
                     else:
                         image_data_fits = np.transpose(image_to_save, (2, 0, 1))  # RGB images in (channels, height, width)
                         header['NAXIS'] = 3
@@ -466,14 +454,6 @@ class XISFViewer(QWidget):
 
 
 
-    def prepare_mono_image_for_fits(self, image):
-        """Convert a mono image to the correct format for saving as FITS."""
-        if self.bit_depth == "16-bit":
-            return (image[:, :, 0] * 65535).astype(np.uint16)
-        elif self.bit_depth == "32-bit unsigned":
-            return image[:, :, 0].astype(np.uint32)
-        else:  # 32-bit float
-            return image[:, :, 0].astype(np.float32)
 
     def save_tiff(self, output_path, bit_depth):
         if bit_depth == 16:
@@ -487,7 +467,7 @@ class XISFViewer(QWidget):
             else:
                 tiff.imwrite(output_path, self.image_data.astype(np.float32))
         else:  # 8-bit
-            image_8bit = (self.image_data * 255).astype(np.uint8) if not is_8bit else self.image_data
+            image_8bit = (self.image_data * 255).astype(np.uint8)
             if self.is_mono:
                 tiff.imwrite(output_path, image_8bit[:, :, 0])
             else:
