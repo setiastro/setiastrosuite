@@ -737,9 +737,16 @@ class CosmicClarityTab(QWidget):
 
         # Wrench button to select Cosmic Clarity folder
         self.wrench_button = QPushButton()
-        self.wrench_button.setIcon(QIcon("wrench_icon.png"))  # Ensure this icon path is correct
+
+        # Set the path for the wrench icon
+        if hasattr(sys, '_MEIPASS'):
+            icon_path = os.path.join(sys._MEIPASS, "wrench_icon.png")
+        else:
+            icon_path = "wrench_icon.png"
+
+        self.wrench_button.setIcon(QIcon(icon_path))  # Set the wrench icon with the dynamic path
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
-        left_layout.addWidget(self.wrench_button)    
+        left_layout.addWidget(self.wrench_button) 
 
         # Footer
         footer_label = QLabel("""
@@ -999,12 +1006,7 @@ class CosmicClarityTab(QWidget):
             except Exception as e:
                 print(f"Error centering scrollbars: {e}")
 
-            # Update the display after another short delay to ensure scrollbars are centered first
-            try:
-                QTimer.singleShot(100, self.update_image_display)  # Delay of 100 ms for display update
-                print("Image display updated.")
-            except Exception as e:
-                print(f"Error updating image display: {e}")
+
 
         else:
             print("No file selected.")
@@ -1200,11 +1202,11 @@ class CosmicClarityTab(QWidget):
 
         # Determine the correct executable and output filename suffix based on the selected mode
         if self.sharpen_radio.isChecked():
-            exe_name = "setiastrocosmicclarity"  # Sharpening executable
+            exe_name = "SetiAstroCosmicClarity"  # Sharpening executable
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "setiastrocosmicclarity_denoise"  # Denoising executable
+            exe_name = "SetiAstroCosmicClarity_denoise"  # Denoising executable
             mode = "denoise"
             output_suffix = "_denoised"
 
@@ -1260,11 +1262,11 @@ class CosmicClarityTab(QWidget):
 
         # Determine the correct executable and output filename suffix based on the selected mode
         if self.sharpen_radio.isChecked():
-            exe_name = "setiastrocosmicclarity"
+            exe_name = "SetiAstroCosmicClarity"  # Sharpening executable
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "setiastrocosmicclarity_denoise"
+            exe_name = "SetiAstroCosmicClarity_denoise"  # Denoising executable
             mode = "denoise"
             output_suffix = "_denoised"
 
@@ -1342,7 +1344,14 @@ class CosmicClarityTab(QWidget):
 
         elif os.name == 'posix':  # macOS/Linux
             batch_file_path += ".sh"
-            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+            
+            # Set the executable path based on the mode
+            if mode == "sharpen":
+                exe_path = os.path.join(self.cosmic_clarity_folder, "SetiAstroCosmicClarity")
+            else:  # mode == "denoise"
+                exe_path = os.path.join(self.cosmic_clarity_folder, "SetiAstroCosmicClarity_denoise")
+
+            # Start constructing the script content with the correctly-cased executable path
             batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"{exe_path}" '
 
             # Add sharpening or denoising arguments
@@ -1361,7 +1370,9 @@ class CosmicClarityTab(QWidget):
                     f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
                 )
 
+            # Add GPU option if applicable
             batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
+
 
         # Write the script to the batch file
         try:
