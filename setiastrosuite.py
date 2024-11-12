@@ -11,6 +11,17 @@ from urllib.parse import quote
 import webbrowser
 import warnings
 import shutil
+import subprocess
+from xisf import XISF
+import requests
+import csv
+import lz4.block
+import zstandard
+import base64
+import ast
+import platform
+import glob
+import time
 
 # Third-party library imports
 import requests
@@ -39,12 +50,12 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect
 
 # Math functions
 from math import sqrt
@@ -56,12 +67,23 @@ class AstroEditingSuite(QWidget):
         self.initUI()
 
     def initUI(self):
+        # Determine the correct path to the icon
+        if hasattr(sys, '_MEIPASS'):
+            # PyInstaller path
+            icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+        else:
+            # Development path
+            icon_path = 'astrosuite.png'
+
+        self.setWindowIcon(QIcon(icon_path))
         layout = QVBoxLayout()
 
         # Create tab widget
         self.tabs = QTabWidget()
 
         # Add individual tabs for each tool
+        self.tabs.addTab(XISFViewer(), "XISF Liberator")
+        self.tabs.addTab(CosmicClarityTab(), "Cosmic Clarity")
         self.tabs.addTab(StatisticalStretchTab(), "Statistical Stretch")
         self.tabs.addTab(NBtoRGBstarsTab(), "NB to RGB Stars")  # Placeholder        
         self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
@@ -76,7 +98,1569 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.4')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5')
+
+class XISFViewer(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        self.image_data = None
+        self.file_meta = None
+        self.image_meta = None
+        self.is_mono = False
+        self.bit_depth = None
+        self.scale_factor = 0.25
+        self.dragging = False
+        self.drag_start_pos = QPoint()
+        self.autostretch_enabled = False
+    
+    def initUI(self):
+        main_layout = QHBoxLayout()
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(5)
+
+
+
+        # Set the window icon
+        self.setWindowIcon(QIcon(icon_path))
+
+        # Left side layout for image display and save button
+        left_widget = QWidget()        
+        left_layout = QVBoxLayout(left_widget)
+        left_widget.setMinimumSize(600, 600)
+        
+        self.load_button = QPushButton("Load XISF File")
+        self.load_button.clicked.connect(self.load_xisf)
+        left_layout.addWidget(self.load_button)
+
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        
+        # Add a scroll area to allow panning
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(False)  # Keep it resizable
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        left_layout.addWidget(self.scroll_area)
+
+        self.toggle_button = QPushButton("Toggle Autostretch", self)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.clicked.connect(self.toggle_autostretch)
+        left_layout.addWidget(self.toggle_button)        
+
+        # Zoom buttons
+        zoom_layout = QHBoxLayout()
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(self.zoom_in_button)
+        zoom_layout.addWidget(self.zoom_out_button)
+        left_layout.addLayout(zoom_layout)
+
+        # Inside the initUI method, where the Save button is added
+        self.save_button = QPushButton("Save As")
+        self.save_button.clicked.connect(self.save_as)
+        self.save_button.setEnabled(False)
+
+        # Create the "Save Stretched Image" checkbox
+        self.save_stretched_checkbox = QCheckBox("Save Stretched Image")
+        self.save_stretched_checkbox.setChecked(False)  # Default is to save the original
+
+        # Add the Save button and checkbox to a horizontal layout
+        save_layout = QHBoxLayout()
+        save_layout.addWidget(self.save_button)
+        save_layout.addWidget(self.save_stretched_checkbox)
+        left_layout.addLayout(save_layout)
+
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet("font-size: 10px;")
+        left_layout.addWidget(footer_label)
+
+
+        # Right side layout for metadata display
+        right_widget = QWidget()
+        right_widget.setMinimumWidth(300)
+        right_layout = QVBoxLayout()
+        self.metadata_tree = QTreeWidget()
+        self.metadata_tree.setHeaderLabels(["Property", "Value"])
+        self.metadata_tree.setColumnWidth(0, 150)
+        right_layout.addWidget(self.metadata_tree)
+        
+        # Save Metadata button below metadata tree
+        self.save_metadata_button = QPushButton("Save Metadata")
+        self.save_metadata_button.clicked.connect(self.save_metadata)
+        right_layout.addWidget(self.save_metadata_button)
+        
+        right_widget.setLayout(right_layout)
+
+        # Add left widget and metadata tree to the splitter
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setSizes([800, 200])  # Initial sizes for the left (preview) and right (metadata) sections
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
+        self.setWindowTitle("XISF Liberator V1.2")
+
+    def toggle_autostretch(self):
+        self.autostretch_enabled = not self.autostretch_enabled
+        if self.autostretch_enabled:
+            self.apply_autostretch()
+        else:
+            self.stretched_image = self.image_data  # Reset to original image if stretch is disabled
+
+        self.display_image()
+
+    def apply_autostretch(self):
+        # Determine if the image is mono or color
+        if len(self.image_data.shape) == 2:  # Mono image
+            self.stretched_image = stretch_mono_image(self.image_data, target_median=0.25, normalize=True)
+        else:  # Color image
+            self.stretched_image = stretch_color_image(self.image_data, target_median=0.25, linked=False, normalize=False)
+
+
+
+    def load_xisf(self):
+        file_name, _ = QFileDialog.getOpenFileName(self, "Open XISF File", "", "XISF Files (*.xisf)")
+        
+        if file_name:
+            try:
+                xisf = XISF(file_name)
+                im_data = xisf.read_image(0)
+                
+                # Load metadata for saving later
+                self.file_meta = xisf.get_file_metadata()
+                self.image_meta = xisf.get_images_metadata()[0]
+                
+                # Display metadata
+                self.display_metadata()
+
+                # Determine if the image is mono or RGB, and set bit depth
+                self.is_mono = im_data.shape[2] == 1
+                self.bit_depth = str(im_data.dtype)
+                self.image_data = im_data
+
+                # Display image with scaling and normalization as before
+                self.display_image()
+                
+                # Enable save button
+                self.save_button.setEnabled(True)
+            except Exception as e:
+                self.image_label.setText(f"Failed to load XISF file: {e}")
+
+    def display_image(self):
+        if self.image_data is None:
+            return
+
+        im_data = self.stretched_image if self.autostretch_enabled else self.image_data
+        if self.is_mono:
+            im_data = np.squeeze(im_data, axis=2)
+            height, width = im_data.shape
+            bytes_per_line = width
+            
+            if im_data.dtype == np.uint8:
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            elif im_data.dtype == np.uint16:
+                im_data = (im_data / 256).astype(np.uint8)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            height, width, channels = im_data.shape
+            bytes_per_line = channels * width
+            
+            if im_data.dtype == np.uint8:
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            elif im_data.dtype == np.uint16:
+                im_data = (im_data / 256).astype(np.uint8)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+
+        # Calculate scaled dimensions
+        scaled_width = int(q_image.width() * self.scale_factor)
+        scaled_height = int(q_image.height() * self.scale_factor)
+
+        # Apply scaling
+        scaled_image = q_image.scaled(
+            scaled_width,
+            scaled_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        
+        pixmap = QPixmap.fromImage(scaled_image)
+        self.image_label.setPixmap(pixmap)
+        self.image_label.resize(scaled_image.size())
+
+
+
+    def zoom_in(self):
+        self.center_image_on_zoom(1.25)
+
+    def zoom_out(self):
+        self.center_image_on_zoom(1 / 1.25)
+
+    def center_image_on_zoom(self, zoom_factor):
+        # Get the current center point of the visible area
+        current_center_x = self.scroll_area.horizontalScrollBar().value() + (self.scroll_area.viewport().width() / 2)
+        current_center_y = self.scroll_area.verticalScrollBar().value() + (self.scroll_area.viewport().height() / 2)
+        
+        # Adjust the scale factor
+        self.scale_factor *= zoom_factor
+        
+        # Display the image with the new scale factor
+        self.display_image()
+        
+        # Calculate the new center point after zooming
+        new_center_x = current_center_x * zoom_factor
+        new_center_y = current_center_y * zoom_factor
+        
+        # Adjust scrollbars to keep the image centered
+        self.scroll_area.horizontalScrollBar().setValue(int(new_center_x - self.scroll_area.viewport().width() / 2))
+        self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
+
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.drag_start_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            delta = event.pos() - self.drag_start_pos
+            self.scroll_area.horizontalScrollBar().setValue(
+                self.scroll_area.horizontalScrollBar().value() - delta.x()
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().value() - delta.y()
+            )
+            self.drag_start_pos = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+
+    def display_metadata(self):
+        self.metadata_tree.clear()
+        
+        file_meta_item = QTreeWidgetItem(["File Metadata"])
+        self.metadata_tree.addTopLevelItem(file_meta_item)
+        for key, value in self.file_meta.items():
+            item = QTreeWidgetItem([key, str(value['value'])])
+            file_meta_item.addChild(item)
+
+        image_meta_item = QTreeWidgetItem(["Image Metadata"])
+        self.metadata_tree.addTopLevelItem(image_meta_item)
+        for key, value in self.image_meta.items():
+            if key == 'FITSKeywords':
+                fits_item = QTreeWidgetItem(["FITS Keywords"])
+                image_meta_item.addChild(fits_item)
+                for kw, kw_values in value.items():
+                    for kw_value in kw_values:
+                        item = QTreeWidgetItem([kw, kw_value["value"]])
+                        fits_item.addChild(item)
+            elif key == 'XISFProperties':
+                props_item = QTreeWidgetItem(["XISF Properties"])
+                image_meta_item.addChild(props_item)
+                for prop_name, prop in value.items():
+                    item = QTreeWidgetItem([prop_name, str(prop["value"])])
+                    props_item.addChild(item)
+            else:
+                item = QTreeWidgetItem([key, str(value)])
+                image_meta_item.addChild(item)
+        
+        self.metadata_tree.expandAll()
+
+    def save_as(self):
+        output_path, _ = QFileDialog.getSaveFileName(self, "Save Image As", "", "XISF (*.xisf);;FITS (*.fits);;TIFF (*.tif);;PNG (*.png)")
+        
+        if output_path:
+            # Determine if we should save the stretched image or the original
+            image_to_save = self.stretched_image if self.save_stretched_checkbox.isChecked() and self.stretched_image is not None else self.image_data
+            _, ext = os.path.splitext(output_path)
+            
+            # Determine bit depth and color mode
+            is_32bit_float = image_to_save.dtype == np.float32
+            is_16bit = image_to_save.dtype == np.uint16
+            is_8bit = image_to_save.dtype == np.uint8
+
+            try:
+                # Save as FITS file with FITS header only (no XISF properties)
+                if ext.lower() in ['.fits', '.fit']:
+                    header = fits.Header()
+                    crval1, crval2 = None, None
+                    
+                    # Populate FITS header with FITS keywords and essential WCS keywords only
+                    wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+                    
+                    if 'FITSKeywords' in self.image_meta:
+                        for keyword, values in self.image_meta['FITSKeywords'].items():
+                            for entry in values:
+                                if 'value' in entry:
+                                    value = entry['value']
+                                    if keyword in wcs_keywords:
+                                        try:
+                                            value = int(value)
+                                        except ValueError:
+                                            value = float(value)
+                                    header[keyword] = value
+
+                    # Manually add WCS information if missing
+                    if 'CTYPE1' not in header:
+                        header['CTYPE1'] = 'RA---TAN'
+                    if 'CTYPE2' not in header:
+                        header['CTYPE2'] = 'DEC--TAN'
+                    
+                    # Add the -SIP suffix if SIP coefficients are present
+                    if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+                        header['CTYPE1'] = 'RA---TAN-SIP'
+                        header['CTYPE2'] = 'DEC--TAN-SIP'
+
+                    # Set default reference pixel (center of the image)
+                    if 'CRPIX1' not in header:
+                        header['CRPIX1'] = image_to_save.shape[1] / 2  # X center
+                    if 'CRPIX2' not in header:
+                        header['CRPIX2'] = image_to_save.shape[0] / 2  # Y center
+
+                    # Retrieve RA and DEC values if available
+                    if 'FITSKeywords' in self.image_meta:
+                        if 'RA' in self.image_meta['FITSKeywords']:
+                            crval1 = float(self.image_meta['FITSKeywords']['RA'][0]['value'])  # Reference RA
+                        if 'DEC' in self.image_meta['FITSKeywords']:
+                            crval2 = float(self.image_meta['FITSKeywords']['DEC'][0]['value'])  # Reference DEC
+
+                    # Add CRVAL1 and CRVAL2 to the header if found
+                    if crval1 is not None and crval2 is not None:
+                        header['CRVAL1'] = crval1
+                        header['CRVAL2'] = crval2
+                    else:
+                        print("RA and DEC values not found in FITS Keywords")
+
+                    # Calculate pixel scale if focal length and pixel size are available
+                    if 'FOCALLEN' in self.image_meta['FITSKeywords'] and 'XPIXSZ' in self.image_meta['FITSKeywords']:
+                        focal_length = float(self.image_meta['FITSKeywords']['FOCALLEN'][0]['value'])  # in mm
+                        pixel_size = float(self.image_meta['FITSKeywords']['XPIXSZ'][0]['value'])  # in μm
+                        pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
+                        header['CDELT1'] = -pixel_scale / 3600.0
+                        header['CDELT2'] = pixel_scale / 3600.0
+                    else:
+                        header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
+                        header['CDELT2'] = 2.77778e-4
+
+                    # Populate CD matrix using the XISF LinearTransformationMatrix if available
+                    if 'XISFProperties' in self.image_meta and 'PCL:AstrometricSolution:LinearTransformationMatrix' in self.image_meta['XISFProperties']:
+                        linear_transform = self.image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                        header['CD1_1'] = linear_transform[0][0]
+                        header['CD1_2'] = linear_transform[0][1]
+                        header['CD2_1'] = linear_transform[1][0]
+                        header['CD2_2'] = linear_transform[1][1]
+                    else:
+                        header['CD1_1'] = header['CDELT1']
+                        header['CD1_2'] = 0.0
+                        header['CD2_1'] = 0.0
+                        header['CD2_2'] = header['CDELT2']
+
+                    # Duplicate the mono image to create a 3-channel image if it’s mono
+                    if self.is_mono:
+                        image_data_fits = np.stack([image_to_save[:, :, 0]] * 3, axis=-1)  # Create 3-channel from mono
+                        image_data_fits = np.transpose(image_data_fits, (2, 0, 1))  # Reorder to (channels, height, width)
+                        header['NAXIS'] = 3
+                        header['NAXIS3'] = 3  # Channels (RGB)
+                    else:
+                        image_data_fits = np.transpose(image_to_save, (2, 0, 1))  # RGB images in (channels, height, width)
+                        header['NAXIS'] = 3
+                        header['NAXIS3'] = 3  # Channels (RGB)
+
+                    hdu = fits.PrimaryHDU(image_data_fits, header=header)
+                    hdu.writeto(output_path, overwrite=True)
+                    print(f"Saved FITS image with metadata to: {output_path}")
+
+                # Save as TIFF based on bit depth
+                elif ext.lower() in ['.tif', '.tiff']:
+                    if is_16bit:
+                        self.save_tiff(output_path, bit_depth=16)
+                    elif is_32bit_float:
+                        self.save_tiff(output_path, bit_depth=32)
+                    else:
+                        self.save_tiff(output_path, bit_depth=8)
+                    print(f"Saved TIFF image with {self.bit_depth} bit depth to: {output_path}")
+
+                # Save as PNG
+                elif ext.lower() == '.png':
+                    # Convert mono images to RGB for PNG format
+                    if self.is_mono:
+                        image_8bit = (image_to_save[:, :, 0] * 255).astype(np.uint8) if not is_8bit else image_to_save[:, :, 0]
+                        image_8bit_rgb = np.stack([image_8bit] * 3, axis=-1)  # Duplicate channel to create RGB
+                    else:
+                        image_8bit_rgb = (image_to_save * 255).astype(np.uint8) if not is_8bit else image_to_save
+                    Image.fromarray(image_8bit_rgb).save(output_path)
+                    print(f"Saved 8-bit PNG image to: {output_path}")
+
+                # Save as XISF with metadata
+                elif ext.lower() == '.xisf':
+                    XISF.write(output_path, image_to_save, xisf_metadata=self.file_meta)
+                    print(f"Saved XISF image with metadata to: {output_path}")
+
+            except Exception as e:
+                print(f"Error saving file: {e}")
+
+
+
+
+
+    def save_tiff(self, output_path, bit_depth):
+        if bit_depth == 16:
+            if self.is_mono:
+                tiff.imwrite(output_path, (self.image_data[:, :, 0] * 65535).astype(np.uint16))
+            else:
+                tiff.imwrite(output_path, (self.image_data * 65535).astype(np.uint16))
+        elif bit_depth == 32:
+            if self.is_mono:
+                tiff.imwrite(output_path, self.image_data[:, :, 0].astype(np.float32))
+            else:
+                tiff.imwrite(output_path, self.image_data.astype(np.float32))
+        else:  # 8-bit
+            image_8bit = (self.image_data * 255).astype(np.uint8)
+            if self.is_mono:
+                tiff.imwrite(output_path, image_8bit[:, :, 0])
+            else:
+                tiff.imwrite(output_path, image_8bit)
+
+    def save_metadata(self):
+        if not self.file_meta and not self.image_meta:
+            QMessageBox.warning(self, "Warning", "No metadata to save.")
+            return
+
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", "", "CSV Files (*.csv);;All Files (*)", options=options)
+        if file_path:
+            try:
+                # Flatten metadata function
+                def flatten_metadata(data, parent_key=''):
+                    items = []
+                    for key, value in data.items():
+                        new_key = f"{parent_key}.{key}" if parent_key else key
+                        if isinstance(value, dict):
+                            items.extend(flatten_metadata(value, new_key).items())
+                        elif isinstance(value, list):
+                            for i, list_item in enumerate(value):
+                                list_key = f"{new_key}_{i}"
+                                items.extend(flatten_metadata({list_key: list_item}).items())
+                        else:
+                            items.append((new_key, value if value is not None else ''))  # Replace None with an empty string
+                    return dict(items)
+
+                # Flatten both file_meta and image_meta
+                flattened_file_meta = flatten_metadata(self.file_meta) if self.file_meta else {}
+                flattened_image_meta = flatten_metadata(self.image_meta) if self.image_meta else {}
+
+                # Combine both metadata into one dictionary for CSV
+                combined_meta = {**flattened_file_meta, **flattened_image_meta}
+
+                # Write to CSV
+                with open(file_path, mode='w', newline='', encoding='utf-8') as file:
+                    writer = csv.writer(file)
+                    writer.writerow(["Key", "Value"])  # Header row
+                    for key, value in combined_meta.items():
+                        writer.writerow([key, value])
+
+                QMessageBox.information(self, "Success", f"Metadata saved to {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save metadata: {e}")       
+
+class CosmicClarityTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.cosmic_clarity_folder = None
+        self.loaded_image_path = None
+        self.image = None  # Store the loaded image data
+        self.original_header = None
+        self.bit_depth = None
+        self.is_mono = False
+        self.settings_file = "cosmic_clarity_folder.txt"  # Path to save the folder location
+        self.zoom_factor = 0.5  # Zoom level
+        self.drag_start_position = QPoint()  # Starting point for drag
+        self.is_dragging = False  # Flag to indicate if dragging
+        self.scroll_position = QPoint(0, 0)  # Initialize scroll position
+        self.original_image = None  # Image before processing
+        self.processed_image = None  # Most recent processed image    
+        self.is_selecting_preview = False  # Initialize preview selection attribute
+        self.preview_start_position = None
+        self.preview_end_position = None
+        self.preview_rect = None  # Stores the preview selection rectangle
+        self.autostretch_enabled = False  # Track autostretch status
+
+        self.initUI()
+
+        self.load_cosmic_clarity_folder()
+
+    def initUI(self):
+        main_layout = QHBoxLayout()
+
+        # Left panel for controls
+        left_layout = QVBoxLayout()
+
+        # Load button to load an image
+        self.load_button = QPushButton("Load Image")
+        self.load_button.clicked.connect(self.load_image)
+        left_layout.addWidget(self.load_button)
+
+        # AutoStretch toggle button
+        self.auto_stretch_button = QPushButton("AutoStretch (Off)")
+        self.auto_stretch_button.setCheckable(True)
+        self.auto_stretch_button.toggled.connect(self.toggle_auto_stretch)
+        left_layout.addWidget(self.auto_stretch_button)
+
+        # Radio buttons to switch between Sharpen and Denoise
+        self.sharpen_radio = QRadioButton("Sharpen")
+        self.denoise_radio = QRadioButton("Denoise")
+        self.sharpen_radio.setChecked(True)  # Default to Sharpen
+        self.sharpen_radio.toggled.connect(self.update_ui_for_mode)
+        left_layout.addWidget(self.sharpen_radio)
+        left_layout.addWidget(self.denoise_radio)
+
+        # GPU Acceleration dropdown
+        self.gpu_label = QLabel("Use GPU Acceleration:")
+        left_layout.addWidget(self.gpu_label)
+        self.gpu_dropdown = QComboBox()
+        self.gpu_dropdown.addItems(["Yes", "No"])
+        left_layout.addWidget(self.gpu_dropdown)
+
+        # Add Sharpening specific controls
+        self.sharpen_mode_label = QLabel("Sharpening Mode:")
+        self.sharpen_mode_dropdown = QComboBox()
+        self.sharpen_mode_dropdown.addItems(["Both", "Stellar Only", "Non-Stellar Only"])
+        left_layout.addWidget(self.sharpen_mode_label)
+        left_layout.addWidget(self.sharpen_mode_dropdown)
+
+        # Dropdown for Sharpen Channels Separately option
+        self.sharpen_channels_label = QLabel("Sharpen RGB Channels Separately:")
+        self.sharpen_channels_dropdown = QComboBox()
+        self.sharpen_channels_dropdown.addItems(["No", "Yes"])  # "No" means don't separate, "Yes" means separate
+        left_layout.addWidget(self.sharpen_channels_label)
+        left_layout.addWidget(self.sharpen_channels_dropdown)
+
+        # Non-Stellar Sharpening PSF Slider
+        self.psf_slider_label = QLabel("Non-Stellar Sharpening PSF (1-8): 3")
+        self.psf_slider = QSlider(Qt.Horizontal)
+        self.psf_slider.setMinimum(10)
+        self.psf_slider.setMaximum(80)
+        self.psf_slider.setValue(30)
+        self.psf_slider.valueChanged.connect(self.update_psf_slider_label)
+        left_layout.addWidget(self.psf_slider_label)
+        left_layout.addWidget(self.psf_slider)
+
+        # Stellar Amount Slider
+        self.stellar_amount_label = QLabel("Stellar Sharpening Amount (0-1): 0.50")
+        self.stellar_amount_slider = QSlider(Qt.Horizontal)
+        self.stellar_amount_slider.setMinimum(0)
+        self.stellar_amount_slider.setMaximum(100)
+        self.stellar_amount_slider.setValue(50)
+        self.stellar_amount_slider.valueChanged.connect(self.update_stellar_amount_label)
+        left_layout.addWidget(self.stellar_amount_label)
+        left_layout.addWidget(self.stellar_amount_slider)
+
+        # Non-Stellar Amount Slider
+        self.nonstellar_amount_label = QLabel("Non-Stellar Sharpening Amount (0-1): 0.50")
+        self.nonstellar_amount_slider = QSlider(Qt.Horizontal)
+        self.nonstellar_amount_slider.setMinimum(0)
+        self.nonstellar_amount_slider.setMaximum(100)
+        self.nonstellar_amount_slider.setValue(50)
+        self.nonstellar_amount_slider.valueChanged.connect(self.update_nonstellar_amount_label)
+        left_layout.addWidget(self.nonstellar_amount_label)
+        left_layout.addWidget(self.nonstellar_amount_slider)
+
+        # Denoise Strength Slider
+        self.denoise_strength_label = QLabel("Denoise Strength (0-1): 0.50")
+        self.denoise_strength_slider = QSlider(Qt.Horizontal)
+        self.denoise_strength_slider.setMinimum(0)
+        self.denoise_strength_slider.setMaximum(100)
+        self.denoise_strength_slider.setValue(50)
+        self.denoise_strength_slider.valueChanged.connect(self.update_denoise_strength_label)
+        left_layout.addWidget(self.denoise_strength_label)
+        left_layout.addWidget(self.denoise_strength_slider)
+
+        # Denoise Mode dropdown
+        self.denoise_mode_label = QLabel("Denoise Mode:")
+        self.denoise_mode_dropdown = QComboBox()
+        self.denoise_mode_dropdown.addItems(["luminance", "full"])  # 'luminance' for luminance-only, 'full' for full YCbCr denoising
+        left_layout.addWidget(self.denoise_mode_label)
+        left_layout.addWidget(self.denoise_mode_dropdown)
+
+        # Execute button
+        self.execute_button = QPushButton("Execute")
+        self.execute_button.clicked.connect(self.run_cosmic_clarity)
+        left_layout.addWidget(self.execute_button)
+
+        # Undo and Redo buttons
+        self.undo_button = QPushButton("Original")
+        self.undo_button.setIcon(QApplication.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.undo_button.clicked.connect(self.undo)
+        self.undo_button.setEnabled(False)  # Disabled initially
+        left_layout.addWidget(self.undo_button)
+
+        self.redo_button = QPushButton("Current")
+        self.redo_button.setIcon(QApplication.style().standardIcon(QStyle.SP_ArrowRight))
+        self.redo_button.clicked.connect(self.redo)
+        self.redo_button.setEnabled(False)  # Disabled initially
+        left_layout.addWidget(self.redo_button)        
+
+        # Save button to save the processed image
+        self.save_button = QPushButton("Save Image")
+        self.save_button.clicked.connect(self.save_processed_image_to_disk)
+        left_layout.addWidget(self.save_button)  
+
+        # Spacer to push the wrench button to the bottom
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Cosmic Clarity folder path label
+        self.cosmic_clarity_folder_label = QLabel("No folder selected")
+        left_layout.addWidget(self.cosmic_clarity_folder_label)
+
+        # Wrench button to select Cosmic Clarity folder
+        self.wrench_button = QPushButton()
+        self.wrench_button.setIcon(QIcon("wrench_icon.png"))  # Ensure this icon path is correct
+        self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
+        left_layout.addWidget(self.wrench_button)    
+
+        # Footer
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet("font-size: 10px;")
+        left_layout.addWidget(footer_label)   
+
+
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Right panel for image preview with zoom controls
+        right_layout = QVBoxLayout()
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("+")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("-")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        right_layout.addLayout(zoom_layout)
+
+        # Scroll area for image preview with click-and-drag functionality
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setWidget(self.image_label)
+        right_layout.addWidget(self.scroll_area)
+
+        # Button to open the preview area selection dialog
+        self.select_preview_button = QPushButton("Select Preview Area")
+        self.select_preview_button.clicked.connect(self.open_preview_dialog)
+        right_layout.addWidget(self.select_preview_button)        
+
+        # Add left and right layouts to the main layout
+        main_layout.addLayout(left_layout)
+        main_layout.addLayout(right_layout)
+
+        self.setLayout(main_layout)
+        self.update_ui_for_mode()
+
+    def update_psf_slider_label(self):
+        """Update the label text to display the current value of the PSF slider as a non-integer."""
+        psf_value = self.psf_slider.value() / 10  # Convert to a float in the range 1.0 - 8.0
+        self.psf_slider_label.setText(f"Non-Stellar Sharpening PSF (1.0-8.0): {psf_value:.1f}")
+
+    def update_stellar_amount_label(self):
+        self.stellar_amount_label.setText(f"Stellar Sharpening Amount (0-1): {self.stellar_amount_slider.value() / 100:.2f}")
+
+    def update_nonstellar_amount_label(self):
+        self.nonstellar_amount_label.setText(f"Non-Stellar Sharpening Amount (0-1): {self.nonstellar_amount_slider.value() / 100:.2f}")
+
+    def update_denoise_strength_label(self):
+        self.denoise_strength_label.setText(f"Denoise Strength (0-1): {self.denoise_strength_slider.value() / 100:.2f}")
+
+    def mousePressEvent(self, event):
+        """Handle the start of the drag action or selection of a preview area."""
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.drag_start_position = event.pos()              
+                
+
+    def mouseMoveEvent(self, event):
+        """Handle dragging or adjusting the preview selection area."""
+        if self.is_dragging:
+            # Handle image panning
+            delta = event.pos() - self.drag_start_position
+            self.scroll_area.horizontalScrollBar().setValue(self.scroll_area.horizontalScrollBar().value() - delta.x())
+            self.scroll_area.verticalScrollBar().setValue(self.scroll_area.verticalScrollBar().value() - delta.y())
+            self.drag_start_position = event.pos()
+
+
+    def mouseReleaseEvent(self, event):
+        """End the drag action or finalize the preview selection area."""
+        if event.button() == Qt.LeftButton:
+            if self.is_dragging:
+                self.is_dragging = False
+
+
+    def open_preview_dialog(self):
+        """Open a preview dialog to select a 640x480 area of the image at 100% scale."""
+        if self.image is not None:
+            # Pass the 32-bit numpy image directly to maintain bit depth
+            self.preview_dialog = PreviewDialog(self.image, parent_tab=self, is_mono=self.is_mono)
+            self.preview_dialog.show()
+        else:
+            print("No image loaded. Please load an image first.")
+
+
+
+    def convert_numpy_to_qimage(self, np_img):
+        """Convert a numpy array to QImage."""
+        # Ensure image is in 8-bit format for QImage compatibility
+        if np_img.dtype == np.float32:
+            np_img = (np_img * 255).astype(np.uint8)  # Convert normalized float32 to uint8 [0, 255]
+        
+        if np_img.dtype == np.uint8:
+            if len(np_img.shape) == 2:
+                # Grayscale image
+                height, width = np_img.shape
+                bytes_per_line = width
+                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+            elif len(np_img.shape) == 3 and np_img.shape[2] == 3:
+                # RGB image
+                height, width, channels = np_img.shape
+                bytes_per_line = 3 * width
+                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        else:
+            print("Image format not supported for conversion to QImage.")
+            return None
+
+
+
+    def select_cosmic_clarity_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Cosmic Clarity Folder")
+        if folder:
+            self.cosmic_clarity_folder = folder
+            self.save_cosmic_clarity_folder(folder)
+            self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
+            print(f"Selected Cosmic Clarity folder: {folder}")
+
+    def zoom_in(self):
+        """Zoom in on the image and update the display."""
+        self.zoom_factor *= 1.2
+        self.apply_zoom()  # Use apply_zoom to handle zoom correctly
+
+    def zoom_out(self):
+        """Zoom out on the image and update the display."""
+        self.zoom_factor /= 1.2
+        self.apply_zoom()  # Use apply_zoom to handle zoom correctly
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image and update the display."""
+        if self.image is None:
+            return
+
+        # Determine the new dimensions after zoom
+        height, width = self.image.shape[:2]
+        new_width = int(width * self.zoom_factor)
+        new_height = int(height * self.zoom_factor)
+
+        # Update image display with new zoom dimensions
+        self.update_image_display(new_width, new_height)    
+
+    def undo(self):
+        """Undo to the original image without changing zoom and scroll position."""
+        if self.original_image is not None:
+            self.restore_image(self.original_image)
+            self.redo_button.setEnabled(True)
+            self.undo_button.setEnabled(False)
+
+
+    def redo(self):
+        """Redo to the processed image without changing zoom and scroll position."""
+        if self.processed_image is not None:
+            self.restore_image(self.processed_image)
+            self.redo_button.setEnabled(False)
+            self.undo_button.setEnabled(True)
+
+
+    def restore_image(self, image_array):
+        """Display a given image array, preserving the current zoom level and scroll position."""
+        # Save the current zoom level and scroll position
+        current_zoom = self.zoom_factor
+        current_scroll_position = (
+            self.scroll_area.horizontalScrollBar().value(),
+            self.scroll_area.verticalScrollBar().value()
+        )
+
+        # Display the image
+        self.show_image(image_array)
+
+        # Restore the zoom level and scroll position
+        self.zoom_factor = current_zoom
+        self.update_image_display()  # Refresh display with the preserved zoom level
+
+        self.scroll_area.horizontalScrollBar().setValue(current_scroll_position[0])
+        self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
+
+
+    def save_cosmic_clarity_folder(self, folder):
+        """Save the Cosmic Clarity folder path to a text file."""
+        with open(self.settings_file, 'w') as file:
+            file.write(folder)
+        print(f"Saved Cosmic Clarity folder to {self.settings_file}")
+
+    def load_cosmic_clarity_folder(self):
+        """Load the saved Cosmic Clarity folder path from a text file."""
+        if os.path.exists(self.settings_file):
+            with open(self.settings_file, 'r') as file:
+                folder = file.read().strip()
+                if folder:
+                    self.cosmic_clarity_folder = folder
+                    self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
+                    print(f"Loaded Cosmic Clarity folder from {self.settings_file}: {folder}")
+                else:
+                    print("Cosmic Clarity folder path in file is empty.")
+        else:
+            print("No saved Cosmic Clarity folder found.")
+
+    def load_image(self):
+        """Load an image and set it as the current and original image."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Image Files (*.png *.jpg *.tif *.tiff *.fits *.fit *.jpeg *.xisf)")
+        if file_path:
+            self.loaded_image_path = file_path
+            print(f"Loading file: {file_path}")
+
+            # Load the image and store it as the original image
+            self.image, self.original_header, self.bit_depth, self.is_mono = load_image(file_path)
+            
+            # Check if the image was loaded successfully
+            if self.image is None:
+                print("Error: Failed to load the image data.")
+                QMessageBox.critical(self, "Error", "Failed to load the image. Please try a different file.")
+                return
+
+            print(f"Image loaded successfully. Shape: {self.image.shape}, Dtype: {self.image.dtype}")
+
+            # Make a copy of the original image for reference
+            try:
+                self.original_image = self.image.copy()
+                print("Original image copied successfully.")
+            except Exception as e:
+                print(f"Error copying original image: {e}")
+                QMessageBox.critical(self, "Error", "Failed to copy the original image.")
+                return
+
+            # Clear any existing processed image
+            self.processed_image = None
+
+            # Attempt to display the loaded image in the preview
+            try:
+                self.show_image()  # Ensure this function can handle 32-bit float images
+                print("Image displayed successfully.")
+            except Exception as e:
+                print(f"Error displaying image: {e}")
+                QMessageBox.critical(self, "Error", "Failed to display the image.")
+                return
+
+            # Enable or disable buttons as necessary
+            self.undo_button.setEnabled(False)
+            self.redo_button.setEnabled(False)
+
+            # Center scrollbars after a short delay
+            try:
+                QTimer.singleShot(50, self.center_scrollbars)  # Delay of 50 ms for centering scrollbars
+                print("Scrollbars centered.")
+            except Exception as e:
+                print(f"Error centering scrollbars: {e}")
+
+            # Update the display after another short delay to ensure scrollbars are centered first
+            try:
+                QTimer.singleShot(100, self.update_image_display)  # Delay of 100 ms for display update
+                print("Image display updated.")
+            except Exception as e:
+                print(f"Error updating image display: {e}")
+
+        else:
+            print("No file selected.")
+
+
+
+    def center_scrollbars(self):
+        """Centers the scrollbars to start in the middle of the image."""
+        h_scroll = self.scroll_area.horizontalScrollBar()
+        v_scroll = self.scroll_area.verticalScrollBar()
+        h_scroll.setValue((h_scroll.maximum() + h_scroll.minimum()) // 2)
+        v_scroll.setValue((v_scroll.maximum() + v_scroll.minimum()) // 2)
+
+    def show_image(self, file_path=None):
+        """Display the loaded image or a specified image, preserving zoom and scroll position."""
+        # Load and display the specified file if provided, otherwise use the currently loaded image
+        if file_path is not None:
+            # If file_path is a string, load the image from the file; otherwise, use the numpy array directly
+            if isinstance(file_path, str):
+                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(file_path)
+                self.loaded_image_path = file_path
+            else:
+                # If file_path is an image array (like self.original_image), set it directly
+                self.image = file_path
+
+        if self.image is None:
+            return
+
+        # Save the current scroll position if it exists
+        current_scroll_position = (
+            self.scroll_area.horizontalScrollBar().value(),
+            self.scroll_area.verticalScrollBar().value()
+        )
+
+        # Stretch and display the image
+        display_image = self.image
+        target_median = 0.25
+        is_mono = display_image.shape[2] == 1 if display_image.ndim == 3 else True
+
+        if self.auto_stretch_button.isChecked():
+            if is_mono:
+                stretched_mono = stretch_mono_image(display_image[:, :, 0] if display_image.ndim == 3 else display_image, target_median)
+                display_image = np.stack([stretched_mono] * 3, axis=-1)
+            else:
+                display_image = stretch_color_image(display_image, target_median, linked=False)
+
+        # Convert to QImage for display
+        display_image_uint8 = (display_image * 255).astype(np.uint8)
+        if display_image_uint8.shape[2] == 3:
+            height, width, channel = display_image_uint8.shape
+            bytes_per_line = 3 * width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        else:
+            height, width = display_image_uint8.shape
+            bytes_per_line = width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+
+        # Set pixmap without applying additional scaling (keep the original zoom level)
+        pixmap = QPixmap.fromImage(qimage)
+        self.image_label.setPixmap(pixmap)
+
+        # Restore the previous scroll position
+        self.scroll_area.horizontalScrollBar().setValue(current_scroll_position[0])
+        self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
+
+
+
+    def update_image_display(self, display_width=None, display_height=None):
+        """Update the displayed image according to the current zoom level and autostretch setting."""
+        if self.image is None:
+            return
+
+        # Apply autostretch if enabled
+        display_image = self.image.copy()
+        if self.auto_stretch_button.isChecked():
+            target_median = 0.25
+            if self.is_mono:
+                stretched_mono = stretch_mono_image(display_image[:, :, 0], target_median)
+                display_image = np.stack([stretched_mono] * 3, axis=-1)
+            else:
+                display_image = stretch_color_image(display_image, target_median, linked=False)
+
+        # Convert to QImage for display
+        display_image_uint8 = (display_image * 255).astype(np.uint8)
+        if display_image_uint8.shape[2] == 3:
+            height, width, channel = display_image_uint8.shape
+            bytes_per_line = 3 * width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        else:
+            height, width = display_image_uint8.shape
+            bytes_per_line = width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+
+        # Scale QPixmap based on provided display dimensions
+        pixmap = QPixmap.fromImage(qimage)
+        if display_width and display_height:
+            pixmap = pixmap.scaled(display_width, display_height, Qt.KeepAspectRatio)
+
+        self.image_label.setPixmap(pixmap)
+
+        # Adjust the scroll bars to keep the view centered
+        h_scroll = self.scroll_area.horizontalScrollBar()
+        v_scroll = self.scroll_area.verticalScrollBar()
+        visible_width = self.scroll_area.viewport().width()
+        visible_height = self.scroll_area.viewport().height()
+        center_x = h_scroll.value() + visible_width // 2
+        center_y = v_scroll.value() + visible_height // 2
+
+        h_scroll.setValue(int(center_x * self.zoom_factor - visible_width // 2))
+        v_scroll.setValue(int(center_y * self.zoom_factor - visible_height // 2))
+
+    def store_processed_image(self):
+        """Store the currently displayed image as the processed image."""
+        if self.image is not None:
+            self.processed_image = self.image.copy()  # Store a copy of the processed image
+            self.undo_button.setEnabled(True)
+            self.redo_button.setEnabled(False)  # Reset redo button for new process
+
+    def toggle_auto_stretch(self, checked):
+        """Toggle autostretch and apply it to the current image display."""
+        self.autostretch_enabled = checked
+        self.auto_stretch_button.setText("AutoStretch (On)" if checked else "AutoStretch (Off)")
+        self.update_image_display()  # Redraw with autostretch if enabled
+
+    def save_input_image(self, file_path):
+        """Save the image directly to the specified input path for Cosmic Clarity without prompting."""
+        if self.image is None:
+            print("No image to save.")
+            return
+        
+        # Get the file extension as original_format
+        original_format = os.path.splitext(self.loaded_image_path)[-1].lstrip('.').lower()  # E.g., 'tiff', 'png', etc.
+        
+        # Call save_image with the correct format
+        save_image(self.image, file_path, original_format, self.bit_depth, self.original_header, self.is_mono)
+        print(f"Saved input image to {file_path}")
+
+    def update_ui_for_mode(self):
+        # Show/hide sharpening controls based on mode
+        if self.sharpen_radio.isChecked():
+            self.sharpen_mode_label.show()
+            self.sharpen_mode_dropdown.show()
+            self.psf_slider_label.show()
+            self.psf_slider.show()
+            self.stellar_amount_label.show()
+            self.stellar_amount_slider.show()
+            self.nonstellar_amount_label.show()
+            self.nonstellar_amount_slider.show()
+            self.sharpen_channels_label.show()  # Show the label for RGB sharpening
+            self.sharpen_channels_dropdown.show()  # Show the dropdown for RGB sharpening
+            # Hide denoise controls
+            self.denoise_strength_label.hide()
+            self.denoise_strength_slider.hide()
+            self.denoise_mode_label.hide()
+            self.denoise_mode_dropdown.hide()
+        else:
+            # Show denoise controls
+            self.denoise_strength_label.show()
+            self.denoise_strength_slider.show()
+            self.denoise_mode_label.show()
+            self.denoise_mode_dropdown.show()
+            self.sharpen_mode_label.hide()
+            self.sharpen_mode_dropdown.hide()
+            self.psf_slider_label.hide()
+            self.psf_slider.hide()
+            self.stellar_amount_label.hide()
+            self.stellar_amount_slider.hide()
+            self.nonstellar_amount_label.hide()
+            self.nonstellar_amount_slider.hide()
+            self.sharpen_channels_label.hide()  # Hide the label for RGB sharpening
+            self.sharpen_channels_dropdown.hide()  # Hide the dropdown for RGB sharpening
+
+    def get_psf_value(self):
+        """Convert the slider value to a float in the range 1.0 - 8.0."""
+        return self.psf_slider.value() / 10.0
+    
+    def run_cosmic_clarity(self, input_file_path=None):
+        """Run Cosmic Clarity with the current parameters."""
+        psf_value = self.get_psf_value()
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
+            return
+        if self.image is None:  # Ensure an image is currently displayed
+            QMessageBox.warning(self, "Warning", "Please load an image first.")
+            return
+
+        # Check the current autostretch state
+        was_autostretch_enabled = self.auto_stretch_button.isChecked()
+
+        # Disable autostretch if it was enabled
+        if was_autostretch_enabled:
+            self.auto_stretch_button.setChecked(False)
+
+        # Determine the correct executable and output filename suffix based on the selected mode
+        if self.sharpen_radio.isChecked():
+            exe_name = "setiastrocosmicclarity"  # Sharpening executable
+            mode = "sharpen"
+            output_suffix = "_sharpened"
+        else:
+            exe_name = "setiastrocosmicclarity_denoise"  # Denoising executable
+            mode = "denoise"
+            output_suffix = "_denoised"
+
+        # Define paths for input and output
+        input_folder = os.path.join(self.cosmic_clarity_folder, "input")
+        output_folder = os.path.join(self.cosmic_clarity_folder, "output")
+        input_file_path = os.path.join(input_folder, os.path.basename(self.loaded_image_path))
+        batch_file_path = os.path.join(self.cosmic_clarity_folder, "run_setiastrocosmicclarity")
+
+        # Save the current previewed image directly to the input folder
+        self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
+
+        # Generate the batch or shell script
+        batch_script_path = self.create_batch_script(batch_file_path, exe_name, mode)
+        if not batch_script_path:
+            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
+            return
+
+        # Run the script
+        self.execute_script(batch_script_path)
+
+        # Wait for the output file with any of the possible extensions
+        output_file_glob = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*")
+        output_file_path = self.wait_for_output_file(output_file_glob)
+        
+        if output_file_path:
+            # Update loaded_image_path to the latest output file for subsequent processing
+            self.loaded_image_path = output_file_path
+            self.show_image(output_file_path)
+            self.store_processed_image() 
+            self.cleanup_files(input_file_path, output_file_path)
+            self.update_image_display()
+        else:
+            QMessageBox.critical(self, "Error", "Output file not found within timeout.")
+
+        # Restore autostretch if it was originally enabled
+        if was_autostretch_enabled:
+            self.auto_stretch_button.setChecked(True)
+
+
+    def run_cosmic_clarity_on_cropped(self, cropped_image, apply_autostretch=False):
+        """Run Cosmic Clarity on a cropped image, with an option to autostretch upon receipt."""
+        psf_value = self.get_psf_value()
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
+            return
+        if cropped_image is None:  # Ensure a cropped image is provided
+            QMessageBox.warning(self, "Warning", "No cropped image provided.")
+            return
+
+        # Convert the cropped image to 32-bit floating point format
+        cropped_image_32bit = cropped_image.astype(np.float32) / np.max(cropped_image)  # Normalize if needed
+
+        # Determine the correct executable and output filename suffix based on the selected mode
+        if self.sharpen_radio.isChecked():
+            exe_name = "setiastrocosmicclarity"
+            mode = "sharpen"
+            output_suffix = "_sharpened"
+        else:
+            exe_name = "setiastrocosmicclarity_denoise"
+            mode = "denoise"
+            output_suffix = "_denoised"
+
+        # Define paths for input and output
+        input_folder = os.path.join(self.cosmic_clarity_folder, "input")
+        output_folder = os.path.join(self.cosmic_clarity_folder, "output")
+        input_file_path = os.path.join(input_folder, "cropped_preview_image.tiff")
+
+        # Save the 32-bit floating-point cropped image to the input folder
+        save_image(cropped_image_32bit, input_file_path, "tiff", "32-bit floating point", self.original_header, self.is_mono)
+
+        # Generate the batch or shell script
+        batch_script_path = self.create_batch_script(
+            os.path.join(self.cosmic_clarity_folder, "run_setiastrocosmicclarity"),
+            exe_name,
+            mode
+        )
+        if not batch_script_path:
+            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
+            return
+
+        # Run the script
+        self.execute_script(batch_script_path)
+
+        # Wait for the output file with any of the possible extensions
+        output_file_glob = os.path.join(output_folder, "cropped_preview_image" + output_suffix + ".*")
+        output_file_path = self.wait_for_output_file(output_file_glob)
+        
+        if output_file_path:
+            # Load the processed image as a numpy array
+            processed_image, _, _, _ = load_image(output_file_path)
+            
+            # Apply autostretch if requested
+            if apply_autostretch:
+                if self.is_mono:
+                    processed_image = np.stack([stretch_mono_image(processed_image[:, :, 0], target_median=0.25)] * 3, axis=-1)
+                else:
+                    processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
+
+            # Update the preview dialog with the processed image
+            self.preview_dialog.display_qimage(processed_image)  # Use the display_qimage function to show the processed image
+
+            self.cleanup_files(input_file_path, output_file_path)
+        else:
+            QMessageBox.critical(self, "Error", "Output file not found within timeout.")
+
+
+
+    def create_batch_script(self, batch_file_path, exe_name, mode):
+        """Generate the batch or shell script to run Cosmic Clarity."""
+        print("Running Cosmic Clarity on cropped image")  # Debug print
+        # Ensure correct file extension based on the operating system
+        if os.name == 'nt':  # Windows
+            batch_file_path += ".bat"
+            exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe")
+            batch_content = f'@echo off\ncd /d "{self.cosmic_clarity_folder}"\nstart "" "{exe_path}" '
+
+            # Add sharpening or denoising arguments
+            if mode == "sharpen":
+                psf_value = self.get_psf_value()
+                batch_content += (
+                    f'--sharpening_mode "{self.sharpen_mode_dropdown.currentText()}" '
+                    f'--stellar_amount {self.stellar_amount_slider.value() / 100:.2f} '
+                    f'--nonstellar_strength {psf_value:.1f} '
+                    f'--nonstellar_amount {self.nonstellar_amount_slider.value() / 100:.2f} '
+                    f'{"--sharpen_channels_separately" if self.sharpen_channels_dropdown.currentText() == "Yes" else ""} '
+                )
+            elif mode == "denoise":
+                batch_content += (
+                    f'--denoise_strength {self.denoise_strength_slider.value() / 100:.2f} '
+                    f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
+                )
+
+            batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
+
+        elif os.name == 'posix':  # macOS/Linux
+            batch_file_path += ".sh"
+            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+            batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"{exe_path}" '
+
+            # Add sharpening or denoising arguments
+            if mode == "sharpen":
+                psf_value = self.get_psf_value()
+                batch_content += (
+                    f'--sharpening_mode "{self.sharpen_mode_dropdown.currentText()}" '
+                    f'--stellar_amount {self.stellar_amount_slider.value() / 100:.2f} '
+                    f'--nonstellar_strength {psf_value:.1f} '
+                    f'--nonstellar_amount {self.nonstellar_amount_slider.value() / 100:.2f} '
+                    f'{"--sharpen_channels_separately" if self.sharpen_channels_dropdown.currentText() == "Yes" else ""} '
+                )
+            elif mode == "denoise":
+                batch_content += (
+                    f'--denoise_strength {self.denoise_strength_slider.value() / 100:.2f} '
+                    f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
+                )
+
+            batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
+
+        # Write the script to the batch file
+        try:
+            with open(batch_file_path, 'w') as batch_file:
+                batch_file.write(batch_content)
+            print(f"Batch/Shell script created: {batch_file_path}")
+            return batch_file_path
+        except Exception as e:
+            print(f"Error creating batch file: {e}")
+            return None
+
+
+    def save_processed_image(self):
+        """Save the current displayed image as the processed image."""
+        self.processed_image = self.image.copy()
+        self.undo_button.setEnabled(True)
+        self.redo_button.setEnabled(False)  # Reset redo
+
+    def save_processed_image_to_disk(self):
+        """Save the processed image to disk, using the correct format, bit depth, and header information."""
+        if self.processed_image is None:
+            QMessageBox.warning(self, "Warning", "No processed image to save.")
+            return
+
+        # Prompt user for the file path and format
+        options = QFileDialog.Options()
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Processed Image", "", 
+            "TIFF Files (*.tif *.tiff);;PNG Files (*.png);;FITS Files (*.fits *.fit)", 
+            options=options
+        )
+        
+        if not save_path:
+            return  # User cancelled the save dialog
+
+        # Determine the format based on file extension
+        _, file_extension = os.path.splitext(save_path)
+        file_extension = file_extension.lower().lstrip('.')
+        original_format = file_extension if file_extension in ['tiff', 'tif', 'png', 'fits', 'fit'] else 'tiff'
+
+        # Call the save_image function with the necessary parameters
+        try:
+            save_image(
+                img_array=self.processed_image,
+                filename=save_path,
+                original_format=original_format,
+                bit_depth=self.bit_depth,
+                original_header=self.original_header,
+                is_mono=self.is_mono
+            )
+            QMessageBox.information(self, "Success", f"Image saved successfully at: {save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+
+    def execute_script(self, script_path):
+        """Execute the batch or shell script."""
+        if os.name == 'nt':  # Windows
+            subprocess.Popen(["cmd.exe", "/c", script_path])
+        else:  # macOS/Linux
+            subprocess.Popen(["/bin/sh", script_path])
+
+    def wait_for_output_file(self, output_file_glob, timeout=1800):
+        """Wait for the output file with any extension within the specified timeout."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Use glob to find any file matching the pattern
+            matching_files = glob.glob(output_file_glob)
+            if matching_files:
+                print(f"Output file found: {matching_files[0]}")
+                return matching_files[0]
+            time.sleep(1)  # Wait a bit before checking again
+        return None
+
+    def display_image(self, file_path):
+        """Load and display the output image."""
+        self.image, self.original_header, self.bit_depth, self.is_mono = load_image(file_path)
+        self.display_image()  # Update display with the new image
+
+    def cleanup_files(self, input_file_path, output_file_path):
+        """Delete input and output files after processing."""
+        try:
+            if os.path.exists(input_file_path):
+                os.remove(input_file_path)
+                print(f"Deleted input file: {input_file_path}")
+            if os.path.exists(output_file_path):
+                os.remove(output_file_path)
+                print(f"Deleted output file: {output_file_path}")
+        except Exception as e:
+            print(f"Failed to delete files: {e}")
+
+class PreviewDialog(QDialog):
+    def __init__(self, np_image, parent_tab=None, is_mono=False):
+        super().__init__(parent=parent_tab)
+        self.setWindowTitle("Select Preview Area")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowContextHelpButtonHint | Qt.MSWindowsFixedSizeDialogHint)
+        self.setFixedSize(640, 480)  # Fix the size to 640x480
+        self.autostretch_enabled = False  # Autostretch toggle for preview
+        self.is_mono = is_mono  # Store is_mono flag
+
+        # Store the 32-bit numpy image for reference
+        self.np_image = np_image
+        self.original_np_image = np_image.copy()  # Copy to allow undo
+        self.parent_tab = parent_tab
+        # Track saved scroll positions for Undo
+        self.saved_h_scroll = 0
+        self.saved_v_scroll = 0        
+
+        # Set up the layout and the scroll area
+        layout = QVBoxLayout(self)
+
+        # Autostretch button
+        self.autostretch_button = QPushButton("AutoStretch (Off)")
+        self.autostretch_button.setCheckable(True)
+        self.autostretch_button.toggled.connect(self.toggle_autostretch)
+        layout.addWidget(self.autostretch_button)
+
+        # Scroll area for displaying the image
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        layout.addWidget(self.scroll_area)
+
+        # Set up the QLabel to display the image
+        self.image_label = QLabel()
+        self.display_qimage(self.np_image)  # Display the image with the initial numpy array
+        self.scroll_area.setWidget(self.image_label)
+
+        # Add the Process Visible Area and Undo buttons
+        button_layout = QHBoxLayout()
+        
+        self.process_button = QPushButton("Process Visible Area")
+        self.process_button.clicked.connect(self.process_visible_area)
+        button_layout.addWidget(self.process_button)
+
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.clicked.connect(self.undo_last_process)
+        self.undo_button.setIcon(QApplication.style().standardIcon(QStyle.SP_ArrowLeft))
+        button_layout.addWidget(self.undo_button)
+
+        layout.addLayout(button_layout)
+
+        # Set up mouse dragging
+        self.dragging = False
+        self.drag_start_pos = QPoint()
+
+        # Center the scroll area on initialization
+        QTimer.singleShot(0, self.center_scrollbars)  # Delay to ensure layout is set
+                
+        # Enable What's This functionality
+        self.setWhatsThis(
+            "Instructions:\n\n"
+            "1. Use the scroll bars to center on the area of the image you want to preview.\n"
+            "2. Click and drag to move around the image.\n"
+            "3. When ready, click the 'Process Visible Area' button to process the selected section."
+        )
+
+    def display_qimage(self, np_img):
+        """Convert a numpy array to QImage and display it at 100% scale."""
+        display_image_uint8 = (np.clip(np_img, 0, 1) * 255).astype(np.uint8)
+        if display_image_uint8.shape[2] == 3:
+            height, width, channels = display_image_uint8.shape
+            bytes_per_line = 3 * width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        else:
+            height, width = display_image_uint8.shape
+            bytes_per_line = width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+
+        # Display the QImage at 100% scale in QLabel
+        self.image_label.setPixmap(QPixmap.fromImage(qimage))
+        self.image_label.adjustSize()  
+
+    def toggle_autostretch(self, checked):
+        self.autostretch_enabled = checked
+        self.autostretch_button.setText("AutoStretch (On)" if checked else "AutoStretch (Off)")
+        self.apply_autostretch()
+
+    def apply_autostretch(self):
+        """Apply or remove autostretch while maintaining 32-bit precision."""
+        target_median = 0.25  # Target median for stretching
+
+        if self.autostretch_enabled:
+            if self.is_mono:  # Apply mono stretch
+                stretched_mono = stretch_mono_image(self.np_image[:, :, 0], target_median)  # Single channel for mono
+                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
+            else:  # Apply color stretch
+                display_image = stretch_color_image(self.np_image, target_median, linked=False)
+        else:
+            display_image = self.np_image  # Use original image if autostretch is off
+
+        # Convert and display the QImage
+        self.display_qimage(display_image)
+
+    def undo_last_process(self):
+        """Revert to the original image in the preview, respecting the autostretch setting."""
+        print("Undo last process")
+        
+        # Reset to the original image
+        self.np_image = self.original_np_image.copy()
+        
+        # Apply autostretch if it is enabled
+        if self.autostretch_enabled:
+            print("Applying autostretch on undo")
+            self.apply_autostretch()
+        else:
+            # Display the original image without autostretch
+            self.display_qimage(self.np_image)
+        
+        # Restore saved scroll positions with a slight delay
+        QTimer.singleShot(0, self.restore_scrollbars)
+        print("Scrollbars will be restored to saved positions")
+
+
+    def restore_scrollbars(self):
+        """Restore the scrollbars to the saved positions after a delay."""
+        self.scroll_area.horizontalScrollBar().setValue(self.saved_h_scroll)
+        self.scroll_area.verticalScrollBar().setValue(self.saved_v_scroll)
+        print("Scrollbars restored to saved positions")
+   
+    def center_scrollbars(self):
+        """Centers the scrollbars to start in the middle of the image."""
+        # Set the horizontal and vertical scrollbar positions to center
+        h_scroll = self.scroll_area.horizontalScrollBar()
+        v_scroll = self.scroll_area.verticalScrollBar()
+        h_scroll.setValue((h_scroll.maximum() + h_scroll.minimum()) // 2)
+        v_scroll.setValue((v_scroll.maximum() + v_scroll.minimum()) // 2)
+
+    def mousePressEvent(self, event):
+        """Start dragging if the left mouse button is pressed."""
+        if event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.drag_start_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        """Handle dragging to move the scroll area."""
+        if self.dragging:
+            delta = event.pos() - self.drag_start_pos
+            self.scroll_area.horizontalScrollBar().setValue(
+                self.scroll_area.horizontalScrollBar().value() - delta.x()
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().value() - delta.y()
+            )
+            self.drag_start_pos = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        """Stop dragging when the left mouse button is released."""
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+
+    def process_visible_area(self):
+        print("Process Visible Area button pressed")  # Initial debug print to confirm button press
+
+        """Crop the image to the visible area and send it to CosmicClarityTab for processing."""
+
+        self.saved_h_scroll = self.scroll_area.horizontalScrollBar().value()
+        self.saved_v_scroll = self.scroll_area.verticalScrollBar().value()
+
+        # Calculate the visible area in the original image coordinates
+        h_scroll = self.scroll_area.horizontalScrollBar().value()
+        v_scroll = self.scroll_area.verticalScrollBar().value()
+        visible_rect = QRect(h_scroll, v_scroll, 640, 480)  # 640x480 fixed size
+        print(f"Visible area rectangle: {visible_rect}")  # Debug print to confirm visible area coordinates
+
+        # Crop the numpy image array directly using slicing
+        cropped_np_image = self.np_image[
+            v_scroll : v_scroll + visible_rect.height(),
+            h_scroll : h_scroll + visible_rect.width(),
+            :
+        ]
+
+        if cropped_np_image is None:
+            print("Error: Failed to convert QImage to numpy array")  # Debug if conversion failed
+        else:
+            print("Image converted to numpy array successfully")  # Debug print to confirm conversion
+
+        # Pass the cropped image to CosmicClarityTab for processing
+        if self.parent_tab:
+            print("Sending to parent class for processing")  # Debug print before sending to parent
+            self.parent_tab.run_cosmic_clarity_on_cropped(cropped_np_image, apply_autostretch=self.autostretch_enabled)
+        else:
+            print("Error: Failed to send to parent class")  # Debug if parent reference is missing
+
+    def convert_qimage_to_numpy(self, qimage):
+        """Convert QImage to a 32-bit float numpy array, preserving the 32-bit precision."""
+        qimage = qimage.convertToFormat(QImage.Format_RGB888)
+        
+        width = qimage.width()
+        height = qimage.height()
+        ptr = qimage.bits()
+        ptr.setsize(height * width * 3)
+        
+        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((height, width, 3)).astype(np.float32) / 255.0
+        return arr
+
+    def closeEvent(self, event):
+        """Handle dialog close event if any cleanup is necessary."""
+        self.dragging = False
+        event.accept()
+
 
 
 class StatisticalStretchTab(QWidget):
@@ -1843,16 +3427,26 @@ class ContinuumProcessingThread(QThread):
 
 
 
-# Function to load and convert images to 32-bit floating point
 def load_image(filename):
     bit_depth = None  # Initialize bit depth to None
-    is_mono = True  # Assume monochrome by default    
+    is_mono = False   # Assume color by default    
     original_header = None  # Initialize an empty header for FITS files
+    img_array = None  # Placeholder for image array
+
     if filename.lower().endswith('.png'):
-        img = Image.open(filename).convert('RGB')  # Ensures it's RGB
+        img = Image.open(filename)
+        if img.mode == 'L':
+            is_mono = True
+            img = img.convert('RGB')  # Convert to 3-channel for consistency
         img_array = np.array(img, dtype=np.float32) / 255.0  # Normalize to [0, 1]
+
     elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
         img_array = tiff.imread(filename)
+        # Check if the image is grayscale (single channel)
+        if img_array.ndim == 2:
+            is_mono = True
+            img_array = np.stack([img_array] * 3, axis=-1)  # Convert to 3-channel for consistency
+
         # Handle different bit depths
         if img_array.dtype == np.uint8:
             img_array = img_array.astype(np.float32) / 255.0  # Normalize 8-bit to [0, 1]
@@ -1864,11 +3458,11 @@ def load_image(filename):
             img_array = img_array  # Already in 32-bit floating point, no need to convert
         else:
             raise ValueError("Unsupported TIFF format!")
+
     elif filename.lower().endswith('.fits') or filename.lower().endswith('.fit'):
         with fits.open(filename) as hdul:
             img_array = hdul[0].data
             original_header = hdul[0].header  # Capture the FITS header
-            bit_depth = None
 
             # Determine bit depth and apply necessary transformations
             if img_array.dtype == np.uint16:
@@ -1897,6 +3491,50 @@ def load_image(filename):
                 is_mono = True
             else:
                 raise ValueError("Unsupported FITS format!")
+    elif filename.lower().endswith('.xisf'):
+        try:
+            # Load XISF image data
+            xisf = XISF(filename)
+            img_array = xisf.read_image(0)
+
+            # Load XISF metadata
+            file_meta = xisf.get_file_metadata()
+            image_meta = xisf.get_images_metadata()[0]
+            print(f"Loaded XISF image with metadata: {file_meta}")
+
+            # Normalize based on bit depth
+            if img_array.dtype == np.uint16:
+                img_array = img_array.astype(np.float32) / 65535.0
+                bit_depth = "16-bit"
+            elif img_array.dtype == np.uint32:
+                img_array = img_array.astype(np.float32) / 4294967295.0
+                bit_depth = "32-bit unsigned"
+            elif img_array.dtype in [np.float32, np.float64]:
+                img_array = np.clip(img_array, 0, 1)  # No normalization needed for 32-bit float
+                bit_depth = "32-bit floating point"
+            else:
+                img_array = img_array.astype(np.float32)
+                bit_depth = str(img_array.dtype)
+
+            # Convert grayscale to RGB format for consistency
+            if len(img_array.shape) == 2:
+                img_array = np.stack([img_array] * 3, axis=-1)
+                is_mono = True
+            elif img_array.shape[2] == 1:
+                img_array = np.squeeze(img_array, axis=2)
+                img_array = np.stack([img_array] * 3, axis=-1)
+                is_mono = True
+            else:
+                is_mono = False
+
+            # Capture XISF metadata for further use
+            original_header = {"XISF": file_meta, "ImageMetadata": image_meta}
+
+        except Exception as e:
+            print(f"Error loading XISF file: {e}")
+            return None, None, None, None
+
+
     else:
         raise ValueError("Unsupported file format!")
 
@@ -1904,11 +3542,9 @@ def load_image(filename):
 
 
 
-
-
-
 def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False):
     img_array = ensure_native_byte_order(img_array)  # Apply native byte order correction if needed
+    xisf_metadata = original_header
 
     if original_format == 'png':
         img = Image.fromarray((img_array * 255).astype(np.uint8))  # Convert to 8-bit and save as PNG
@@ -1949,6 +3585,23 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
 
         hdu.writeto(filename, overwrite=True)
+    elif original_format == 'xisf':
+        try:
+            if is_mono:
+                rgb_image = np.stack([img_array[:, :, 0]] * 3, axis=-1).astype(np.float32)
+            else:
+                rgb_image = img_array.astype(np.float32)
+            
+            # Print debug information
+            print(f"Saving XISF with shape: {rgb_image.shape}, dtype: {rgb_image.dtype}")
+
+            # Save the image in XISF format using the metadata
+            XISF.write(filename, rgb_image)
+
+            print(f"Saved {bit_depth} XISF image to: {filename}")
+            
+        except Exception as e:
+            print(f"Error saving XISF file: {e}")
     else:
         raise ValueError("Unsupported file format!")
 
@@ -2027,7 +3680,7 @@ def ensure_native_byte_order(array):
     if array.dtype.byteorder == '=':  # Already in native byte order
         return array
     elif array.dtype.byteorder in ('<', '>'):  # Non-native byte order
-        return array.byteswap().newbyteorder()
+        return array.byteswap().view(array.dtype.newbyteorder('='))
     return array
 
 
@@ -2321,8 +3974,51 @@ def load_image(filename):
         bit_depth = None
         is_mono = True
         original_header = None
+                # Debugging: Print detected file extension
+        print(f"Loading file: {filename}, Detected extension: {file_extension}")
 
-        if file_extension in ['tif', 'tiff']:
+
+        # Load XISF files
+        if file_extension == 'xisf':
+            xisf = XISF(filename)
+            im_data = xisf.read_image(0)
+
+            # Load XISF metadata
+            file_meta = xisf.get_file_metadata()
+            image_meta = xisf.get_images_metadata()[0]
+            print(f"Loaded XISF image with metadata: {file_meta}")
+
+            # Determine bit depth and normalize
+            if im_data.dtype == np.uint16:
+                im_data = im_data.astype(np.float32) / 65535.0
+                bit_depth = "16-bit"
+            elif im_data.dtype == np.uint32:
+                im_data = im_data.astype(np.float32) / 4294967295.0
+                bit_depth = "32-bit unsigned"
+            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                im_data = np.clip(im_data, 0, 1)  # No normalization needed for 32-bit float
+                bit_depth = "32-bit floating point"
+            else:
+                im_data = im_data.astype(np.float32)
+                bit_depth = str(im_data.dtype)
+
+            # Convert grayscale images to 3-channel for display consistency
+            if len(im_data.shape) == 2:
+                im_data = np.stack([im_data] * 3, axis=-1)  # Convert to RGB format for consistency
+                is_mono = True
+            elif im_data.shape[2] == 1:
+                im_data = np.squeeze(im_data, axis=2)  # Remove singleton channel if grayscale
+                im_data = np.stack([im_data] * 3, axis=-1)
+                is_mono = True
+            else:
+                is_mono = False  # Assume RGB for 3-channel
+
+            # Capture the XISF metadata for further processing or display
+            original_header = {"XISF": file_meta, "ImageMetadata": image_meta}
+
+            return im_data, original_header, bit_depth, is_mono
+        
+        elif file_extension in ['tif', 'tiff']:
             image = tiff.imread(filename)
             print(f"Loaded TIFF image with dtype: {image.dtype}")
             
@@ -2405,6 +4101,7 @@ def load_image(filename):
                         print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
 
                     elif bit_depth == "32-bit floating point":
+                        print(f"Mono 32bit float point FITS Loaded")
                         image = image_data  # No normalization needed for 32-bit float
 
                     is_mono = True
@@ -3428,7 +5125,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 1200, 800)
         # Track the theme status
         self.is_dark_mode = True
-
+        self.metadata = {}
         self.circle_center = None
         self.circle_radius = 0    
         self.show_names = False  # Boolean to toggle showing names on the main image
@@ -3442,7 +5139,7 @@ class MainWindow(QMainWindow):
         left_panel = QVBoxLayout()
 
         # Create the instruction QLabel for search region
-        self.title_label = QLabel("What's In My Image")
+        self.title_label = QLabel("What's In My Image V1.1")
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")    
         left_panel.addWidget(self.title_label)    
@@ -4183,7 +5880,10 @@ class MainWindow(QMainWindow):
         self.circle_radius = radius_px  # Set this to allow the check in `query_simbad`
 
         # Perform the query with the calculated radius
-        self.query_simbad(radius_deg, max_results=25000)
+        self.query_simbad(radius_deg, max_results=100000)
+
+
+
 
     def toggle_advanced_search(self):
         """Toggle visibility of the advanced search panel."""
@@ -4413,7 +6113,7 @@ class MainWindow(QMainWindow):
     
 
     def open_image(self):
-        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits)")
+        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)")
         if self.image_path:
             img_array, original_header, bit_depth, is_mono = load_image(self.image_path)
             if img_array is not None:
@@ -4483,10 +6183,146 @@ class MainWindow(QMainWindow):
                         except ValueError as e:
                             print("Error initializing WCS:", e)
                             QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
+                elif self.image_path.lower().endswith('.xisf'):
+                    # Load WCS from XISF properties
+                    xisf_meta = self.extract_xisf_metadata(self.image_path)
+                    self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
+
+                    # Construct WCS header from XISF properties
+                    header = self.construct_fits_header_from_xisf(xisf_meta)
+                    if header:
+                        try:
+                            self.initialize_wcs_from_header(header)
+                        except ValueError as e:
+                            print("Error initializing WCS from XISF:", e)
+                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
                 else:
                     # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
                     self.prompt_blind_solve()
 
+    def extract_xisf_metadata(self, xisf_path):
+        """
+        Extract metadata from a .xisf file, focusing on WCS and essential image properties.
+        """
+        try:
+            # Load the XISF file
+            xisf = XISF(xisf_path)
+            
+            # Extract file and image metadata
+            self.file_meta = xisf.get_file_metadata()
+            self.image_meta = xisf.get_images_metadata()[0]  # Get metadata for the first image
+            return self.image_meta
+        except Exception as e:
+            print(f"Error reading XISF metadata: {e}")
+            return None
+
+    def initialize_wcs_from_header(self, header):
+        """ Initialize WCS data from a FITS header or constructed XISF header """
+        try:
+            # Use only the first two dimensions for WCS
+            self.wcs = WCS(header, naxis=2, relax=True)
+            
+            # Calculate and set pixel scale
+            pixel_scale_matrix = self.wcs.pixel_scale_matrix
+            self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
+            self.center_ra, self.center_dec = self.wcs.wcs.crval
+            self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
+            self.print_corner_coordinates()
+            
+            # Display WCS information
+            if 'CROTA2' in header:
+                self.orientation = header['CROTA2']
+            else:
+                self.orientation = calculate_orientation(header)
+                if self.orientation is None:
+                    print("Orientation: CD matrix elements not found in WCS header.")
+
+            if self.orientation is not None:
+                print(f"Orientation: {self.orientation:.2f}°")
+                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+            else:
+                self.orientation_label.setText("Orientation: N/A")
+
+            print(f"WCS data loaded from header: RA={self.center_ra}, Dec={self.center_dec}, Pixel Scale={self.pixscale} arcsec/px")
+        except ValueError as e:
+            raise ValueError(f"WCS initialization error: {e}")
+
+    def construct_fits_header_from_xisf(self, xisf_meta):
+        """ Convert XISF metadata to a FITS header compatible with WCS """
+        header = fits.Header()
+
+        # Define WCS keywords to populate
+        wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", 
+                        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+
+        # Populate WCS and FITS keywords
+        if 'FITSKeywords' in xisf_meta:
+            for keyword, values in xisf_meta['FITSKeywords'].items():
+                for entry in values:
+                    if 'value' in entry:
+                        value = entry['value']
+                        if keyword in wcs_keywords:
+                            try:
+                                value = int(value)
+                            except ValueError:
+                                value = float(value)
+                        header[keyword] = value
+
+        # Manually add WCS information if missing
+        header.setdefault('CTYPE1', 'RA---TAN')
+        header.setdefault('CTYPE2', 'DEC--TAN')
+
+        # Add SIP distortion suffix if SIP coefficients are present
+        if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+            header['CTYPE1'] = 'RA---TAN-SIP'
+            header['CTYPE2'] = 'DEC--TAN-SIP'
+
+        # Set default reference pixel to the center of the image
+        header.setdefault('CRPIX1', self.image_data.shape[1] / 2)
+        header.setdefault('CRPIX2', self.image_data.shape[0] / 2)
+
+        # Retrieve RA and DEC values if available
+        if 'RA' in xisf_meta['FITSKeywords']:
+            header['CRVAL1'] = float(xisf_meta['FITSKeywords']['RA'][0]['value'])  # Reference RA
+        if 'DEC' in xisf_meta['FITSKeywords']:
+            header['CRVAL2'] = float(xisf_meta['FITSKeywords']['DEC'][0]['value'])  # Reference DEC
+
+        # Calculate pixel scale if focal length and pixel size are available
+        if 'FOCALLEN' in xisf_meta['FITSKeywords'] and 'XPIXSZ' in xisf_meta['FITSKeywords']:
+            focal_length = float(xisf_meta['FITSKeywords']['FOCALLEN'][0]['value'])  # in mm
+            pixel_size = float(xisf_meta['FITSKeywords']['XPIXSZ'][0]['value'])  # in μm
+            pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
+            header['CDELT1'] = -pixel_scale / 3600.0
+            header['CDELT2'] = pixel_scale / 3600.0
+        else:
+            header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
+            header['CDELT2'] = 2.77778e-4
+
+        # Populate CD matrix using the XISF LinearTransformationMatrix if available
+        if 'XISFProperties' in xisf_meta and 'PCL:AstrometricSolution:LinearTransformationMatrix' in xisf_meta['XISFProperties']:
+            linear_transform = xisf_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+            header['CD1_1'] = linear_transform[0][0]
+            header['CD1_2'] = linear_transform[0][1]
+            header['CD2_1'] = linear_transform[1][0]
+            header['CD2_2'] = linear_transform[1][1]
+        else:
+            # Use pixel scale for CD matrix if no linear transformation is defined
+            header['CD1_1'] = header['CDELT1']
+            header['CD1_2'] = 0.0
+            header['CD2_1'] = 0.0
+            header['CD2_2'] = header['CDELT2']
+
+        # Ensure numeric types for SIP distortion keywords if present
+        sip_keywords = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+        for sip_key in sip_keywords:
+            if sip_key in xisf_meta['XISFProperties']:
+                try:
+                    value = xisf_meta['XISFProperties'][sip_key]['value']
+                    header[sip_key] = int(value) if isinstance(value, str) and value.isdigit() else float(value)
+                except ValueError:
+                    pass  # Ignore any invalid conversion
+
+        return header
 
     def print_corner_coordinates(self):
         """Print the RA/Dec coordinates of the four corners of the image for debugging purposes."""
@@ -4735,8 +6571,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             raise Exception("Login to Astrometry.net failed: " + str(e))
 
+
     def upload_image_to_astrometry(self, image_path, session_key):
         try:
+            # Check if the file is XISF format
+            file_extension = os.path.splitext(image_path)[-1].lower()
+            if file_extension == ".xisf":
+                # Load the XISF image
+                xisf = XISF(image_path)
+                im_data = xisf.read_image(0)
+                
+                # Convert to a temporary TIFF file for upload
+                temp_image_path = os.path.splitext(image_path)[0] + "_converted.tif"
+                if im_data.dtype == np.float32 or im_data.dtype == np.float64:
+                    im_data = np.clip(im_data, 0, 1) * 65535
+                im_data = im_data.astype(np.uint16)
+
+                # Save as TIFF
+                if im_data.shape[-1] == 1:  # Grayscale
+                    tiff.imwrite(temp_image_path, np.squeeze(im_data, axis=-1))
+                else:  # RGB
+                    tiff.imwrite(temp_image_path, im_data)
+
+                print(f"Converted XISF file to TIFF at {temp_image_path} for upload.")
+                image_path = temp_image_path  # Use the converted file for upload
+
+            # Upload the image file
             with open(image_path, 'rb') as image_file:
                 files = {'file': image_file}
                 data = {
@@ -4753,8 +6613,16 @@ class MainWindow(QMainWindow):
                     return response_data["subid"]
                 else:
                     raise ValueError("Image upload failed: " + response_data.get("error", "Unknown error"))
+
         except Exception as e:
             raise Exception("Image upload to Astrometry.net failed: " + str(e))
+
+        finally:
+            # Clean up temporary file if created
+            if file_extension == ".xisf" and os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+                print(f"Temporary TIFF file {temp_image_path} deleted after upload.")
+
 
 
     def poll_submission_status(self, subid):
@@ -5267,7 +7135,7 @@ class MainWindow(QMainWindow):
         
         # Max Results setting
         max_results_spinbox = QSpinBox()
-        max_results_spinbox.setRange(1, 25000)
+        max_results_spinbox.setRange(1, 100000)
         max_results_spinbox.setValue(self.max_results)
         layout.addRow("Max Results:", max_results_spinbox)
         
@@ -5417,11 +7285,13 @@ def calculate_orientation(header):
         print("CD matrix elements not found in the header.")
         return None
 
-# Determine the path to the "imgs" folder based on the environment
+
+
+# Set the directory for the images in the /imgs folder
 if getattr(sys, 'frozen', False):  # Check if running as a PyInstaller bundle
-    imgs_folder = os.path.join(sys._MEIPASS, "imgs")  # Use PyInstaller's temporary folder
+    phase_folder = os.path.join(sys._MEIPASS, "imgs")  # Use PyInstaller's temporary directory with /imgs
 else:
-    imgs_folder = os.path.join(os.path.dirname(__file__), "imgs")  # Use the script's directory
+    phase_folder = os.path.join(os.path.dirname(__file__), "imgs")  # Use the directory of the script file with /imgs
 
 
 # Set precision for Decimal operations
@@ -5581,10 +7451,7 @@ class CalculationThread(QThread):
 
         return phase_percentage, phase_image_name
 
-def get_lunar_phase_image_path(phase_image_name):
-    # Build the full path to the lunar phase image using the correct folder
-    phase_image_path = os.path.join(imgs_folder, phase_image_name)
-    return phase_image_path
+
 
 class WhatsInMySky(QWidget):
     def __init__(self):
@@ -5652,7 +7519,7 @@ class WhatsInMySky(QWidget):
         self.catalog_vars = {}
         for i, catalog in enumerate(["Messier", "NGC", "IC", "Caldwell", "Abell", "Sharpless", "LBN", "LDN", "PNG", "User"]):
             chk = QCheckBox(catalog)
-            chk.setChecked(True)
+            chk.setChecked(False)
             catalog_layout.addWidget(chk, i // 5, i % 5)
             self.catalog_vars[catalog] = chk
         catalog_widget.setLayout(catalog_layout)
@@ -5758,7 +7625,7 @@ class WhatsInMySky(QWidget):
         self.lunar_phase_label.setText(f"Lunar Phase: {phase_percentage}% illuminated")
 
         # Load and display the lunar phase image
-        phase_image_path = get_lunar_phase_image_path(phase_image_name)
+        phase_image_path = os.path.join("imgs", phase_image_name)
         if os.path.exists(phase_image_path):
             pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lunar_phase_image_label.setPixmap(pixmap)
