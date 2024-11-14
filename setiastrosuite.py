@@ -50,7 +50,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie
@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.1')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -596,7 +596,7 @@ class CosmicClarityTab(QWidget):
         self.bit_depth = None
         self.is_mono = False
         self.settings_file = "cosmic_clarity_folder.txt"  # Path to save the folder location
-        self.zoom_factor = 0.5  # Zoom level
+        self.zoom_factor = 1  # Zoom level
         self.drag_start_position = QPoint()  # Starting point for drag
         self.is_dragging = False  # Flag to indicate if dragging
         self.scroll_position = QPoint(0, 0)  # Initialize scroll position
@@ -617,6 +617,8 @@ class CosmicClarityTab(QWidget):
 
         # Left panel for controls
         left_layout = QVBoxLayout()
+
+        
 
         # Load button to load an image
         self.load_button = QPushButton("Load Image")
@@ -746,7 +748,7 @@ class CosmicClarityTab(QWidget):
 
         self.wrench_button.setIcon(QIcon(icon_path))  # Set the wrench icon with the dynamic path
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
-        left_layout.addWidget(self.wrench_button) 
+        left_layout.addWidget(self.wrench_button)  
 
         # Footer
         footer_label = QLabel("""
@@ -790,8 +792,12 @@ class CosmicClarityTab(QWidget):
         self.select_preview_button.clicked.connect(self.open_preview_dialog)
         right_layout.addWidget(self.select_preview_button)        
 
+        left_widget = QWidget()
+        left_widget.setLayout(left_layout)
+        left_widget.setFixedWidth(400)
+
         # Add left and right layouts to the main layout
-        main_layout.addLayout(left_layout)
+        main_layout.addWidget(left_widget)
         main_layout.addLayout(right_layout)
 
         self.setLayout(main_layout)
@@ -888,17 +894,9 @@ class CosmicClarityTab(QWidget):
         self.apply_zoom()  # Use apply_zoom to handle zoom correctly
 
     def apply_zoom(self):
-        """Apply the current zoom level to the image and update the display."""
-        if self.image is None:
-            return
-
-        # Determine the new dimensions after zoom
-        height, width = self.image.shape[:2]
-        new_width = int(width * self.zoom_factor)
-        new_height = int(height * self.zoom_factor)
-
-        # Update image display with new zoom dimensions
-        self.update_image_display(new_width, new_height)    
+        """Apply the current zoom level to the image."""
+        self.update_image_display()  # Call without extra arguments; it will calculate dimensions based on zoom factor
+    
 
     def undo(self):
         """Undo to the original image without changing zoom and scroll position."""
@@ -1006,7 +1004,12 @@ class CosmicClarityTab(QWidget):
             except Exception as e:
                 print(f"Error centering scrollbars: {e}")
 
-
+            # Update the display after another short delay to ensure scrollbars are centered first
+            try:
+                QTimer.singleShot(100, self.update_image_display)  # Delay of 100 ms for display update
+                print("Image display updated.")
+            except Exception as e:
+                print(f"Error updating image display: {e}")
 
         else:
             print("No file selected.")
@@ -1079,6 +1082,10 @@ class CosmicClarityTab(QWidget):
         if self.image is None:
             return
 
+        # Get the current center point of the visible area
+        current_center_x = self.scroll_area.horizontalScrollBar().value() + (self.scroll_area.viewport().width() / 2)
+        current_center_y = self.scroll_area.verticalScrollBar().value() + (self.scroll_area.viewport().height() / 2)
+
         # Apply autostretch if enabled
         display_image = self.image.copy()
         if self.auto_stretch_button.isChecked():
@@ -1100,23 +1107,25 @@ class CosmicClarityTab(QWidget):
             bytes_per_line = width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
 
-        # Scale QPixmap based on provided display dimensions
-        pixmap = QPixmap.fromImage(qimage)
-        if display_width and display_height:
-            pixmap = pixmap.scaled(display_width, display_height, Qt.KeepAspectRatio)
-
+        # Calculate the new dimensions based on the zoom factor
+        if display_width is None or display_height is None:
+            display_width = int(width * self.zoom_factor)
+            display_height = int(height * self.zoom_factor)
+        
+        # Scale QPixmap and set it on the image label
+        pixmap = QPixmap.fromImage(qimage).scaled(display_width, display_height, Qt.KeepAspectRatio)
         self.image_label.setPixmap(pixmap)
 
-        # Adjust the scroll bars to keep the view centered
-        h_scroll = self.scroll_area.horizontalScrollBar()
-        v_scroll = self.scroll_area.verticalScrollBar()
-        visible_width = self.scroll_area.viewport().width()
-        visible_height = self.scroll_area.viewport().height()
-        center_x = h_scroll.value() + visible_width // 2
-        center_y = v_scroll.value() + visible_height // 2
+        # Calculate the new center point after zooming
+        new_center_x = current_center_x * self.zoom_factor
+        new_center_y = current_center_y * self.zoom_factor
 
-        h_scroll.setValue(int(center_x * self.zoom_factor - visible_width // 2))
-        v_scroll.setValue(int(center_y * self.zoom_factor - visible_height // 2))
+        # Adjust scroll bars to keep the view centered on the same area
+        self.scroll_area.horizontalScrollBar().setValue(int(new_center_x - self.scroll_area.viewport().width() / 2))
+        self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
+
+
+
 
     def store_processed_image(self):
         """Store the currently displayed image as the processed image."""
@@ -1202,11 +1211,11 @@ class CosmicClarityTab(QWidget):
 
         # Determine the correct executable and output filename suffix based on the selected mode
         if self.sharpen_radio.isChecked():
-            exe_name = "SetiAstroCosmicClarity"  # Sharpening executable
+            exe_name = "setiastrocosmicclarity"  # Sharpening executable
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "SetiAstroCosmicClarity_denoise"  # Denoising executable
+            exe_name = "setiastrocosmicclarity_denoise"  # Denoising executable
             mode = "denoise"
             output_suffix = "_denoised"
 
@@ -1262,11 +1271,11 @@ class CosmicClarityTab(QWidget):
 
         # Determine the correct executable and output filename suffix based on the selected mode
         if self.sharpen_radio.isChecked():
-            exe_name = "SetiAstroCosmicClarity"  # Sharpening executable
+            exe_name = "setiastrocosmicclarity"
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "SetiAstroCosmicClarity_denoise"  # Denoising executable
+            exe_name = "setiastrocosmicclarity_denoise"
             mode = "denoise"
             output_suffix = "_denoised"
 
@@ -1344,14 +1353,7 @@ class CosmicClarityTab(QWidget):
 
         elif os.name == 'posix':  # macOS/Linux
             batch_file_path += ".sh"
-            
-            # Set the executable path based on the mode
-            if mode == "sharpen":
-                exe_path = os.path.join(self.cosmic_clarity_folder, "SetiAstroCosmicClarity")
-            else:  # mode == "denoise"
-                exe_path = os.path.join(self.cosmic_clarity_folder, "SetiAstroCosmicClarity_denoise")
-
-            # Start constructing the script content with the correctly-cased executable path
+            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
             batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"{exe_path}" '
 
             # Add sharpening or denoising arguments
@@ -1370,9 +1372,7 @@ class CosmicClarityTab(QWidget):
                     f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
                 )
 
-            # Add GPU option if applicable
             batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
-
 
         # Write the script to the batch file
         try:
@@ -4143,7 +4143,8 @@ class CustomGraphicsView(QGraphicsView):
         self.start_pos = None     
         self.annotation_items = []  # Store annotation items  
         self.drawing_measurement = False
-        self.measurement_start = QPointF()     
+        self.measurement_start = QPointF()    
+         
 
         self.selected_object = None  # Initialize selected_object to None
         self.show_names = False 
@@ -4782,6 +4783,22 @@ class CustomGraphicsView(QGraphicsView):
             }
         ))
 
+    def zoom_to_coordinates(self, ra, dec):
+        """Zoom to the specified RA/Dec coordinates and center the view on that position."""
+        # Calculate the pixel position from RA and Dec
+        pixel_x, pixel_y = self.parent.calculate_pixel_from_ra_dec(ra, dec)
+        
+        if pixel_x is not None and pixel_y is not None:
+            # Center the view on the calculated pixel position
+            self.centerOn(pixel_x, pixel_y)
+            
+            # Reset the zoom level to 1.0 by adjusting the transformation matrix
+            self.resetTransform()
+            self.scale(1.0, 1.0)
+
+            # Optionally, update the mini preview to reflect the new zoom and center
+            self.update_mini_preview()
+
     def draw_query_results(self):
         """Draw query results with or without names based on the show_names setting."""
         if self.parent.main_image:
@@ -4873,25 +4890,33 @@ class CustomGraphicsView(QGraphicsView):
                     text_east.setDefaultTextColor(Qt.blue)
                     self.parent.main_scene.addItem(text_east)                               
             # Ensure the search circle is drawn if circle data is available
-            if self.circle_center is not None and self.circle_radius > 0:
-                self.update_circle()
+            #if self.circle_center is not None and self.circle_radius > 0:
+            #    self.update_circle()
 
-            # Draw object annotations
+            # Draw object markers (circle or crosshair)
             for obj in self.parent.results:
                 ra, dec, name = obj["ra"], obj["dec"], obj["name"]
                 x, y = self.parent.calculate_pixel_from_ra_dec(ra, dec)
                 if x is not None and y is not None:
-                    # Use green color if this is the selected object, otherwise use red
+                    # Determine color: green if selected, red otherwise
                     pen_color = QColor(0, 255, 0) if obj == self.selected_object else QColor(255, 0, 0)
                     pen = QPen(pen_color, 2)
-                    self.parent.main_scene.addEllipse(int(x - 5), int(y - 5), 10, 10, pen)
 
-                    # Conditionally draw names if the checkbox is checked
-                    if self.parent.show_names:
-                        text_item = QGraphicsTextItem(name)
-                        text_item.setPos(x + 10, y + 10)
-                        text_item.setDefaultTextColor(QColor(255, 255, 0))  # Set text color to white
-                        self.parent.main_scene.addItem(text_item)
+                    if self.parent.marker_style == "Circle":
+                        # Draw a circle around the object
+                        self.parent.main_scene.addEllipse(int(x - 5), int(y - 5), 10, 10, pen)
+                    elif self.parent.marker_style == "Crosshair":
+                        # Draw crosshair with a 5-pixel gap in the middle
+                        crosshair_size = 10
+                        gap = 5
+                        line1 = QLineF(x - crosshair_size, y, x - gap, y)
+                        line2 = QLineF(x + gap, y, x + crosshair_size, y)
+                        line3 = QLineF(x, y - crosshair_size, x, y - gap)
+                        line4 = QLineF(x, y + gap, x, y + crosshair_size)
+                        for line in [line1, line2, line3, line4]:
+                            crosshair_item = QGraphicsLineItem(line)
+                            crosshair_item.setPen(pen)
+                            self.parent.main_scene.addItem(crosshair_item)
     
 
     def clear_query_results(self):
@@ -5142,6 +5167,7 @@ class MainWindow(QMainWindow):
         self.show_names = False  # Boolean to toggle showing names on the main image
         self.max_results = 100  # Default maximum number of query results     
         self.current_tool = None  # Track the active annotation tool
+        self.marker_style = "Circle" 
             
 
         main_layout = QHBoxLayout()
@@ -5150,7 +5176,7 @@ class MainWindow(QMainWindow):
         left_panel = QVBoxLayout()
 
         # Create the instruction QLabel for search region
-        self.title_label = QLabel("What's In My Image V1.1")
+        self.title_label = QLabel("What's In My Image V1.2")
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")    
         left_panel.addWidget(self.title_label)    
@@ -5337,13 +5363,30 @@ class MainWindow(QMainWindow):
         self.main_preview.verticalScrollBar().valueChanged.connect(self.main_preview.update_mini_preview)
         self.main_preview.horizontalScrollBar().valueChanged.connect(self.main_preview.update_mini_preview)
 
-        # Tree Widget for results
+        # Create a horizontal layout for the labels
+        label_layout = QHBoxLayout()
+
+        # Create the label to display the count of objects
+        self.object_count_label = QLabel("Objects Found: 0")
+
+        # Create the label with instructions
+        self.instructions_label = QLabel("Right Click a Row for More Options")
+
+        # Add both labels to the horizontal layout
+        label_layout.addWidget(self.object_count_label)
+        label_layout.addWidget(self.instructions_label)
+
+        # Add the horizontal layout to the main panel layout
+        right_panel.addLayout(label_layout)
+
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["RA", "Dec", "Name", "Diameter", "Type", "Long Type", "Redshift", "Comoving Radial Distance (GLy)"])
         self.results_tree.setFixedHeight(150)
+        self.results_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results_tree.customContextMenuRequested.connect(self.open_context_menu)
         self.results_tree.itemClicked.connect(self.on_tree_item_clicked)
-        self.results_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked) 
-        self.results_tree.setSortingEnabled(True)  # <-- Add this line
+        self.results_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
+        self.results_tree.setSortingEnabled(True)
         right_panel.addWidget(self.results_tree)
 
         self.annotation_buttons = []
@@ -5521,6 +5564,53 @@ class MainWindow(QMainWindow):
 
         # Initialize the dark theme
         self.apply_light_theme()
+
+    def update_object_count(self):
+        count = self.results_tree.topLevelItemCount()
+        self.object_count_label.setText(f"Objects Found: {count}")
+
+    def open_context_menu(self, position):
+        
+        # Get the item at the mouse position
+        item = self.results_tree.itemAt(position)
+        if not item:
+            return  # If no item is clicked, do nothing
+        
+        self.on_tree_item_clicked(item)
+
+        # Create the context menu
+        menu = QMenu(self)
+
+        # Define actions
+        open_website_action = QAction("Open Website", self)
+        open_website_action.triggered.connect(lambda: self.results_tree.itemDoubleClicked.emit(item, 0))
+        menu.addAction(open_website_action)
+
+        zoom_to_object_action = QAction("Zoom to Object", self)
+        zoom_to_object_action.triggered.connect(lambda: self.zoom_to_object(item))
+        menu.addAction(zoom_to_object_action)
+
+        copy_info_action = QAction("Copy Object Information", self)
+        copy_info_action.triggered.connect(lambda: self.copy_object_information(item))
+        menu.addAction(copy_info_action)
+
+        # Display the context menu at the cursor position
+        menu.exec_(self.results_tree.viewport().mapToGlobal(position))
+
+
+
+    def zoom_to_object(self, item):
+        """Zoom to the object in the main preview."""
+        ra = float(item.text(0))  # Assuming RA is in the first column
+        dec = float(item.text(1))  # Assuming Dec is in the second column
+        self.main_preview.zoom_to_coordinates(ra, dec)
+        
+
+    def copy_object_information(self, item):
+        """Copy object information to the clipboard."""
+        info = f"RA: {item.text(0)}, Dec: {item.text(1)}, Name: {item.text(2)}, Diameter: {item.text(3)}, Type: {item.text(4)}"
+        clipboard = QApplication.clipboard()
+        clipboard.setText(info)
 
     def set_tool(self, tool_name):
         """Sets the current tool and updates button states."""
@@ -6915,6 +7005,7 @@ class MainWindow(QMainWindow):
             # Set query results in the CustomGraphicsView for display
             self.main_preview.set_query_results(query_results)
             self.query_results = query_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
 
         except Exception as e:
             QMessageBox.critical(self, "Query Failed", f"Failed to query Simbad: {str(e)}")
@@ -7039,6 +7130,7 @@ class MainWindow(QMainWindow):
             # Update the main preview with the query results
             self.main_preview.set_query_results(all_results)
             self.query_results = all_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
             
         except Exception as e:
             QMessageBox.critical(self, "Vizier Search Failed", f"Failed to query Vizier: {str(e)}")
@@ -7122,6 +7214,7 @@ class MainWindow(QMainWindow):
             # Set query results in the CustomGraphicsView for display
             self.main_preview.set_query_results(query_results)
             self.query_results = query_results  # Keep a reference to results in MainWindow
+            self.update_object_count()
 
         except Exception as e:
             QMessageBox.critical(self, "MAST Query Failed", f"Failed to query MAST: {str(e)}")
@@ -7138,7 +7231,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Results cleared.")
 
     def open_settings_dialog(self):
-        """Open settings dialog to adjust max results and provide option to force a blind solve."""
+        """Open settings dialog to adjust max results and marker type."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
         
@@ -7150,6 +7243,12 @@ class MainWindow(QMainWindow):
         max_results_spinbox.setValue(self.max_results)
         layout.addRow("Max Results:", max_results_spinbox)
         
+        # Marker Style selection
+        marker_style_combo = QComboBox()
+        marker_style_combo.addItems(["Circle", "Crosshair"])
+        marker_style_combo.setCurrentText(self.marker_style)
+        layout.addRow("Marker Style:", marker_style_combo)
+
         # Force Blind Solve button
         force_blind_solve_button = QPushButton("Force Blind Solve")
         force_blind_solve_button.clicked.connect(lambda: self.force_blind_solve(dialog))
@@ -7157,12 +7256,19 @@ class MainWindow(QMainWindow):
         
         # OK and Cancel buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(lambda: self.update_max_results(max_results_spinbox.value(), dialog))
+        buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         
         dialog.setLayout(layout)
         dialog.exec_()
+
+    def update_settings(self, max_results, marker_style, dialog):
+        """Update settings based on dialog input."""
+        self.max_results = max_results
+        self.marker_style = marker_style  # Store the selected marker style
+        self.main_preview.draw_query_results()
+        dialog.accept()
 
     def force_blind_solve(self, dialog):
         """Force a blind solve on the currently loaded image."""
@@ -7432,6 +7538,9 @@ class CalculationThread(QThread):
         future_elongation = future_moon.separation(future_sun).deg
         is_waxing = future_elongation > elongation
 
+        phase_folder = os.path.join(sys._MEIPASS, "imgs") if getattr(sys, 'frozen', False) else os.path.join(os.path.dirname(__file__), "imgs")
+
+
         # Select appropriate lunar phase image based on phase angle
         phase_image_name = "new_moon.png"  # Default
 
@@ -7460,6 +7569,8 @@ class CalculationThread(QThread):
         elif 162 <= elongation <= 180:
             phase_image_name = "full_moon.png"
 
+
+        self.lunar_phase_calculated.emit(phase_percentage, phase_image_name)
         return phase_percentage, phase_image_name
 
 
@@ -7635,13 +7746,16 @@ class WhatsInMySky(QWidget):
         # Update the lunar phase label
         self.lunar_phase_label.setText(f"Lunar Phase: {phase_percentage}% illuminated")
 
-        # Load and display the lunar phase image
-        phase_image_path = os.path.join("imgs", phase_image_name)
+        # Define the path to the image
+        phase_folder = os.path.join(sys._MEIPASS, "imgs") if getattr(sys, 'frozen', False) else os.path.join(os.path.dirname(__file__), "imgs")
+        phase_image_path = os.path.join(phase_folder, phase_image_name)
+
+        # Load and display the lunar phase image if it exists
         if os.path.exists(phase_image_path):
             pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.lunar_phase_image_label.setPixmap(pixmap)
         else:
-            print(f"Image not found: {phase_image_path}")        
+            print(f"Image not found: {phase_image_path}")     
 
     def on_calculation_complete(self, df, message):
         # Handle the data received from the calculation thread
