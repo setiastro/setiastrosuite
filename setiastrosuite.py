@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.1')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.2')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -3439,117 +3439,137 @@ class ContinuumProcessingThread(QThread):
 
 
 def load_image(filename):
-    bit_depth = None  # Initialize bit depth to None
-    is_mono = False   # Assume color by default    
-    original_header = None  # Initialize an empty header for FITS files
-    img_array = None  # Placeholder for image array
+    image = None  # Ensure 'image' is explicitly declared
+    bit_depth = None
+    is_mono = False
+    original_header = None
 
-    if filename.lower().endswith('.png'):
-        img = Image.open(filename)
-        if img.mode == 'L':
-            is_mono = True
-            img = img.convert('RGB')  # Convert to 3-channel for consistency
-        img_array = np.array(img, dtype=np.float32) / 255.0  # Normalize to [0, 1]
+    try:
+        if filename.lower().endswith('.fits') or filename.lower().endswith('.fit'):
+            print(f"Loading FITS file: {filename}")
+            with fits.open(filename) as hdul:
+                image_data = hdul[0].data
+                original_header = hdul[0].header  # Capture the FITS header
 
-    elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
-        img_array = tiff.imread(filename)
-        # Check if the image is grayscale (single channel)
-        if img_array.ndim == 2:
-            is_mono = True
-            img_array = np.stack([img_array] * 3, axis=-1)  # Convert to 3-channel for consistency
+                # Ensure native byte order
+                if image_data.dtype.byteorder not in ('=', '|'):
+                    image_data = image_data.astype(image_data.dtype.newbyteorder('='))
 
-        # Handle different bit depths
-        if img_array.dtype == np.uint8:
-            img_array = img_array.astype(np.float32) / 255.0  # Normalize 8-bit to [0, 1]
-        elif img_array.dtype == np.uint16:
-            img_array = img_array.astype(np.float32) / 65535.0  # Normalize 16-bit to [0, 1]
-        elif img_array.dtype == np.uint32:
-            img_array = img_array.astype(np.float32) / 4294967295.0  # Normalize 32-bit unsigned integer to [0, 1]
-        elif img_array.dtype == np.float32:
-            img_array = img_array  # Already in 32-bit floating point, no need to convert
-        else:
-            raise ValueError("Unsupported TIFF format!")
+                # Determine bit depth
+                if image_data.dtype == np.uint16:
+                    bit_depth = "16-bit"
+                    print("Identified 16-bit FITS image.")
+                elif image_data.dtype == np.float32:
+                    bit_depth = "32-bit floating point"
+                    print("Identified 32-bit floating point FITS image.")
+                elif image_data.dtype == np.uint32:
+                    bit_depth = "32-bit unsigned"
+                    print("Identified 32-bit unsigned FITS image.")
+                else:
+                    raise ValueError("Unsupported FITS data type!")
 
-    elif filename.lower().endswith('.fits') or filename.lower().endswith('.fit'):
-        with fits.open(filename) as hdul:
-            img_array = hdul[0].data
-            original_header = hdul[0].header  # Capture the FITS header
+                # Handle 3D FITS data (e.g., RGB or multi-layered)
+                if image_data.ndim == 3 and image_data.shape[0] == 3:
+                    image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
 
-            # Determine bit depth and apply necessary transformations
-            if img_array.dtype == np.uint16:
+                    if bit_depth == "16-bit":
+                        image = image.astype(np.float32) / 65535.0
+                    elif bit_depth == "32-bit unsigned":
+                        bzero = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        image = image.astype(np.float32) * bscale + bzero
+
+                        # Normalize based on range
+                        image_min = image.min()
+                        image_max = image.max()
+                        image = (image - image_min) / (image_max - image_min)
+                    # No normalization needed for 32-bit float
+                    is_mono = False
+
+                # Handle 2D FITS data (grayscale)
+                elif image_data.ndim == 2:
+                    if bit_depth == "16-bit":
+                        image = image_data.astype(np.float32) / 65535.0
+                    elif bit_depth == "32-bit unsigned":
+                        bzero = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        image = image_data.astype(np.float32) * bscale + bzero
+
+                        # Normalize based on range
+                        image_min = image.min()
+                        image_max = image.max()
+                        image = (image - image_min) / (image_max - image_min)
+                    elif bit_depth == "32-bit floating point":
+                        image = image_data
+                    else:
+                        raise ValueError("Unsupported FITS data type!")
+
+                    # Convert grayscale to 3-channel RGB
+                    image = np.stack([image] * 3, axis=-1)
+                    is_mono = True
+
+                else:
+                    raise ValueError("Unsupported FITS format or dimensions!")
+
+        elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
+            image = tiff.imread(filename)
+            print(f"Loaded TIFF image with dtype: {image.dtype}")
+            if image.dtype == np.uint16:
                 bit_depth = "16-bit"
-                img_array = img_array.astype(np.float32) / 65535.0  # Normalize 16-bit to [0, 1]
-            elif img_array.dtype == np.uint32:
+                image = image.astype(np.float32) / 65535.0
+            elif image.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-                bzero = original_header.get('BZERO', 0)
-                bscale = original_header.get('BSCALE', 1)
-                img_array = img_array.astype(np.float32) * bscale + bzero
-
-                # Normalize to [0, 1] based on range
-                image_min = img_array.min()
-                image_max = img_array.max()
-                img_array = (img_array - image_min) / (image_max - image_min)
-            elif img_array.dtype == np.float32:
+                image = image.astype(np.float32) / 4294967295.0
+            elif image.dtype == np.float32:
                 bit_depth = "32-bit floating point"
-                # No normalization needed for 32-bit float
-
-            # Handle 3D FITS data (e.g., RGB or multi-layered data)
-            if img_array.ndim == 3 and img_array.shape[0] == 3:
-                img_array = np.transpose(img_array, (1, 2, 0))  # Reorder to (height, width, channels)
-                is_mono = False
-            elif img_array.ndim == 2:
-                img_array = np.stack([img_array] * 3, axis=-1)  # Convert grayscale to 3-channel for consistency
-                is_mono = True
             else:
-                raise ValueError("Unsupported FITS format!")
-    elif filename.lower().endswith('.xisf'):
-        try:
-            # Load XISF image data
+                raise ValueError("Unsupported TIFF format!")
+
+            if image.ndim == 2:  # Grayscale
+                is_mono = True
+                image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel
+
+        elif filename.lower().endswith('.xisf'):
+            print(f"Loading XISF file: {filename}")
             xisf = XISF(filename)
-            img_array = xisf.read_image(0)
-
-            # Load XISF metadata
-            file_meta = xisf.get_file_metadata()
-            image_meta = xisf.get_images_metadata()[0]
-            print(f"Loaded XISF image with metadata: {file_meta}")
-
-            # Normalize based on bit depth
-            if img_array.dtype == np.uint16:
-                img_array = img_array.astype(np.float32) / 65535.0
+            image = xisf.read_image(0)
+            original_header = xisf.get_images_metadata()[0]
+            if image.dtype == np.uint16:
                 bit_depth = "16-bit"
-            elif img_array.dtype == np.uint32:
-                img_array = img_array.astype(np.float32) / 4294967295.0
+                image = image.astype(np.float32) / 65535.0
+            elif image.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-            elif img_array.dtype in [np.float32, np.float64]:
-                img_array = np.clip(img_array, 0, 1)  # No normalization needed for 32-bit float
+                image = image.astype(np.float32) / 4294967295.0
+            elif image.dtype == np.float32:
                 bit_depth = "32-bit floating point"
             else:
-                img_array = img_array.astype(np.float32)
-                bit_depth = str(img_array.dtype)
+                raise ValueError("Unsupported XISF data type!")
 
-            # Convert grayscale to RGB format for consistency
-            if len(img_array.shape) == 2:
-                img_array = np.stack([img_array] * 3, axis=-1)
+            if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
                 is_mono = True
-            elif img_array.shape[2] == 1:
-                img_array = np.squeeze(img_array, axis=2)
-                img_array = np.stack([img_array] * 3, axis=-1)
+                image = np.stack([image.squeeze()] * 3, axis=-1)
+
+        elif filename.lower().endswith('.png'):
+            img = Image.open(filename)
+            if img.mode == 'L':  # Grayscale
                 is_mono = True
-            else:
-                is_mono = False
+                img = img.convert('RGB')
+            image = np.array(img, dtype=np.float32) / 255.0
+            bit_depth = "8-bit"
 
-            # Capture XISF metadata for further use
-            original_header = {"XISF": file_meta, "ImageMetadata": image_meta}
+        else:
+            raise ValueError("Unsupported file format!")
 
-        except Exception as e:
-            print(f"Error loading XISF file: {e}")
-            return None, None, None, None
+        print(f"Loaded image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+        return image, original_header, bit_depth, is_mono
+
+    except Exception as e:
+        print(f"Error reading image {filename}: {e}")
+        return None, None, None, None
 
 
-    else:
-        raise ValueError("Unsupported file format!")
 
-    return img_array, original_header, bit_depth, is_mono  # Return the image array, header, bit depth, and is_mono flag
+
 
 
 
@@ -3979,157 +3999,7 @@ def save_api_key(api_key):
     with open(ASTROMETRY_API_KEY_FILE, 'w') as file:
         file.write(api_key)
 
-def load_image(filename):
-    try:
-        file_extension = filename.lower().split('.')[-1]
-        bit_depth = None
-        is_mono = True
-        original_header = None
-                # Debugging: Print detected file extension
-        print(f"Loading file: {filename}, Detected extension: {file_extension}")
 
-
-        # Load XISF files
-        if file_extension == 'xisf':
-            xisf = XISF(filename)
-            im_data = xisf.read_image(0)
-
-            # Load XISF metadata
-            file_meta = xisf.get_file_metadata()
-            image_meta = xisf.get_images_metadata()[0]
-            print(f"Loaded XISF image with metadata: {file_meta}")
-
-            # Determine bit depth and normalize
-            if im_data.dtype == np.uint16:
-                im_data = im_data.astype(np.float32) / 65535.0
-                bit_depth = "16-bit"
-            elif im_data.dtype == np.uint32:
-                im_data = im_data.astype(np.float32) / 4294967295.0
-                bit_depth = "32-bit unsigned"
-            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
-                im_data = np.clip(im_data, 0, 1)  # No normalization needed for 32-bit float
-                bit_depth = "32-bit floating point"
-            else:
-                im_data = im_data.astype(np.float32)
-                bit_depth = str(im_data.dtype)
-
-            # Convert grayscale images to 3-channel for display consistency
-            if len(im_data.shape) == 2:
-                im_data = np.stack([im_data] * 3, axis=-1)  # Convert to RGB format for consistency
-                is_mono = True
-            elif im_data.shape[2] == 1:
-                im_data = np.squeeze(im_data, axis=2)  # Remove singleton channel if grayscale
-                im_data = np.stack([im_data] * 3, axis=-1)
-                is_mono = True
-            else:
-                is_mono = False  # Assume RGB for 3-channel
-
-            # Capture the XISF metadata for further processing or display
-            original_header = {"XISF": file_meta, "ImageMetadata": image_meta}
-
-            return im_data, original_header, bit_depth, is_mono
-        
-        elif file_extension in ['tif', 'tiff']:
-            image = tiff.imread(filename)
-            print(f"Loaded TIFF image with dtype: {image.dtype}")
-            
-            if image.dtype == np.uint16:
-                image = image.astype(np.float32) / 65535.0
-                bit_depth = "16-bit"
-            elif image.dtype == np.uint32:
-                image = image.astype(np.float32) / 4294967295.0
-                bit_depth = "32-bit unsigned"
-            else:
-                image = image.astype(np.float32)
-                bit_depth = "32-bit floating point"
-
-            print(f"Final bit depth set to: {bit_depth}")
-
-            # Check if the image has an alpha channel and remove it if necessary
-            if image.shape[-1] == 4:
-                print("Detected alpha channel in TIFF. Removing it.")
-                image = image[:, :, :3]  # Keep only the first 3 channels (RGB)
-
-            if len(image.shape) == 2:
-                image = np.stack([image] * 3, axis=-1)
-                is_mono = True
-
-        elif file_extension in ['fits', 'fit']:
-            with fits.open(filename) as hdul:
-                image_data = hdul[0].data
-                original_header = hdul[0].header  # Capture the FITS header
-
-                # Determine the bit depth based on the data type in the FITS file
-                if image_data.dtype == np.uint16:
-                    bit_depth = "16-bit"
-                    print("Identified 16-bit FITS image.")
-                elif image_data.dtype == np.uint8:
-                    bit_depth = "8-bit"
-                    print("Identified 8-bit FITS image")
-                elif image_data.dtype == np.float32:
-                    bit_depth = "32-bit floating point"
-                    print("Identified 32-bit floating point FITS image.")
-                elif image_data.dtype == np.uint32:
-                    bit_depth = "32-bit unsigned"
-                    print("Identified 32-bit unsigned FITS image.")
-
-                # Handle 3D FITS data (e.g., RGB or multi-layered data)
-                if image_data.ndim == 3 and image_data.shape[0] == 3:
-                    image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
-
-                    if bit_depth == "16-bit":
-                        image = image.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                    elif bit_depth == "8-bit":
-                        image = image.astype(np.float32) / 255.0    
-                    elif bit_depth == "32-bit unsigned":
-                        # Apply BSCALE and BZERO if present
-                        bzero = original_header.get('BZERO', 0)
-                        bscale = original_header.get('BSCALE', 1)
-                        image = image.astype(np.float32) * bscale + bzero
-
-                        # Normalize based on the actual data range
-                        image_min, image_max = image.min(), image.max()
-                        image = (image - image_min) / (image_max - image_min)
-                        print(f"Image range after applying BZERO and BSCALE (3D case): min={image_min}, max={image_max}")
-
-                    is_mono = False  # RGB data
-
-                # Handle 2D FITS data (grayscale)
-                elif image_data.ndim == 2:
-                    if bit_depth == "16-bit":
-                        image = image_data.astype(np.float32) / 65535.0  # Normalize to [0, 1] for 16-bit
-                    elif bit_depth == "8-bit":
-                        image = image_data.astype(np.float32) / 255.1    
-                    elif bit_depth == "32-bit unsigned":
-                        # Apply BSCALE and BZERO if present
-                        bzero = original_header.get('BZERO', 0)
-                        bscale = original_header.get('BSCALE', 1)
-                        image = image_data.astype(np.float32) * bscale + bzero
-
-                        # Normalize based on the actual data range
-                        image_min, image_max = image.min(), image.max()
-                        image = (image - image_min) / (image_max - image_min)
-                        print(f"Image range after applying BZERO and BSCALE (2D case): min={image_min}, max={image_max}")
-
-                    elif bit_depth == "32-bit floating point":
-                        print(f"Mono 32bit float point FITS Loaded")
-                        image = image_data  # No normalization needed for 32-bit float
-
-                    is_mono = True
-                    image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel for consistency
-                else:
-                    raise ValueError("Unsupported FITS format!")
-
-        else:
-            # For PNG, JPEG, or other standard image formats
-            image = np.array(Image.open(filename).convert('RGB')).astype(np.float32) / 255.0
-            is_mono = False
-
-        return image, original_header, bit_depth, is_mono
-
-    except Exception as e:
-        print(f"Error reading image {filename}: {e}")
-        return None, None, None, None
 
 
 class CustomGraphicsView(QGraphicsView):
