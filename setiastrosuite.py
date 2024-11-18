@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.3')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.4')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -1037,6 +1037,8 @@ class CosmicClarityTab(QWidget):
 
         if self.image is None:
             return
+        
+
 
         # Save the current scroll position if it exists
         current_scroll_position = (
@@ -1047,25 +1049,31 @@ class CosmicClarityTab(QWidget):
         # Stretch and display the image
         display_image = self.image
         target_median = 0.25
-        is_mono = display_image.shape[2] == 1 if display_image.ndim == 3 else True
+
+        # Determine if the image is mono based on dimensions
+        is_mono = display_image.ndim == 2 or (display_image.ndim == 3 and display_image.shape[2] == 1)
 
         if self.auto_stretch_button.isChecked():
             if is_mono:
-                stretched_mono = stretch_mono_image(display_image[:, :, 0] if display_image.ndim == 3 else display_image, target_median)
-                display_image = np.stack([stretched_mono] * 3, axis=-1)
+                stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
+                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
             else:
                 display_image = stretch_color_image(display_image, target_median, linked=False)
 
         # Convert to QImage for display
         display_image_uint8 = (display_image * 255).astype(np.uint8)
-        if display_image_uint8.shape[2] == 3:
-            height, width, channel = display_image_uint8.shape
+
+        if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
+            height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
-        else:
+        elif display_image_uint8.ndim == 2:  # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            print("Unexpected image format!")
+            return
 
         # Set pixmap without applying additional scaling (keep the original zoom level)
         pixmap = QPixmap.fromImage(qimage)
@@ -1091,21 +1099,27 @@ class CosmicClarityTab(QWidget):
         if self.auto_stretch_button.isChecked():
             target_median = 0.25
             if self.is_mono:
-                stretched_mono = stretch_mono_image(display_image[:, :, 0], target_median)
-                display_image = np.stack([stretched_mono] * 3, axis=-1)
+                stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
+                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert mono to RGB for display
             else:
                 display_image = stretch_color_image(display_image, target_median, linked=False)
 
         # Convert to QImage for display
         display_image_uint8 = (display_image * 255).astype(np.uint8)
-        if display_image_uint8.shape[2] == 3:
-            height, width, channel = display_image_uint8.shape
+
+        # Handle mono and RGB images differently
+        if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:
+            # RGB image
+            height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
-        else:
+        elif display_image_uint8.ndim == 2:  # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            print("Unexpected image format!")
+            return
 
         # Calculate the new dimensions based on the zoom factor
         if display_width is None or display_height is None:
@@ -1123,7 +1137,6 @@ class CosmicClarityTab(QWidget):
         # Adjust scroll bars to keep the view centered on the same area
         self.scroll_area.horizontalScrollBar().setValue(int(new_center_x - self.scroll_area.viewport().width() / 2))
         self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
-
 
 
 
@@ -2891,16 +2904,22 @@ class HaloBGonTab(QWidget):
         return super().eventFilter(source, event)
 
 
-    def create_lightness_mask(image):
-        # Convert to grayscale to get the lightness mask
-        lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        
-        # Apply Unsharp Mask
+    def createLightnessMask(self, image):
+        # Check if the image is already single-channel (grayscale)
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Normalize the grayscale image
+            lightness_mask = image.astype(np.float32) / 255.0
+        else:
+            # Convert to grayscale to create a lightness mask
+            lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+
+        # Apply a Gaussian blur to smooth the mask
         blurred = cv2.GaussianBlur(lightness_mask, (0, 0), sigmaX=2)
+
+        # Apply an unsharp mask for enhancement
         lightness_mask = cv2.addWeighted(lightness_mask, 1.66, blurred, -0.66, 0)
-        
-        # Normalize to the [0, 1] range
-        return lightness_mask / 255.0
+
+        return lightness_mask
 
     def createDuplicateImage(self, original):
         return np.copy(original)
@@ -2966,7 +2985,8 @@ class HaloProcessingThread(QThread):
         self.preview_generated.emit(processed_image)
 
     def applyHaloReduction(self, image, reduction_amount, is_linear):
-        image = np.clip(image, 0, 1)
+        image = np.clip(image, 0, 1)  # Ensure the image values are in range [0, 1]
+
         if is_linear:
             image = image ** (1 / 5)  # Convert linear to non-linear (approx gamma correction)
 
@@ -2975,19 +2995,45 @@ class HaloProcessingThread(QThread):
         inverted_mask = 1.0 - lightness_mask
         duplicated_mask = cv2.GaussianBlur(lightness_mask, (0, 0), sigmaX=2)
         enhanced_mask = inverted_mask - duplicated_mask * reduction_amount * 0.33
-        masked_image = cv2.multiply(image, np.stack([enhanced_mask] * 3, axis=-1))
+
+        # Ensure the enhanced_mask matches the shape of the image
+        if image.ndim == 2:  # Single-channel image
+            # Expand the image to 3 channels
+            image = np.stack([image] * 3, axis=-1)
+            # Broadcast the mask to 3 channels
+            enhanced_mask = np.stack([enhanced_mask] * 3, axis=-1)
+
+        # Verify dimensions of image and enhanced_mask
+        if image.shape != enhanced_mask.shape:
+            raise ValueError(
+                f"Shape mismatch between image {image.shape} and enhanced_mask {enhanced_mask.shape}"
+            )
+
+        # Apply the mask
+        masked_image = cv2.multiply(image, enhanced_mask)
+
+        # Apply curves to the resulting image
         final_image = self.applyCurvesToImage(masked_image, reduction_amount)
 
-        #if is_linear:
-        #    final_image = final_image ** 5  # Convert back to linear
+        return np.clip(final_image, 0, 1)  # Ensure the final image values are within [0, 1]
 
-        return np.clip(final_image, 0, 1)
+
 
     def createLightnessMask(self, image):
-        # Convert image to grayscale to create a lightness mask
-        lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        # Check if the image is already grayscale
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Image is already grayscale; normalize it
+            lightness_mask = image.astype(np.float32) / 255.0
+        else:
+            # Convert RGB image to grayscale
+            lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+
+        # Apply Gaussian blur to smooth the mask
         blurred = cv2.GaussianBlur(lightness_mask, (0, 0), sigmaX=2)
+
+        # Apply an unsharp mask for enhancement
         return cv2.addWeighted(lightness_mask, 1.66, blurred, -0.66, 0)
+
 
     def createDuplicateMask(self, mask):
         # Duplicate the mask and apply additional processing (simulating MMT)
@@ -3467,9 +3513,14 @@ def load_image(filename):
                     image_data = image_data.astype(image_data.dtype.newbyteorder('='))
 
                 # Determine bit depth
-                if image_data.dtype == np.uint16:
+                if image_data.dtype == np.uint8:
+                    bit_depth = "8-bit"
+                    print("Identified 8-bit FITS image.")
+                    image = image_data.astype(np.float32) / 255.0
+                elif image_data.dtype == np.uint16:
                     bit_depth = "16-bit"
                     print("Identified 16-bit FITS image.")
+                    image = image_data.astype(np.float32) / 65535.0
                 elif image_data.dtype == np.float32:
                     bit_depth = "32-bit floating point"
                     print("Identified 32-bit floating point FITS image.")
@@ -3483,7 +3534,9 @@ def load_image(filename):
                 if image_data.ndim == 3 and image_data.shape[0] == 3:
                     image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
 
-                    if bit_depth == "16-bit":
+                    if bit_depth == "8-bit":
+                        image = image.astype(np.float32) / 255.0
+                    elif bit_depth == "16-bit":
                         image = image.astype(np.float32) / 65535.0
                     elif bit_depth == "32-bit unsigned":
                         bzero = original_header.get('BZERO', 0)
@@ -3499,7 +3552,9 @@ def load_image(filename):
 
                 # Handle 2D FITS data (grayscale)
                 elif image_data.ndim == 2:
-                    if bit_depth == "16-bit":
+                    if bit_depth == "8-bit":
+                        image = image_data.astype(np.float32)/255.0
+                    elif bit_depth == "16-bit":
                         image = image_data.astype(np.float32) / 65535.0
                     elif bit_depth == "32-bit unsigned":
                         bzero = original_header.get('BZERO', 0)
@@ -3521,6 +3576,7 @@ def load_image(filename):
                         return image, original_header, bit_depth, is_mono
                     elif image_data.ndim == 3 and image_data.shape[0] == 3:  # RGB
                         image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, C)
+                        is_mono - False
                         return image, original_header, bit_depth, is_mono
 
                 else:
@@ -3529,9 +3585,13 @@ def load_image(filename):
         elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
             image = tiff.imread(filename)
             print(f"Loaded TIFF image with dtype: {image.dtype}")
-            if image.dtype == np.uint16:
+            # Determine bit depth and normalize
+            if image_data.dtype == np.uint8:
+                bit_depth = "8-bit"
+                image = image_data.astype(np.float32) / 255.0
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
-                image = image.astype(np.float32) / 65535.0
+                image = image_data.astype(np.float32) / 65535.0
             elif image.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
                 image = image.astype(np.float32) / 4294967295.0
@@ -3552,9 +3612,13 @@ def load_image(filename):
             xisf = XISF(filename)
             image = xisf.read_image(0)
             original_header = xisf.get_images_metadata()[0]
-            if image.dtype == np.uint16:
+            # Determine bit depth and normalize
+            if image_data.dtype == np.uint8:
+                bit_depth = "8-bit"
+                image = image_data.astype(np.float32) / 255.0
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
-                image = image.astype(np.float32) / 65535.0
+                image = image_data.astype(np.float32) / 65535.0
             elif image.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
                 image = image.astype(np.float32) / 4294967295.0
@@ -3595,67 +3659,97 @@ def load_image(filename):
 
 
 def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False):
-    img_array = ensure_native_byte_order(img_array)  # Apply native byte order correction if needed
+    """
+    Save an image array to a file in the specified format and bit depth.
+    """
+    img_array = ensure_native_byte_order(img_array)  # Ensure correct byte order
     xisf_metadata = original_header
 
-    if original_format == 'png':
-        img = Image.fromarray((img_array * 255).astype(np.uint8))  # Convert to 8-bit and save as PNG
-        img.save(filename)
-    elif original_format in ['tiff', 'tif']:
-        if bit_depth == "16-bit":
-            tiff.imwrite(filename, (img_array * 65535).astype(np.uint16))  # Save as 16-bit TIFF
-        elif bit_depth == "32-bit unsigned":
-            tiff.imwrite(filename, (img_array * 4294967295).astype(np.uint32))  # Save as 32-bit unsigned TIFF
-        elif bit_depth == "32-bit floating point":
-            tiff.imwrite(filename, img_array.astype(np.float32))  # Save as 32-bit floating point TIFF
-    elif original_format in ['fits', 'fit']:
-        # For grayscale (mono) FITS images
-        if is_mono:
-            if bit_depth == "16-bit":
-                img_array_fits = (img_array[:, :, 0] * 65535).astype(np.uint16)
+    try:
+        if original_format == 'png':
+            img = Image.fromarray((img_array * 255).astype(np.uint8))  # Convert to 8-bit and save as PNG
+            img.save(filename)
+            print(f"Saved 8-bit PNG image to: {filename}")
+        
+        elif original_format in ['tiff', 'tif']:
+            # Save TIFF files based on bit depth
+            if bit_depth == "8-bit":
+                tiff.imwrite(filename, (img_array * 255).astype(np.uint8))  # Save as 8-bit TIFF
+            elif bit_depth == "16-bit":
+                tiff.imwrite(filename, (img_array * 65535).astype(np.uint16))  # Save as 16-bit TIFF
             elif bit_depth == "32-bit unsigned":
-                img_array_fits = (img_array[:, :, 0] * 4294967295).astype(np.uint32)
+                tiff.imwrite(filename, (img_array * 4294967295).astype(np.uint32))  # Save as 32-bit unsigned TIFF
             elif bit_depth == "32-bit floating point":
-                img_array_fits = img_array[:, :, 0].astype(np.float32)
-            hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
-        else:
-            # Transpose RGB image to (channels, height, width) for FITS format
-            img_array_fits = np.transpose(img_array, (2, 0, 1))
-            if bit_depth == "16-bit":
-                img_array_fits = (img_array_fits * 65535).astype(np.uint16)
-            elif bit_depth == "32-bit unsigned":
-                img_array_fits = (img_array_fits * 4294967295).astype(np.uint32)
-            elif bit_depth == "32-bit floating point":
-                img_array_fits = img_array_fits.astype(np.float32)
-
-            # Update the original header with correct dimensions for multi-channel images
-            original_header['NAXIS'] = 3
-            original_header['NAXIS1'] = img_array_fits.shape[2]  # Width
-            original_header['NAXIS2'] = img_array_fits.shape[1]  # Height
-            original_header['NAXIS3'] = img_array_fits.shape[0]  # Channels
-
-            hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
-
-        hdu.writeto(filename, overwrite=True)
-    elif original_format == 'xisf':
-        try:
-            if is_mono:
-                rgb_image = np.stack([img_array[:, :, 0]] * 3, axis=-1).astype(np.float32)
+                tiff.imwrite(filename, img_array.astype(np.float32))  # Save as 32-bit floating point TIFF
             else:
-                rgb_image = img_array.astype(np.float32)
-            
-            # Print debug information
-            print(f"Saving XISF with shape: {rgb_image.shape}, dtype: {rgb_image.dtype}")
+                raise ValueError("Unsupported bit depth for TIFF!")
+            print(f"Saved {bit_depth} TIFF image to: {filename}")
 
-            # Save the image in XISF format using the metadata
-            XISF.write(filename, rgb_image)
+        elif original_format in ['fits', 'fit']:
+            # Handle FITS files
+            if is_mono:
+                # Handle mono images
+                mono_image = img_array[:, :, 0] if img_array.ndim == 3 else img_array
+                if bit_depth == "8-bit":
+                    img_array_fits = (mono_image * 255).astype(np.uint8)
+                elif bit_depth == "16-bit":
+                    img_array_fits = (mono_image * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    img_array_fits = (mono_image * 4294967295).astype(np.uint32)
+                elif bit_depth == "32-bit floating point":
+                    img_array_fits = mono_image.astype(np.float32)
+                else:
+                    raise ValueError("Unsupported bit depth for mono FITS!")
+                hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
+            else:
+                # Handle RGB or multi-channel images
+                img_array_fits = np.transpose(img_array, (2, 0, 1))  # (channels, height, width)
+                if bit_depth == "8-bit":
+                    img_array_fits = (img_array_fits * 255).astype(np.uint8)
+                elif bit_depth == "16-bit":
+                    img_array_fits = (img_array_fits * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    img_array_fits = (img_array_fits * 4294967295).astype(np.uint32)
+                elif bit_depth == "32-bit floating point":
+                    img_array_fits = img_array_fits.astype(np.float32)
+                else:
+                    raise ValueError("Unsupported bit depth for RGB FITS!")
 
-            print(f"Saved {bit_depth} XISF image to: {filename}")
-            
-        except Exception as e:
-            print(f"Error saving XISF file: {e}")
-    else:
-        raise ValueError("Unsupported file format!")
+                # Update header for multi-channel FITS
+                if original_header:
+                    original_header['NAXIS'] = 3
+                    original_header['NAXIS1'] = img_array_fits.shape[2]  # Width
+                    original_header['NAXIS2'] = img_array_fits.shape[1]  # Height
+                    original_header['NAXIS3'] = img_array_fits.shape[0]  # Channels
+                hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
+
+            hdu.writeto(filename, overwrite=True)
+            print(f"Saved {bit_depth} FITS image to: {filename}")
+
+        elif original_format == 'xisf':
+            try:
+                if is_mono:
+                    # Handle mono images for XISF
+                    mono_image = img_array[:, :, 0] if img_array.ndim == 3 else img_array
+                    rgb_image = np.stack([mono_image] * 3, axis=-1).astype(np.float32)
+                else:
+                    rgb_image = img_array.astype(np.float32)
+                
+                # Save the image in XISF format
+                XISF.write(filename, rgb_image)
+                print(f"Saved {bit_depth} XISF image to: {filename}")
+            except Exception as e:
+                print(f"Error saving XISF file: {e}")
+                raise
+
+        else:
+            raise ValueError("Unsupported file format!")
+
+    except Exception as e:
+        print(f"Error saving image to {filename}: {e}")
+        raise
+
+
 
 
 
@@ -6114,6 +6208,11 @@ class MainWindow(QMainWindow):
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
+
+                # Prepare image for display
+                if img_array.ndim == 2:  # Single-channel image
+                    img_array = np.stack([img_array] * 3, axis=-1)  # Expand to 3 channels
+
 
                 # Prepare image for display
                 img = (img_array * 255).astype(np.uint8)
