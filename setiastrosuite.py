@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.2')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.3')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -2561,32 +2561,38 @@ class NBtoRGBProcessingThread(QThread):
         self.stretch_factor = stretch_factor
 
     def run(self):
-        # Check if an OSC image is provided and handle as RGB channels
+        # Normalize input images to [0, 1]
+        if self.ha_image is not None:
+            self.ha_image = np.clip(self.ha_image, 0, 1)
+        if self.oiii_image is not None:
+            self.oiii_image = np.clip(self.oiii_image, 0, 1)
+        if self.sii_image is not None:
+            self.sii_image = np.clip(self.sii_image, 0, 1)
         if self.osc_image is not None:
+            self.osc_image = np.clip(self.osc_image, 0, 1)
+
+        # Combined RGB logic
+        if self.osc_image is not None:
+            # Extract OSC channels
             r_channel = self.osc_image[..., 0]
             g_channel = self.osc_image[..., 1]
             b_channel = self.osc_image[..., 2]
-            
-            # Handle cases where narrowband images are missing
-            # If Ha is None, use the red channel of the OSC image for g_combined
-            if self.ha_image is None:
-                self.ha_image = r_channel
-            # If OIII is None, use the green channel of the OSC image for b_combined
-            if self.oiii_image is None:
-                self.oiii_image = g_channel
-            # If SII is None, use the red channel of the OSC image for r_combined
-            if self.sii_image is None:
-                self.sii_image = r_channel
 
-            # Combined RGB channels with defaults as fallbacks
-            r_combined = 0.5 * r_channel + 0.5 * self.sii_image
-            g_combined = self.ha_to_oii_ratio * self.ha_image + (1 - self.ha_to_oii_ratio) * g_channel
-            b_combined = b_channel
+            # Fallbacks for missing Ha, OIII, or SII images
+            r_combined = 0.5 * r_channel + 0.5 * (self.sii_image if self.sii_image is not None else r_channel)
+            g_combined = self.ha_to_oii_ratio * (self.ha_image if self.ha_image is not None else r_channel) + \
+                         (1 - self.ha_to_oii_ratio) * g_channel
+            b_combined = b_channel if self.oiii_image is None else self.oiii_image
         else:
-            # If no OSC image, use Ha, OIII, and SII images directly
+            # Use narrowband images directly (default logic)
             r_combined = 0.5 * self.ha_image + 0.5 * (self.sii_image if self.sii_image is not None else self.ha_image)
             g_combined = self.ha_to_oii_ratio * self.ha_image + (1 - self.ha_to_oii_ratio) * self.oiii_image
             b_combined = self.oiii_image
+
+        # Normalize combined channels to [0, 1]
+        r_combined = np.clip(r_combined, 0, 1)
+        g_combined = np.clip(g_combined, 0, 1)
+        b_combined = np.clip(b_combined, 0, 1)
 
         # Stack the channels to create an RGB image
         combined_image = np.stack((r_combined, g_combined, b_combined), axis=-1)
@@ -2597,10 +2603,15 @@ class NBtoRGBProcessingThread(QThread):
 
         # Apply SCNR (remove green cast)
         combined_image = self.apply_scnr(combined_image)
+
+        # Emit the processed image for preview
         self.preview_generated.emit(combined_image)
 
 
+
     def apply_star_stretch(self, image):
+        # Ensure input image is in the range [0, 1]
+        assert np.all(image >= 0) and np.all(image <= 1), "Image must be normalized to [0, 1] before star stretch."
         stretched = ((3 ** self.stretch_factor) * image) / ((3 ** self.stretch_factor - 1) * image + 1)
         return np.clip(stretched, 0, 1)
 
@@ -3504,9 +3515,13 @@ def load_image(filename):
                     else:
                         raise ValueError("Unsupported FITS data type!")
 
-                    # Convert grayscale to 3-channel RGB
-                    image = np.stack([image] * 3, axis=-1)
-                    is_mono = True
+                    # Mono or RGB handling
+                    if image_data.ndim == 2:  # Mono
+                        is_mono = True
+                        return image, original_header, bit_depth, is_mono
+                    elif image_data.ndim == 3 and image_data.shape[0] == 3:  # RGB
+                        image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, C)
+                        return image, original_header, bit_depth, is_mono
 
                 else:
                     raise ValueError("Unsupported FITS format or dimensions!")
@@ -3525,9 +3540,12 @@ def load_image(filename):
             else:
                 raise ValueError("Unsupported TIFF format!")
 
-            if image.ndim == 2:  # Grayscale
+            if image.ndim == 2:  # Mono
                 is_mono = True
-                image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel
+                return image, None, bit_depth, is_mono
+            elif image.ndim == 3 and image.shape[2] == 3:  # RGB
+                is_mono = False
+                return image, None, bit_depth, is_mono
 
         elif filename.lower().endswith('.xisf'):
             print(f"Loading XISF file: {filename}")
@@ -3553,9 +3571,12 @@ def load_image(filename):
             img = Image.open(filename)
             if img.mode == 'L':  # Grayscale
                 is_mono = True
-                img = img.convert('RGB')
-            image = np.array(img, dtype=np.float32) / 255.0
-            bit_depth = "8-bit"
+                image = np.array(img, dtype=np.float32) / 255.0
+                return image, None, "8-bit", is_mono
+            elif img.mode == 'RGB':  # RGB
+                is_mono = False
+                image = np.array(img, dtype=np.float32) / 255.0
+                return image, None, "8-bit", is_mono
 
         else:
             raise ValueError("Unsupported file format!")
