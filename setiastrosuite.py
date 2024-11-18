@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.4')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.5')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -1543,19 +1543,26 @@ class PreviewDialog(QDialog):
 
     def display_qimage(self, np_img):
         """Convert a numpy array to QImage and display it at 100% scale."""
+        # Ensure the numpy array is scaled to [0, 255] and converted to uint8
         display_image_uint8 = (np.clip(np_img, 0, 1) * 255).astype(np.uint8)
-        if display_image_uint8.shape[2] == 3:
+        
+        if len(display_image_uint8.shape) == 3 and display_image_uint8.shape[2] == 3:
+            # RGB image
             height, width, channels = display_image_uint8.shape
             bytes_per_line = 3 * width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
-        else:
+        elif len(display_image_uint8.shape) == 2:
+            # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            raise ValueError(f"Unexpected image shape: {display_image_uint8.shape}")
 
         # Display the QImage at 100% scale in QLabel
         self.image_label.setPixmap(QPixmap.fromImage(qimage))
-        self.image_label.adjustSize()  
+        self.image_label.adjustSize()
+
 
     def toggle_autostretch(self, checked):
         self.autostretch_enabled = checked
@@ -1568,7 +1575,8 @@ class PreviewDialog(QDialog):
 
         if self.autostretch_enabled:
             if self.is_mono:  # Apply mono stretch
-                stretched_mono = stretch_mono_image(self.np_image[:, :, 0], target_median)  # Single channel for mono
+                # Directly use the 2D array for mono images
+                stretched_mono = stretch_mono_image(self.np_image, target_median)  # Mono image is 2D
                 display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
             else:  # Apply color stretch
                 display_image = stretch_color_image(self.np_image, target_median, linked=False)
@@ -1577,6 +1585,7 @@ class PreviewDialog(QDialog):
 
         # Convert and display the QImage
         self.display_qimage(display_image)
+
 
     def undo_last_process(self):
         """Revert to the original image in the preview, respecting the autostretch setting."""
@@ -1650,16 +1659,27 @@ class PreviewDialog(QDialog):
         print(f"Visible area rectangle: {visible_rect}")  # Debug print to confirm visible area coordinates
 
         # Crop the numpy image array directly using slicing
-        cropped_np_image = self.np_image[
-            v_scroll : v_scroll + visible_rect.height(),
-            h_scroll : h_scroll + visible_rect.width(),
-            :
-        ]
+        if len(self.np_image.shape) == 2:  # Mono image (2D array)
+            cropped_np_image = self.np_image[
+                v_scroll : v_scroll + visible_rect.height(),
+                h_scroll : h_scroll + visible_rect.width(),
+            ]
+            # Convert cropped mono image to RGB for consistent handling
+            cropped_np_image = np.stack([cropped_np_image] * 3, axis=-1)
+        elif len(self.np_image.shape) == 3:  # Color image (3D array)
+            cropped_np_image = self.np_image[
+                v_scroll : v_scroll + visible_rect.height(),
+                h_scroll : h_scroll + visible_rect.width(),
+                :
+            ]
+        else:
+            print("Error: Unsupported image format")
+            return
 
         if cropped_np_image is None:
-            print("Error: Failed to convert QImage to numpy array")  # Debug if conversion failed
+            print("Error: Failed to crop numpy image")  # Debug if cropping failed
         else:
-            print("Image converted to numpy array successfully")  # Debug print to confirm conversion
+            print("Image cropped successfully")  # Debug print to confirm cropping
 
         # Pass the cropped image to CosmicClarityTab for processing
         if self.parent_tab:
@@ -1667,6 +1687,7 @@ class PreviewDialog(QDialog):
             self.parent_tab.run_cosmic_clarity_on_cropped(cropped_np_image, apply_autostretch=self.autostretch_enabled)
         else:
             print("Error: Failed to send to parent class")  # Debug if parent reference is missing
+
 
     def convert_qimage_to_numpy(self, qimage):
         """Convert QImage to a 32-bit float numpy array, preserving the 32-bit precision."""
@@ -3586,10 +3607,10 @@ def load_image(filename):
             image = tiff.imread(filename)
             print(f"Loaded TIFF image with dtype: {image.dtype}")
             # Determine bit depth and normalize
-            if image_data.dtype == np.uint8:
+            if image.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image_data.dtype == np.uint16:
+            elif image.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
             elif image.dtype == np.uint32:
@@ -3613,10 +3634,10 @@ def load_image(filename):
             image = xisf.read_image(0)
             original_header = xisf.get_images_metadata()[0]
             # Determine bit depth and normalize
-            if image_data.dtype == np.uint8:
+            if image.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image_data.dtype == np.uint16:
+            elif image.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
             elif image.dtype == np.uint32:
