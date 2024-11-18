@@ -2985,38 +2985,38 @@ class HaloProcessingThread(QThread):
         self.preview_generated.emit(processed_image)
 
     def applyHaloReduction(self, image, reduction_amount, is_linear):
-        image = np.clip(image, 0, 1)  # Ensure the image values are in range [0, 1]
+        # Ensure the image values are in range [0, 1]
+        image = np.clip(image, 0, 1)
 
+        # Convert linear to non-linear if the image is linear
         if is_linear:
-            image = image ** (1 / 5)  # Convert linear to non-linear (approx gamma correction)
+            image = image ** (1 / 5)  # Gamma correction for linear data
 
         # Apply halo reduction logic
-        lightness_mask = self.createLightnessMask(image)
+        lightness_mask = self.createLightnessMask(image)  # Single-channel mask
         inverted_mask = 1.0 - lightness_mask
         duplicated_mask = cv2.GaussianBlur(lightness_mask, (0, 0), sigmaX=2)
         enhanced_mask = inverted_mask - duplicated_mask * reduction_amount * 0.33
 
-        # Ensure the enhanced_mask matches the shape of the image
-        if image.ndim == 2:  # Single-channel image
-            # Expand the image to 3 channels
-            image = np.stack([image] * 3, axis=-1)
-            # Broadcast the mask to 3 channels
-            enhanced_mask = np.stack([enhanced_mask] * 3, axis=-1)
+        # Expand the mask to match the number of channels in the image
+        if image.ndim == 3 and image.shape[2] == 3:  # Color image
+            enhanced_mask = np.expand_dims(enhanced_mask, axis=-1)  # Add a channel dimension
+            enhanced_mask = np.repeat(enhanced_mask, 3, axis=-1)  # Repeat for all 3 channels
 
-        # Verify dimensions of image and enhanced_mask
+        # Verify that the image and mask dimensions match
         if image.shape != enhanced_mask.shape:
             raise ValueError(
                 f"Shape mismatch between image {image.shape} and enhanced_mask {enhanced_mask.shape}"
             )
 
-        # Apply the mask
+        # Apply the mask to the image
         masked_image = cv2.multiply(image, enhanced_mask)
 
         # Apply curves to the resulting image
         final_image = self.applyCurvesToImage(masked_image, reduction_amount)
 
-        return np.clip(final_image, 0, 1)  # Ensure the final image values are within [0, 1]
-
+        # Ensure the final image values are within [0, 1]
+        return np.clip(final_image, 0, 1)
 
 
     def createLightnessMask(self, image):
