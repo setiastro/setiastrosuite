@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.5')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.6')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -1453,6 +1453,7 @@ class CosmicClarityTab(QWidget):
         while time.time() - start_time < timeout:
             # Use glob to find any file matching the pattern
             matching_files = glob.glob(output_file_glob)
+            time.sleep(2)
             if matching_files:
                 print(f"Output file found: {matching_files[0]}")
                 return matching_files[0]
