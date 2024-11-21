@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.5')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.6')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -1454,6 +1454,7 @@ class CosmicClarityTab(QWidget):
         while time.time() - start_time < timeout:
             # Use glob to find any file matching the pattern
             matching_files = glob.glob(output_file_glob)
+            time.sleep(2)
             if matching_files:
                 print(f"Output file found: {matching_files[0]}")
                 return matching_files[0]
@@ -3594,64 +3595,78 @@ def load_image(filename):
                     raise ValueError("Unsupported FITS format or dimensions!")
 
         elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
-            image = tiff.imread(filename)
-            print(f"Loaded TIFF image with dtype: {image.dtype}")
+            print(f"Loading TIFF file: {filename}")
+            image_data = tiff.imread(filename)
+            print(f"Loaded TIFF image with dtype: {image_data.dtype}")
+
             # Determine bit depth and normalize
-            if image.dtype == np.uint8:
+            if image_data.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image.dtype == np.uint16:
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:
+            elif image_data.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-                image = image.astype(np.float32) / 4294967295.0
-            elif image.dtype == np.float32:
+                image = image_data.astype(np.float32) / 4294967295.0
+            elif image_data.dtype == np.float32:
                 bit_depth = "32-bit floating point"
+                image = image_data
             else:
                 raise ValueError("Unsupported TIFF format!")
 
-            if image.ndim == 2:  # Mono
+            # Handle mono or RGB TIFFs
+            if image_data.ndim == 2:  # Mono
                 is_mono = True
-                return image, None, bit_depth, is_mono
-            elif image.ndim == 3 and image.shape[2] == 3:  # RGB
+            elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
                 is_mono = False
-                return image, None, bit_depth, is_mono
+            else:
+                raise ValueError("Unsupported TIFF image dimensions!")
 
         elif filename.lower().endswith('.xisf'):
             print(f"Loading XISF file: {filename}")
             xisf = XISF(filename)
-            image = xisf.read_image(0)
+            image_data = xisf.read_image(0)
             original_header = xisf.get_images_metadata()[0]
+
             # Determine bit depth and normalize
-            if image.dtype == np.uint8:
+            if image_data.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image.dtype == np.uint16:
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:
+            elif image_data.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-                image = image.astype(np.float32) / 4294967295.0
-            elif image.dtype == np.float32:
+                image = image_data.astype(np.float32) / 4294967295.0
+            elif image_data.dtype == np.float32:
                 bit_depth = "32-bit floating point"
+                image = image_data
             else:
                 raise ValueError("Unsupported XISF data type!")
 
-            if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Handle mono or RGB XISF
+            if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):  # Mono
                 is_mono = True
-                image = np.stack([image.squeeze()] * 3, axis=-1)
+                image = np.stack([image_data.squeeze()] * 3, axis=-1)
+            elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
+                is_mono = False
+            else:
+                raise ValueError("Unsupported XISF image dimensions!")
 
         elif filename.lower().endswith('.png'):
+            print(f"Loading PNG file: {filename}")
             img = Image.open(filename)
             if img.mode == 'L':  # Grayscale
                 is_mono = True
                 image = np.array(img, dtype=np.float32) / 255.0
-                return image, None, "8-bit", is_mono
+                bit_depth = "8-bit"
             elif img.mode == 'RGB':  # RGB
                 is_mono = False
                 image = np.array(img, dtype=np.float32) / 255.0
-                return image, None, "8-bit", is_mono
+                bit_depth = "8-bit"
+            else:
+                raise ValueError("Unsupported PNG format!")
 
         else:
             raise ValueError("Unsupported file format!")
@@ -3662,6 +3677,8 @@ def load_image(filename):
     except Exception as e:
         print(f"Error reading image {filename}: {e}")
         return None, None, None, None
+
+
 
 
 
@@ -6918,8 +6935,8 @@ class MainWindow(QMainWindow):
 
     def query_simbad(self, radius_deg, max_results=None):
         """Query Simbad based on the defined search circle using a single ADQL query, with filtering by selected types."""
-            # If max_results is not provided, use the value from settings
         max_results = max_results if max_results is not None else self.max_results
+
         # Check if the circle center and radius are defined
         if not self.circle_center or self.circle_radius <= 0:
             QMessageBox.warning(self, "No Search Area", "Please define a search circle by Shift-clicking and dragging.")
@@ -6930,9 +6947,6 @@ class MainWindow(QMainWindow):
         if ra_center is None or dec_center is None:
             QMessageBox.warning(self, "Invalid Coordinates", "Could not determine the RA/Dec of the circle center.")
             return
-
-        # Convert radius from arcseconds to degrees
-        radius_deg = radius_deg
 
         # Get selected types from the tree widget
         selected_types = self.get_selected_object_types()
@@ -6969,8 +6983,8 @@ class MainWindow(QMainWindow):
                 ra = row["ra"]
                 dec = row["dec"]
                 main_id = row["main_id"]
-                redshift = row["rvz_redshift"] if row["rvz_redshift"] is not None else "--"
-                diameter = row.get("galdim_majaxis", "N/A")
+                redshift = row["rvz_redshift"] if "rvz_redshift" in row else "--"
+                diameter = row["galdim_majaxis"] if "galdim_majaxis" in row else "N/A"
                 comoving_distance = calculate_comoving_distance(float(redshift)) if redshift != "--" else "N/A"
 
                 # Map short type to long type
@@ -6992,7 +7006,7 @@ class MainWindow(QMainWindow):
                     'long_type': long_type,
                     'redshift': redshift,
                     'comoving_distance': comoving_distance,
-                    'source' : "Simbad"
+                    'source': "Simbad"
                 })
 
             # Set query results in the CustomGraphicsView for display
@@ -7002,6 +7016,7 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Query Failed", f"Failed to query Simbad: {str(e)}")
+
 
     def perform_deep_vizier_search(self):
         """Perform a Vizier catalog search and parse results based on catalog-specific fields, with duplicate handling."""
@@ -7018,115 +7033,63 @@ class MainWindow(QMainWindow):
         # Convert radius from arcseconds to arcminutes
         radius_arcmin = float((self.circle_radius * self.pixscale) / 60.0)
 
-        # List of Vizier catalogs
-        catalog_ids = ["II/246", "I/350/gaiaedr3", "V/147/sdss12", "I/322A", "V/154"]
-
         coord = SkyCoord(ra_center, dec_center, unit="deg")
         all_results = []  # Collect all results for display in the main preview
         unique_entries = {}  # Dictionary to track unique entries by (RA, Dec) tuple
 
         try:
-            for catalog_id in catalog_ids:
-                # Query each catalog
-                result = Vizier.query_region(coord, radius=radius_arcmin * u.arcmin, catalog=catalog_id)
-                if result:
-                    catalog_results = result[0]
-                    for row in catalog_results:
-                        # Map data to the columns in your tree view structure
+            result = Vizier.query_region(coord, radius=radius_arcmin * u.arcmin)
+            if result is None or len(result) == 0:
+                QMessageBox.information(self, "No Results", "No objects found in the specified area on Vizier.")
+                return
 
-                        # RA and Dec
-                        ra = str(row.get("RAJ2000", row.get("RA_ICRS", "")))
-                        dec = str(row.get("DEJ2000", row.get("DE_ICRS", "")))
-                        if not ra or not dec:
-                            
-                            continue  # Skip this entry if RA or Dec is empty
+            for catalog_results in result:
+                for row in catalog_results:
+                    ra = str(row["RAJ2000"] if "RAJ2000" in row else row["RA_ICRS"])
+                    dec = str(row["DEJ2000"] if "DEJ2000" in row else row["DE_ICRS"])
+                    if not ra or not dec:
+                        continue  # Skip this entry if RA or Dec is empty
 
-                        # Create a unique key based on RA and Dec to track duplicates
-                        unique_key = (ra, dec)
+                    # Create a unique key based on RA and Dec to track duplicates
+                    unique_key = (ra, dec)
 
-                        # Name (different columns based on catalog)
-                        name = str(
-                            row.get("_2MASS", "")
-                            or row.get("Source", "")
-                            or row.get("SDSS12", "")
-                            or row.get("UCAC4", "")
-                            or row.get("SDSS16", "")
-                        )
+                    # Name (different columns based on catalog)
+                    name = row.get("_2MASS", "") or row.get("Source", "")
 
-                        # Diameter - store catalog ID as the diameter field to help with tracking
-                        diameter = catalog_id
+                    # Diameter
+                    diameter = "N/A"
 
-                        # Type (e.g., otype)
-                        type_short = str(row.get("otype", "N/A"))
+                    # Short type and Long type
+                    short_type = row.get("otype", "N/A")
+                    long_type = row.get("SpType", "N/A")
 
-                        # Long Type (e.g., SpType)
-                        long_type = str(row.get("SpType", "N/A"))
+                    # Add unique entry
+                    if unique_key not in unique_entries:
+                        unique_entries[unique_key] = {
+                            'ra': ra,
+                            'dec': dec,
+                            'name': name,
+                            'diameter': diameter,
+                            'short_type': short_type,
+                            'long_type': long_type,
+                            'source': "Vizier"
+                        }
 
-                        # Redshift or Parallax (zph for redshift or Plx for parallax)
-                        redshift = row.get("zph", row.get("Plx", ""))
-                        if redshift:
-                            if "Plx" in row.colnames:
-                                redshift = f"{redshift} (Parallax in mas)"
-                                # Calculate the distance in light-years from parallax
-                                try:
-                                    parallax_value = float(row["Plx"])
-                                    comoving_distance = f"{1000 / parallax_value * 3.2615637769:.2f} Ly"
-                                except (ValueError, ZeroDivisionError):
-                                    comoving_distance = "N/A"  # Handle invalid parallax values
-                            else:
-                                redshift = str(redshift)
-                                # Calculate comoving distance for redshift if it's from zph
-                                if "zph" in row.colnames and isinstance(row["zph"], (float, int)):
-                                    comoving_distance = str(calculate_comoving_distance(float(row["zph"])))
-                        else:
-                            redshift = "N/A"
-                            comoving_distance = "N/A"
-
-                        # Handle duplicates: prioritize V/147/sdss12 over V/154 and only add unique entries
-                        if unique_key not in unique_entries:
-                            unique_entries[unique_key] = {
-                                'ra': ra,
-                                'dec': dec,
-                                'name': name,
-                                'diameter': diameter,
-                                'short_type': type_short,
-                                'long_type': long_type,
-                                'redshift': redshift,
-                                'comoving_distance': comoving_distance,
-                                'source' : "Vizier"
-                            }
-                        else:
-                            # Check if we should replace the existing entry
-                            existing_entry = unique_entries[unique_key]
-                            if (existing_entry['diameter'] == "V/154" and diameter == "V/147/sdss12"):
-                                unique_entries[unique_key] = {
-                                    'ra': ra,
-                                    'dec': dec,
-                                    'name': name,
-                                    'diameter': diameter,
-                                    'short_type': type_short,
-                                    'long_type': long_type,
-                                    'redshift': redshift,
-                                    'comoving_distance': comoving_distance,
-                                    'source' : "Vizier"
-                                }
-
-            # Convert unique entries to the main preview display
+            # Populate the tree and update the main preview
             for entry in unique_entries.values():
                 item = QTreeWidgetItem([
-                    entry['ra'], entry['dec'], entry['name'], entry['diameter'], entry['short_type'], entry['long_type'],
-                    entry['redshift'], entry['comoving_distance']
+                    entry['ra'], entry['dec'], entry['name'], entry['diameter'], entry['short_type'], entry['long_type']
                 ])
                 self.results_tree.addTopLevelItem(item)
                 all_results.append(entry)
 
-            # Update the main preview with the query results
             self.main_preview.set_query_results(all_results)
             self.query_results = all_results  # Keep a reference to results in MainWindow
             self.update_object_count()
-            
+
         except Exception as e:
-            QMessageBox.critical(self, "Vizier Search Failed", f"Failed to query Vizier: {str(e)}")
+            QMessageBox.critical(self, "Query Failed", f"Failed to query Vizier: {str(e)}")
+
 
     def perform_mast_search(self):
         """Perform a MAST cone search in the user-defined region using astroquery."""
@@ -7167,16 +7130,12 @@ class MainWindow(QMainWindow):
 
             # Process each observation in the results
             for obj in limited_observations:
-
-                def safe_get(value):
-                    return "N/A" if np.ma.is_masked(value) else str(value)
-
-
-                ra = safe_get(obj.get("s_ra", "N/A"))
-                dec = safe_get(obj.get("s_dec", "N/A"))
-                target_name = safe_get(obj.get("target_name", "N/A"))
-                instrument = safe_get(obj.get("instrument_name", "N/A"))
-                jpeg_url = safe_get(obj.get("dataURL", "N/A"))  # Adjust URL field as needed
+                # Safe extraction of values (replace .get with direct attribute access)
+                ra = obj["s_ra"] if "s_ra" in obj else "N/A"
+                dec = obj["s_dec"] if "s_dec" in obj else "N/A"
+                target_name = obj["target_name"] if "target_name" in obj else "N/A"
+                instrument = obj["instrument_name"] if "instrument_name" in obj else "N/A"
+                jpeg_url = obj["dataURL"] if "dataURL" in obj else "N/A"  # Adjust URL field as needed
 
                 # Add to TreeWidget
                 item = QTreeWidgetItem([
@@ -7210,7 +7169,7 @@ class MainWindow(QMainWindow):
             self.update_object_count()
 
         except Exception as e:
-            QMessageBox.critical(self, "MAST Query Failed", f"Failed to query MAST: {str(e)}")
+            QMessageBox.critical(self, "MAST Search Failed", f"Failed to query MAST: {str(e)}")
 
     def toggle_show_names(self, state):
         """Toggle showing/hiding names on the main image."""
