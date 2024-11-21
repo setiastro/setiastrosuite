@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.5.linux')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.6')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -3592,64 +3592,78 @@ def load_image(filename):
                     raise ValueError("Unsupported FITS format or dimensions!")
 
         elif filename.lower().endswith('.tiff') or filename.lower().endswith('.tif'):
-            image = tiff.imread(filename)
-            print(f"Loaded TIFF image with dtype: {image.dtype}")
+            print(f"Loading TIFF file: {filename}")
+            image_data = tiff.imread(filename)
+            print(f"Loaded TIFF image with dtype: {image_data.dtype}")
+
             # Determine bit depth and normalize
-            if image.dtype == np.uint8:
+            if image_data.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image.dtype == np.uint16:
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:
+            elif image_data.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-                image = image.astype(np.float32) / 4294967295.0
-            elif image.dtype == np.float32:
+                image = image_data.astype(np.float32) / 4294967295.0
+            elif image_data.dtype == np.float32:
                 bit_depth = "32-bit floating point"
+                image = image_data
             else:
                 raise ValueError("Unsupported TIFF format!")
 
-            if image.ndim == 2:  # Mono
+            # Handle mono or RGB TIFFs
+            if image_data.ndim == 2:  # Mono
                 is_mono = True
-                return image, None, bit_depth, is_mono
-            elif image.ndim == 3 and image.shape[2] == 3:  # RGB
+            elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
                 is_mono = False
-                return image, None, bit_depth, is_mono
+            else:
+                raise ValueError("Unsupported TIFF image dimensions!")
 
         elif filename.lower().endswith('.xisf'):
             print(f"Loading XISF file: {filename}")
             xisf = XISF(filename)
-            image = xisf.read_image(0)
+            image_data = xisf.read_image(0)
             original_header = xisf.get_images_metadata()[0]
+
             # Determine bit depth and normalize
-            if image.dtype == np.uint8:
+            if image_data.dtype == np.uint8:
                 bit_depth = "8-bit"
                 image = image_data.astype(np.float32) / 255.0
-            elif image.dtype == np.uint16:
+            elif image_data.dtype == np.uint16:
                 bit_depth = "16-bit"
                 image = image_data.astype(np.float32) / 65535.0
-            elif image.dtype == np.uint32:
+            elif image_data.dtype == np.uint32:
                 bit_depth = "32-bit unsigned"
-                image = image.astype(np.float32) / 4294967295.0
-            elif image.dtype == np.float32:
+                image = image_data.astype(np.float32) / 4294967295.0
+            elif image_data.dtype == np.float32:
                 bit_depth = "32-bit floating point"
+                image = image_data
             else:
                 raise ValueError("Unsupported XISF data type!")
 
-            if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Handle mono or RGB XISF
+            if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):  # Mono
                 is_mono = True
-                image = np.stack([image.squeeze()] * 3, axis=-1)
+                image = np.stack([image_data.squeeze()] * 3, axis=-1)
+            elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
+                is_mono = False
+            else:
+                raise ValueError("Unsupported XISF image dimensions!")
 
         elif filename.lower().endswith('.png'):
+            print(f"Loading PNG file: {filename}")
             img = Image.open(filename)
             if img.mode == 'L':  # Grayscale
                 is_mono = True
                 image = np.array(img, dtype=np.float32) / 255.0
-                return image, None, "8-bit", is_mono
+                bit_depth = "8-bit"
             elif img.mode == 'RGB':  # RGB
                 is_mono = False
                 image = np.array(img, dtype=np.float32) / 255.0
-                return image, None, "8-bit", is_mono
+                bit_depth = "8-bit"
+            else:
+                raise ValueError("Unsupported PNG format!")
 
         else:
             raise ValueError("Unsupported file format!")
@@ -3660,11 +3674,6 @@ def load_image(filename):
     except Exception as e:
         print(f"Error reading image {filename}: {e}")
         return None, None, None, None
-
-
-
-
-
 
 
 
