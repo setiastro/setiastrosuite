@@ -98,7 +98,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.6')
+        self.setWindowTitle('Seti Astro\'s Suite V1.5.7')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -4938,6 +4938,14 @@ class CustomGraphicsView(QGraphicsView):
                             crosshair_item = QGraphicsLineItem(line)
                             crosshair_item.setPen(pen)
                             self.parent.main_scene.addItem(crosshair_item)
+                    if self.parent.show_names:
+                        #print(f"Drawing name: {name} at ({x}, {y})")  # Debugging statement
+                        text_color = obj.get("color", QColor(Qt.white))
+                        text_item = QGraphicsTextItem(name)
+                        text_item.setPos(x + 10, y + 10)  # Offset to avoid overlapping the marker
+                        text_item.setDefaultTextColor(text_color)
+                        text_item.setFont(self.parent.selected_font)
+                        self.parent.main_scene.addItem(text_item)                            
     
 
     def clear_query_results(self):
@@ -6162,6 +6170,7 @@ class MainWindow(QMainWindow):
     def toggle_object_names(self, state):
         """Toggle the visibility of object names based on the checkbox state."""
         self.show_names = state == Qt.Checked
+        self.show_names = bool(state)        
         self.main_preview.draw_query_results()  # Redraw to apply the change
 
 
