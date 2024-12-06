@@ -23,6 +23,8 @@ import platform
 import glob
 import time
 
+
+
 # Third-party library imports
 import requests
 import numpy as np
@@ -53,9 +55,9 @@ from PyQt5.QtWidgets import (
     QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction
 )
 from PyQt5.QtGui import (
-    QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie
+    QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent
 
 # Math functions
 from math import sqrt
@@ -83,7 +85,8 @@ class AstroEditingSuite(QWidget):
 
         # Add individual tabs for each tool
         self.tabs.addTab(XISFViewer(), "XISF Liberator")
-        self.tabs.addTab(CosmicClarityTab(), "Cosmic Clarity")
+        self.tabs.addTab(CosmicClarityTab(), "Cosmic Clarity Sharpen/Denoise")
+        self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(), "Statistical Stretch")
         self.tabs.addTab(NBtoRGBstarsTab(), "NB to RGB Stars")  # Placeholder        
         self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
@@ -98,7 +101,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.5.7')
+        self.setWindowTitle('Seti Astro\'s Suite V1.6')
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -1707,6 +1710,691 @@ class PreviewDialog(QDialog):
         self.dragging = False
         event.accept()
 
+class CosmicClaritySatelliteTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.cosmic_clarity_folder = None
+        self.input_folder = None
+        self.output_folder = None
+        self.settings_file = "cosmic_clarity_satellite_folder.txt"
+        self.file_watcher = QFileSystemWatcher()  # Watcher for input and output folders
+        self.file_watcher.directoryChanged.connect(self.on_folder_changed)  # Connect signal
+        self.initUI()
+        self.load_cosmic_clarity_folder()
+
+    def initUI(self):
+        # Main horizontal layout
+        main_layout = QHBoxLayout()
+
+        # Left layout for controls and settings
+        left_layout = QVBoxLayout()
+
+        # Input/Output Folder Selection in a Horizontal Sizer
+        folder_layout = QHBoxLayout()
+        self.input_folder_button = QPushButton("Select Input Folder")
+        self.input_folder_button.clicked.connect(self.select_input_folder)
+        self.output_folder_button = QPushButton("Select Output Folder")
+        self.output_folder_button.clicked.connect(self.select_output_folder)
+        folder_layout.addWidget(self.input_folder_button)
+        folder_layout.addWidget(self.output_folder_button)
+        left_layout.addLayout(folder_layout)
+
+        # GPU Acceleration
+        self.gpu_label = QLabel("Use GPU Acceleration:")
+        left_layout.addWidget(self.gpu_label)
+        self.gpu_dropdown = QComboBox()
+        self.gpu_dropdown.addItems(["Yes", "No"])
+        left_layout.addWidget(self.gpu_dropdown)
+
+        # Removal Mode
+        self.mode_label = QLabel("Satellite Removal Mode:")
+        left_layout.addWidget(self.mode_label)
+        self.mode_dropdown = QComboBox()
+        self.mode_dropdown.addItems(["Full", "Luminance"])
+        left_layout.addWidget(self.mode_dropdown)
+
+        # Clip Trail
+        self.clip_trail_checkbox = QCheckBox("Clip Satellite Trail to 0.000")
+        self.clip_trail_checkbox.setChecked(True)
+        left_layout.addWidget(self.clip_trail_checkbox)
+
+        # Skip Save
+        self.skip_save_checkbox = QCheckBox("Skip Save if No Satellite Trail Detected")
+        self.skip_save_checkbox.setChecked(False)
+        left_layout.addWidget(self.skip_save_checkbox)
+
+        # Process Single Image and Batch Process in a Horizontal Sizer
+        process_layout = QHBoxLayout()
+        self.process_single_button = QPushButton("Process Single Image")
+        self.process_single_button.clicked.connect(self.process_single_image)
+        process_layout.addWidget(self.process_single_button)
+
+        self.batch_process_button = QPushButton("Batch Process Input Folder")
+        self.batch_process_button.clicked.connect(self.batch_process_folder)
+        process_layout.addWidget(self.batch_process_button)
+        left_layout.addLayout(process_layout)
+
+        # Live Monitor
+        self.live_monitor_button = QPushButton("Live Monitor Input Folder")
+        self.live_monitor_button.clicked.connect(self.live_monitor_folder)
+        left_layout.addWidget(self.live_monitor_button)
+
+        # Folder Selection
+        self.folder_label = QLabel("No folder selected")
+        left_layout.addWidget(self.folder_label)
+        self.wrench_button = QPushButton()
+        self.wrench_button.setIcon(QIcon("wrench_icon.png"))  # Ensure the icon is available
+        self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
+        left_layout.addWidget(self.wrench_button)
+
+        # Footer
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet("font-size: 10px;")
+        left_layout.addWidget(footer_label)
+
+        # Right layout for TreeBoxes
+        right_layout = QVBoxLayout()
+
+        # Input Files TreeBox
+        input_files_label = QLabel("Input Folder Files:")
+        right_layout.addWidget(input_files_label)
+        self.input_files_tree = QTreeWidget()
+        self.input_files_tree.setHeaderLabels(["Filename"])
+        self.input_files_tree.itemDoubleClicked.connect(lambda: self.preview_image(self.input_files_tree))
+        self.input_files_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.input_files_tree.customContextMenuRequested.connect(lambda pos: self.show_context_menu(self.input_files_tree, pos))
+        right_layout.addWidget(self.input_files_tree)
+
+        # Output Files TreeBox
+        output_files_label = QLabel("Output Folder Files:")
+        right_layout.addWidget(output_files_label)
+        self.output_files_tree = QTreeWidget()
+        self.output_files_tree.setHeaderLabels(["Filename"])
+        self.output_files_tree.itemDoubleClicked.connect(lambda: self.preview_image(self.output_files_tree))
+        self.output_files_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.output_files_tree.customContextMenuRequested.connect(lambda pos: self.show_context_menu(self.output_files_tree, pos))
+        right_layout.addWidget(self.output_files_tree)
+
+
+        # Add the left and right layouts to the main layout
+        main_layout.addLayout(left_layout, stretch=2)  # More space for the left layout
+        main_layout.addLayout(right_layout, stretch=1)  # Less space for the right layout
+
+        self.setLayout(main_layout)
+
+    def preview_image(self, treebox):
+        """Preview the selected image."""
+        selected_item = treebox.currentItem()
+        if selected_item:
+            file_path = os.path.join(self.input_folder if treebox == self.input_files_tree else self.output_folder, selected_item.text(0))
+            if os.path.isfile(file_path):
+                try:
+                    image, _, _, is_mono = load_image(file_path)
+                    if image is not None:
+                        self.current_preview_dialog = ImagePreviewDialog(image, is_mono=is_mono)  # Store reference
+                        self.current_preview_dialog.setAttribute(Qt.WA_DeleteOnClose)  # Ensure cleanup on close
+                        self.current_preview_dialog.show()  # Open non-blocking dialog
+                    else:
+                        QMessageBox.critical(self, "Error", "Failed to load image for preview.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to preview image: {e}")
+
+
+    def open_preview_dialog(self, image, is_mono):
+        """Open the preview dialog."""
+        preview_dialog = ImagePreviewDialog(image, is_mono=is_mono)
+        preview_dialog.setAttribute(Qt.WA_DeleteOnClose)  # Ensure proper cleanup when closed
+        preview_dialog.show()  # Open the dialog without blocking the main UI
+
+
+
+
+
+    def show_context_menu(self, treebox, pos):
+        """Show context menu for the treebox."""
+        menu = QMenu()
+        delete_action = QAction("Delete File")
+        rename_action = QAction("Rename File")
+        delete_action.triggered.connect(lambda: self.delete_file(treebox))
+        rename_action.triggered.connect(lambda: self.rename_file(treebox))
+        menu.addAction(delete_action)
+        menu.addAction(rename_action)
+        menu.exec_(treebox.viewport().mapToGlobal(pos))
+
+    def delete_file(self, treebox):
+        """Delete the selected file."""
+        selected_item = treebox.currentItem()
+        if selected_item:
+            folder = self.input_folder if treebox == self.input_files_tree else self.output_folder
+            file_path = os.path.join(folder, selected_item.text(0))
+            if os.path.exists(file_path):
+                reply = QMessageBox.question(self, "Confirm Delete", f"Are you sure you want to delete {selected_item.text(0)}?",
+                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    os.remove(file_path)
+                    self.refresh_input_files() if treebox == self.input_files_tree else self.refresh_output_files()
+
+    def rename_file(self, treebox):
+        """Rename the selected file."""
+        selected_item = treebox.currentItem()
+        if selected_item:
+            folder = self.input_folder if treebox == self.input_files_tree else self.output_folder
+            file_path = os.path.join(folder, selected_item.text(0))
+            new_name, ok = QInputDialog.getText(self, "Rename File", "Enter new name:", text=selected_item.text(0))
+            if ok and new_name:
+                new_path = os.path.join(folder, new_name)
+                os.rename(file_path, new_path)
+                self.refresh_input_files() if treebox == self.input_files_tree else self.refresh_output_files()
+
+    def refresh_input_files(self):
+        """Populate the input TreeBox with files from the input folder."""
+        self.input_files_tree.clear()
+        if not self.input_folder:
+            return
+        for file_name in os.listdir(self.input_folder):
+            if file_name.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf')):
+                QTreeWidgetItem(self.input_files_tree, [file_name])
+
+    def refresh_output_files(self):
+        """Populate the output TreeBox with files from the output folder."""
+        self.output_files_tree.clear()
+        if not self.output_folder:
+            return
+        for file_name in os.listdir(self.output_folder):
+            if file_name.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf')):
+                QTreeWidgetItem(self.output_files_tree, [file_name])
+
+
+
+    def select_input_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        if folder:
+            self.input_folder = folder
+            self.input_folder_button.setText(f"Input Folder: {os.path.basename(folder)}")
+            self.file_watcher.addPath(folder)  # Add folder to watcher
+            self.refresh_input_files()
+
+    def select_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if folder:
+            self.output_folder = folder
+            self.output_folder_button.setText(f"Output Folder: {os.path.basename(folder)}")
+            self.file_watcher.addPath(folder)  # Add folder to watcher
+            self.refresh_output_files()
+
+    def on_folder_changed(self, path):
+        """Refresh the TreeBox when files are added or removed from the watched folder."""
+        if path == self.input_folder:
+            self.refresh_input_files()
+        elif path == self.output_folder:
+            self.refresh_output_files()
+
+
+    def select_cosmic_clarity_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Cosmic Clarity Folder")
+        if folder:
+            self.cosmic_clarity_folder = folder
+            self.folder_label.setText(f"Folder: {folder}")
+            with open(self.settings_file, 'w') as f:
+                f.write(folder)
+
+    def load_cosmic_clarity_folder(self):
+        if os.path.exists(self.settings_file):
+            with open(self.settings_file, 'r') as f:
+                folder = f.read().strip()
+                if folder:
+                    self.cosmic_clarity_folder = folder
+                    self.folder_label.setText(f"Folder: {folder}")
+
+    def process_single_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "", "Image Files (*.png *.jpg *.tif *.tiff *.fits *.fit *.jpeg *.xisf)"
+        )
+        if not file_path:
+            QMessageBox.warning(self, "Warning", "No file selected.")
+            return
+
+        # Create temp input and output folders
+        temp_input = self.create_temp_folder()
+        temp_output = self.create_temp_folder()
+
+        # Copy the selected file to the temp input folder
+        shutil.copy(file_path, temp_input)
+
+        # Run Cosmic Clarity Satellite Removal Tool
+        try:
+            self.run_cosmic_clarity_satellite(temp_input, temp_output)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error processing image: {e}")
+            return
+
+        # Locate the processed file in the temp output folder
+        processed_file = glob.glob(os.path.join(temp_output, "*_satellited.*"))
+        if processed_file:
+            # Move the processed file back to the original folder
+            original_folder = os.path.dirname(file_path)
+            destination_path = os.path.join(original_folder, os.path.basename(processed_file[0]))
+            shutil.move(processed_file[0], destination_path)
+
+            # Inform the user
+            QMessageBox.information(self, "Success", f"Processed image saved to: {destination_path}")
+        else:
+            QMessageBox.warning(self, "Warning", "No output file found.")
+
+        # Cleanup temporary folders
+        if os.path.exists(temp_input):
+            shutil.rmtree(temp_input)
+        if os.path.exists(temp_output):
+            shutil.rmtree(temp_output)
+
+    def batch_process_folder(self):
+        if not self.input_folder or not self.output_folder:
+            QMessageBox.warning(self, "Warning", "Please select both input and output folders.")
+            return
+
+        exe_name = "setiastrocosmicclarity_satellite"
+        exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe") if os.name == 'nt' else os.path.join(self.cosmic_clarity_folder, exe_name)
+
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}")
+            return
+
+        # Construct the command
+        command = [
+            exe_path,
+            "--input", self.input_folder,
+            "--output", self.output_folder,
+            "--mode", self.mode_dropdown.currentText().lower(),
+            "--batch"
+        ]
+        if self.gpu_dropdown.currentText() == "Yes":
+            command.append("--use-gpu")
+        if self.clip_trail_checkbox.isChecked():
+            command.append("--clip-trail")
+        if self.skip_save_checkbox.isChecked():
+            command.append("--skip-save")
+
+        # Run the command in a separate thread
+        self.satellite_thread = SatelliteProcessingThread(command)
+        self.satellite_thread.finished.connect(lambda: QMessageBox.information(self, "Success", "Batch processing finished."))
+        self.satellite_thread.start()
+
+    def live_monitor_folder(self):
+        if not self.input_folder or not self.output_folder:
+            QMessageBox.warning(self, "Warning", "Please select both input and output folders.")
+            return
+
+        exe_name = "setiastrocosmicclarity_satellite"
+        exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe") if os.name == 'nt' else os.path.join(self.cosmic_clarity_folder, exe_name)
+
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}")
+            return
+
+        # Construct the command
+        command = [
+            exe_path,
+            "--input", self.input_folder,
+            "--output", self.output_folder,
+            "--mode", self.mode_dropdown.currentText().lower(),
+            "--monitor"
+        ]
+        if self.gpu_dropdown.currentText() == "Yes":
+            command.append("--use-gpu")
+        if self.clip_trail_checkbox.isChecked():
+            command.append("--clip-trail")
+        if self.skip_save_checkbox.isChecked():
+            command.append("--skip-save")
+
+        # Run the command in a separate thread
+        self.satellite_thread = SatelliteProcessingThread(command)
+        self.satellite_thread.finished.connect(lambda: QMessageBox.information(self, "Success", "Live monitoring stopped."))
+        self.satellite_thread.start()
+
+
+    @staticmethod
+    def create_temp_folder(base_folder="~"):
+        """
+        Create a temporary folder for processing in the user's directory.
+        :param base_folder: Base folder to create the temp directory in (default is the user's home directory).
+        :return: Path to the created temporary folder.
+        """
+        user_dir = os.path.expanduser(base_folder)
+        temp_folder = os.path.join(user_dir, "CosmicClarityTemp")
+        os.makedirs(temp_folder, exist_ok=True)  # Create the folder if it doesn't exist
+        return temp_folder
+
+
+    def run_cosmic_clarity_satellite(self, input_dir, output_dir, live_monitor=False):
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
+            return
+
+        exe_name = "setiastrocosmicclarity_satellite"
+        exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe") if os.name == 'nt' else os.path.join(self.cosmic_clarity_folder, exe_name)
+
+        # Check if the executable exists
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}")
+            return
+
+        # Construct command arguments
+        command = [
+            exe_path,
+            "--input", input_dir,
+            "--output", output_dir,
+            "--mode", self.mode_dropdown.currentText().lower(),
+        ]
+        if self.gpu_dropdown.currentText() == "Yes":
+            command.append("--use-gpu")
+        if self.clip_trail_checkbox.isChecked():
+            command.append("--clip-trail")
+        if self.skip_save_checkbox.isChecked():
+            command.append("--skip-save")
+        if live_monitor:
+            command.append("--monitor")
+        else:
+            command.append("--batch")
+
+        # Debugging: Print the command to verify
+        print(f"Running command: {' '.join(command)}")
+
+        # Execute the command
+        try:
+            subprocess.run(command, check=True)
+            QMessageBox.information(self, "Success", "Processing complete.")
+        except subprocess.CalledProcessError as e:
+            QMessageBox.critical(self, "Error", f"Processing failed: {e}")
+
+
+
+    def run_satellite_removal(self, input_file_path=None, batch_mode=False, monitor_mode=False):
+        """Run the Satellite Removal tool with the current parameters."""
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
+            return
+        
+        exe_name = "cosmicclarity_satellite"  # Satellite removal executable
+        input_folder = self.input_folder if input_file_path is None else os.path.dirname(input_file_path)
+        output_folder = self.output_folder
+        batch_file_path = os.path.join(self.cosmic_clarity_folder, "run_satellite_removal")
+
+        if not input_folder or not output_folder:
+            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
+            return
+
+        # Ensure the input folder for single image
+        if input_file_path and not batch_mode:
+            input_folder = os.path.join(self.cosmic_clarity_folder, "temp_input")
+            output_folder = os.path.join(self.cosmic_clarity_folder, "temp_output")
+            os.makedirs(input_folder, exist_ok=True)
+            os.makedirs(output_folder, exist_ok=True)
+            shutil.copy(input_file_path, input_folder)
+
+        # Generate the batch or shell script
+        batch_script_path = self.create_batch_script(
+            batch_file_path=batch_file_path,
+            exe_name=exe_name,
+            input_folder=input_folder,
+            output_folder=output_folder,
+            batch_mode=batch_mode,
+            monitor_mode=monitor_mode,
+        )
+        if not batch_script_path:
+            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
+            return
+
+        # Run the script
+        self.execute_script(batch_script_path)
+
+        if not monitor_mode:
+            # Wait for the output files
+            if input_file_path:  # Single image processing
+                output_file_glob = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(input_file_path))[0]}_satellited.*")
+            else:  # Batch processing
+                output_file_glob = os.path.join(output_folder, "*_satellited.*")
+
+            output_files = self.wait_for_output_files(output_file_glob)
+            if not output_files:
+                QMessageBox.critical(self, "Error", "No output files found within timeout.")
+            else:
+                QMessageBox.information(self, "Success", f"Processed files saved to: {output_folder}")
+
+        # Cleanup temporary folders for single image processing
+        if input_file_path and not batch_mode:
+            shutil.rmtree(input_folder)
+            shutil.rmtree(output_folder)
+
+    def create_batch_script(self, batch_file_path, exe_name, input_folder, output_folder, batch_mode, monitor_mode):
+        """Generate the batch or shell script to run Satellite Removal."""
+        if os.name == 'nt':  # Windows
+            batch_file_path += ".bat"
+            exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe")
+            batch_content = f'@echo off\ncd /d "{self.cosmic_clarity_folder}"\n"{exe_path}" '
+        else:  # macOS/Linux
+            batch_file_path += ".sh"
+            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+            batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"./{exe_path}" '
+
+        # Add arguments
+        batch_content += f'--input "{input_folder}" --output "{output_folder}" '
+        if self.gpu_dropdown.currentText() == "Yes":
+            batch_content += "--use-gpu "
+        if batch_mode:
+            batch_content += "--batch "
+        if monitor_mode:
+            batch_content += "--monitor "
+        if self.mode_dropdown.currentText().lower() == "luminance":
+            batch_content += "--mode luminance "
+        if self.clip_trail_checkbox.isChecked():
+            batch_content += "--clip-trail "
+        if self.skip_save_checkbox.isChecked():
+            batch_content += "--skip-save "
+
+        # Write to file
+        try:
+            with open(batch_file_path, "w") as batch_file:
+                batch_file.write(batch_content)
+            os.chmod(batch_file_path, 0o755)  # Ensure it's executable
+            return batch_file_path
+        except Exception as e:
+            print(f"Error creating batch file: {e}")
+            return None
+
+    def execute_script(self, script_path):
+        """Execute the batch or shell script."""
+        if os.name == 'nt':  # Windows
+            subprocess.Popen(["cmd.exe", "/c", script_path], shell=True)
+        else:  # macOS/Linux
+            subprocess.Popen(["/bin/sh", script_path], shell=True)
+
+    def wait_for_output_files(self, output_file_glob, timeout=1800):
+        """Wait for output files matching the glob pattern within a timeout."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            matching_files = glob.glob(output_file_glob)
+            if matching_files:
+                time.sleep(2)
+                return matching_files
+            time.sleep(1)
+        return None
+
+class ImagePreviewDialog(QDialog):
+    def __init__(self, np_image, is_mono=False):
+        super().__init__()
+        self.setWindowTitle("Image Preview")
+        self.resize(640, 480)  # Set initial size
+        self.autostretch_enabled = False  # Autostretch toggle for preview
+        self.is_mono = is_mono  # Store is_mono flag
+        self.zoom_factor = 1.0  # Track the zoom level
+
+        # Store the 32-bit numpy image for reference
+        self.np_image = np_image
+
+        # Set up the layout and the scroll area
+        layout = QVBoxLayout(self)
+
+        # Autostretch and Zoom Buttons
+        button_layout = QHBoxLayout()
+        self.autostretch_button = QPushButton("AutoStretch (Off)")
+        self.autostretch_button.setCheckable(True)
+        self.autostretch_button.toggled.connect(self.toggle_autostretch)
+        button_layout.addWidget(self.autostretch_button)
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        button_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        button_layout.addWidget(self.zoom_out_button)
+
+        layout.addLayout(button_layout)
+
+        # Scroll area for displaying the image
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        layout.addWidget(self.scroll_area)
+
+        # Set up the QLabel to display the image
+        self.image_label = QLabel()
+        self.display_qimage(self.np_image)  # Display the image with the initial numpy array
+        self.scroll_area.setWidget(self.image_label)
+
+        # Set up mouse dragging
+        self.dragging = False
+        self.drag_start_pos = QPoint()
+
+        # Enable mouse wheel for zooming
+        self.image_label.installEventFilter(self)
+
+        # Center the scroll area on initialization
+        QTimer.singleShot(0, self.center_scrollbars)  # Delay to ensure layout is set
+
+    def display_qimage(self, np_img):
+        """Convert a numpy array to QImage and display it at the current zoom level."""
+        display_image_uint8 = (np.clip(np_img, 0, 1) * 255).astype(np.uint8)
+
+        if len(display_image_uint8.shape) == 3 and display_image_uint8.shape[2] == 3:
+            # RGB image
+            height, width, channels = display_image_uint8.shape
+            bytes_per_line = 3 * width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        elif len(display_image_uint8.shape) == 2:
+            # Grayscale image
+            height, width = display_image_uint8.shape
+            bytes_per_line = width
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+        else:
+            raise ValueError(f"Unexpected image shape: {display_image_uint8.shape}")
+
+        # Apply zoom
+        pixmap = QPixmap.fromImage(qimage)
+        scaled_width = int(pixmap.width() * self.zoom_factor)  # Convert to integer
+        scaled_height = int(pixmap.height() * self.zoom_factor)  # Convert to integer
+        scaled_pixmap = pixmap.scaled(scaled_width, scaled_height, Qt.KeepAspectRatio)
+        self.image_label.setPixmap(scaled_pixmap)
+        self.image_label.adjustSize()
+
+
+    def toggle_autostretch(self, checked):
+        self.autostretch_enabled = checked
+        self.autostretch_button.setText("AutoStretch (On)" if checked else "AutoStretch (Off)")
+        self.apply_autostretch()
+
+    def apply_autostretch(self):
+        """Apply or remove autostretch while maintaining 32-bit precision."""
+        target_median = 0.25  # Target median for stretching
+
+        if self.autostretch_enabled:
+            if self.is_mono:  # Apply mono stretch
+                stretched_mono = stretch_mono_image(self.np_image, target_median)
+                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
+            else:  # Apply color stretch
+                display_image = stretch_color_image(self.np_image, target_median, linked=False)
+        else:
+            display_image = self.np_image  # Use original image if autostretch is off
+
+        self.display_qimage(display_image)
+
+    def zoom_in(self):
+        """Increase the zoom factor and refresh the display."""
+        self.zoom_factor *= 1.2  # Increase zoom by 20%
+        self.display_qimage(self.np_image)
+
+    def zoom_out(self):
+        """Decrease the zoom factor and refresh the display."""
+        self.zoom_factor /= 1.2  # Decrease zoom by 20%
+        self.display_qimage(self.np_image)
+
+    def eventFilter(self, source, event):
+        """Handle mouse wheel events for zooming."""
+        if source == self.image_label and event.type() == QEvent.Wheel:
+            if event.angleDelta().y() > 0:
+                self.zoom_in()
+            else:
+                self.zoom_out()
+            return True
+        return super().eventFilter(source, event)
+
+    def mousePressEvent(self, event):
+        """Start dragging if the left mouse button is pressed."""
+        if event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.drag_start_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        """Handle dragging to move the scroll area."""
+        if self.dragging:
+            delta = event.pos() - self.drag_start_pos
+            self.scroll_area.horizontalScrollBar().setValue(
+                self.scroll_area.horizontalScrollBar().value() - delta.x()
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().value() - delta.y()
+            )
+            self.drag_start_pos = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        """Stop dragging when the left mouse button is released."""
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+
+    def center_scrollbars(self):
+        """Centers the scrollbars to start in the middle of the image."""
+        h_scroll = self.scroll_area.horizontalScrollBar()
+        v_scroll = self.scroll_area.verticalScrollBar()
+        h_scroll.setValue((h_scroll.maximum() + h_scroll.minimum()) // 2)
+        v_scroll.setValue((v_scroll.maximum() + v_scroll.minimum()) // 2)
+
+    def resizeEvent(self, event):
+        """Handle resizing of the dialog."""
+        super().resizeEvent(event)
+        self.display_qimage(self.np_image)
+
+
+
+class SatelliteProcessingThread(QThread):
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, command):
+        super().__init__()
+        self.command = command
+
+    def run(self):
+        try:
+            self.log_signal.emit(f"Running command: {' '.join(self.command)}")
+            subprocess.run(self.command, check=True)
+            self.log_signal.emit("Processing complete.")
+        except subprocess.CalledProcessError as e:
+            self.log_signal.emit(f"Processing failed: {e}")
+        except Exception as e:
+            self.log_signal.emit(f"Unexpected error: {e}")
 
 
 class StatisticalStretchTab(QWidget):
@@ -3667,6 +4355,29 @@ def load_image(filename):
         elif filename.lower().endswith('.png'):
             print(f"Loading PNG file: {filename}")
             img = Image.open(filename)
+
+            # Convert unsupported modes to RGB
+            if img.mode not in ('L', 'RGB'):
+                print(f"Unsupported PNG mode: {img.mode}, converting to RGB")
+                img = img.convert("RGB")
+
+            # Convert image to numpy array and normalize pixel values to [0, 1]
+            image = np.array(img, dtype=np.float32) / 255.0
+            bit_depth = "8-bit"
+
+            # Determine if the image is grayscale or RGB
+            if len(image.shape) == 2:  # Grayscale image
+                is_mono = True
+            elif len(image.shape) == 3 and image.shape[2] == 3:  # RGB image
+                is_mono = False
+            else:
+                raise ValueError(f"Unsupported PNG dimensions: {image.shape}")
+
+            print(f"Loaded PNG image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+
+        elif filename.lower().endswith('.jpg') or filename.lower().endswith('.jpeg'):
+            print(f"Loading JPG file: {filename}")
+            img = Image.open(filename)
             if img.mode == 'L':  # Grayscale
                 is_mono = True
                 image = np.array(img, dtype=np.float32) / 255.0
@@ -3676,7 +4387,8 @@ def load_image(filename):
                 image = np.array(img, dtype=np.float32) / 255.0
                 bit_depth = "8-bit"
             else:
-                raise ValueError("Unsupported PNG format!")
+                raise ValueError("Unsupported JPG format!")            
+
 
         else:
             raise ValueError("Unsupported file format!")
