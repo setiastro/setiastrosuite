@@ -22,6 +22,7 @@ import ast
 import platform
 import glob
 import time
+from datetime import datetime
 
 
 
@@ -52,7 +53,7 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor
@@ -66,6 +67,7 @@ from math import sqrt
 class AstroEditingSuite(QWidget):
     def __init__(self):
         super().__init__()
+        self.current_theme = "dark"  # Default theme
         self.initUI()
 
     def initUI(self):
@@ -80,6 +82,26 @@ class AstroEditingSuite(QWidget):
         self.setWindowIcon(QIcon(icon_path))
         layout = QVBoxLayout()
 
+        # Create a menu bar
+        menubar = QMenuBar()
+        theme_menu = menubar.addMenu("Themes")
+
+        # Add tooltip to the "Themes" menu
+        theme_menu.setToolTip("Click to select Light or Dark theme")
+
+        # Add theme options
+        light_theme_action = QAction("Light Theme", self)
+        dark_theme_action = QAction("Dark Theme", self)
+
+        light_theme_action.triggered.connect(lambda: self.apply_theme("light"))
+        dark_theme_action.triggered.connect(lambda: self.apply_theme("dark"))
+
+        theme_menu.addAction(light_theme_action)
+        theme_menu.addAction(dark_theme_action)
+
+        # Add the menu bar to the layout
+        layout.setMenuBar(menubar)
+
         # Create tab widget
         self.tabs = QTabWidget()
 
@@ -92,16 +114,141 @@ class AstroEditingSuite(QWidget):
         self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
         self.tabs.addTab(HaloBGonTab(), "Halo-B-Gon")  # Placeholder
         self.tabs.addTab(ContinuumSubtractTab(), "Continuum Subtraction")
-        self.tabs.addTab(MainWindow(),"What's In My Image")
-        self.tabs.addTab(WhatsInMySky(),"What's In My Sky")
-        
+        self.tabs.addTab(MainWindow(), "What's In My Image")
+        self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
 
         # Add the tab widget to the main layout
         layout.addWidget(self.tabs)
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.6')
+        self.setWindowTitle('Seti Astro\'s Suite V1.7')
+
+        # Apply the default theme
+        self.apply_theme(self.current_theme)
+
+    def apply_theme(self, theme):
+        """Apply the selected theme to the application."""
+        if theme == "light":
+            self.current_theme = "light"
+            light_stylesheet = """
+            QWidget {
+                background-color: #f0f0f0;
+                color: #000000;
+                font-family: Arial, sans-serif;
+            }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                background-color: #ffffff;
+                border: 1px solid #cccccc;
+                color: #000000;
+                padding: 2px;
+            }
+            QPushButton {
+                background-color: #e0e0e0;
+                border: 1px solid #cccccc;
+                color: #000000;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #d0d0d0;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background: #ffffff;
+            }
+            QTreeWidget {
+                background-color: #ffffff;
+                border: 1px solid #cccccc;
+                color: #000000;
+            }
+            QHeaderView::section {
+                background-color: #f0f0f0;
+                color: #000000;
+                padding: 5px;
+            }
+            QTabWidget::pane { 
+                border: 1px solid #cccccc; 
+                background-color: #f0f0f0;
+            }
+            QTabBar::tab {
+                background: #e0e0e0;
+                color: #000000;
+                padding: 5px;
+                border: 1px solid #cccccc;
+                border-bottom: none;  /* Avoid double border at bottom */
+            }
+            QTabBar::tab:selected {
+                background: #d0d0d0;  /* Highlight for the active tab */
+                border-color: #000000;
+            }
+            QTabBar::tab:hover {
+                background: #c0c0c0;
+            }
+            QTabBar::tab:!selected {
+                margin-top: 2px;  /* Push unselected tabs down for better clarity */
+            }
+            """
+            self.setStyleSheet(light_stylesheet)
+
+        elif theme == "dark":
+            self.current_theme = "dark"
+            dark_stylesheet = """
+            QWidget {
+                background-color: #2b2b2b;
+                color: #dcdcdc;
+                font-family: Arial, sans-serif;
+            }
+            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                background-color: #3c3f41;
+                border: 1px solid #5c5c5c;
+                color: #ffffff;
+                padding: 2px;
+            }
+            QPushButton {
+                background-color: #3c3f41;
+                border: 1px solid #5c5c5c;
+                color: #ffffff;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background: #3c3f41;
+            }
+            QTreeWidget {
+                background-color: #3c3f41;
+                border: 1px solid #5c5c5c;
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #3c3f41;
+                color: #dcdcdc;
+                padding: 5px;
+            }
+            QTabWidget::pane { 
+                border: 1px solid #5c5c5c; 
+                background-color: #2b2b2b;
+            }
+            QTabBar::tab {
+                background: #3c3f41;
+                color: #dcdcdc;
+                padding: 5px;
+                border: 1px solid #5c5c5c;
+                border-bottom: none;  /* Avoid double border at bottom */
+            }
+            QTabBar::tab:selected {
+                background: #4a4a4a;  /* Highlight for the active tab */
+                border-color: #dcdcdc;
+            }
+            QTabBar::tab:hover {
+                background: #505050;
+            }
+            QTabBar::tab:!selected {
+                margin-top: 2px;  /* Push unselected tabs down for better clarity */
+            }
+            """
+            self.setStyleSheet(dark_stylesheet)
+
 
 class XISFViewer(QWidget):
     def __init__(self):
@@ -176,6 +323,12 @@ class XISFViewer(QWidget):
         save_layout.addWidget(self.save_stretched_checkbox)
         left_layout.addLayout(save_layout)
 
+        # Add a Batch Process button
+        self.batch_process_button = QPushButton("Batch Process")
+        self.batch_process_button.clicked.connect(self.open_batch_process_window)
+        left_layout.addWidget(self.batch_process_button)
+
+
         footer_label = QLabel("""
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
@@ -229,6 +382,9 @@ class XISFViewer(QWidget):
         else:  # Color image
             self.stretched_image = stretch_color_image(self.image_data, target_median=0.25, linked=False, normalize=False)
 
+    def open_batch_process_window(self):
+        self.batch_dialog = BatchProcessDialog(self)
+        self.batch_dialog.show()
 
 
     def load_xisf(self):
@@ -526,7 +682,161 @@ class XISFViewer(QWidget):
                 print(f"Error saving file: {e}")
 
 
+    def process_batch(self, input_dir, output_dir, file_format, update_status_callback):
+        import glob
+        from pathlib import Path
 
+        xisf_files = glob.glob(f"{input_dir}/*.xisf")
+        if not xisf_files:
+            QMessageBox.warning(self, "Error", "No XISF files found in the input directory.")
+            update_status_callback("")
+            return
+
+        for i, xisf_file in enumerate(xisf_files, start=1):
+            try:
+                # Update progress
+                update_status_callback(f"Processing file {i}/{len(xisf_files)}: {Path(xisf_file).name}")
+
+                # Load the XISF file
+                xisf = XISF(xisf_file)
+                im_data = xisf.read_image(0)
+
+                # Set metadata
+                file_meta = xisf.get_file_metadata()
+                image_meta = xisf.get_images_metadata()[0]
+                is_mono = im_data.shape[2] == 1 if len(im_data.shape) == 3 else True
+
+                # Determine output file path
+                base_name = Path(xisf_file).stem
+                output_file = Path(output_dir) / f"{base_name}{file_format}"
+
+                # Save the file using save_direct
+                self.save_direct(output_file, im_data, file_meta, image_meta, is_mono)
+
+            except Exception as e:
+                update_status_callback(f"Error processing file {Path(xisf_file).name}: {e}")
+                continue  # Skip to the next file
+
+        update_status_callback("Batch Processing Complete!")
+
+    def save_direct(self, output_path, image_to_save, file_meta, image_meta, is_mono):
+        """
+        Save an image directly to the specified path with the given metadata.
+        This function does not prompt the user and is suitable for batch processing.
+        """
+        _, ext = os.path.splitext(output_path)
+
+        # Determine bit depth and color mode
+        is_32bit_float = image_to_save.dtype == np.float32
+        is_16bit = image_to_save.dtype == np.uint16
+        is_8bit = image_to_save.dtype == np.uint8
+
+        try:
+            # Save as FITS file with metadata
+            if ext.lower() in ['.fits', '.fit']:
+                header = fits.Header()
+                crval1, crval2 = None, None
+
+                # Populate FITS header with FITS keywords and WCS keywords
+                wcs_keywords = [
+                    "CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", 
+                    "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"
+                ]
+
+                if 'FITSKeywords' in image_meta:
+                    for keyword, values in image_meta['FITSKeywords'].items():
+                        for entry in values:
+                            if 'value' in entry:
+                                value = entry['value']
+                                # Convert only numerical values to float
+                                if keyword in wcs_keywords and isinstance(value, (int, float)):
+                                    value = float(value)
+                                header[keyword] = value
+
+                # Add default WCS information if missing
+                if 'CTYPE1' not in header:
+                    header['CTYPE1'] = 'RA---TAN'
+                if 'CTYPE2' not in header:
+                    header['CTYPE2'] = 'DEC--TAN'
+
+                # Add the -SIP suffix for SIP coefficients
+                if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+                    header['CTYPE1'] = 'RA---TAN-SIP'
+                    header['CTYPE2'] = 'DEC--TAN-SIP'
+
+                # Set default reference pixel if missing
+                if 'CRPIX1' not in header:
+                    header['CRPIX1'] = image_to_save.shape[1] / 2
+                if 'CRPIX2' not in header:
+                    header['CRPIX2'] = image_to_save.shape[0] / 2
+
+                # Add CRVAL1 and CRVAL2 if available
+                if 'RA' in image_meta.get('FITSKeywords', {}):
+                    crval1 = float(image_meta['FITSKeywords']['RA'][0]['value'])
+                if 'DEC' in image_meta.get('FITSKeywords', {}):
+                    crval2 = float(image_meta['FITSKeywords']['DEC'][0]['value'])
+
+                if crval1 is not None and crval2 is not None:
+                    header['CRVAL1'] = crval1
+                    header['CRVAL2'] = crval2
+
+                # Add CD matrix if available
+                if 'XISFProperties' in image_meta and 'PCL:AstrometricSolution:LinearTransformationMatrix' in image_meta['XISFProperties']:
+                    linear_transform = image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                    header['CD1_1'] = linear_transform[0][0]
+                    header['CD1_2'] = linear_transform[0][1]
+                    header['CD2_1'] = linear_transform[1][0]
+                    header['CD2_2'] = linear_transform[1][1]
+                else:
+                    header['CD1_1'] = header['CDELT1'] if 'CDELT1' in header else 0.0
+                    header['CD1_2'] = 0.0
+                    header['CD2_1'] = 0.0
+                    header['CD2_2'] = header['CDELT2'] if 'CDELT2' in header else 0.0
+
+                # Duplicate mono image to create 3-channel if necessary
+                if is_mono:
+                    image_data_fits = image_to_save[:, :, 0] if len(image_to_save.shape) == 3 else image_to_save
+                    header['NAXIS'] = 2  # Mono images are 2-dimensional
+                else:
+                    image_data_fits = np.transpose(image_to_save, (2, 0, 1))
+                    header['NAXIS'] = 3
+                    header['NAXIS3'] = 3
+
+                hdu = fits.PrimaryHDU(image_data_fits, header=header)
+                hdu.writeto(output_path, overwrite=True)
+                print(f"Saved FITS image to: {output_path}")
+
+
+            # Save as TIFF
+            elif ext.lower() in ['.tif', '.tiff']:
+                if is_16bit:
+                    tiff.imwrite(output_path, (image_to_save * 65535).astype(np.uint16))
+                elif is_32bit_float:
+                    tiff.imwrite(output_path, image_to_save.astype(np.float32))
+                else:
+                    tiff.imwrite(output_path, (image_to_save * 255).astype(np.uint8))
+                print(f"Saved TIFF image to: {output_path}")
+
+            # Save as PNG
+            elif ext.lower() == '.png':
+                if is_mono:
+                    image_8bit = (image_to_save[:, :, 0] * 255).astype(np.uint8) if not is_8bit else image_to_save[:, :, 0]
+                    image_8bit_rgb = np.stack([image_8bit] * 3, axis=-1)
+                else:
+                    image_8bit_rgb = (image_to_save * 255).astype(np.uint8) if not is_8bit else image_to_save
+                Image.fromarray(image_8bit_rgb).save(output_path)
+                print(f"Saved PNG image to: {output_path}")
+
+            # Save as XISF
+            elif ext.lower() == '.xisf':
+                XISF.write(output_path, image_to_save, xisf_metadata=file_meta)
+                print(f"Saved XISF image to: {output_path}")
+
+            else:
+                print(f"Unsupported file format: {ext}")
+
+        except Exception as e:
+            print(f"Error saving file {output_path}: {e}")
 
 
     def save_tiff(self, output_path, bit_depth):
@@ -588,6 +898,87 @@ class XISFViewer(QWidget):
                 QMessageBox.information(self, "Success", f"Metadata saved to {file_path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save metadata: {e}")       
+
+class BatchProcessDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Process")
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout()
+
+        # Input directory
+        self.input_dir_label = QLabel("Input Directory:")
+        self.input_dir_button = QPushButton("Select Input Directory")
+        self.input_dir_button.clicked.connect(self.select_input_directory)
+        self.input_dir = QLineEdit()
+        self.input_dir.setReadOnly(True)
+
+        layout.addWidget(self.input_dir_label)
+        layout.addWidget(self.input_dir)
+        layout.addWidget(self.input_dir_button)
+
+        # Output directory
+        self.output_dir_label = QLabel("Output Directory:")
+        self.output_dir_button = QPushButton("Select Output Directory")
+        self.output_dir_button.clicked.connect(self.select_output_directory)
+        self.output_dir = QLineEdit()
+        self.output_dir.setReadOnly(True)
+
+        layout.addWidget(self.output_dir_label)
+        layout.addWidget(self.output_dir)
+        layout.addWidget(self.output_dir_button)
+
+        # File format
+        self.format_label = QLabel("Select Output Format:")
+        self.format_combo = QComboBox()
+        self.format_combo.addItems([".png", ".fit", ".fits", ".tif", ".tiff"])
+
+        layout.addWidget(self.format_label)
+        layout.addWidget(self.format_combo)
+
+        # Start Batch Processing button
+        self.start_button = QPushButton("Start Batch Processing")
+        self.start_button.clicked.connect(self.start_batch_processing)
+        layout.addWidget(self.start_button)
+
+        # Status label
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+
+        self.setLayout(layout)
+
+    def select_input_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Input Directory")
+        if directory:
+            self.input_dir.setText(directory)
+
+    def select_output_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if directory:
+            self.output_dir.setText(directory)
+
+    def start_batch_processing(self):
+        input_dir = self.input_dir.text()
+        output_dir = self.output_dir.text()
+        file_format = self.format_combo.currentText()
+
+        if not input_dir or not output_dir:
+            QMessageBox.warning(self, "Error", "Please select both input and output directories.")
+            return
+
+        self.status_label.setText("Initializing batch processing...")
+        QApplication.processEvents()  # Ensures UI updates immediately
+
+        # Call the parent function to process files with progress updates
+        self.parent().process_batch(input_dir, output_dir, file_format, self.update_status)
+
+        self.status_label.setText("Batch Processing Complete!")
+
+    def update_status(self, message):
+        self.status_label.setText(message)
+        QApplication.processEvents()  # Ensures UI updates immediately
+
 
 class CosmicClarityTab(QWidget):
     def __init__(self):
@@ -2917,7 +3308,7 @@ class StarStretchTab(QWidget):
 
 
     def selectImage(self):
-        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.fits *.fit)")
+        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
         if selected_file:
             try:
                 self.image, self.original_header, _, self.is_mono = load_image(selected_file)  # Load image with header
@@ -3153,7 +3544,7 @@ class NBtoRGBstarsTab(QWidget):
         self.stretchSlider.setVisible(enabled)
 
     def selectImage(self, image_type):
-        selected_file, _ = QFileDialog.getOpenFileName(self, f"Select {image_type} Image", "", "Images (*.png *.tif *.fits *.fit)")
+        selected_file, _ = QFileDialog.getOpenFileName(self, f"Select {image_type} Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
         if selected_file:
             try:
                 if image_type == 'Ha':
@@ -3473,7 +3864,7 @@ class HaloBGonTab(QWidget):
     
 
     def selectImage(self):
-        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.fits *.fit)")
+        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
         if selected_file:
             try:
                 # Match the StarStretchTab loading method here
@@ -3894,7 +4285,7 @@ class ContinuumSubtractTab(QWidget):
         self.setLayout(main_layout)
 
     def selectImage(self, image_type):
-        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.fits *.fit)")
+        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
         if selected_file:
             try:
                 image, original_header, _, _ = load_image(selected_file)  # Load image with header
@@ -8579,13 +8970,19 @@ class WhatsInMySky(QWidget):
             # Populate fields with loaded settings
             self.latitude_entry.setText(str(self.settings.get("latitude", "")))
             self.longitude_entry.setText(str(self.settings.get("longitude", "")))
-            self.date_entry.setText(self.settings.get("date", ""))
+
+            # Use today's date for the date entry instead of the saved date
+            today_date = datetime.now().strftime("%Y-%m-%d")
+            self.date_entry.setText(today_date)
+
             self.time_entry.setText(self.settings.get("time", ""))
             self.timezone_combo.setCurrentText(self.settings.get("timezone", "UTC"))
             self.min_altitude_entry.setText(str(self.settings.get("min_altitude", "0")))
             self.object_limit = self.settings.get("object_limit", 100)
         else:
             self.settings = {}
+            # Default to today's date
+            self.date_entry.setText(datetime.now().strftime("%Y-%m-%d"))
 
 
     def open_settings(self):
@@ -8730,6 +9127,7 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
         else:
             # Default string comparison for other columns
             return self.text(column) < other.text(column)
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
