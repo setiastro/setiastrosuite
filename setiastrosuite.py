@@ -122,7 +122,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.7')
+        self.setWindowTitle('Seti Astro\'s Suite V1.7.2')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -2174,7 +2174,7 @@ class CosmicClaritySatelliteTab(QWidget):
         self.folder_label = QLabel("No folder selected")
         left_layout.addWidget(self.folder_label)
         self.wrench_button = QPushButton()
-        self.wrench_button.setIcon(QIcon("wrench_icon.png"))  # Ensure the icon is available
+        self.wrench_button.setIcon(QIcon(icon_path))  # Ensure the icon is available
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)
 
@@ -7124,10 +7124,20 @@ class MainWindow(QMainWindow):
 
     def toggle_all_items(self):
         """Toggle selection for all items in the object tree."""
+        # Check if all items are currently selected
+        all_checked = all(
+            self.object_tree.topLevelItem(i).checkState(0) == Qt.Checked
+            for i in range(self.object_tree.topLevelItemCount())
+        )
+
+        # Determine the new state: Uncheck if all are checked, otherwise check all
+        new_state = Qt.Unchecked if all_checked else Qt.Checked
+
+        # Apply the new state to all items
         for i in range(self.object_tree.topLevelItemCount()):
             item = self.object_tree.topLevelItem(i)
-            new_state = Qt.Checked if item.checkState(0) == Qt.Unchecked else Qt.Unchecked
             item.setCheckState(0, new_state)
+
 
     def toggle_star_items(self):
         """Toggle selection for items related to stars."""
@@ -8600,6 +8610,7 @@ class CalculationThread(QThread):
 
             # Calculate Local Sidereal Time
             lst = astropy_time.sidereal_time('apparent', self.longitude * u.deg)
+            self.lst_calculated.emit(f"Local Sidereal Time: {lst.to_string(unit=u.hour, precision=3)}")
 
             # Calculate lunar phase
             phase_percentage, phase_image_name = self.calculate_lunar_phase(astropy_time, location)
@@ -8639,19 +8650,35 @@ class CalculationThread(QThread):
 
             moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
 
+            before_or_after = []  # Initialize the list for "Before/After Transit"
+
             for _, row in df.iterrows():
                 sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
                 altaz = sky_coord.transform_to(altaz_frame)
-                altitudes.append(altaz.alt.deg)
-                azimuths.append(altaz.az.deg)
-                minutes_to_transit.append(abs((sky_coord.ra - lst).hour * 60))
-                degrees_from_moon.append(sky_coord.separation(moon).deg)
+                altitudes.append(round(altaz.alt.deg, 1))
+                azimuths.append(round(altaz.az.deg, 1))
 
-            # Add new calculated columns
+                # Calculate time difference to transit
+                ra = row['RA'] * u.deg.to(u.hourangle)  # Convert RA from degrees to hour angle
+                time_diff = ((ra - lst.hour) * u.hour) % (24 * u.hour)
+                minutes = round(time_diff.value * 60, 1)
+                if minutes > 720:
+                    minutes = 1440 - minutes
+                    before_or_after.append("After")
+                else:
+                    before_or_after.append("Before")
+                minutes_to_transit.append(minutes)
+
+                # Calculate angular distance from the moon
+                moon_sep = sky_coord.separation(moon).deg
+                degrees_from_moon.append(round(moon_sep, 2))
+
             df['Altitude'] = altitudes
             df['Azimuth'] = azimuths
             df['Minutes to Transit'] = minutes_to_transit
+            df['Before/After Transit'] = before_or_after
             df['Degrees from Moon'] = degrees_from_moon
+
 
             # Filter by minimum altitude and limit results
             df = df[df['Altitude'] >= self.min_altitude].head(self.object_limit)
@@ -8852,6 +8879,13 @@ class WhatsInMySky(QWidget):
         layout.addWidget(save_button, 12, 1)
         save_button.clicked.connect(self.save_to_csv)
 
+        # Settings button to change the number of objects displayed
+        settings_button = QPushButton()
+        settings_button.setIcon(QIcon(icon_path))  # Use icon_path for the button's icon
+        settings_button.setFixedWidth(fixed_width)
+        layout.addWidget(settings_button, 12, 2)
+        settings_button.clicked.connect(self.open_settings)        
+
         # Allow the main window to expand
         layout.setColumnStretch(2, 1)  # Makes the right column (with tree widget) expand as the window grows
 
@@ -8874,7 +8908,7 @@ class WhatsInMySky(QWidget):
         )
         self.calc_thread.calculation_complete.connect(self.on_calculation_complete)
         self.calc_thread.lunar_phase_calculated.connect(self.update_lunar_phase)
-        self.calc_thread.lst_calculated.connect(self.update_lst)
+        self.calc_thread.lst_calculated.connect(self.update_lst) 
         self.calc_thread.status_update.connect(self.update_status)
         self.update_status("Calculating...")
         self.calc_thread.start()
@@ -8912,7 +8946,7 @@ class WhatsInMySky(QWidget):
                     dec_display = sky_coord.dec.to_string(unit=u.deg, sep=':')
 
                 # Calculate Before/After Transit string
-                before_after = "Before" if row['Minutes to Transit'] <= 720 else "After"
+                before_after = row['Before/After Transit']
 
                 # Ensure Size (arcmin) displays correctly as a string
                 size_arcmin = row.get('Info', '')
