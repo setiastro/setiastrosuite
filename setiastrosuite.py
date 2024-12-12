@@ -53,12 +53,12 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess
 
 # Math functions
 from math import sqrt
@@ -122,7 +122,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.7.2')
+        self.setWindowTitle('Seti Astro\'s Suite V1.7.3')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -1630,37 +1630,187 @@ class CosmicClarityTab(QWidget):
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
         input_file_path = os.path.join(input_folder, os.path.basename(self.loaded_image_path))
-        batch_file_path = os.path.join(self.cosmic_clarity_folder, "run_setiastrocosmicclarity")
 
         # Save the current previewed image directly to the input folder
         self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
 
-        # Generate the batch or shell script
-        batch_script_path = self.create_batch_script(batch_file_path, exe_name, mode)
-        if not batch_script_path:
-            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
+        # After defining input_file_path:
+        self.current_input_file_path = input_file_path
+
+
+        cmd = self.build_command_args(exe_name, mode)
+        exe_path = cmd[0]
+        args = cmd[1:]  # Separate the executable from its arguments
+
+        # Use QProcess instead of subprocess
+        self.process_q = QProcess(self)
+        self.process_q.setProcessChannelMode(QProcess.MergedChannels)  # Combine stdout/stderr
+
+        # Connect signals
+        self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
+        self.process_q.finished.connect(self.qprocess_finished)
+
+        # Start the process
+        self.process_q.setProgram(exe_path)
+        self.process_q.setArguments(args)
+        self.process_q.start()
+
+        if not self.process_q.waitForStarted(3000):
+            QMessageBox.critical(self, "Error", "Failed to start the Cosmic Clarity process.")
             return
 
-        # Run the script
-        self.execute_script(batch_script_path)
+        # Set up file waiting worker and wait dialog as before
+        output_file_glob = os.path.join(
+            output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*"
+        )
+        self.wait_thread = WaitForFileWorker(output_file_glob, timeout=1800)
+        self.wait_thread.fileFound.connect(self.on_file_found)
+        self.wait_thread.error.connect(self.on_file_error)
+        self.wait_thread.cancelled.connect(self.on_file_cancelled)
 
-        # Wait for the output file with any of the possible extensions
-        output_file_glob = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*")
-        output_file_path = self.wait_for_output_file(output_file_glob)
-        
-        if output_file_path:
-            # Update loaded_image_path to the latest output file for subsequent processing
-            self.loaded_image_path = output_file_path
-            self.show_image(output_file_path)
-            self.store_processed_image() 
-            self.cleanup_files(input_file_path, output_file_path)
-            self.update_image_display()
-        else:
-            QMessageBox.critical(self, "Error", "Output file not found within timeout.")
+        self.wait_dialog = WaitDialog(self)
+        self.wait_dialog.cancelled.connect(self.on_wait_cancelled)
+        self.wait_dialog.setWindowModality(Qt.NonModal)
+        self.wait_dialog.show()
 
-        # Restore autostretch if it was originally enabled
+        self.wait_thread.start()
+
+        # Once the dialog is closed (either by file found, error, or cancellation), restore autostretch if needed
         if was_autostretch_enabled:
             self.auto_stretch_button.setChecked(True)
+
+
+    ########################################
+    # Below are the new helper slots (methods) to handle signals from worker and dialog.
+    ########################################
+
+    def qprocess_output(self):
+        if not hasattr(self, 'process_q') or self.process_q is None:
+            return
+        output = self.process_q.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("Progress:"):
+                # Extract the percentage and update the progress bar
+                parts = line.split()
+                # e.g., "Progress:", "50.00%", "(6/12", "chunks", "processed)"
+                percentage_str = parts[1].replace("%", "")
+                try:
+                    percentage = float(percentage_str)
+                    self.wait_dialog.progress_bar.setValue(int(percentage))
+                except ValueError:
+                    pass
+                # Don't append this line to the text box
+            else:
+                # Append all other lines to the text box
+                self.wait_dialog.append_output(line)
+
+
+
+
+    def qprocess_finished(self, exitCode, exitStatus):
+        """Slot called when the QProcess finishes."""
+        # You can handle any cleanup logic here if needed.
+        # The WaitForFileWorker will handle whether the output file was found or not.
+        pass
+
+    def read_process_output(self):
+        """Read output from the process and display it in the wait_dialog's text edit."""
+        if self.process is None:
+            return
+
+        # Read all available lines from stdout
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if line:
+                # Append the line to the wait_dialog's output text
+                self.wait_dialog.append_output(line)
+
+        # Check if process has finished
+        if self.process.poll() is not None:
+            # Process ended
+            self.output_timer.stop()
+            # You can handle any cleanup here if needed
+
+    def on_file_found(self, output_file_path):
+        self.wait_dialog.close()
+        self.wait_thread = None
+
+        if getattr(self, 'is_cropped_mode', False):
+            # Cropped image logic
+            processed_image, _, _, _ = load_image(output_file_path)
+            
+            # Apply autostretch if requested
+            if getattr(self, 'cropped_apply_autostretch', False):
+                if self.is_mono:
+                    processed_image = np.stack([stretch_mono_image(processed_image[:, :, 0], target_median=0.25)] * 3, axis=-1)
+                else:
+                    processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
+
+            # Update the preview dialog
+            self.preview_dialog.display_qimage(processed_image)
+
+            # Cleanup with known paths
+            input_file_path = os.path.join(self.cosmic_clarity_folder, "input", "cropped_preview_image.tiff")
+            self.cleanup_files(input_file_path, output_file_path)
+
+            # Reset cropped mode
+            self.is_cropped_mode = False
+        else:
+            # Normal mode logic
+            processed_image_path = output_file_path
+            self.loaded_image_path = processed_image_path
+
+            # Show the processed image
+            self.show_image(processed_image_path)
+
+            # Store the image in memory
+            self.store_processed_image()
+
+            # IMPORTANT: Use the originally stored input file path, not derived from self.loaded_image_path
+            # Before starting cosmic clarity, store:
+            # self.current_input_file_path = input_file_path (in run_cosmic_clarity)
+
+            input_file_path = self.current_input_file_path
+            self.cleanup_files(input_file_path, processed_image_path)
+
+            self.update_image_display()
+
+
+
+
+    def on_file_error(self, msg):
+        # File not found in time
+        self.wait_dialog.close()
+        self.wait_thread = None
+        QMessageBox.critical(self, "Error", msg)
+
+
+    def on_file_cancelled(self):
+        # The worker was stopped before finding a file
+        self.wait_dialog.close()
+        self.wait_thread = None
+        QMessageBox.information(self, "Cancelled", "File waiting was cancelled.")
+
+
+    def on_wait_cancelled(self):
+        # User clicked cancel in the wait dialog
+        if self.wait_thread and self.wait_thread.isRunning():
+            self.wait_thread.stop()
+
+        # If we have a QProcess reference, terminate it
+        if hasattr(self, 'process_q') and self.process_q is not None:
+            self.process_q.kill()  # or self.process_q.terminate()
+
+        QMessageBox.information(self, "Cancelled", "Operation was cancelled by the user.")
+
+
 
 
     def run_cosmic_clarity_on_cropped(self, cropped_image, apply_autostretch=False):
@@ -1694,103 +1844,72 @@ class CosmicClarityTab(QWidget):
         # Save the 32-bit floating-point cropped image to the input folder
         save_image(cropped_image_32bit, input_file_path, "tiff", "32-bit floating point", self.original_header, self.is_mono)
 
-        # Generate the batch or shell script
-        batch_script_path = self.create_batch_script(
-            os.path.join(self.cosmic_clarity_folder, "run_setiastrocosmicclarity"),
-            exe_name,
-            mode
-        )
-        if not batch_script_path:
-            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
+        # Build command args (no batch script)
+        cmd = self.build_command_args(exe_name, mode)
+
+        # Set cropped mode and store parameters needed after file is found
+        self.is_cropped_mode = True
+        self.cropped_apply_autostretch = apply_autostretch
+        self.cropped_output_suffix = output_suffix
+
+        # Use QProcess (already defined in run_cosmic_clarity)
+        self.process_q = QProcess(self)
+        self.process_q.setProcessChannelMode(QProcess.MergedChannels)
+        self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
+        self.process_q.finished.connect(self.qprocess_finished)
+
+        exe_path = cmd[0]
+        args = cmd[1:]
+        self.process_q.setProgram(exe_path)
+        self.process_q.setArguments(args)
+        self.process_q.start()
+
+        if not self.process_q.waitForStarted(3000):
+            QMessageBox.critical(self, "Error", "Failed to start the Cosmic Clarity process.")
             return
 
-        # Run the script
-        self.execute_script(batch_script_path)
-
-        # Wait for the output file with any of the possible extensions
+        # Set up wait thread for cropped file
         output_file_glob = os.path.join(output_folder, "cropped_preview_image" + output_suffix + ".*")
-        output_file_path = self.wait_for_output_file(output_file_glob)
+        self.wait_thread = WaitForFileWorker(output_file_glob, timeout=1800)
+        self.wait_thread.fileFound.connect(self.on_file_found)
+        self.wait_thread.error.connect(self.on_file_error)
+        self.wait_thread.cancelled.connect(self.on_file_cancelled)
+
+        # Use the same WaitDialog
+        self.wait_dialog = WaitDialog(self)
+        self.wait_dialog.cancelled.connect(self.on_wait_cancelled)
+        self.wait_dialog.setWindowModality(Qt.NonModal)
+        self.wait_dialog.show()
+
+        self.wait_thread.start()
         
-        if output_file_path:
-            # Load the processed image as a numpy array
-            processed_image, _, _, _ = load_image(output_file_path)
-            
-            # Apply autostretch if requested
-            if apply_autostretch:
-                if self.is_mono:
-                    processed_image = np.stack([stretch_mono_image(processed_image[:, :, 0], target_median=0.25)] * 3, axis=-1)
-                else:
-                    processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
+    def build_command_args(self, exe_name, mode):
+        """Build the command line arguments for Cosmic Clarity without using a batch file."""
+        exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe" if os.name == 'nt' else exe_name)
+        cmd = [exe_path]
 
-            # Update the preview dialog with the processed image
-            self.preview_dialog.display_qimage(processed_image)  # Use the display_qimage function to show the processed image
+        # Add sharpening or denoising arguments
+        if mode == "sharpen":
+            psf_value = self.get_psf_value()
+            cmd += [
+                "--sharpening_mode", self.sharpen_mode_dropdown.currentText(),
+                "--stellar_amount", f"{self.stellar_amount_slider.value() / 100:.2f}",
+                "--nonstellar_strength", f"{psf_value:.1f}",
+                "--nonstellar_amount", f"{self.nonstellar_amount_slider.value() / 100:.2f}"
+            ]
+            if self.sharpen_channels_dropdown.currentText() == "Yes":
+                cmd.append("--sharpen_channels_separately")
+        elif mode == "denoise":
+            cmd += [
+                "--denoise_strength", f"{self.denoise_strength_slider.value() / 100:.2f}",
+                "--denoise_mode", self.denoise_mode_dropdown.currentText()
+            ]
 
-            self.cleanup_files(input_file_path, output_file_path)
-        else:
-            QMessageBox.critical(self, "Error", "Output file not found within timeout.")
+        # GPU option
+        if self.gpu_dropdown.currentText() == "No":
+            cmd.append("--disable_gpu")
 
-
-
-    def create_batch_script(self, batch_file_path, exe_name, mode):
-        """Generate the batch or shell script to run Cosmic Clarity."""
-        print("Running Cosmic Clarity on cropped image")  # Debug print
-        # Ensure correct file extension based on the operating system
-        if os.name == 'nt':  # Windows
-            batch_file_path += ".bat"
-            exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe")
-            batch_content = f'@echo off\ncd /d "{self.cosmic_clarity_folder}"\nstart "" "{exe_path}" '
-
-            # Add sharpening or denoising arguments
-            if mode == "sharpen":
-                psf_value = self.get_psf_value()
-                batch_content += (
-                    f'--sharpening_mode "{self.sharpen_mode_dropdown.currentText()}" '
-                    f'--stellar_amount {self.stellar_amount_slider.value() / 100:.2f} '
-                    f'--nonstellar_strength {psf_value:.1f} '
-                    f'--nonstellar_amount {self.nonstellar_amount_slider.value() / 100:.2f} '
-                    f'{"--sharpen_channels_separately" if self.sharpen_channels_dropdown.currentText() == "Yes" else ""} '
-                )
-            elif mode == "denoise":
-                batch_content += (
-                    f'--denoise_strength {self.denoise_strength_slider.value() / 100:.2f} '
-                    f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
-                )
-
-            batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
-
-        elif os.name == 'posix':  # macOS/Linux
-            batch_file_path += ".sh"
-            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
-            batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"{exe_path}" '
-
-            # Add sharpening or denoising arguments
-            if mode == "sharpen":
-                psf_value = self.get_psf_value()
-                batch_content += (
-                    f'--sharpening_mode "{self.sharpen_mode_dropdown.currentText()}" '
-                    f'--stellar_amount {self.stellar_amount_slider.value() / 100:.2f} '
-                    f'--nonstellar_strength {psf_value:.1f} '
-                    f'--nonstellar_amount {self.nonstellar_amount_slider.value() / 100:.2f} '
-                    f'{"--sharpen_channels_separately" if self.sharpen_channels_dropdown.currentText() == "Yes" else ""} '
-                )
-            elif mode == "denoise":
-                batch_content += (
-                    f'--denoise_strength {self.denoise_strength_slider.value() / 100:.2f} '
-                    f'--denoise_mode "{self.denoise_mode_dropdown.currentText()}" '
-                )
-
-            batch_content += f'{"--disable_gpu" if self.gpu_dropdown.currentText() == "No" else ""}\n'
-
-        # Write the script to the batch file
-        try:
-            with open(batch_file_path, 'w') as batch_file:
-                batch_file.write(batch_content)
-            print(f"Batch/Shell script created: {batch_file_path}")
-            return batch_file_path
-        except Exception as e:
-            print(f"Error creating batch file: {e}")
-            return None
-
+        return cmd
 
     def save_processed_image(self):
         """Save the current displayed image as the processed image."""
@@ -1833,13 +1952,6 @@ class CosmicClarityTab(QWidget):
             QMessageBox.information(self, "Success", f"Image saved successfully at: {save_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
-
-    def execute_script(self, script_path):
-        """Execute the batch or shell script."""
-        if os.name == 'nt':  # Windows
-            subprocess.Popen(["cmd.exe", "/c", script_path])
-        else:  # macOS/Linux
-            subprocess.Popen(["/bin/sh", script_path])
 
     def wait_for_output_file(self, output_file_glob, timeout=1800):
         """Wait for the output file with any extension within the specified timeout."""
@@ -2100,6 +2212,65 @@ class PreviewDialog(QDialog):
         """Handle dialog close event if any cleanup is necessary."""
         self.dragging = False
         event.accept()
+
+class WaitDialog(QDialog):
+    cancelled = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Processing...")
+        
+        self.layout = QVBoxLayout()
+        
+        self.label = QLabel("Processing, please wait...")
+        self.layout.addWidget(self.label)
+        
+        # Add a QTextEdit to show process output
+        self.output_text_edit = QTextEdit()
+        self.output_text_edit.setReadOnly(True)
+        self.layout.addWidget(self.output_text_edit)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.layout.addWidget(self.progress_bar)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.cancelled.emit)
+        self.layout.addWidget(cancel_button)
+        
+        self.setLayout(self.layout)
+
+    def append_output(self, text):
+        self.output_text_edit.append(text)
+
+
+class WaitForFileWorker(QThread):
+    fileFound = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, output_file_glob, timeout=1800, parent=None):
+        super().__init__(parent)
+        self.output_file_glob = output_file_glob
+        self.timeout = timeout
+        self._running = True
+
+    def run(self):
+        start_time = time.time()
+        while self._running and (time.time() - start_time < self.timeout):
+            matching_files = glob.glob(self.output_file_glob)
+            if matching_files:
+                self.fileFound.emit(matching_files[0])
+                return
+            time.sleep(1)
+        if self._running:
+            self.error.emit("Output file not found within timeout.")
+        else:
+            # Thread stopped by user
+            self.cancelled.emit()
+
+    def stop(self):
+        self._running = False
 
 class CosmicClaritySatelliteTab(QWidget):
     def __init__(self):
@@ -2944,7 +3115,7 @@ class StatisticalStretchTab(QWidget):
 
 
     def openFileDialog(self):
-        self.filename, _ = QFileDialog.getOpenFileName(self, 'Open Image File', '', 'Images (*.png *.tiff *.tif *.fits *.fit);;All Files (*)')
+        self.filename, _ = QFileDialog.getOpenFileName(self, 'Open Image File', '', 'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)')
         if self.filename:
             self.fileLabel.setText(self.filename)
             # Unpack all four values returned by load_image
@@ -5702,6 +5873,33 @@ class CustomGraphicsView(QGraphicsView):
             self.parent.main_scene.clear()
             self.parent.main_scene.addPixmap(self.parent.main_image)
 
+    def delete_selected_object(self):
+        if self.selected_object is None:
+            self.parent.status_label.setText("No object selected to delete.")
+            return
+
+        # Remove the selected object from the results list
+        self.parent.results = [obj for obj in self.parent.results if obj != self.selected_object]
+
+        # Remove the corresponding row from the TreeBox
+        for i in range(self.parent.results_tree.topLevelItemCount()):
+            item = self.parent.results_tree.topLevelItem(i)
+            if item.text(2) == self.selected_object["name"]:  # Match the name in the third column
+                self.parent.results_tree.takeTopLevelItem(i)
+                break
+
+        # Clear the selection
+        self.selected_object = None
+        self.parent.results_tree.clearSelection()
+
+        # Redraw the main and mini previews without the deleted marker
+        self.draw_query_results()
+        self.update_mini_preview()
+
+        # Update the status label
+        self.parent.status_label.setText("Selected object and marker removed.")
+
+
 
     def scrollContentsBy(self, dx, dy):
         """Called whenever the main preview scrolls, ensuring the green box updates in the mini preview."""
@@ -6580,6 +6778,11 @@ class MainWindow(QMainWindow):
         self.clear_annotations_button.setIcon(QApplication.style().standardIcon(QStyle.SP_TrashIcon))  # Trash icon
         self.clear_annotations_button.clicked.connect(self.main_preview.clear_annotations)  # Connect to clear_annotations in CustomGraphicsView
 
+        # Delete Selected Object button
+        self.delete_selected_object_button = QPushButton("Delete Selected Object")
+        self.delete_selected_object_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogCloseButton))  # Trash icon
+        self.delete_selected_object_button.clicked.connect(self.main_preview.delete_selected_object)  # Connect to delete_selected_object in CustomGraphicsView
+
         # Add the instruction label to the top of the grid layout (row 0, spanning multiple columns)
         annotation_tools_layout.addWidget(annotation_instruction_label, 0, 0, 1, 4)  # Span 5 columns to center it
 
@@ -6594,6 +6797,7 @@ class MainWindow(QMainWindow):
         annotation_tools_layout.addWidget(self.font_button, 4, 1)
         annotation_tools_layout.addWidget(self.undo_button, 1, 4)
         annotation_tools_layout.addWidget(self.clear_annotations_button, 2, 4)
+        annotation_tools_layout.addWidget(self.delete_selected_object_button, 3, 4)
 
         self.annotation_tools_section.setVisible(False)  # Initially hidden
         right_panel.addWidget(self.annotation_tools_section)
