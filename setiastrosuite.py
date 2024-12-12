@@ -1616,15 +1616,35 @@ class CosmicClarityTab(QWidget):
         if was_autostretch_enabled:
             self.auto_stretch_button.setChecked(False)
 
-        # Determine the correct executable and output filename suffix based on the selected mode
+        # Determine mode from the radio buttons
         if self.sharpen_radio.isChecked():
-            exe_name = "setiastrocosmicclarity"  # Sharpening executable
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "setiastrocosmicclarity_denoise"  # Denoising executable
             mode = "denoise"
             output_suffix = "_denoised"
+
+        # Determine the correct executable name based on platform and mode
+        if os.name == 'nt':
+            # Windows
+            if mode == "sharpen":
+                exe_name = "SetiAstroCosmicClarity.exe"
+            else:
+                exe_name = "SetiAstroCosmicClarity_denoise.exe"
+        else:
+            # macOS or Linux (posix)
+            if sys.platform == "darwin":
+                # macOS
+                if mode == "sharpen":
+                    exe_name = "SetiAstroCosmicClaritymac"
+                else:
+                    exe_name = "SetiAstroCosmicClarity_denoisemac"
+            else:
+                # Linux
+                if mode == "sharpen":
+                    exe_name = "SetiAstroCosmicClarity"
+                else:
+                    exe_name = "SetiAstroCosmicClarity_denoise"
 
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
@@ -1826,15 +1846,35 @@ class CosmicClarityTab(QWidget):
         # Convert the cropped image to 32-bit floating point format
         cropped_image_32bit = cropped_image.astype(np.float32) / np.max(cropped_image)  # Normalize if needed
 
-        # Determine the correct executable and output filename suffix based on the selected mode
+        # Determine mode and suffix
         if self.sharpen_radio.isChecked():
-            exe_name = "setiastrocosmicclarity"
             mode = "sharpen"
             output_suffix = "_sharpened"
         else:
-            exe_name = "setiastrocosmicclarity_denoise"
             mode = "denoise"
             output_suffix = "_denoised"
+
+        # Determine the correct executable name based on platform and mode
+        if os.name == 'nt':
+            # Windows
+            if mode == "sharpen":
+                exe_name = "SetiAstroCosmicClarity.exe"
+            else:
+                exe_name = "SetiAstroCosmicClarity_denoise.exe"
+        else:
+            # macOS or Linux (posix)
+            if sys.platform == "darwin":
+                # macOS
+                if mode == "sharpen":
+                    exe_name = "SetiAstroCosmicClaritymac"
+                else:
+                    exe_name = "SetiAstroCosmicClarity_denoisemac"
+            else:
+                # Linux
+                if mode == "sharpen":
+                    exe_name = "SetiAstroCosmicClarity"
+                else:
+                    exe_name = "SetiAstroCosmicClarity_denoise"
 
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
@@ -1885,7 +1925,8 @@ class CosmicClarityTab(QWidget):
         
     def build_command_args(self, exe_name, mode):
         """Build the command line arguments for Cosmic Clarity without using a batch file."""
-        exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe" if os.name == 'nt' else exe_name)
+        # exe_name is now fully resolved (including .exe on Windows if needed)
+        exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
         cmd = [exe_path]
 
         # Add sharpening or denoising arguments
