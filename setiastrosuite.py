@@ -46,6 +46,8 @@ import tifffile as tiff
 import pytz
 from astropy.utils.data import conf
 
+import rawpy
+
 # PyQt5 imports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
@@ -122,7 +124,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.7.3')
+        self.setWindowTitle('Seti Astro\'s Suite V1.7.4')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -2500,7 +2502,7 @@ class CosmicClaritySatelliteTab(QWidget):
         if not self.input_folder:
             return
         for file_name in os.listdir(self.input_folder):
-            if file_name.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf')):
+            if file_name.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 QTreeWidgetItem(self.input_files_tree, [file_name])
 
     def refresh_output_files(self):
@@ -2509,7 +2511,7 @@ class CosmicClaritySatelliteTab(QWidget):
         if not self.output_folder:
             return
         for file_name in os.listdir(self.output_folder):
-            if file_name.lower().endswith(('.tif', '.tiff', '.png', '.fits', '.fit', '.xisf')):
+            if file_name.lower().endswith(('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 QTreeWidgetItem(self.output_files_tree, [file_name])
 
 
@@ -2556,7 +2558,7 @@ class CosmicClaritySatelliteTab(QWidget):
 
     def process_single_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "", "Image Files (*.png *.jpg *.tif *.tiff *.fits *.fit *.jpeg *.xisf)"
+            self, "Select Image", "", "Image Files ('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')"
         )
         if not file_path:
             QMessageBox.warning(self, "Warning", "No file selected.")
@@ -2916,14 +2918,23 @@ class ImagePreviewDialog(QDialog):
 
         if self.autostretch_enabled:
             if self.is_mono:  # Apply mono stretch
-                stretched_mono = stretch_mono_image(self.np_image, target_median)
-                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
+                if self.np_image.ndim == 2:  # Ensure single-channel mono
+                    stretched_mono = stretch_mono_image(self.np_image, target_median)
+                    display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
+                else:
+                    raise ValueError(f"Unexpected mono image shape: {self.np_image.shape}")
             else:  # Apply color stretch
                 display_image = stretch_color_image(self.np_image, target_median, linked=False)
         else:
-            display_image = self.np_image  # Use original image if autostretch is off
+            if self.is_mono and self.np_image.ndim == 2:
+                display_image = np.stack([self.np_image] * 3, axis=-1)  # Convert to RGB for display
+            else:
+                display_image = self.np_image  # Use original image if autostretch is off
 
+        print(f"Debug: Display image shape before QImage conversion: {display_image.shape}")
         self.display_qimage(display_image)
+
+
 
     def zoom_in(self):
         """Increase the zoom factor and refresh the display."""
@@ -4955,6 +4966,55 @@ def load_image(filename):
             else:
                 raise ValueError("Unsupported XISF image dimensions!")
 
+        elif filename.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            print(f"Loading RAW file: {filename}")
+            with rawpy.imread(filename) as raw:
+                # Get the raw Bayer data
+                bayer_image = raw.raw_image_visible.astype(np.float32)
+                print(f"Raw Bayer image dtype: {bayer_image.dtype}, min: {bayer_image.min()}, max: {bayer_image.max()}")
+
+                # Ensure Bayer image is normalized
+                bayer_image /= bayer_image.max()
+
+                if bayer_image.ndim == 2:
+                    image = bayer_image  # Keep as 2D mono image
+                    is_mono = True
+                elif bayer_image.ndim == 3 and bayer_image.shape[2] == 3:
+                    image = bayer_image  # Already RGB
+                    is_mono = False
+                else:
+                    raise ValueError(f"Unexpected RAW Bayer image shape: {bayer_image.shape}")
+                bit_depth = "16-bit"  # Assuming 16-bit raw data
+                is_mono = True
+
+                # Populate `original_header` with RAW metadata
+                original_header_dict = {
+                    'CAMERA': raw.camera_whitebalance[0] if raw.camera_whitebalance else 'Unknown',
+                    'EXPTIME': raw.shutter if hasattr(raw, 'shutter') else 0.0,
+                    'ISO': raw.iso_speed if hasattr(raw, 'iso_speed') else 0,
+                    'FOCAL': raw.focal_len if hasattr(raw, 'focal_len') else 0.0,
+                    'DATE': raw.timestamp if hasattr(raw, 'timestamp') else 'Unknown',
+                }
+
+                # Extract CFA pattern
+                cfa_pattern = raw.raw_colors_visible
+                cfa_mapping = {
+                    0: 'R',  # Red
+                    1: 'G',  # Green
+                    2: 'B',  # Blue
+                }
+                cfa_description = ''.join([cfa_mapping.get(color, '?') for color in cfa_pattern.flatten()[:4]])
+
+                # Add CFA pattern to header
+                original_header_dict['CFA'] = (cfa_description, 'Color Filter Array pattern')
+
+                # Convert original_header_dict to fits.Header
+                original_header = fits.Header()
+                for key, value in original_header_dict.items():
+                    original_header[key] = value
+
+                print(f"RAW file loaded with CFA pattern: {cfa_description}")
+
         elif filename.lower().endswith('.png'):
             print(f"Loading PNG file: {filename}")
             img = Image.open(filename)
@@ -5036,46 +5096,64 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                 raise ValueError("Unsupported bit depth for TIFF!")
             print(f"Saved {bit_depth} TIFF image to: {filename}")
 
-        elif original_format in ['fits', 'fit']:
-            # Handle FITS files
-            if is_mono:
-                # Handle mono images
-                mono_image = img_array[:, :, 0] if img_array.ndim == 3 else img_array
-                if bit_depth == "8-bit":
-                    img_array_fits = (mono_image * 255).astype(np.uint8)
-                elif bit_depth == "16-bit":
-                    img_array_fits = (mono_image * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    img_array_fits = (mono_image * 4294967295).astype(np.uint32)
-                elif bit_depth == "32-bit floating point":
-                    img_array_fits = mono_image.astype(np.float32)
-                else:
-                    raise ValueError("Unsupported bit depth for mono FITS!")
-                hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
+        elif original_format in ['fits', 'fit', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
+            # Save as FITS file with metadata
+            print("RAW formats are not writable. Saving as FITS instead.")
+            filename = filename.rsplit('.', 1)[0] + ".fits"
+
+            if original_header is not None:
+                # Convert original_header (dictionary) to astropy Header object
+                fits_header = fits.Header()
+                for key, value in original_header.items():
+                    fits_header[key] = value
+                fits_header['BSCALE'] = 1.0  # Scaling factor
+                fits_header['BZERO'] = 0.0   # Offset for brightness    
+
+                if is_mono:  # Grayscale FITS
+                    if bit_depth == "16-bit":
+                        img_array_fits = (img_array[:, :, 0] * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        bzero = fits_header.get('BZERO', 0)
+                        bscale = fits_header.get('BSCALE', 1)
+                        img_array_fits = (img_array[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                    else:  # 32-bit float
+                        img_array_fits = img_array[:, :, 0].astype(np.float32)
+
+                    # Update header for a 2D (grayscale) image
+                    fits_header['NAXIS'] = 2
+                    fits_header['NAXIS1'] = img_array.shape[1]  # Width
+                    fits_header['NAXIS2'] = img_array.shape[0]  # Height
+                    fits_header.pop('NAXIS3', None)  # Remove if present
+
+                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
+                else:  # RGB FITS
+                    img_array_transposed = np.transpose(img_array, (2, 0, 1))  # Channels, Height, Width
+                    if bit_depth == "16-bit":
+                        img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
+                    elif bit_depth == "32-bit unsigned":
+                        bzero = fits_header.get('BZERO', 0)
+                        bscale = fits_header.get('BSCALE', 1)
+                        img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
+                        fits_header['BITPIX'] = -32
+                    else:  # Default to 32-bit float
+                        img_array_fits = img_array_transposed.astype(np.float32)
+
+                    # Update header for a 3D (RGB) image
+                    fits_header['NAXIS'] = 3
+                    fits_header['NAXIS1'] = img_array_transposed.shape[2]  # Width
+                    fits_header['NAXIS2'] = img_array_transposed.shape[1]  # Height
+                    fits_header['NAXIS3'] = img_array_transposed.shape[0]  # Channels
+
+                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
+
+                # Write the FITS file
+                try:
+                    hdu.writeto(filename, overwrite=True)
+                    print(f"RAW processed and saved as FITS to: {filename}")
+                except Exception as e:
+                    print(f"Error saving FITS file: {e}")
             else:
-                # Handle RGB or multi-channel images
-                img_array_fits = np.transpose(img_array, (2, 0, 1))  # (channels, height, width)
-                if bit_depth == "8-bit":
-                    img_array_fits = (img_array_fits * 255).astype(np.uint8)
-                elif bit_depth == "16-bit":
-                    img_array_fits = (img_array_fits * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    img_array_fits = (img_array_fits * 4294967295).astype(np.uint32)
-                elif bit_depth == "32-bit floating point":
-                    img_array_fits = img_array_fits.astype(np.float32)
-                else:
-                    raise ValueError("Unsupported bit depth for RGB FITS!")
-
-                # Update header for multi-channel FITS
-                if original_header:
-                    original_header['NAXIS'] = 3
-                    original_header['NAXIS1'] = img_array_fits.shape[2]  # Width
-                    original_header['NAXIS2'] = img_array_fits.shape[1]  # Height
-                    original_header['NAXIS3'] = img_array_fits.shape[0]  # Channels
-                hdu = fits.PrimaryHDU(img_array_fits, header=original_header)
-
-            hdu.writeto(filename, overwrite=True)
-            print(f"Saved {bit_depth} FITS image to: {filename}")
+                raise ValueError("Original header is required for FITS format!")
 
         elif original_format == 'xisf':
             try:
