@@ -8479,7 +8479,68 @@ class MainWindow(QMainWindow):
             self.update_object_count()
 
         except Exception as e:
-            QMessageBox.critical(self, "Query Failed", f"Failed to query Simbad: {str(e)}")
+            # Fallback to legacy region query if TAP fails
+            try:
+                QMessageBox.warning(self, "Query Failed", f"TAP service failed, falling back to legacy region query. Error: {str(e)}")
+                
+                # Legacy region query fallback
+                coord = SkyCoord(ra_center, dec_center, unit="deg")
+                legacy_result = Simbad.query_region(coord, radius=radius_deg * u.deg)
+
+                if legacy_result is None or len(legacy_result) == 0:
+                    QMessageBox.information(self, "No Results", "No objects found in the specified area (fallback query).")
+                    return
+
+                # Process legacy query results
+                query_results = []
+                self.results_tree.clear()
+
+                for row in legacy_result:
+                    try:
+                        # Convert RA/Dec to degrees
+                        coord = SkyCoord(row["RA"], row["DEC"], unit=(u.hourangle, u.deg))
+                        ra = coord.ra.deg  # RA in degrees
+                        dec = coord.dec.deg  # Dec in degrees
+                    except Exception as coord_error:
+                        print(f"Failed to convert RA/Dec for {row['MAIN_ID']}: {coord_error}")
+                        continue  # Skip this object if conversion fails
+
+                    # Retrieve other data fields
+                    main_id = row["MAIN_ID"]
+                    short_type = row["OTYPE"]
+                    long_type = otype_long_name_lookup.get(short_type, short_type)
+
+                    # Fallback does not provide some fields, so we use placeholders
+                    diameter = "N/A"
+                    redshift = "N/A"
+                    comoving_distance = "N/A"
+
+                    # Add to TreeWidget for display
+                    item = QTreeWidgetItem([
+                        f"{ra:.6f}", f"{dec:.6f}", main_id, diameter, short_type, long_type, redshift, comoving_distance
+                    ])
+                    self.results_tree.addTopLevelItem(item)
+
+                    # Append full details to query_results
+                    query_results.append({
+                        'ra': ra,  # Ensure degrees format
+                        'dec': dec,  # Ensure degrees format
+                        'name': main_id,
+                        'diameter': diameter,
+                        'short_type': short_type,
+                        'long_type': long_type,
+                        'redshift': redshift,
+                        'comoving_distance': comoving_distance,
+                        'source': "Simbad (Legacy)"
+                    })
+
+                # Pass fallback results to graphics and updates
+                self.main_preview.set_query_results(query_results)
+                self.query_results = query_results  # Keep a reference to results in MainWindow
+                self.update_object_count()
+
+            except Exception as fallback_error:
+                QMessageBox.critical(self, "Query Failed", f"Both TAP and fallback queries failed: {str(fallback_error)}")
 
     def perform_deep_vizier_search(self):
         """Perform a Vizier catalog search and parse results based on catalog-specific fields, with duplicate handling."""
