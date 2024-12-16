@@ -124,7 +124,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.7.6')
+        self.setWindowTitle('Seti Astro\'s Suite V1.7.7')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -1560,7 +1560,7 @@ class CosmicClarityTab(QWidget):
         
         # Call save_image with the correct format
         save_image(self.image, file_path, original_format, self.bit_depth, self.original_header, self.is_mono)
-        print(f"Saved input image to {file_path}")
+
 
     def update_ui_for_mode(self):
         # Show/hide sharpening controls based on mode
@@ -1651,13 +1651,15 @@ class CosmicClarityTab(QWidget):
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
-        input_file_path = os.path.join(input_folder, os.path.basename(self.loaded_image_path))
+        input_extension = os.path.splitext(self.loaded_image_path)[-1].lower() 
+        input_file_path = os.path.join(input_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{input_extension}")
 
         # Save the current previewed image directly to the input folder
         self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
 
         # After defining input_file_path:
         self.current_input_file_path = input_file_path
+
 
 
         cmd = self.build_command_args(exe_name, mode)
@@ -1718,14 +1720,12 @@ class CosmicClarityTab(QWidget):
             if line.startswith("Progress:"):
                 # Extract the percentage and update the progress bar
                 parts = line.split()
-                # e.g., "Progress:", "50.00%", "(6/12", "chunks", "processed)"
                 percentage_str = parts[1].replace("%", "")
                 try:
                     percentage = float(percentage_str)
                     self.wait_dialog.progress_bar.setValue(int(percentage))
                 except ValueError:
                     pass
-                # Don't append this line to the text box
             else:
                 # Append all other lines to the text box
                 self.wait_dialog.append_output(line)
@@ -1735,9 +1735,7 @@ class CosmicClarityTab(QWidget):
 
     def qprocess_finished(self, exitCode, exitStatus):
         """Slot called when the QProcess finishes."""
-        # You can handle any cleanup logic here if needed.
-        # The WaitForFileWorker will handle whether the output file was found or not.
-        pass
+        pass  # Handle cleanup logic if needed
 
     def read_process_output(self):
         """Read output from the process and display it in the wait_dialog's text edit."""
@@ -1795,11 +1793,9 @@ class CosmicClarityTab(QWidget):
             # Store the image in memory
             self.store_processed_image()
 
-            # IMPORTANT: Use the originally stored input file path, not derived from self.loaded_image_path
-            # Before starting cosmic clarity, store:
-            # self.current_input_file_path = input_file_path (in run_cosmic_clarity)
-
+            # Use the stored input file path
             input_file_path = self.current_input_file_path
+
             self.cleanup_files(input_file_path, processed_image_path)
 
             self.update_image_display()
@@ -2017,12 +2013,17 @@ class CosmicClarityTab(QWidget):
     def cleanup_files(self, input_file_path, output_file_path):
         """Delete input and output files after processing."""
         try:
-            if os.path.exists(input_file_path):
+            if input_file_path and os.path.exists(input_file_path):
                 os.remove(input_file_path)
                 print(f"Deleted input file: {input_file_path}")
-            if os.path.exists(output_file_path):
+            else:
+                print(f"")
+
+            if output_file_path and os.path.exists(output_file_path):
                 os.remove(output_file_path)
                 print(f"Deleted output file: {output_file_path}")
+            else:
+                print(f"")
         except Exception as e:
             print(f"Failed to delete files: {e}")
 
@@ -5122,8 +5123,9 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             print(f"Saved {bit_depth} TIFF image to: {filename}")
 
         elif original_format in ['fits', 'fit']:
-            # Save as FITS file with metadata
-            filename = filename.rsplit('.', 1)[0] + ".fits"
+            # Preserve the original extension
+            if not filename.lower().endswith(f".{original_format}"):
+                filename = filename.rsplit('.', 1)[0] + f".{original_format}"
 
             if original_header is not None:
                 # Convert original_header (dictionary) to astropy Header object
@@ -5133,15 +5135,16 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                 fits_header['BSCALE'] = 1.0  # Scaling factor
                 fits_header['BZERO'] = 0.0   # Offset for brightness    
 
-                if is_mono:  # Grayscale FITS
+                # Handle mono (2D) images
+                if is_mono or img_array.ndim == 2:
                     if bit_depth == "16-bit":
-                        img_array_fits = (img_array[:, :, 0] * 65535).astype(np.uint16)
+                        img_array_fits = (img_array * 65535).astype(np.uint16)
                     elif bit_depth == "32-bit unsigned":
                         bzero = fits_header.get('BZERO', 0)
                         bscale = fits_header.get('BSCALE', 1)
-                        img_array_fits = (img_array[:, :, 0].astype(np.float32) * bscale + bzero).astype(np.uint32)
+                        img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
                     else:  # 32-bit float
-                        img_array_fits = img_array[:, :, 0].astype(np.float32)
+                        img_array_fits = img_array.astype(np.float32)
 
                     # Update header for a 2D (grayscale) image
                     fits_header['NAXIS'] = 2
@@ -5150,7 +5153,9 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                     fits_header.pop('NAXIS3', None)  # Remove if present
 
                     hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
-                else:  # RGB FITS
+
+                # Handle RGB (3D) images
+                else:
                     img_array_transposed = np.transpose(img_array, (2, 0, 1))  # Channels, Height, Width
                     if bit_depth == "16-bit":
                         img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
@@ -5173,7 +5178,7 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                 # Write the FITS file
                 try:
                     hdu.writeto(filename, overwrite=True)
-                    print(f"RAW processed and saved as FITS to: {filename}")
+                    print(f"Saved as {original_format.upper()} to: {filename}")
                 except Exception as e:
                     print(f"Error saving FITS file: {e}")
             else:
