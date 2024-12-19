@@ -65,7 +65,7 @@ from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCore
 
 # Math functions
 from math import sqrt
-import colour
+
 
 
 class AstroEditingSuite(QWidget):
@@ -3799,7 +3799,7 @@ class FullCurvesTab(QWidget):
         if self.image is None:
             return
         curve_mode = self.curveModeGroup.checkedButton().text()
-        lut = self.curveEditor.getLUT()
+        curve_func = self.curveEditor.getCurveFunction()
 
         # Determine source image based on user choice
         if self.applyOriginalRadio.isChecked():
@@ -3812,13 +3812,15 @@ class FullCurvesTab(QWidget):
         self.spinnerLabel.setAlignment(Qt.AlignCenter)
         self.spinnerMovie = QMovie(resource_path("spinner.gif"))
         self.spinnerLabel.setMovie(self.spinnerMovie)
-        self.spinnerLabel.setGeometry( (self.width() - 64)//2, (self.height() - 64)//2, 64, 64 )
+        self.spinnerLabel.setGeometry((self.width() - 64)//2, (self.height() - 64)//2, 64, 64)
         self.spinnerLabel.show()
         self.spinnerMovie.start()
 
-        self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, lut)
+        # Pass curve_func instead of lut
+        self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, curve_func)
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
+
 
     def finishProcessing(self, adjusted_image):
         # Hide the spinner
@@ -3901,10 +3903,10 @@ class FullCurvesTab(QWidget):
 
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, curve_editor, x, y, color=Qt.green, lock_axis=None, position_type=None):
-        super().__init__(-5, -5, 10, 10)  # Centered ellipse
+        super().__init__(-5, -5, 10, 10)
         self.curve_editor = curve_editor
         self.lock_axis = lock_axis
-        self.position_type = position_type  # 'bottom_left' or 'top_right' or None for control points
+        self.position_type = position_type
         self.setBrush(QBrush(color))
         self.setFlags(QGraphicsEllipseItem.ItemIsMovable | QGraphicsEllipseItem.ItemSendsScenePositionChanges)
         self.setCursor(Qt.OpenHandCursor)
@@ -3913,12 +3915,11 @@ class DraggablePoint(QGraphicsEllipseItem):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.RightButton:
-            # Right-click: remove this point if it's a control point
             if self in self.curve_editor.control_points:
                 self.curve_editor.control_points.remove(self)
                 self.curve_editor.scene.removeItem(self)
                 self.curve_editor.updateCurve()
-            return  # Don't pass to parent for further handling
+            return
         super().mousePressEvent(event)
 
     def itemChange(self, change, value):
@@ -3927,80 +3928,64 @@ class DraggablePoint(QGraphicsEllipseItem):
             x = new_pos.x()
             y = new_pos.y()
 
-            # Enforce endpoint constraints if needed (as before)
             if self.position_type == 'top_right':
-                dist_to_top = abs(y - 0)
-                dist_to_right = abs(x - 360)
-                if dist_to_right < dist_to_top:
-                    nx = 360
-                    ny = min(max(y, 0), 360)
+                dist_to_top = abs(y-0)
+                dist_to_right = abs(x-360)
+                if dist_to_right<dist_to_top:
+                    nx=360
+                    ny=min(max(y,0),360)
                 else:
-                    ny = 0
-                    nx = min(max(x, 0), 360)
-                x, y = nx, ny
-            elif self.position_type == 'bottom_left':
-                dist_to_left = abs(x - 0)
-                dist_to_bottom = abs(y - 360)
-                if dist_to_left < dist_to_bottom:
-                    nx = 0
-                    ny = min(max(y, 0), 360)
+                    ny=0
+                    nx=min(max(x,0),360)
+                x,y=nx,ny
+            elif self.position_type=='bottom_left':
+                dist_to_left=abs(x-0)
+                dist_to_bottom=abs(y-360)
+                if dist_to_left<dist_to_bottom:
+                    nx=0
+                    ny=min(max(y,0),360)
                 else:
-                    ny = 360
-                    nx = min(max(x, 0), 360)
-                x, y = nx, ny
+                    ny=360
+                    nx=min(max(x,0),360)
+                x,y=nx,ny
 
-            # Now ensure this point does not cross others in X
-            all_points = self.curve_editor.end_points + self.curve_editor.control_points
-            # Remove self to sort and find neighbors easily
-            other_points = [p for p in all_points if p is not self]
-            # Sort other points by X
-            other_points_sorted = sorted(other_points, key=lambda p: p.scenePos().x())
+            all_points=self.curve_editor.end_points+self.curve_editor.control_points
+            other_points=[p for p in all_points if p is not self]
+            other_points_sorted=sorted(other_points,key=lambda p:p.scenePos().x())
 
-            # Determine where this point would fit by X
-            # We do a binary search or linear insert
-            insert_index = 0
-            for i, p in enumerate(other_points_sorted):
-                if p.scenePos().x() < x:
-                    insert_index = i+1
+            insert_index=0
+            for i,p in enumerate(other_points_sorted):
+                if p.scenePos().x()<x:
+                    insert_index=i+1
                 else:
                     break
 
-            # Check left neighbor
-            if insert_index > 0:
-                left_p = other_points_sorted[insert_index-1]
-                left_x = left_p.scenePos().x()
-                if x <= left_x:
-                    x = left_x + 0.0001  # Slight offset to keep strictly increasing
+            if insert_index>0:
+                left_p=other_points_sorted[insert_index-1]
+                left_x=left_p.scenePos().x()
+                if x<=left_x:
+                    x=left_x+0.0001
 
-            # Check right neighbor
-            if insert_index < len(other_points_sorted):
-                right_p = other_points_sorted[insert_index]
-                right_x = right_p.scenePos().x()
-                if x >= right_x:
-                    x = right_x - 0.0001  # Slight offset to keep strictly increasing
+            if insert_index<len(other_points_sorted):
+                right_p=other_points_sorted[insert_index]
+                right_x=right_p.scenePos().x()
+                if x>=right_x:
+                    x=right_x-0.0001
 
-            # Clamp final X and Y within scene bounds if needed
-            x = max(0, min(x, 360))
-            y = max(0, min(y, 360))
+            x=max(0,min(x,360))
+            y=max(0,min(y,360))
 
-            # Apply final position
-            super().setPos(x, y)
-
-            # Update curve after adjustments
+            super().setPos(x,y)
             self.curve_editor.updateCurve()
 
         return super().itemChange(change, value)
 
 class ImageLabel(QLabel):
     mouseMoved = pyqtSignal(float, float)
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
-
     def mouseMoveEvent(self, event):
-        # Emit the mouse position relative to the label
-        # We'll let the parent handle converting to image coords
         self.mouseMoved.emit(event.x(), event.y())
         super().mouseMoveEvent(event)
 
@@ -4176,6 +4161,7 @@ class CurveEditor(QGraphicsView):
 
         # Create a PCHIP interpolator
         interpolator = PchipInterpolator(xs, ys)
+        self.curve_function = interpolator
 
         # Sample the curve
         sample_xs = np.linspace(xs[0], xs[-1], 361)
@@ -4203,6 +4189,9 @@ class CurveEditor(QGraphicsView):
         pen.setWidth(3)
         self.curve_item = self.scene.addPath(self.curve_path, pen)
 
+
+    def getCurveFunction(self):
+        return self.curve_function
 
     def getCurvePoints(self):
         if not hasattr(self, 'curve_points') or not self.curve_points:
@@ -4264,30 +4253,145 @@ class CurveEditor(QGraphicsView):
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
 
-    def __init__(self, image, curve_mode, lut):
+    def __init__(self, image, curve_mode, curve_func):
         super().__init__()
         self.image = image
         self.curve_mode = curve_mode
-        self.lut = lut
+        self.curve_func = curve_func
 
     def run(self):
-        adjusted_image = self.process_curve(self.image, self.curve_mode, self.lut)
+        adjusted_image = self.process_curve(self.image, self.curve_mode, self.curve_func)
         self.result_ready.emit(adjusted_image)
 
     @staticmethod
-    def float_to_lut_index(value_float):
-        idx = (value_float * 65535.0).astype(np.uint32)
-        idx = np.clip(idx, 0, 65535)
-        return idx
+    def apply_curve_direct(value, curve_func):
+        # value in [0..1]
+        # Evaluate curve at value*360 (X), get Y in [0..360]
+        # Invert it: out = 360 - curve_func(X)
+        # Map back to [0..1]: out/360
+        out = curve_func(value*360.0)
+        out = 360.0 - out
+        return np.clip(out/360.0, 0, 1).astype(np.float32)
 
     @staticmethod
-    def lut_to_float(lut_values):
-        return (lut_values / 65535.0).astype(np.float32)
+    def process_curve(image, curve_mode, curve_func):
+        if image is None:
+            return image
 
-    @staticmethod
-    def apply_lut_to_channel(channel, lut):
-        idx = FullCurvesProcessingThread.float_to_lut_index(channel)
-        return FullCurvesProcessingThread.lut_to_float(lut[idx])
+        if curve_func is None:
+            # No curve defined, identity
+            return image
+
+        if image.dtype != np.float32:
+            image = image.astype(np.float32, copy=False)
+
+        is_gray = (image.ndim == 2 or image.shape[2] == 1)
+        if is_gray:
+            image = image.reshape(image.shape[0], image.shape[1], 1)
+
+        mode = curve_mode.lower()
+
+        # Helper functions for color modes
+        def apply_to_all_channels(img):
+            for c in range(img.shape[2]):
+                img[:,:,c] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,c], curve_func)
+            return img
+
+        def apply_to_channel(img, ch):
+            img[:,:,ch] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,ch], curve_func)
+            return img
+
+        if mode == 'r':
+            if image.shape[2] == 3:
+                image = apply_to_channel(image, 0)
+
+        elif mode == 'g':
+            if image.shape[2] == 3:
+                image = apply_to_channel(image, 1)
+
+        elif mode == 'b':
+            if image.shape[2] == 3:
+                image = apply_to_channel(image, 2)
+
+        elif mode == 'k (brightness)':
+            image = apply_to_all_channels(image)
+
+        elif mode == 'l*':
+            # Convert to Lab, apply curve to L
+            # L in [0..100], normalize to [0..1], apply curve, then *100
+            from_color = FullCurvesProcessingThread.rgb_to_xyz
+            to_color = FullCurvesProcessingThread.xyz_to_rgb
+            xyz = from_color(image)
+            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+
+            L_norm = np.clip(lab[:,:,0]/100.0, 0, 1)
+            L_new = FullCurvesProcessingThread.apply_curve_direct(L_norm, curve_func)*100.0
+            lab[:,:,0] = L_new
+
+            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
+            image = to_color(xyz_new)
+            
+        elif mode == 'a*':
+            # Convert to Lab, apply curve to a*
+            from_color = FullCurvesProcessingThread.rgb_to_xyz
+            to_color = FullCurvesProcessingThread.xyz_to_rgb
+            xyz = from_color(image)
+            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+
+            # a* in [-128..127], shift/scale to [0..1]
+            a_norm = np.clip((lab[:,:,1] + 128.0)/255.0, 0, 1)
+            a_new = FullCurvesProcessingThread.apply_curve_direct(a_norm, curve_func)*255.0 - 128.0
+            lab[:,:,1] = a_new
+
+            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
+            image = to_color(xyz_new)
+
+        elif mode == 'b*':
+            # Convert to Lab, apply curve to b*
+            from_color = FullCurvesProcessingThread.rgb_to_xyz
+            to_color = FullCurvesProcessingThread.xyz_to_rgb
+            xyz = from_color(image)
+            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+
+            b_norm = np.clip((lab[:,:,2] + 128.0)/255.0, 0, 1)
+            b_new = FullCurvesProcessingThread.apply_curve_direct(b_norm, curve_func)*255.0 - 128.0
+            lab[:,:,2] = b_new
+
+            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
+            image = to_color(xyz_new)
+
+        elif mode == 'chroma':
+            # Convert to Lab, apply curve to Chroma
+            from_color = FullCurvesProcessingThread.rgb_to_xyz
+            to_color = FullCurvesProcessingThread.xyz_to_rgb
+            xyz = from_color(image)
+            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+
+            a_ = lab[:,:,1]
+            b_ = lab[:,:,2]
+            C = np.sqrt(a_*a_ + b_*b_)
+            C_norm = np.clip(C/200.0, 0, 1)
+            C_new = FullCurvesProcessingThread.apply_curve_direct(C_norm, curve_func)*200.0
+
+            ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C!=0))
+            lab[:,:,1] = a_*ratio
+            lab[:,:,2] = b_*ratio
+
+            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
+            image = to_color(xyz_new)
+
+        elif mode == 'saturation':
+            # Convert to HSV, apply curve to S
+            hsv = FullCurvesProcessingThread.rgb_to_hsv(image)
+            S = hsv[:,:,1]
+            S_new = FullCurvesProcessingThread.apply_curve_direct(S, curve_func)
+            hsv[:,:,1] = S_new
+            image = FullCurvesProcessingThread.hsv_to_rgb(hsv)
+
+        if is_gray:
+            image = image[:,:,0]
+
+        return image
 
     @staticmethod
     def rgb_to_xyz(rgb):
@@ -4311,14 +4415,11 @@ class FullCurvesProcessingThread(QThread):
     @staticmethod
     def f_lab(t):
         delta = 6/29
-        if isinstance(t, np.ndarray):
-            mask = t > delta**3
-            f = np.zeros_like(t)
-            f[mask] = np.cbrt(t[mask])
-            f[~mask] = t[~mask] / (3*delta*delta) + 4/29
-            return f
-        else:
-            return np.cbrt(t) if t > delta**3 else t/(3*delta*delta) + 4/29
+        mask = t > delta**3
+        f = np.zeros_like(t)
+        f[mask] = np.cbrt(t[mask])
+        f[~mask] = t[~mask]/(3*delta*delta)+4/29
+        return f
 
     @staticmethod
     def xyz_to_lab(xyz):
@@ -4334,7 +4435,6 @@ class FullCurvesProcessingThread(QThread):
         L = (116 * fy - 16)
         a = 500*(fx - fy)
         b = 200*(fy - fz)
-
         return np.dstack([L, a, b]).astype(np.float32)
 
     @staticmethod
@@ -4348,31 +4448,14 @@ class FullCurvesProcessingThread(QThread):
         fx = fy + a/500
         fz = fy - b/200
 
-        Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
-
         def f_inv(ft):
-            return np.where(ft > delta, ft**3, 3*delta**2*(ft - 4/29))
+            return np.where(ft > delta, ft**3, 3*delta*delta*(ft - 4/29))
 
-        X = Xn * f_inv(fx)
-        Y = Yn * f_inv(fy)
-        Z = Zn * f_inv(fz)
-
+        Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+        X = Xn*f_inv(fx)
+        Y = Yn*f_inv(fy)
+        Z = Zn*f_inv(fz)
         return np.dstack([X, Y, Z]).astype(np.float32)
-
-    @staticmethod
-    def apply_lut_to_L(L_channel, lut):
-        L_norm = np.clip(L_channel/100.0, 0, 1)
-        idx = FullCurvesProcessingThread.float_to_lut_index(L_norm)
-        L_out = FullCurvesProcessingThread.lut_to_float(lut[idx]) * 100.0
-        return L_out
-
-    @staticmethod
-    def apply_lut_to_ab(ab_channel, lut):
-        ab_shifted = (ab_channel + 128.0)/255.0
-        ab_shifted = np.clip(ab_shifted, 0, 1)
-        idx = FullCurvesProcessingThread.float_to_lut_index(ab_shifted)
-        ab_out = FullCurvesProcessingThread.lut_to_float(lut[idx]) * 255.0 - 128.0
-        return ab_out
 
     @staticmethod
     def rgb_to_hsv(rgb):
@@ -4386,145 +4469,41 @@ class FullCurvesProcessingThread(QThread):
 
         mask = delta != 0
         r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
-        H[mask & (cmax==r)] = 60 * (((g[mask & (cmax==r)] - b[mask & (cmax==r)])/delta[mask & (cmax==r)]) % 6)
-        H[mask & (cmax==g)] = 60 * (((b[mask & (cmax==g)] - r[mask & (cmax==g)])/delta[mask & (cmax==g)]) + 2)
-        H[mask & (cmax==b)] = 60 * (((r[mask & (cmax==b)] - g[mask & (cmax==b)])/delta[mask & (cmax==b)]) + 4)
+        H[mask & (cmax==r)] = 60*(((g[mask&(cmax==r)]-b[mask&(cmax==r)])/delta[mask&(cmax==r)])%6)
+        H[mask & (cmax==g)] = 60*(((b[mask&(cmax==g)]-r[mask&(cmax==g)])/delta[mask&(cmax==g)])+2)
+        H[mask & (cmax==b)] = 60*(((r[mask&(cmax==b)]-g[mask&(cmax==b)])/delta[mask&(cmax==b)])+4)
 
-        S[cmax > 0] = delta[cmax > 0] / cmax[cmax > 0]
-
-        return np.dstack([H, S, V]).astype(np.float32)
+        S[cmax>0] = delta[cmax>0]/cmax[cmax>0]
+        return np.dstack([H,S,V]).astype(np.float32)
 
     @staticmethod
     def hsv_to_rgb(hsv):
         H, S, V = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
-
-        C = V * S
-        X = C * (1 - np.abs((H/60.0)%2 - 1))
-        m = V - C
+        C = V*S
+        X = C*(1-np.abs((H/60.0)%2-1))
+        m = V-C
 
         R = np.zeros_like(H)
         G = np.zeros_like(H)
         B = np.zeros_like(H)
 
-        cond0 = (H < 60)
-        cond1 = (H >= 60) & (H < 120)
-        cond2 = (H >= 120) & (H < 180)
-        cond3 = (H >= 180) & (H < 240)
-        cond4 = (H >= 240) & (H < 300)
-        cond5 = (H >= 300)
+        cond0 = (H<60)
+        cond1 = (H>=60)&(H<120)
+        cond2 = (H>=120)&(H<180)
+        cond3 = (H>=180)&(H<240)
+        cond4 = (H>=240)&(H<300)
+        cond5 = (H>=300)
 
-        R[cond0] = C[cond0]; G[cond0] = X[cond0]; B[cond0] = 0
-        R[cond1] = X[cond1]; G[cond1] = C[cond1]; B[cond1] = 0
-        R[cond2] = 0; G[cond2] = C[cond2]; B[cond2] = X[cond2]
-        R[cond3] = 0; G[cond3] = X[cond3]; B[cond3] = C[cond3]
-        R[cond4] = X[cond4]; G[cond4] = 0; B[cond4] = C[cond4]
-        R[cond5] = C[cond5]; G[cond5] = 0; B[cond5] = X[cond5]
+        R[cond0]=C[cond0]; G[cond0]=X[cond0]; B[cond0]=0
+        R[cond1]=X[cond1]; G[cond1]=C[cond1]; B[cond1]=0
+        R[cond2]=0; G[cond2]=C[cond2]; B[cond2]=X[cond2]
+        R[cond3]=0; G[cond3]=X[cond3]; B[cond3]=C[cond3]
+        R[cond4]=X[cond4]; G[cond4]=0; B[cond4]=C[cond4]
+        R[cond5]=C[cond5]; G[cond5]=0; B[cond5]=X[cond5]
 
         rgb = np.dstack([R+m, G+m, B+m])
         rgb = np.clip(rgb, 0, 1)
         return rgb
-
-    @staticmethod
-    def apply_lut_float(value, lut):
-        idx = FullCurvesProcessingThread.float_to_lut_index(value)
-        return FullCurvesProcessingThread.lut_to_float(lut[idx])
-
-    @staticmethod
-    def apply_lut_to_chroma(a_channel, b_channel, lut):
-        C = np.sqrt(a_channel**2 + b_channel**2)
-        C_norm = np.clip(C/200.0, 0, 1)
-        C_new = FullCurvesProcessingThread.apply_lut_float(C_norm, lut)*200.0
-        ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C!=0))
-        a_new = a_channel * ratio
-        b_new = b_channel * ratio
-        return a_new, b_new
-
-    @staticmethod
-    def apply_lut_to_saturation(hsv, lut):
-        S = hsv[:,:,1]
-        S_new = FullCurvesProcessingThread.apply_lut_float(S, lut)
-        hsv_new = hsv.copy()
-        hsv_new[:,:,1] = S_new
-        return hsv_new
-
-    def process_curve(self, image, curve_mode, lut):
-        if image is None:
-            return image
-
-        if image.dtype != np.float32:
-            image = image.astype(np.float32, copy=False)
-
-        is_gray = (image.ndim == 2 or image.shape[2] == 1)
-        if is_gray:
-            image = image.reshape(image.shape[0], image.shape[1], 1)
-
-        mode = curve_mode.lower()
-
-        # Use class name when calling static methods
-        if mode == 'r':
-            if image.shape[2] == 3:
-                image[:,:,0] = self.apply_lut_to_channel(image[:,:,0], lut)
-
-        elif mode == 'g':
-            if image.shape[2] == 3:
-                image[:,:,1] = self.apply_lut_to_channel(image[:,:,1], lut)
-
-        elif mode == 'b':
-            if image.shape[2] == 3:
-                image[:,:,2] = self.apply_lut_to_channel(image[:,:,2], lut)
-
-        elif mode == 'k (brightness)':
-            for c in range(image.shape[2]):
-                image[:,:,c] = self.apply_lut_to_channel(image[:,:,c], lut)
-
-        elif mode == 'l*':
-            if image.shape[2] == 3:
-                xyz = self.rgb_to_xyz(image)
-                lab = self.xyz_to_lab(xyz)
-                lab[:,:,0] = self.apply_lut_to_L(lab[:,:,0], lut)
-                xyz_new = self.lab_to_xyz(lab)
-                image = self.xyz_to_rgb(xyz_new)
-            else:
-                L = image[:,:,0]*100.0
-                L = self.apply_lut_to_L(L, lut)
-                image[:,:,0] = L/100.0
-
-        elif mode == 'a*':
-            if image.shape[2] == 3:
-                xyz = self.rgb_to_xyz(image)
-                lab = self.xyz_to_lab(xyz)
-                lab[:,:,1] = self.apply_lut_to_ab(lab[:,:,1], lut)
-                xyz_new = self.lab_to_xyz(lab)
-                image = self.xyz_to_rgb(xyz_new)
-
-        elif mode == 'b*':
-            if image.shape[2] == 3:
-                xyz = self.rgb_to_xyz(image)
-                lab = self.xyz_to_lab(xyz)
-                lab[:,:,2] = self.apply_lut_to_ab(lab[:,:,2], lut)
-                xyz_new = self.lab_to_xyz(lab)
-                image = self.xyz_to_rgb(xyz_new)
-
-        elif mode == 'chroma':
-            if image.shape[2] == 3:
-                xyz = self.rgb_to_xyz(image)
-                lab = self.xyz_to_lab(xyz)
-                a_new, b_new = self.apply_lut_to_chroma(lab[:,:,1], lab[:,:,2], lut)
-                lab[:,:,1] = a_new
-                lab[:,:,2] = b_new
-                xyz_new = self.lab_to_xyz(lab)
-                image = self.xyz_to_rgb(xyz_new)
-
-        elif mode == 'saturation':
-            if image.shape[2] == 3:
-                hsv = self.rgb_to_hsv(image)
-                hsv_new = self.apply_lut_to_saturation(hsv, lut)
-                image = self.hsv_to_rgb(hsv_new)
-
-        if is_gray:
-            image = image[:,:,0]
-
-        return image
 
 
 
@@ -5863,8 +5842,13 @@ def load_image(filename, max_retries=3, wait_seconds=3):
             elif filename.lower().endswith('.xisf'):
                 print(f"Loading XISF file: {filename}")
                 xisf = XISF(filename)
-                image_meta = xisf.get_images_metadata()  # List of metadata blocks for each image
-                file_meta = xisf.get_file_metadata()  # File-level metadata
+
+                # Read image data (assuming the first image in the XISF file)
+                image_data = xisf.read_image(0)  # Adjust the index if multiple images are present
+
+                # Retrieve metadata
+                image_meta = xisf.get_images_metadata()[0]  # Assuming single image
+                file_meta = xisf.get_file_metadata()
 
                 # Determine bit depth and normalize
                 if image_data.dtype == np.uint8:
@@ -5885,11 +5869,23 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 # Handle mono or RGB XISF
                 if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):  # Mono
                     is_mono = True
-                    image = np.stack([image_data.squeeze()] * 3, axis=-1)
+                    if image_data.ndim == 3:
+                        image = np.squeeze(image_data, axis=2)
+                    image = np.stack([image] * 3, axis=-1)  # Convert to RGB by stacking
                 elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
                     is_mono = False
                 else:
                     raise ValueError("Unsupported XISF image dimensions!")
+
+                # For XISF, you can choose what to set as original_header
+                # It could be a combination of file_meta and image_meta or any other relevant information
+                original_header = {
+                    "file_meta": file_meta,
+                    "image_meta": image_meta
+                }
+
+                print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+                return image, original_header, bit_depth, is_mono
 
             elif filename.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 print(f"Loading RAW file: {filename}")
