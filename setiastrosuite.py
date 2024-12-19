@@ -45,6 +45,7 @@ from astroquery.vizier import Vizier
 import tifffile as tiff
 import pytz
 from astropy.utils.data import conf
+from scipy.interpolate import interp1d
 
 import rawpy
 
@@ -55,15 +56,16 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton
 )
 from PyQt5.QtGui import (
-    QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor
+    QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor, QBrush
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize
 
 # Math functions
 from math import sqrt
+import colour
 
 
 class AstroEditingSuite(QWidget):
@@ -112,6 +114,7 @@ class AstroEditingSuite(QWidget):
         self.tabs.addTab(CosmicClarityTab(), "Cosmic Clarity Sharpen/Denoise")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(), "Statistical Stretch")
+        self.tabs.addTab(FullCurvesTab(), "Curves Utility")
         self.tabs.addTab(NBtoRGBstarsTab(), "NB to RGB Stars")  # Placeholder        
         self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
         self.tabs.addTab(HaloBGonTab(), "Halo-B-Gon")  # Placeholder
@@ -124,7 +127,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.7.7')
+        self.setWindowTitle('Seti Astro\'s Suite V1.8')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -3361,7 +3364,6 @@ class ProcessingThread(QThread):
         image_array[..., 1] = green_channel
         return np.clip(image_array, 0, 1)
 
-
 class StarStretchTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -3617,6 +3619,914 @@ class StarStretchTab(QWidget):
         if self.image is not None and self.image.size > 0:
             print(f"Applying stretch: {self.stretch_factor}, Color Boost: {self.sat_amount:.2f}, SCNR: {self.scnrCheckBox.isChecked()}")
             self.generatePreview()
+
+class FullCurvesTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+        self.image = None
+        self.filename = None
+        self.zoom_factor = 1.0
+        self.original_header = None
+        self.bit_depth = None
+        self.is_mono = None
+        self.curve_mode = "K (Brightness)"  # Default curve mode
+
+    def initUI(self):
+        main_layout = QHBoxLayout()
+
+        # Left column for controls
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_widget.setFixedWidth(400)
+
+        # Load button
+        self.fileButton = QPushButton('Load Image', self)
+        self.fileButton.clicked.connect(self.openFileDialog)
+        left_layout.addWidget(self.fileButton)
+
+        # File label
+        self.fileLabel = QLabel('No file selected', self)
+        left_layout.addWidget(self.fileLabel)
+
+        # Curve Mode Selection
+        self.curveModeLabel = QLabel('Select Curve Mode:', self)
+        left_layout.addWidget(self.curveModeLabel)
+
+        self.curveModeGroup = QButtonGroup(self)
+        curve_modes = ['K (Brightness)', 'R', 'G', 'B', 'L*', 'a*', 'b*', 'Chroma', 'Saturation']
+        curve_mode_layout = QVBoxLayout()
+
+        for mode in curve_modes:
+            button = QRadioButton(mode, self)
+            if mode == 'K (Brightness)':
+                button.setChecked(True)
+            self.curveModeGroup.addButton(button)
+            curve_mode_layout.addWidget(button)
+        left_layout.addLayout(curve_mode_layout)
+
+        # Curve editor placeholder
+        self.curveEditor = CurveEditor(self)
+        left_layout.addWidget(self.curveEditor)
+
+        self.statusLabel = QLabel('X:0 Y:0', self)
+        left_layout.addWidget(self.statusLabel)
+
+        self.applySourceGroup = QButtonGroup(self)
+
+        self.applyOriginalRadio = QRadioButton("Original", self)
+        self.applyOriginalRadio.setChecked(True)
+        self.applySourceGroup.addButton(self.applyOriginalRadio)
+
+        self.applyCurrentRadio = QRadioButton("Current", self)
+        self.applySourceGroup.addButton(self.applyCurrentRadio)
+
+        source_layout = QHBoxLayout()
+        source_layout.addWidget(QLabel("Apply to:", self))
+        source_layout.addWidget(self.applyOriginalRadio)
+        source_layout.addWidget(self.applyCurrentRadio)
+        left_layout.addLayout(source_layout)
+
+        # Horizontal layout for Apply and Reset buttons
+        button_layout = QHBoxLayout()
+
+        # Apply Curve Button
+        self.applyButton = QPushButton('Apply Curve', self)
+        self.applyButton.clicked.connect(self.startProcessing)
+        button_layout.addWidget(self.applyButton)
+
+        # Reset Curve Button as a small tool button with an icon
+        self.resetCurveButton = QToolButton(self)
+        self.resetCurveButton.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))  # Provide a suitable icon
+        self.resetCurveButton.setToolTip("Reset Curve")
+        # Set a small icon size if needed
+        self.resetCurveButton.setIconSize(QSize(16,16))
+
+        # Optionally, if you want the reset button even smaller, you can also adjust its size:
+        # self.resetCurveButton.setFixedSize(24, 24)
+
+        self.resetCurveButton.clicked.connect(self.resetCurve)
+        button_layout.addWidget(self.resetCurveButton)
+
+        # Add the horizontal layout with both buttons to the main left layout
+        left_layout.addLayout(button_layout)
+
+        # Spacer
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Save button
+        self.saveButton = QPushButton('Save Image', self)
+        self.saveButton.clicked.connect(self.saveImage)
+        left_layout.addWidget(self.saveButton)
+
+        # Footer
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setStyleSheet("font-size: 10px;")
+        left_layout.addWidget(footer_label)
+
+        main_layout.addWidget(left_widget)
+
+        # Right side for the preview inside a QScrollArea
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        # QLabel for the image preview
+        self.imageLabel = ImageLabel(self)
+        self.imageLabel.setAlignment(Qt.AlignCenter)
+        self.scrollArea.setWidget(self.imageLabel)
+        self.scrollArea.setMinimumSize(400, 400)
+        self.scrollArea.setWidgetResizable(True)
+        self.imageLabel.mouseMoved.connect(self.handleImageMouseMove)
+
+        main_layout.addWidget(self.scrollArea)
+
+        # Zoom buttons
+        zoom_layout = QHBoxLayout()
+        self.zoomInButton = QPushButton('Zoom In', self)
+        self.zoomInButton.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(self.zoomInButton)
+
+        self.zoomOutButton = QPushButton('Zoom Out', self)
+        self.zoomOutButton.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(self.zoomOutButton)
+
+        left_layout.addLayout(zoom_layout)
+
+        self.setLayout(main_layout)
+        self.zoom_factor = 1.0
+        self.scrollArea.viewport().setMouseTracking(True)
+        self.scrollArea.viewport().installEventFilter(self)
+        self.dragging = False
+        self.last_pos = QPoint()
+
+    def handleImageMouseMove(self, x, y):
+        if self.image is None:
+            return
+
+        # Convert from scaled coordinates to original image coords
+        # scaled_pixmap was created with: pixmap.scaled(orig_size * zoom_factor)
+        # So original coordinate = x/zoom_factor, y/zoom_factor
+        # Make sure to also consider the imageLabel size and whether the image is centered.
+
+        # If you have the pixmap stored, you can find original width/height from self.image shape:
+        h, w = self.image.shape[:2]
+
+        # Convert mouse coords to image coords
+        img_x = int(x / self.zoom_factor)
+        img_y = int(y / self.zoom_factor)
+
+        # Ensure within bounds
+        if 0 <= img_x < w and 0 <= img_y < h:
+            pixel_value = self.image[img_y, img_x]
+            if self.image.ndim == 3:
+                # RGB pixel
+                r, g, b = pixel_value
+                text = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
+            else:
+                # Grayscale pixel
+                text = f"X:{img_x} Y:{img_y} Val:{pixel_value:.3f}"
+            # Update a status label or print it
+            self.statusLabel.setText(text)  # For example, reuse fileLabel or add a dedicated status label.
+
+    def startProcessing(self):
+        if self.image is None:
+            return
+        curve_mode = self.curveModeGroup.checkedButton().text()
+        lut = self.curveEditor.getLUT()
+
+        # Determine source image based on user choice
+        if self.applyOriginalRadio.isChecked():
+            source_image = self.original_image.copy()
+        else:
+            source_image = self.image.copy()
+
+        # Show the spinner separately, not on imageLabel.
+        self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignCenter)
+        self.spinnerMovie = QMovie(resource_path("spinner.gif"))
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.setGeometry( (self.width() - 64)//2, (self.height() - 64)//2, 64, 64 )
+        self.spinnerLabel.show()
+        self.spinnerMovie.start()
+
+        self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, lut)
+        self.processing_thread.result_ready.connect(self.finishProcessing)
+        self.processing_thread.start()
+
+    def finishProcessing(self, adjusted_image):
+        # Hide the spinner
+        self.spinnerLabel.hide()
+        self.spinnerMovie.stop()
+        self.updatePreview(adjusted_image)
+
+    def resetCurve(self):
+        # Reset the curve in the curve editor
+        self.curveEditor.initCurve()
+        # Since initCurve clears and re-draws the curve, update the preview if desired
+        # If the user expects the preview to revert to the original image:
+        if self.original_image is not None:
+            self.image = self.original_image.copy()
+            self.updatePreview()
+
+    def eventFilter(self, source, event):
+        if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.last_pos = event.pos()
+        elif event.type() == event.MouseButtonRelease and event.button() == Qt.LeftButton:
+            self.dragging = False
+        elif event.type() == event.MouseMove and self.dragging:
+            delta = event.pos() - self.last_pos
+            self.scrollArea.horizontalScrollBar().setValue(self.scrollArea.horizontalScrollBar().value() - delta.x())
+            self.scrollArea.verticalScrollBar().setValue(self.scrollArea.verticalScrollBar().value() - delta.y())
+            self.last_pos = event.pos()
+
+        return super().eventFilter(source, event)
+
+    def openFileDialog(self):
+        self.filename, _ = QFileDialog.getOpenFileName(self, 'Open Image File', '', 'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)')
+        if self.filename:
+            self.fileLabel.setText(self.filename)
+            self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.filename)
+            # Keep a copy of the original image
+            self.original_image = self.image.copy()
+            self.updatePreview()
+
+    def updatePreview(self, adjusted_image=None):
+        # Save current scroll positions
+
+        if adjusted_image is not None:
+            self.image = adjusted_image
+
+        if self.image is not None:
+            img = (self.image * 255).astype(np.uint8)
+            h, w = img.shape[:2]
+
+            if img.ndim == 3:
+                bytes_per_line = 3 * w
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+            else:
+                bytes_per_line = w
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
+
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+
+
+
+
+    def zoom_in(self):
+        if self.image is not None:
+            self.zoom_factor *= 1.2
+            self.updatePreview()
+
+    def zoom_out(self):
+        if self.image is not None:
+            self.zoom_factor /= 1.2
+            self.updatePreview()
+
+    def saveImage(self):
+        if self.image is not None:
+            save_filename, _ = QFileDialog.getSaveFileName(self, 'Save Image As', '', 'Images (*.tiff *.tif *.png *.fit *.fits *.xisf);;All Files (*)')
+            if save_filename:
+                save_image(self.image, save_filename, "tif", self.bit_depth, self.original_header, self.is_mono)
+
+class DraggablePoint(QGraphicsEllipseItem):
+    def __init__(self, curve_editor, x, y, color=Qt.green, lock_axis=None, position_type=None):
+        super().__init__(-5, -5, 10, 10)  # Centered ellipse
+        self.curve_editor = curve_editor
+        self.lock_axis = lock_axis
+        self.position_type = position_type  # 'bottom_left' or 'top_right' or None for control points
+        self.setBrush(QBrush(color))
+        self.setFlags(QGraphicsEllipseItem.ItemIsMovable | QGraphicsEllipseItem.ItemSendsScenePositionChanges)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
+        self.setPos(x, y)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            # Right-click: remove this point if it's a control point
+            if self in self.curve_editor.control_points:
+                self.curve_editor.control_points.remove(self)
+                self.curve_editor.scene.removeItem(self)
+                self.curve_editor.updateCurve()
+            return  # Don't pass to parent for further handling
+        super().mousePressEvent(event)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            new_pos = value
+            x = new_pos.x()
+            y = new_pos.y()
+
+            # Enforce endpoint constraints if needed (as before)
+            if self.position_type == 'top_right':
+                dist_to_top = abs(y - 0)
+                dist_to_right = abs(x - 360)
+                if dist_to_right < dist_to_top:
+                    nx = 360
+                    ny = min(max(y, 0), 360)
+                else:
+                    ny = 0
+                    nx = min(max(x, 0), 360)
+                x, y = nx, ny
+            elif self.position_type == 'bottom_left':
+                dist_to_left = abs(x - 0)
+                dist_to_bottom = abs(y - 360)
+                if dist_to_left < dist_to_bottom:
+                    nx = 0
+                    ny = min(max(y, 0), 360)
+                else:
+                    ny = 360
+                    nx = min(max(x, 0), 360)
+                x, y = nx, ny
+
+            # Now ensure this point does not cross others in X
+            all_points = self.curve_editor.end_points + self.curve_editor.control_points
+            # Remove self to sort and find neighbors easily
+            other_points = [p for p in all_points if p is not self]
+            # Sort other points by X
+            other_points_sorted = sorted(other_points, key=lambda p: p.scenePos().x())
+
+            # Determine where this point would fit by X
+            # We do a binary search or linear insert
+            insert_index = 0
+            for i, p in enumerate(other_points_sorted):
+                if p.scenePos().x() < x:
+                    insert_index = i+1
+                else:
+                    break
+
+            # Check left neighbor
+            if insert_index > 0:
+                left_p = other_points_sorted[insert_index-1]
+                left_x = left_p.scenePos().x()
+                if x <= left_x:
+                    x = left_x + 0.0001  # Slight offset to keep strictly increasing
+
+            # Check right neighbor
+            if insert_index < len(other_points_sorted):
+                right_p = other_points_sorted[insert_index]
+                right_x = right_p.scenePos().x()
+                if x >= right_x:
+                    x = right_x - 0.0001  # Slight offset to keep strictly increasing
+
+            # Clamp final X and Y within scene bounds if needed
+            x = max(0, min(x, 360))
+            y = max(0, min(y, 360))
+
+            # Apply final position
+            super().setPos(x, y)
+
+            # Update curve after adjustments
+            self.curve_editor.updateCurve()
+
+        return super().itemChange(change, value)
+
+class ImageLabel(QLabel):
+    mouseMoved = pyqtSignal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+
+    def mouseMoveEvent(self, event):
+        # Emit the mouse position relative to the label
+        # We'll let the parent handle converting to image coords
+        self.mouseMoved.emit(event.x(), event.y())
+        super().mouseMoveEvent(event)
+
+class CurveEditor(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setFixedSize(380, 425)
+
+        # Initialize control points and curve path
+        self.end_points = []  # Start and end points with axis constraints
+        self.control_points = []  # Dynamically added control points
+        self.curve_path = QPainterPath()
+        self.curve_item = None  # Stores the curve line
+
+        # Set scene rectangle
+        self.scene.setSceneRect(0, 0, 360, 360)
+
+        self.initGrid()
+        self.initCurve()
+
+    def initGrid(self):
+        pen = QPen(Qt.gray)
+        pen.setStyle(Qt.DashLine)
+        for i in range(0, 361, 45):  # Grid lines at 0,45,...,360
+            self.scene.addLine(i, 0, i, 360, pen)  # Vertical lines
+            self.scene.addLine(0, i, 360, i, pen)  # Horizontal lines
+
+        # Add X-axis labels
+        # Each line corresponds to i/360.0
+        for i in range(0, 361, 45):
+            val = i/360.0
+            label = QGraphicsTextItem(f"{val:.3f}")
+            # Position label slightly below the x-axis (360 is bottom)
+            # For X-axis, put them near bottom at y=365 for example
+            label.setPos(i-5, 365) 
+            self.scene.addItem(label)
+
+        # Optionally add Y-axis labels if needed
+        # Similar approach for the Y-axis if you want
+
+    def initCurve(self):
+        # Remove existing items from the scene
+        # First remove control points
+        for p in self.control_points:
+            self.scene.removeItem(p)
+        # Remove end points
+        for p in self.end_points:
+            self.scene.removeItem(p)
+        # Remove the curve item if any
+        if self.curve_item:
+            self.scene.removeItem(self.curve_item)
+            self.curve_item = None
+
+        # Clear existing point lists
+        self.end_points = []
+        self.control_points = []
+
+        # Add the default endpoints again
+        self.addEndPoint(0, 360, lock_axis=None, position_type='bottom_left', color=Qt.black)
+        self.addEndPoint(360, 0, lock_axis=None, position_type='top_right', color=Qt.white)
+
+        # Redraw the initial line
+        self.updateCurve()
+
+    def addEndPoint(self, x, y, lock_axis=None, position_type=None, color=Qt.red):
+        point = DraggablePoint(self, x, y, color=color, lock_axis=lock_axis, position_type=position_type)
+        self.scene.addItem(point)
+        self.end_points.append(point)
+
+    def addControlPoint(self, x, y, lock_axis=None):
+
+        point = DraggablePoint(self, x, y, color=Qt.green, lock_axis=lock_axis, position_type=None)
+        self.scene.addItem(point)
+        self.control_points.append(point)
+        self.updateCurve()
+
+    def catmull_rom_spline(self, p0, p1, p2, p3, t):
+        """
+        Compute a point on a Catmull-Rom spline segment at parameter t (0<=t<=1).
+        Each p is a QPointF.
+        """
+        t2 = t * t
+        t3 = t2 * t
+
+        x = 0.5 * (2*p1.x() + (-p0.x() + p2.x()) * t +
+                    (2*p0.x() - 5*p1.x() + 4*p2.x() - p3.x()) * t2 +
+                    (-p0.x() + 3*p1.x() - 3*p2.x() + p3.x()) * t3)
+        y = 0.5 * (2*p1.y() + (-p0.y() + p2.y()) * t +
+                    (2*p0.y() - 5*p1.y() + 4*p2.y() - p3.y()) * t2 +
+                    (-p0.y() + 3*p1.y() - 3*p2.y() + p3.y()) * t3)
+
+        # Clamp to bounding box
+        x = max(0, min(360, x))
+        y = max(0, min(360, y))
+
+        return QPointF(x, y)
+
+    def generateSmoothCurvePoints(self, points):
+        """
+        Given a sorted list of QGraphicsItems (endpoints + control points),
+        generate a list of smooth points approximating a Catmull-Rom spline
+        through these points.
+        """
+        if len(points) < 2:
+            return []
+        if len(points) == 2:
+            # Just a straight line between two points
+            p0 = points[0].scenePos()
+            p1 = points[1].scenePos()
+            return [p0, p1]
+
+        # Extract scene positions
+        pts = [p.scenePos() for p in points]
+
+        # For Catmull-Rom, we need points before the first and after the last
+        # We'll duplicate the first and last points.
+        extended_pts = [pts[0]] + pts + [pts[-1]]
+
+        smooth_points = []
+        steps_per_segment = 20  # increase for smoother curve
+        for i in range(len(pts) - 1):
+            p0 = extended_pts[i]
+            p1 = extended_pts[i+1]
+            p2 = extended_pts[i+2]
+            p3 = extended_pts[i+3]
+
+            # Sample the spline segment between p1 and p2
+            for step in range(steps_per_segment+1):
+                t = step / steps_per_segment
+                pos = self.catmull_rom_spline(p0, p1, p2, p3, t)
+                smooth_points.append(pos)
+
+        return smooth_points
+
+    def updateCurve(self):
+        """Update the curve by redrawing based on endpoints and control points."""
+        from scipy.interpolate import PchipInterpolator
+        import numpy as np
+
+        all_points = self.end_points + self.control_points
+        if not all_points:
+            # No points, no curve
+            if self.curve_item:
+                self.scene.removeItem(self.curve_item)
+                self.curve_item = None
+            return
+
+        # Sort points by X coordinate
+        sorted_points = sorted(all_points, key=lambda p: p.scenePos().x())
+
+        # Extract arrays of X and Y
+        xs = [p.scenePos().x() for p in sorted_points]
+        ys = [p.scenePos().y() for p in sorted_points]
+
+        # If there's only one point or none, we can't interpolate
+        if len(xs) < 2:
+            # If there's a single point, just draw a dot or do nothing
+            if self.curve_item:
+                self.scene.removeItem(self.curve_item)
+                self.curve_item = None
+
+            if len(xs) == 1:
+                # Optionally draw a single point
+                single_path = QPainterPath()
+                single_path.addEllipse(xs[0]-2, ys[0]-2, 4, 4)
+                pen = QPen(Qt.white)
+                pen.setWidth(3)
+                self.curve_item = self.scene.addPath(single_path, pen)
+            return
+
+        # Create a PCHIP interpolator
+        interpolator = PchipInterpolator(xs, ys)
+
+        # Sample the curve
+        sample_xs = np.linspace(xs[0], xs[-1], 361)
+        sample_ys = interpolator(sample_xs)
+
+
+
+        curve_points = [QPointF(float(x), float(y)) for x, y in zip(sample_xs, sample_ys)]
+        self.curve_points = curve_points
+
+        if not curve_points:
+            if self.curve_item:
+                self.scene.removeItem(self.curve_item)
+                self.curve_item = None
+            return
+
+        self.curve_path = QPainterPath()
+        self.curve_path.moveTo(curve_points[0])
+        for pt in curve_points[1:]:
+            self.curve_path.lineTo(pt)
+
+        if self.curve_item:
+            self.scene.removeItem(self.curve_item)
+        pen = QPen(Qt.white)
+        pen.setWidth(3)
+        self.curve_item = self.scene.addPath(self.curve_path, pen)
+
+
+    def getCurvePoints(self):
+        if not hasattr(self, 'curve_points') or not self.curve_points:
+            return []
+        return [(pt.x(), pt.y()) for pt in self.curve_points]
+
+    def getLUT(self):
+        import numpy as np
+
+        # 16-bit LUT size
+        lut_size = 65536
+
+        curve_pts = self.getCurvePoints()
+        if len(curve_pts) == 0:
+            # No curve points, return a linear LUT
+            lut = np.linspace(0, 65535, lut_size, dtype=np.uint16)
+            return lut
+
+        curve_array = np.array(curve_pts, dtype=np.float64)
+        xs = curve_array[:,0]   # X from 0 to 360
+        ys = curve_array[:,1]   # Y from 0 to 360
+
+        ys_for_lut = 360.0 - ys
+
+
+        # Input positions for interpolation (0..65535 mapped to 0..360)
+        input_positions = np.linspace(0, 360, lut_size, dtype=np.float64)
+
+        # Interpolate using the inverted Y
+        output_values = np.interp(input_positions, xs, ys_for_lut)
+
+        # Map 0..360 to 0..65535
+        output_values = (output_values / 360.0) * 65535.0
+        output_values = np.clip(output_values, 0, 65535).astype(np.uint16)
+
+        return output_values
+
+
+    def mouseDoubleClickEvent(self, event):
+        """
+        Handle double-click events to add a new control point.
+        """
+        scene_pos = self.mapToScene(event.pos())
+
+        self.addControlPoint(scene_pos.x(), scene_pos.y())
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event):
+        """Remove selected points on Delete key press."""
+        if event.key() == Qt.Key_Delete:
+            for point in self.control_points[:]:
+                if point.isSelected():
+                    self.scene.removeItem(point)
+                    self.control_points.remove(point)
+            self.updateCurve()
+        super().keyPressEvent(event)
+
+
+class FullCurvesProcessingThread(QThread):
+    result_ready = pyqtSignal(np.ndarray)
+
+    def __init__(self, image, curve_mode, lut):
+        super().__init__()
+        self.image = image
+        self.curve_mode = curve_mode
+        self.lut = lut
+
+    def run(self):
+        adjusted_image = self.process_curve(self.image, self.curve_mode, self.lut)
+        self.result_ready.emit(adjusted_image)
+
+    @staticmethod
+    def float_to_lut_index(value_float):
+        idx = (value_float * 65535.0).astype(np.uint32)
+        idx = np.clip(idx, 0, 65535)
+        return idx
+
+    @staticmethod
+    def lut_to_float(lut_values):
+        return (lut_values / 65535.0).astype(np.float32)
+
+    @staticmethod
+    def apply_lut_to_channel(channel, lut):
+        idx = FullCurvesProcessingThread.float_to_lut_index(channel)
+        return FullCurvesProcessingThread.lut_to_float(lut[idx])
+
+    @staticmethod
+    def rgb_to_xyz(rgb):
+        M = np.array([[0.4124564, 0.3575761, 0.1804375],
+                      [0.2126729, 0.7151522, 0.0721750],
+                      [0.0193339, 0.1191920, 0.9503041]], dtype=np.float32)
+        shape = rgb.shape
+        out = rgb.reshape(-1,3) @ M.T
+        return out.reshape(shape)
+
+    @staticmethod
+    def xyz_to_rgb(xyz):
+        M_inv = np.array([[ 3.2404542, -1.5371385, -0.4985314],
+                          [-0.9692660,  1.8760108,  0.0415560],
+                          [ 0.0556434, -0.2040259,  1.0572252]], dtype=np.float32)
+        shape = xyz.shape
+        out = xyz.reshape(-1,3) @ M_inv.T
+        out = np.clip(out, 0, 1)
+        return out.reshape(shape)
+
+    @staticmethod
+    def f_lab(t):
+        delta = 6/29
+        if isinstance(t, np.ndarray):
+            mask = t > delta**3
+            f = np.zeros_like(t)
+            f[mask] = np.cbrt(t[mask])
+            f[~mask] = t[~mask] / (3*delta*delta) + 4/29
+            return f
+        else:
+            return np.cbrt(t) if t > delta**3 else t/(3*delta*delta) + 4/29
+
+    @staticmethod
+    def xyz_to_lab(xyz):
+        Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+        X = xyz[:,:,0]/Xn
+        Y = xyz[:,:,1]/Yn
+        Z = xyz[:,:,2]/Zn
+
+        fx = FullCurvesProcessingThread.f_lab(X)
+        fy = FullCurvesProcessingThread.f_lab(Y)
+        fz = FullCurvesProcessingThread.f_lab(Z)
+
+        L = (116 * fy - 16)
+        a = 500*(fx - fy)
+        b = 200*(fy - fz)
+
+        return np.dstack([L, a, b]).astype(np.float32)
+
+    @staticmethod
+    def lab_to_xyz(lab):
+        L = lab[:,:,0]
+        a = lab[:,:,1]
+        b = lab[:,:,2]
+
+        delta = 6/29
+        fy = (L+16)/116
+        fx = fy + a/500
+        fz = fy - b/200
+
+        Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+
+        def f_inv(ft):
+            return np.where(ft > delta, ft**3, 3*delta**2*(ft - 4/29))
+
+        X = Xn * f_inv(fx)
+        Y = Yn * f_inv(fy)
+        Z = Zn * f_inv(fz)
+
+        return np.dstack([X, Y, Z]).astype(np.float32)
+
+    @staticmethod
+    def apply_lut_to_L(L_channel, lut):
+        L_norm = np.clip(L_channel/100.0, 0, 1)
+        idx = FullCurvesProcessingThread.float_to_lut_index(L_norm)
+        L_out = FullCurvesProcessingThread.lut_to_float(lut[idx]) * 100.0
+        return L_out
+
+    @staticmethod
+    def apply_lut_to_ab(ab_channel, lut):
+        ab_shifted = (ab_channel + 128.0)/255.0
+        ab_shifted = np.clip(ab_shifted, 0, 1)
+        idx = FullCurvesProcessingThread.float_to_lut_index(ab_shifted)
+        ab_out = FullCurvesProcessingThread.lut_to_float(lut[idx]) * 255.0 - 128.0
+        return ab_out
+
+    @staticmethod
+    def rgb_to_hsv(rgb):
+        cmax = rgb.max(axis=2)
+        cmin = rgb.min(axis=2)
+        delta = cmax - cmin
+
+        H = np.zeros_like(cmax)
+        S = np.zeros_like(cmax)
+        V = cmax
+
+        mask = delta != 0
+        r, g, b = rgb[:,:,0], rgb[:,:,1], rgb[:,:,2]
+        H[mask & (cmax==r)] = 60 * (((g[mask & (cmax==r)] - b[mask & (cmax==r)])/delta[mask & (cmax==r)]) % 6)
+        H[mask & (cmax==g)] = 60 * (((b[mask & (cmax==g)] - r[mask & (cmax==g)])/delta[mask & (cmax==g)]) + 2)
+        H[mask & (cmax==b)] = 60 * (((r[mask & (cmax==b)] - g[mask & (cmax==b)])/delta[mask & (cmax==b)]) + 4)
+
+        S[cmax > 0] = delta[cmax > 0] / cmax[cmax > 0]
+
+        return np.dstack([H, S, V]).astype(np.float32)
+
+    @staticmethod
+    def hsv_to_rgb(hsv):
+        H, S, V = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+
+        C = V * S
+        X = C * (1 - np.abs((H/60.0)%2 - 1))
+        m = V - C
+
+        R = np.zeros_like(H)
+        G = np.zeros_like(H)
+        B = np.zeros_like(H)
+
+        cond0 = (H < 60)
+        cond1 = (H >= 60) & (H < 120)
+        cond2 = (H >= 120) & (H < 180)
+        cond3 = (H >= 180) & (H < 240)
+        cond4 = (H >= 240) & (H < 300)
+        cond5 = (H >= 300)
+
+        R[cond0] = C[cond0]; G[cond0] = X[cond0]; B[cond0] = 0
+        R[cond1] = X[cond1]; G[cond1] = C[cond1]; B[cond1] = 0
+        R[cond2] = 0; G[cond2] = C[cond2]; B[cond2] = X[cond2]
+        R[cond3] = 0; G[cond3] = X[cond3]; B[cond3] = C[cond3]
+        R[cond4] = X[cond4]; G[cond4] = 0; B[cond4] = C[cond4]
+        R[cond5] = C[cond5]; G[cond5] = 0; B[cond5] = X[cond5]
+
+        rgb = np.dstack([R+m, G+m, B+m])
+        rgb = np.clip(rgb, 0, 1)
+        return rgb
+
+    @staticmethod
+    def apply_lut_float(value, lut):
+        idx = FullCurvesProcessingThread.float_to_lut_index(value)
+        return FullCurvesProcessingThread.lut_to_float(lut[idx])
+
+    @staticmethod
+    def apply_lut_to_chroma(a_channel, b_channel, lut):
+        C = np.sqrt(a_channel**2 + b_channel**2)
+        C_norm = np.clip(C/200.0, 0, 1)
+        C_new = FullCurvesProcessingThread.apply_lut_float(C_norm, lut)*200.0
+        ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C!=0))
+        a_new = a_channel * ratio
+        b_new = b_channel * ratio
+        return a_new, b_new
+
+    @staticmethod
+    def apply_lut_to_saturation(hsv, lut):
+        S = hsv[:,:,1]
+        S_new = FullCurvesProcessingThread.apply_lut_float(S, lut)
+        hsv_new = hsv.copy()
+        hsv_new[:,:,1] = S_new
+        return hsv_new
+
+    def process_curve(self, image, curve_mode, lut):
+        if image is None:
+            return image
+
+        if image.dtype != np.float32:
+            image = image.astype(np.float32, copy=False)
+
+        is_gray = (image.ndim == 2 or image.shape[2] == 1)
+        if is_gray:
+            image = image.reshape(image.shape[0], image.shape[1], 1)
+
+        mode = curve_mode.lower()
+
+        # Use class name when calling static methods
+        if mode == 'r':
+            if image.shape[2] == 3:
+                image[:,:,0] = self.apply_lut_to_channel(image[:,:,0], lut)
+
+        elif mode == 'g':
+            if image.shape[2] == 3:
+                image[:,:,1] = self.apply_lut_to_channel(image[:,:,1], lut)
+
+        elif mode == 'b':
+            if image.shape[2] == 3:
+                image[:,:,2] = self.apply_lut_to_channel(image[:,:,2], lut)
+
+        elif mode == 'k (brightness)':
+            for c in range(image.shape[2]):
+                image[:,:,c] = self.apply_lut_to_channel(image[:,:,c], lut)
+
+        elif mode == 'l*':
+            if image.shape[2] == 3:
+                xyz = self.rgb_to_xyz(image)
+                lab = self.xyz_to_lab(xyz)
+                lab[:,:,0] = self.apply_lut_to_L(lab[:,:,0], lut)
+                xyz_new = self.lab_to_xyz(lab)
+                image = self.xyz_to_rgb(xyz_new)
+            else:
+                L = image[:,:,0]*100.0
+                L = self.apply_lut_to_L(L, lut)
+                image[:,:,0] = L/100.0
+
+        elif mode == 'a*':
+            if image.shape[2] == 3:
+                xyz = self.rgb_to_xyz(image)
+                lab = self.xyz_to_lab(xyz)
+                lab[:,:,1] = self.apply_lut_to_ab(lab[:,:,1], lut)
+                xyz_new = self.lab_to_xyz(lab)
+                image = self.xyz_to_rgb(xyz_new)
+
+        elif mode == 'b*':
+            if image.shape[2] == 3:
+                xyz = self.rgb_to_xyz(image)
+                lab = self.xyz_to_lab(xyz)
+                lab[:,:,2] = self.apply_lut_to_ab(lab[:,:,2], lut)
+                xyz_new = self.lab_to_xyz(lab)
+                image = self.xyz_to_rgb(xyz_new)
+
+        elif mode == 'chroma':
+            if image.shape[2] == 3:
+                xyz = self.rgb_to_xyz(image)
+                lab = self.xyz_to_lab(xyz)
+                a_new, b_new = self.apply_lut_to_chroma(lab[:,:,1], lab[:,:,2], lut)
+                lab[:,:,1] = a_new
+                lab[:,:,2] = b_new
+                xyz_new = self.lab_to_xyz(lab)
+                image = self.xyz_to_rgb(xyz_new)
+
+        elif mode == 'saturation':
+            if image.shape[2] == 3:
+                hsv = self.rgb_to_hsv(image)
+                hsv_new = self.apply_lut_to_saturation(hsv, lut)
+                image = self.hsv_to_rgb(hsv_new)
+
+        if is_gray:
+            image = image[:,:,0]
+
+        return image
+
+
 
 class NBtoRGBstarsTab(QWidget):
     def __init__(self):
