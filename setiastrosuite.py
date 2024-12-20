@@ -3897,9 +3897,39 @@ class FullCurvesTab(QWidget):
 
     def saveImage(self):
         if self.image is not None:
-            save_filename, _ = QFileDialog.getSaveFileName(self, 'Save Image As', '', 'Images (*.tiff *.tif *.png *.fit *.fits *.xisf);;All Files (*)')
+            # Open the file save dialog
+            save_filename, _ = QFileDialog.getSaveFileName(
+                self, 'Save Image As', '', 
+                'Images (*.tiff *.tif *.png *.fit *.fits *.xisf);;All Files (*)'
+            )
+            
             if save_filename:
-                save_image(self.image, save_filename, "tif", self.bit_depth, self.original_header, self.is_mono)
+                # Extract the file extension from the selected filename
+                file_extension = save_filename.lower().split('.')[-1]
+
+                # Map the extension to the format expected by save_image
+                if file_extension in ['tif', 'tiff']:
+                    original_format = 'tiff'
+                elif file_extension in ['png']:
+                    original_format = 'png'
+                elif file_extension in ['fit', 'fits']:
+                    original_format = 'fits'
+                elif file_extension == 'xisf':
+                    original_format = 'xisf'
+                else:
+                    QMessageBox.warning(self, "Error", "Unsupported file format!")
+                    return
+                
+                try:
+                    # Call save_image with the appropriate arguments
+                    save_image(
+                        self.image, save_filename, original_format, 
+                        self.bit_depth, self.original_header, self.is_mono
+                    )
+                    print(f"Image saved successfully to {save_filename}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+
 
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, curve_editor, x, y, color=Qt.green, lock_axis=None, position_type=None):
@@ -6001,7 +6031,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
 
 
 
-def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False):
+def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False, image_meta=None, file_meta=None):
     """
     Save an image array to a file in the specified format and bit depth.
     """
@@ -6151,7 +6181,6 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
         elif original_format == 'xisf':
             try:
-                # Debug: Print details about the image
                 print(f"Original image shape: {img_array.shape}, dtype: {img_array.dtype}")
                 print(f"Bit depth: {bit_depth}")
 
@@ -6163,75 +6192,55 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                 else:  # Default to 32-bit float
                     processed_image = img_array.astype(np.float32)
 
-                # Handle mono images
+                # Handle mono images explicitly
                 if is_mono:
-                    print("Preparing mono image for XISF...")
-                    # Extract single channel if image has multiple channels
+                    print("Detected mono image. Preparing for XISF...")
                     if processed_image.ndim == 3 and processed_image.shape[2] > 1:
-                        processed_image = processed_image[:, :, 0]
-                    # Add back channel dimension
-                    processed_image = processed_image[:, :, np.newaxis]
-                    
-                    # Update image metadata for mono images
+                        processed_image = processed_image[:, :, 0]  # Extract single channel
+                    processed_image = processed_image[:, :, np.newaxis]  # Add back channel dimension
+
+                    # Update metadata for mono images
                     if image_meta and isinstance(image_meta, list):
                         image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], 1)
-                        image_meta[0]['colorSpace'] = 'Gray'  # Update metadata for mono images
+                        image_meta[0]['colorSpace'] = 'Gray'
                     else:
-                        # Create default metadata for mono
+                        # Create default metadata for mono images
                         image_meta = [{
                             'geometry': (processed_image.shape[1], processed_image.shape[0], 1),
                             'colorSpace': 'Gray'
                         }]
+
+                # Handle RGB images
                 else:
-                    # Update image metadata for RGB images
                     if image_meta and isinstance(image_meta, list):
                         image_meta[0]['geometry'] = (processed_image.shape[1], processed_image.shape[0], processed_image.shape[2])
                         image_meta[0]['colorSpace'] = 'RGB'
                     else:
-                        # Create default metadata for RGB
+                        # Create default metadata for RGB images
                         image_meta = [{
                             'geometry': (processed_image.shape[1], processed_image.shape[0], processed_image.shape[2]),
                             'colorSpace': 'RGB'
                         }]
 
-                # Fallback for `image_meta` if not provided
+                # Ensure fallback for `image_meta` and `file_meta`
                 if image_meta is None or not isinstance(image_meta, list):
-                    if is_mono:
-                        color_space = 'Gray'
-                        channels = 1
-                    else:
-                        color_space = 'RGB'
-                        channels = 3
                     image_meta = [{
-                        'geometry': (processed_image.shape[1], processed_image.shape[0], channels),
-                        'colorSpace': color_space
+                        'geometry': (processed_image.shape[1], processed_image.shape[0], 1 if is_mono else 3),
+                        'colorSpace': 'Gray' if is_mono else 'RGB'
                     }]
-
-                # Fallback for `file_meta`
                 if file_meta is None:
-                    file_meta = {}  # Ensure file_meta is a valid dictionary
+                    file_meta = {}
 
-                # Debug: Print processed image details
+                # Debug: Print processed image details and metadata
                 print(f"Processed image shape for XISF: {processed_image.shape}, dtype: {processed_image.dtype}")
 
-                # Save the image in XISF format
-                # Replace `XISF.write` with the correct method from your XISF library
-                # Example:
-                # XISF.write(
-                #     filename,                   # Output path
-                #     processed_image,            # Final processed image
-                #     creator_app="Seti Astro Cosmic Clarity",
-                #     image_metadata=image_meta[0],       # First block of image metadata
-                #     xisf_metadata=file_meta,            # File-level metadata
-                #     shuffle=True
-                # )
-                # For demonstration, I'll use a placeholder function
+                # Save the image using XISF.write
                 XISF.write(
-                    filename,                   # Output path
-                    processed_image,            # Final processed image
+                    filename,                    # Output path
+                    processed_image,             # Final processed image
                     creator_app="Seti Astro Cosmic Clarity",
-                    image_metadata=image_meta[0],       # First block of image metadata
-                    xisf_metadata=file_meta,            # File-level metadata
+                    image_metadata=image_meta[0],  # First block of image metadata
+                    xisf_metadata=file_meta,       # File-level metadata
                     shuffle=True
                 )
 
@@ -6240,6 +6249,7 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             except Exception as e:
                 print(f"Error saving XISF file: {e}")
                 raise
+
 
         else:
             raise ValueError("Unsupported file format!")
