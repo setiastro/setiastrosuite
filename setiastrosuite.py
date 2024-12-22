@@ -46,6 +46,7 @@ import tifffile as tiff
 import pytz
 from astropy.utils.data import conf
 from scipy.interpolate import interp1d
+from scipy.interpolate import PchipInterpolator
 
 import rawpy
 
@@ -127,7 +128,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.8')
+        self.setWindowTitle('Seti Astro\'s Suite V1.8.1')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -3626,11 +3627,31 @@ class FullCurvesTab(QWidget):
         self.initUI()
         self.image = None
         self.filename = None
+        self.original_image = None  # Reference to the original image
+        self.preview_image = None   # Reference to the preview image        
         self.zoom_factor = 1.0
         self.original_header = None
         self.bit_depth = None
         self.is_mono = None
         self.curve_mode = "K (Brightness)"  # Default curve mode
+        self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)  # Initialize with identity LUT
+
+        # Initialize the Undo stack with a limited size
+        self.undo_stack = []
+        self.max_undo = 10  # Maximum number of undo steps        
+
+        # Precompute transformation matrices
+        self.M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+
+        self.M_inv = np.array([
+            [ 3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [ 0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)        
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -3642,6 +3663,7 @@ class FullCurvesTab(QWidget):
 
         # Load button
         self.fileButton = QPushButton('Load Image', self)
+        self.fileButton.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         self.fileButton.clicked.connect(self.openFileDialog)
         left_layout.addWidget(self.fileButton)
 
@@ -3654,20 +3676,38 @@ class FullCurvesTab(QWidget):
         left_layout.addWidget(self.curveModeLabel)
 
         self.curveModeGroup = QButtonGroup(self)
-        curve_modes = ['K (Brightness)', 'R', 'G', 'B', 'L*', 'a*', 'b*', 'Chroma', 'Saturation']
-        curve_mode_layout = QVBoxLayout()
+        curve_modes = [
+            ('K (Brightness)', 0, 0),  # Text, row, column
+            ('R', 1, 0),
+            ('G', 2, 0),
+            ('B', 3, 0),
+            ('L*', 0, 1),
+            ('a*', 1, 1),
+            ('b*', 2, 1),
+            ('Chroma', 0, 2),
+            ('Saturation', 1, 2)
+        ]
 
-        for mode in curve_modes:
+        curve_mode_layout = QGridLayout()
+
+        # Connect all buttons to set_curve_mode
+        for mode, row, col in curve_modes:
             button = QRadioButton(mode, self)
-            if mode == 'K (Brightness)':
-                button.setChecked(True)
+            if mode == "K (Brightness)":
+                button.setChecked(True)  # Default selection
+            button.toggled.connect(self.set_curve_mode)  # Update curve_mode on toggle
             self.curveModeGroup.addButton(button)
-            curve_mode_layout.addWidget(button)
+            curve_mode_layout.addWidget(button, row, col)
+
         left_layout.addLayout(curve_mode_layout)
+        self.set_curve_mode()
 
         # Curve editor placeholder
         self.curveEditor = CurveEditor(self)
         left_layout.addWidget(self.curveEditor)
+
+        # Connect the CurveEditor preview callback
+        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode))
 
         self.statusLabel = QLabel('X:0 Y:0', self)
         left_layout.addWidget(self.statusLabel)
@@ -3687,13 +3727,21 @@ class FullCurvesTab(QWidget):
         source_layout.addWidget(self.applyCurrentRadio)
         left_layout.addLayout(source_layout)
 
-        # Horizontal layout for Apply and Reset buttons
+        # Horizontal layout for Apply, Undo, and Reset buttons
         button_layout = QHBoxLayout()
 
         # Apply Curve Button
         self.applyButton = QPushButton('Apply Curve', self)
+        self.applyButton.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
         self.applyButton.clicked.connect(self.startProcessing)
         button_layout.addWidget(self.applyButton)
+
+        # Undo Curve Button
+        self.undoButton = QPushButton('Undo', self)
+        self.undoButton.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.undoButton.setEnabled(False)  # Initially disabled
+        self.undoButton.clicked.connect(self.undo)
+        button_layout.addWidget(self.undoButton)
 
         # Reset Curve Button as a small tool button with an icon
         self.resetCurveButton = QToolButton(self)
@@ -3705,10 +3753,11 @@ class FullCurvesTab(QWidget):
         # Optionally, if you want the reset button even smaller, you can also adjust its size:
         # self.resetCurveButton.setFixedSize(24, 24)
 
+        # Connect the clicked signal to the resetCurve method
         self.resetCurveButton.clicked.connect(self.resetCurve)
         button_layout.addWidget(self.resetCurveButton)
 
-        # Add the horizontal layout with both buttons to the main left layout
+        # Add the horizontal layout with buttons to the main left layout
         left_layout.addLayout(button_layout)
 
         # Spacer
@@ -3716,6 +3765,7 @@ class FullCurvesTab(QWidget):
 
         # Save button
         self.saveButton = QPushButton('Save Image', self)
+        self.saveButton.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.saveButton.clicked.connect(self.saveImage)
         left_layout.addWidget(self.saveButton)
 
@@ -3766,6 +3816,363 @@ class FullCurvesTab(QWidget):
         self.dragging = False
         self.last_pos = QPoint()
 
+    def set_curve_mode(self):
+        selected_button = self.curveModeGroup.checkedButton()
+        if selected_button:
+            self.curve_mode = selected_button.text()
+            # Assuming you have the current LUT, update the preview
+            if hasattr(self, 'current_lut'):
+                self.updatePreviewLUT(self.current_lut, self.curve_mode)
+
+    def get_visible_region(self):
+        """Retrieve the coordinates of the visible region in the image."""
+        viewport = self.scrollArea.viewport()
+        # Top-left corner of the visible area
+        x = self.scrollArea.horizontalScrollBar().value()
+        y = self.scrollArea.verticalScrollBar().value()
+        # Size of the visible area
+        w = viewport.width()
+        h = viewport.height()
+        return x, y, w, h
+
+
+    def updatePreviewLUT(self, lut, curve_mode):
+        """Apply the 8-bit LUT to the preview image for real-time updates."""
+        if self.original_image is None:
+            return
+
+        # Determine the visible region
+        x, y, w, h = self.get_visible_region()
+
+        # Ensure the region is within image bounds
+        x_end = min(x + w, self.original_image.shape[1])
+        y_end = min(y + h, self.original_image.shape[0])
+
+        # Determine the base image based on apply mode
+        if self.applyOriginalRadio.isChecked():
+            base_image = self.original_image
+        else:
+            base_image = self.image
+
+        # Extract the visible region from the base image
+        visible_region = base_image[y:y_end, x:x_end]
+
+        # Create an 8-bit version of the visible region for faster processing
+        image_8bit = (visible_region * 255).astype(np.uint8)
+
+        if image_8bit.ndim == 3:  # RGB image
+            adjusted_image = image_8bit.copy()
+
+            if curve_mode == "K (Brightness)":
+                # Apply LUT to all channels equally (Brightness)
+                for channel in range(3):
+                    adjusted_image[:, :, channel] = np.take(lut, image_8bit[:, :, channel])
+
+            elif curve_mode in ["R", "G", "B"]:
+                # Apply LUT to a single channel
+                channel_index = {"R": 0, "G": 1, "B": 2}[curve_mode]
+                adjusted_image[:, :, channel_index] = np.take(lut, image_8bit[:, :, channel_index])
+
+            elif curve_mode in ["L*", "a*", "b*"]:
+                # Manual RGB to Lab Conversion
+                # Use precomputed transformation matrices
+                M = self.M
+                M_inv = self.M_inv
+
+                # Normalize RGB to [0,1]
+                rgb = image_8bit.astype(np.float32) / 255.0
+
+                # Convert RGB to XYZ
+                xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+
+                # Reference white point (D65)
+                Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+
+                # Normalize XYZ
+                X = xyz[:, :, 0] / Xn
+                Y = xyz[:, :, 1] / Yn
+                Z = xyz[:, :, 2] / Zn
+
+                # Define the f(t) function
+                delta = 6 / 29
+                def f(t):
+                    return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+                fx = f(X)
+                fy = f(Y)
+                fz = f(Z)
+
+                # Compute L*, a*, b*
+                L = 116 * fy - 16
+                a = 500 * (fx - fy)
+                b = 200 * (fy - fz)
+
+                # Apply LUT to the respective channel
+                if curve_mode == "L*":
+                    # L* typically ranges from 0 to 100
+                    L_normalized = np.clip(L / 100.0, 0, 1)  # Normalize to [0,1]
+                    L_lut_indices = (L_normalized * 255).astype(np.uint8)
+                    L_adjusted = lut[L_lut_indices].astype(np.float32) * 100.0 / 255.0  # Scale back to [0,100]
+                    L = L_adjusted
+
+                elif curve_mode == "a*":
+                    # a* typically ranges from -128 to +127
+                    a_normalized = np.clip((a + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
+                    a_lut_indices = (a_normalized * 255).astype(np.uint8)
+                    a_adjusted = lut[a_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
+                    a = a_adjusted
+
+                elif curve_mode == "b*":
+                    # b* typically ranges from -128 to +127
+                    b_normalized = np.clip((b + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
+                    b_lut_indices = (b_normalized * 255).astype(np.uint8)
+                    b_adjusted = lut[b_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
+                    b = b_adjusted
+
+                # Update Lab channels
+                lab_new = np.stack([L, a, b], axis=2)
+
+                # Convert Lab back to XYZ
+                fy_new = (lab_new[:, :, 0] + 16) / 116
+                fx_new = fy_new + lab_new[:, :, 1] / 500
+                fz_new = fy_new - lab_new[:, :, 2] / 200
+
+                def f_inv(ft):
+                    return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
+
+                X_new = f_inv(fx_new) * Xn
+                Y_new = f_inv(fy_new) * Yn
+                Z_new = f_inv(fz_new) * Zn
+
+                # Stack XYZ channels
+                xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
+
+                # Convert XYZ back to RGB
+                rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
+
+                # Clip RGB to [0,1]
+                rgb_new = np.clip(rgb_new, 0, 1)
+
+                # Convert back to 8-bit
+                adjusted_image = (rgb_new * 255).astype(np.uint8)
+
+            elif curve_mode == "Chroma":
+                # === Manual RGB to Lab Conversion ===
+                # Use precomputed transformation matrices
+                M = self.M
+                M_inv = self.M_inv
+
+                # Normalize RGB to [0,1]
+                rgb = image_8bit.astype(np.float32) / 255.0
+
+                # Convert RGB to XYZ
+                xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+
+                # Reference white point (D65)
+                Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+
+                # Normalize XYZ
+                X = xyz[:, :, 0] / Xn
+                Y = xyz[:, :, 1] / Yn
+                Z = xyz[:, :, 2] / Zn
+
+                # Define the f(t) function
+                delta = 6 / 29
+                def f(t):
+                    return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+                fx = f(X)
+                fy = f(Y)
+                fz = f(Z)
+
+                # Compute L*, a*, b*
+                L = 116 * fy - 16
+                a = 500 * (fx - fy)
+                b = 200 * (fy - fz)
+
+                # Compute Chroma
+                chroma = np.sqrt(a**2 + b**2)
+
+                # Define a fixed maximum Chroma for normalization to prevent over-scaling
+                fixed_max_chroma = 200.0  # Adjust this value as needed
+
+                # Normalize Chroma to [0,1] using fixed_max_chroma
+                chroma_norm = np.clip(chroma / fixed_max_chroma, 0, 1)
+
+                # Apply LUT to Chroma
+                chroma_lut_indices = (chroma_norm * 255).astype(np.uint8)
+                chroma_adjusted = lut[chroma_lut_indices].astype(np.float32)  # Ensure float32
+
+                # Compute scaling factor, avoiding division by zero
+                scale = np.ones_like(chroma_adjusted, dtype=np.float32)
+                mask = chroma > 0
+                scale[mask] = chroma_adjusted[mask] / chroma[mask]
+
+                # Scale a* and b* channels
+                a_new = a * scale
+                b_new = b * scale
+
+                # Update Lab channels
+                lab_new = np.stack([L, a_new, b_new], axis=2)
+
+                # Convert Lab back to XYZ
+                fy_new = (lab_new[:, :, 0] + 16) / 116
+                fx_new = fy_new + lab_new[:, :, 1] / 500
+                fz_new = fy_new - lab_new[:, :, 2] / 200
+
+                def f_inv(ft):
+                    return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
+
+                X_new = f_inv(fx_new) * Xn
+                Y_new = f_inv(fy_new) * Yn
+                Z_new = f_inv(fz_new) * Zn
+
+                # Stack XYZ channels
+                xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
+
+                # Convert XYZ back to RGB
+                rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
+
+                # Clip RGB to [0,1]
+                rgb_new = np.clip(rgb_new, 0, 1)
+
+                # Convert back to 8-bit
+                adjusted_image = (rgb_new * 255).astype(np.uint8)
+
+            elif curve_mode == "Saturation":
+                # === Manual RGB to HSV Conversion ===
+                # Normalize RGB to [0,1]
+                rgb = image_8bit.astype(np.float32) / 255.0
+
+                # Split channels
+                R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+
+                # Compute Cmax, Cmin, Delta
+                Cmax = np.maximum(np.maximum(R, G), B)
+                Cmin = np.minimum(np.minimum(R, G), B)
+                Delta = Cmax - Cmin
+
+                # Initialize Hue (H), Saturation (S), and Value (V)
+                H = np.zeros_like(Cmax)
+                S = np.zeros_like(Cmax)
+                V = Cmax.copy()
+
+                # Compute Hue (H)
+                mask = Delta != 0
+                # Avoid division by zero
+                H[mask & (Cmax == R)] = ((G[mask & (Cmax == R)] - B[mask & (Cmax == R)]) / Delta[mask & (Cmax == R)]) % 6
+                H[mask & (Cmax == G)] = ((B[mask & (Cmax == G)] - R[mask & (Cmax == G)]) / Delta[mask & (Cmax == G)]) + 2
+                H[mask & (Cmax == B)] = ((R[mask & (Cmax == B)] - G[mask & (Cmax == B)]) / Delta[mask & (Cmax == B)]) + 4
+                H = H / 6.0  # Normalize Hue to [0,1]
+
+                # Compute Saturation (S)
+                S[Cmax != 0] = Delta[Cmax != 0] / Cmax[Cmax != 0]
+
+                # Apply LUT to Saturation (S) channel
+                S_normalized = np.clip(S, 0, 1)  # Ensure S is within [0,1]
+                S_lut_indices = (S_normalized * 255).astype(np.uint8)
+                S_adjusted = lut[S_lut_indices].astype(np.float32) / 255.0  # Normalize back to [0,1]
+                S = S_adjusted
+
+                # Convert HSV back to RGB
+                C = V * S
+                X = C * (1 - np.abs((H * 6) % 2 - 1))
+                m = V - C
+
+                # Initialize RGB channels
+                R_new = np.zeros_like(R)
+                G_new = np.zeros_like(G)
+                B_new = np.zeros_like(B)
+
+                # Define masks for different sectors of Hue
+                mask0 = (H >= 0) & (H < 1/6)
+                mask1 = (H >= 1/6) & (H < 2/6)
+                mask2 = (H >= 2/6) & (H < 3/6)
+                mask3 = (H >= 3/6) & (H < 4/6)
+                mask4 = (H >= 4/6) & (H < 5/6)
+                mask5 = (H >= 5/6) & (H < 1)
+
+                # Assign RGB values based on the sector of Hue
+                R_new[mask0] = C[mask0]
+                G_new[mask0] = X[mask0]
+                B_new[mask0] = 0
+
+                R_new[mask1] = X[mask1]
+                G_new[mask1] = C[mask1]
+                B_new[mask1] = 0
+
+                R_new[mask2] = 0
+                G_new[mask2] = C[mask2]
+                B_new[mask2] = X[mask2]
+
+                R_new[mask3] = 0
+                G_new[mask3] = X[mask3]
+                B_new[mask3] = C[mask3]
+
+                R_new[mask4] = X[mask4]
+                G_new[mask4] = 0
+                B_new[mask4] = C[mask4]
+
+                R_new[mask5] = C[mask5]
+                G_new[mask5] = 0
+                B_new[mask5] = X[mask5]
+
+                # Add m to match the Value (V)
+                R_new += m
+                G_new += m
+                B_new += m
+
+                # Stack the channels back together
+                rgb_new = np.stack([R_new, G_new, B_new], axis=2)
+
+                # Clip RGB to [0,1] to maintain valid color ranges
+                rgb_new = np.clip(rgb_new, 0, 1)
+
+                # Convert back to 8-bit
+                adjusted_image = (rgb_new * 255).astype(np.uint8)
+
+            else:
+                # Unsupported curve mode
+                print(f"Unsupported curve mode: {curve_mode}")
+                return
+
+        else:  # Grayscale image
+            # For grayscale images, apply LUT directly
+            adjusted_image = np.take(lut, image_8bit)
+
+        # Copy the adjusted region back to the full image
+        full_adjusted_image = self.image.copy()
+        full_adjusted_image[y:y_end, x:x_end] = adjusted_image / 255.0  # Assuming self.image is float [0,1]
+
+        # Convert the full adjusted image to 8-bit for display
+        full_adjusted_8bit = (full_adjusted_image * 255).astype(np.uint8)
+
+        # Convert to QImage
+        if full_adjusted_8bit.ndim == 3:
+            bytes_per_line = 3 * full_adjusted_8bit.shape[1]
+            q_image_full = QImage(full_adjusted_8bit.tobytes(), full_adjusted_8bit.shape[1], full_adjusted_8bit.shape[0], bytes_per_line, QImage.Format_RGB888)
+        else:
+            bytes_per_line = full_adjusted_8bit.shape[1]
+            q_image_full = QImage(full_adjusted_8bit.tobytes(), full_adjusted_8bit.shape[1], full_adjusted_8bit.shape[0], bytes_per_line, QImage.Format_Grayscale8)
+
+        # Create QPixmap from QImage
+        pixmap_full = QPixmap.fromImage(q_image_full)
+
+        # Correctly scale the pixmap based on zoom_factor
+        scaled_width = int(pixmap_full.width() * self.zoom_factor)
+        scaled_height = int(pixmap_full.height() * self.zoom_factor)
+        scaled_pixmap = pixmap_full.scaled(
+            scaled_width,
+            scaled_height,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+
+        # Set the scaled pixmap to the imageLabel
+        self.imageLabel.setPixmap(scaled_pixmap)
+        self.imageLabel.resize(scaled_pixmap.size())
+
+
     def handleImageMouseMove(self, x, y):
         if self.image is None:
             return
@@ -3796,7 +4203,7 @@ class FullCurvesTab(QWidget):
             self.statusLabel.setText(text)  # For example, reuse fileLabel or add a dedicated status label.
 
     def startProcessing(self):
-        if self.image is None:
+        if self.preview_image is None:
             return
         curve_mode = self.curveModeGroup.checkedButton().text()
         curve_func = self.curveEditor.getCurveFunction()
@@ -3806,6 +4213,9 @@ class FullCurvesTab(QWidget):
             source_image = self.original_image.copy()
         else:
             source_image = self.image.copy()
+
+        # Push the current image to the undo stack before modifying
+        self.pushUndo(self.image.copy())
 
         # Show the spinner separately, not on imageLabel.
         self.spinnerLabel = QLabel(self)
@@ -3821,21 +4231,68 @@ class FullCurvesTab(QWidget):
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
 
-
     def finishProcessing(self, adjusted_image):
         # Hide the spinner
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
-        self.updatePreview(adjusted_image)
+
+        # Update the image state based on apply mode without modifying original_image
+        self.image = adjusted_image.copy()
+
+        # Update the preview to reflect the applied changes
+        self.preview_image = self.image.copy()
+        self.updatePreview(self.preview_image)
+
+    def pushUndo(self, image_state):
+        """Push the current image state onto the undo stack."""
+        if len(self.undo_stack) >= self.max_undo:
+            # Remove the oldest state to maintain the stack size
+            self.undo_stack.pop(0)
+        self.undo_stack.append(image_state)
+        self.updateUndoButtonState()
+
+    def updateUndoButtonState(self):
+        """Enable or disable the Undo button based on the undo stack."""
+        if hasattr(self, 'undoButton'):
+            self.undoButton.setEnabled(len(self.undo_stack) > 0)
+
+    def undo(self):
+        """Revert the image to the last state in the undo stack."""
+        if not self.undo_stack:
+            QMessageBox.information(self, "Undo", "No actions to undo.")
+            return
+
+        # Pop the last state from the stack
+        last_state = self.undo_stack.pop()
+
+        # Update the image and preview
+        self.image = last_state.copy()
+        self.preview_image = self.image.copy()
+        self.updatePreview(self.preview_image)
+
+        # Update the Undo button state
+        self.updateUndoButtonState()
+
+
+
 
     def resetCurve(self):
         # Reset the curve in the curve editor
         self.curveEditor.initCurve()
-        # Since initCurve clears and re-draws the curve, update the preview if desired
-        # If the user expects the preview to revert to the original image:
+        
+        # Reset the image to the original image
         if self.original_image is not None:
+            # Push the current image to the undo stack before resetting
+            self.pushUndo(self.image.copy())
+
             self.image = self.original_image.copy()
-            self.updatePreview()
+            self.preview_image = self.original_image.copy()
+            self.updatePreview(self.preview_image)
+
+        else:
+            QMessageBox.warning(self, "Warning", "Original image not loaded.")
+            print("Reset Curve called, but original image not loaded.")
+
 
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -3852,22 +4309,29 @@ class FullCurvesTab(QWidget):
         return super().eventFilter(source, event)
 
     def openFileDialog(self):
-        self.filename, _ = QFileDialog.getOpenFileName(self, 'Open Image File', '', 'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)')
-        if self.filename:
-            self.fileLabel.setText(self.filename)
-            self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.filename)
-            # Keep a copy of the original image
-            self.original_image = self.image.copy()
-            self.updatePreview()
+        try:
+            self.filename, _ = QFileDialog.getOpenFileName(
+                self, 'Open Image File', '', 
+                'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)'
+            )
+            if self.filename:
+                self.fileLabel.setText(self.filename)
+                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.filename)
+                # Keep a copy of the original image
+                self.original_image = self.image.copy()
+                # Initialize the preview image as a copy of the original
+                self.preview_image = self.original_image.copy()
+                self.updatePreview(self.preview_image)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
 
-    def updatePreview(self, adjusted_image=None):
-        # Save current scroll positions
+    def updatePreview(self, preview_image=None):
+        """Display the preview_image on the imageLabel."""
+        if preview_image is None:
+            preview_image = self.preview_image
 
-        if adjusted_image is not None:
-            self.image = adjusted_image
-
-        if self.image is not None:
-            img = (self.image * 255).astype(np.uint8)
+        if preview_image is not None:
+            img = (preview_image * 255).astype(np.uint8)
             h, w = img.shape[:2]
 
             if img.ndim == 3:
@@ -3878,9 +4342,18 @@ class FullCurvesTab(QWidget):
                 q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
 
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # Correctly scale the pixmap based on zoom_factor
+            scaled_width = int(pixmap.width() * self.zoom_factor)
+            scaled_height = int(pixmap.height() * self.zoom_factor)
+            scaled_pixmap = pixmap.scaled(
+                scaled_width,
+                scaled_height,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
             self.imageLabel.setPixmap(scaled_pixmap)
             self.imageLabel.resize(scaled_pixmap.size())
+
 
 
 
@@ -3904,31 +4377,63 @@ class FullCurvesTab(QWidget):
             )
             
             if save_filename:
-                # Extract the file extension from the selected filename
-                file_extension = save_filename.lower().split('.')[-1]
+                # Extract the file extension from the user-provided filename
+                file_extension = save_filename.split('.')[-1].lower()
 
                 # Map the extension to the format expected by save_image
                 if file_extension in ['tif', 'tiff']:
-                    original_format = 'tiff'
-                elif file_extension in ['png']:
-                    original_format = 'png'
+                    file_format = 'tiff'
+                elif file_extension == 'png':
+                    file_format = 'png'
                 elif file_extension in ['fit', 'fits']:
-                    original_format = 'fits'
+                    file_format = 'fits'
                 elif file_extension == 'xisf':
-                    original_format = 'xisf'
+                    file_format = 'xisf'
                 else:
-                    QMessageBox.warning(self, "Error", "Unsupported file format!")
+                    QMessageBox.warning(self, "Error", f"Unsupported file format: .{file_extension}")
                     return
                 
                 try:
+                    # Initialize metadata if not already set (e.g., for PNG)
+                    if not hasattr(self, 'image_meta') or self.image_meta is None:
+                        self.image_meta = [{
+                            'geometry': (self.image.shape[1], self.image.shape[0], self.image.shape[2] if not self.is_mono else 1),
+                            'colorSpace': 'Gray' if self.is_mono else 'RGB'
+                        }]
+
+                    if not hasattr(self, 'file_meta') or self.file_meta is None:
+                        self.file_meta = {}
+
+                    # Initialize a default header for FITS if none exists
+                    if not hasattr(self, 'original_header') or self.original_header is None:
+                        print("Creating default FITS header...")
+                        self.original_header = {
+                            'SIMPLE': True,
+                            'BITPIX': -32 if self.bit_depth == "32-bit floating point" else 16,
+                            'NAXIS': 2 if self.is_mono else 3,
+                            'NAXIS1': self.image.shape[1],
+                            'NAXIS2': self.image.shape[0],
+                            'NAXIS3': 1 if self.is_mono else self.image.shape[2],
+                            'BZERO': 0.0,
+                            'BSCALE': 1.0,
+                            'COMMENT': "Default header created by Seti Astro Suite"
+                        }
+
                     # Call save_image with the appropriate arguments
                     save_image(
-                        self.image, save_filename, original_format, 
-                        self.bit_depth, self.original_header, self.is_mono
+                        self.image,
+                        save_filename,
+                        file_format,  # Use the user-specified format
+                        self.bit_depth,
+                        self.original_header,
+                        self.is_mono,
+                        self.image_meta,
+                        self.file_meta
                     )
                     print(f"Image saved successfully to {save_filename}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+
 
 
 class DraggablePoint(QGraphicsEllipseItem):
@@ -4026,6 +4531,7 @@ class CurveEditor(QGraphicsView):
         self.setScene(self.scene)
         self.setRenderHint(QPainter.Antialiasing)
         self.setFixedSize(380, 425)
+        self.preview_callback = None  # To trigger real-time updates
 
         # Initialize control points and curve path
         self.end_points = []  # Start and end points with axis constraints
@@ -4153,10 +4659,43 @@ class CurveEditor(QGraphicsView):
 
         return smooth_points
 
+    # Add a callback for the preview
+    def setPreviewCallback(self, callback):
+        self.preview_callback = callback
+
+    def get8bitLUT(self):
+        import numpy as np
+
+        # 8-bit LUT size
+        lut_size = 256
+
+        curve_pts = self.getCurvePoints()
+        if len(curve_pts) == 0:
+            # No curve points, return a linear LUT
+            lut = np.linspace(0, 255, lut_size, dtype=np.uint8)
+            return lut
+
+        curve_array = np.array(curve_pts, dtype=np.float64)
+        xs = curve_array[:, 0]   # X from 0 to 360
+        ys = curve_array[:, 1]   # Y from 0 to 360
+
+        ys_for_lut = 360.0 - ys
+
+        # Input positions for interpolation (0..255 mapped to 0..360)
+        input_positions = np.linspace(0, 360, lut_size, dtype=np.float64)
+
+        # Interpolate using the inverted Y
+        output_values = np.interp(input_positions, xs, ys_for_lut)
+
+        # Map 0..360 to 0..255
+        output_values = (output_values / 360.0) * 255.0
+        output_values = np.clip(output_values, 0, 255).astype(np.uint8)
+
+        return output_values
+
     def updateCurve(self):
         """Update the curve by redrawing based on endpoints and control points."""
-        from scipy.interpolate import PchipInterpolator
-        import numpy as np
+
 
         all_points = self.end_points + self.control_points
         if not all_points:
@@ -4218,6 +4757,12 @@ class CurveEditor(QGraphicsView):
         pen = QPen(Qt.white)
         pen.setWidth(3)
         self.curve_item = self.scene.addPath(self.curve_path, pen)
+
+        # Trigger the preview callback
+        if hasattr(self, 'preview_callback') and self.preview_callback:
+            # Generate the 8-bit LUT and pass it to the callback
+            lut = self.get8bitLUT()
+            self.preview_callback(lut)  # Pass curve_mode      
 
 
     def getCurveFunction(self):
