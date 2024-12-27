@@ -128,7 +128,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.8.1')
+        self.setWindowTitle('Seti Astro\'s Suite V1.9')
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -1169,13 +1169,18 @@ class CosmicClarityTab(QWidget):
         # Zoom controls
 
         zoom_layout = QHBoxLayout()
-        zoom_in_button = QPushButton("+")
+        zoom_in_button = QPushButton("Zoom In")
         zoom_in_button.clicked.connect(self.zoom_in)
         zoom_layout.addWidget(zoom_in_button)
 
-        zoom_out_button = QPushButton("-")
+        zoom_out_button = QPushButton("Zoom Out")
         zoom_out_button.clicked.connect(self.zoom_out)
         zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
 
         right_layout.addLayout(zoom_layout)
 
@@ -1292,6 +1297,38 @@ class CosmicClarityTab(QWidget):
         """Zoom out on the image and update the display."""
         self.zoom_factor /= 1.2
         self.apply_zoom()  # Use apply_zoom to handle zoom correctly
+
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scroll_area.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
+
+      
 
     def apply_zoom(self):
         """Apply the current zoom level to the image."""
@@ -3103,24 +3140,25 @@ class StatisticalStretchTab(QWidget):
         self.previewButton.clicked.connect(self.previewStretch)
         left_layout.addWidget(self.previewButton)
 
-        # Zoom buttons
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton('Zoom In', self)
-        self.zoomInButton.clicked.connect(self.zoom_in)
-        zoom_layout.addWidget(self.zoomInButton)
+        # **Remove Zoom Buttons from Left Panel**
+        # Commented out to move to the right panel
+        # zoom_layout = QHBoxLayout()
+        # self.zoomInButton = QPushButton('Zoom In', self)
+        # self.zoomInButton.clicked.connect(self.zoom_in)
+        # zoom_layout.addWidget(self.zoomInButton)
 
-        self.zoomOutButton = QPushButton('Zoom Out', self)
-        self.zoomOutButton.clicked.connect(self.zoom_out)
-        zoom_layout.addWidget(self.zoomOutButton)
+        # self.zoomOutButton = QPushButton('Zoom Out', self)
+        # self.zoomOutButton.clicked.connect(self.zoom_out)
+        # zoom_layout.addWidget(self.zoomOutButton)
 
-        left_layout.addLayout(zoom_layout)
+        # left_layout.addLayout(zoom_layout)
 
         # Save button
         self.saveButton = QPushButton('Save Stretched Image', self)
         self.saveButton.clicked.connect(self.saveImage)
         left_layout.addWidget(self.saveButton)
 
-                        # Footer
+        # Footer
         footer_label = QLabel("""
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
@@ -3135,6 +3173,28 @@ class StatisticalStretchTab(QWidget):
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
 
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
+
+        right_layout.addLayout(zoom_layout)
+
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
         self.scrollArea.setWidgetResizable(True)
@@ -3147,7 +3207,10 @@ class StatisticalStretchTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
 
-        main_layout.addWidget(self.scrollArea)
+        right_layout.addWidget(self.scrollArea)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
 
         self.setLayout(main_layout)
         self.zoom_factor = 0.25
@@ -3250,7 +3313,39 @@ class StatisticalStretchTab(QWidget):
             self.zoom_factor /= 1.2
             self.update_preview(self.stretched_image)  # Pass the latest stretched image
 
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
 
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.update_preview(self.stretched_image)  # Call without extra arguments; it will calculate dimensions based on zoom factor
 
     def saveImage(self):
         if hasattr(self, 'stretched_image') and self.stretched_image is not None:
@@ -3446,23 +3541,24 @@ class StarStretchTab(QWidget):
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)
 
-        # Zoom buttons for preview
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton('Zoom In', self)
-        self.zoomInButton.clicked.connect(self.zoom_in)
-        zoom_layout.addWidget(self.zoomInButton)
-
-        self.zoomOutButton = QPushButton('Zoom Out', self)
-        self.zoomOutButton.clicked.connect(self.zoom_out)
-        zoom_layout.addWidget(self.zoomOutButton)
-        left_layout.addLayout(zoom_layout)
+        # **Remove Zoom Buttons from Left Panel**
+        # Comment out or remove the existing zoom buttons in the left panel
+        # zoom_layout = QHBoxLayout()
+        # self.zoomInButton = QPushButton('Zoom In', self)
+        # self.zoomInButton.clicked.connect(self.zoom_in)
+        # zoom_layout.addWidget(self.zoomInButton)
+        #
+        # self.zoomOutButton = QPushButton('Zoom Out', self)
+        # self.zoomOutButton.clicked.connect(self.zoom_out)
+        # zoom_layout.addWidget(self.zoomOutButton)
+        # left_layout.addLayout(zoom_layout)
 
         # Save As button (replaces Execute button)
         self.saveAsButton = QPushButton("Save As", self)
         self.saveAsButton.clicked.connect(self.saveImage)
         left_layout.addWidget(self.saveAsButton)
 
-                        # Footer
+        # Footer
         footer_label = QLabel("""
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
@@ -3473,9 +3569,29 @@ class StarStretchTab(QWidget):
         left_layout.addWidget(footer_label)
 
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-
-        # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
+
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
+
+        right_layout.addLayout(zoom_layout)
 
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
@@ -3490,9 +3606,14 @@ class StarStretchTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
 
-        main_layout.addWidget(self.scrollArea)
+        right_layout.addWidget(self.scrollArea)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
 
         self.setLayout(main_layout)
+        self.scrollArea.viewport().setMouseTracking(True)
+        self.scrollArea.viewport().installEventFilter(self)
 
     def saveImage(self):
         # Use the processed/stretched image for saving
@@ -3615,6 +3736,40 @@ class StarStretchTab(QWidget):
     def zoom_out(self):
         self.zoom_factor /= 1.2
         self.generatePreview()
+
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.generatePreview()  # Call without extra arguments; it will calculate dimensions based on zoom factor
 
     def applyStretch(self):
         if self.image is not None and self.image.size > 0:
@@ -3760,6 +3915,19 @@ class FullCurvesTab(QWidget):
         # Add the horizontal layout with buttons to the main left layout
         left_layout.addLayout(button_layout)
 
+        # **Remove Zoom Buttons from Left Panel**
+        # Commented out to move to the right panel
+        # zoom_layout = QHBoxLayout()
+        # self.zoomInButton = QPushButton('Zoom In', self)
+        # self.zoomInButton.clicked.connect(self.zoom_in)
+        # zoom_layout.addWidget(self.zoomInButton)
+
+        # self.zoomOutButton = QPushButton('Zoom Out', self)
+        # self.zoomOutButton.clicked.connect(self.zoom_out)
+        # zoom_layout.addWidget(self.zoomOutButton)
+
+        # left_layout.addLayout(zoom_layout)
+
         # Spacer
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
@@ -3779,7 +3947,30 @@ class FullCurvesTab(QWidget):
         footer_label.setStyleSheet("font-size: 10px;")
         left_layout.addWidget(footer_label)
 
+        # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
+
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
+
+        right_layout.addLayout(zoom_layout)
 
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
@@ -3795,19 +3986,10 @@ class FullCurvesTab(QWidget):
         self.scrollArea.setWidgetResizable(True)
         self.imageLabel.mouseMoved.connect(self.handleImageMouseMove)
 
-        main_layout.addWidget(self.scrollArea)
+        right_layout.addWidget(self.scrollArea)
 
-        # Zoom buttons
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton('Zoom In', self)
-        self.zoomInButton.clicked.connect(self.zoom_in)
-        zoom_layout.addWidget(self.zoomInButton)
-
-        self.zoomOutButton = QPushButton('Zoom Out', self)
-        self.zoomOutButton.clicked.connect(self.zoom_out)
-        zoom_layout.addWidget(self.zoomOutButton)
-
-        left_layout.addLayout(zoom_layout)
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
 
         self.setLayout(main_layout)
         self.zoom_factor = 1.0
@@ -4367,6 +4549,40 @@ class FullCurvesTab(QWidget):
         if self.image is not None:
             self.zoom_factor /= 1.2
             self.updatePreview()
+
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.updatePreview()  # Call without extra arguments; it will calculate dimensions based on zoom factor            
 
     def saveImage(self):
         if self.image is not None:
@@ -5093,11 +5309,12 @@ class NBtoRGBstarsTab(QWidget):
         self.combined_image = None
         self.is_mono = False
         self.filename = None  # Store the selected file path
-        self.zoom_factor = 0.25
+        self.zoom_factor = 1.0  # Initialize to 1.0 for normal size
         self.dragging = False
         self.last_pos = QPoint()
         self.processing_thread = None
         self.original_header = None
+        self.original_pixmap = None  # To store the original QPixmap for zooming
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -5180,7 +5397,10 @@ class NBtoRGBstarsTab(QWidget):
         self.saveButton.clicked.connect(self.saveImage)
         left_layout.addWidget(self.saveButton)
 
-                        # Footer
+        # **Remove Zoom Buttons from Left Panel (Not present)**
+        # No existing zoom buttons to remove in the left panel
+
+        # Footer
         footer_label = QLabel("""
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
@@ -5193,16 +5413,43 @@ class NBtoRGBstarsTab(QWidget):
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         main_layout.addWidget(left_widget)
 
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In")
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out")
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
+
+        right_layout.addLayout(zoom_layout)
+
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
         self.scrollArea.setWidgetResizable(True)
         self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
         self.imageLabel = QLabel(self)
         self.imageLabel.setAlignment(Qt.AlignCenter)
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
-        main_layout.addWidget(self.scrollArea)
+
+        right_layout.addWidget(self.scrollArea)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
 
         self.setLayout(main_layout)
         self.scrollArea.viewport().setMouseTracking(True)
@@ -5232,7 +5479,7 @@ class NBtoRGBstarsTab(QWidget):
         self.stretchSlider.setVisible(enabled)
 
     def selectImage(self, image_type):
-        selected_file, _ = QFileDialog.getOpenFileName(self, f"Select {image_type} Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
+        selected_file, _ = QFileDialog.getOpenFileName(self, f"Select {image_type} Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
         if selected_file:
             try:
                 if image_type == 'Ha':
@@ -5251,7 +5498,6 @@ class NBtoRGBstarsTab(QWidget):
             except Exception as e:
                 print(f"Failed to load {image_type} image: {e}")
 
-
     def previewCombine(self):
         ha_to_oii_ratio = self.haToOiiRatioSlider.value() / 100.0
         enable_star_stretch = self.starStretchCheckBox.isChecked()
@@ -5259,6 +5505,9 @@ class NBtoRGBstarsTab(QWidget):
 
         # Show spinner before starting processing
         self.showSpinner()
+
+        # Reset zoom factor when a new preview is generated
+        self.zoom_factor = 1.0
 
         # Start background processing
         self.processing_thread = NBtoRGBProcessingThread(
@@ -5277,8 +5526,15 @@ class NBtoRGBstarsTab(QWidget):
         h, w = preview_image.shape[:2]
         q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
 
-        pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # Store original pixmap for zooming
+        self.original_pixmap = QPixmap.fromImage(q_image)
+
+        # Apply initial zoom
+        scaled_pixmap = self.original_pixmap.scaled(
+            self.original_pixmap.size() * self.zoom_factor,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
         self.imageLabel.setPixmap(scaled_pixmap)
         self.imageLabel.resize(scaled_pixmap.size())
 
@@ -5331,8 +5587,67 @@ class NBtoRGBstarsTab(QWidget):
         else:
             self.fileLabel.setText("No combined image to save.")
 
+    def zoom_in(self):
+        if self.zoom_factor < 20.0:  # Set a maximum zoom limit (e.g., 500%)
+            self.zoom_factor *= 1.25  # Increase zoom by 25%
+            self.updateImageDisplay()
+        else:
+            print("Maximum zoom level reached.")
 
+    def zoom_out(self):
+        if self.zoom_factor > 0.01:  # Set a minimum zoom limit (e.g., 20%)
+            self.zoom_factor /= 1.25  # Decrease zoom by 20%
+            self.updateImageDisplay()
+        else:
+            print("Minimum zoom level reached.")
 
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.updateImageDisplay()  # Call without extra arguments; it will calculate dimensions based on zoom factor
+
+    def reset_zoom(self):
+        self.zoom_factor = 1.0
+        self.updateImageDisplay()
+
+    def updateImageDisplay(self):
+        if self.original_pixmap:
+            scaled_pixmap = self.original_pixmap.scaled(
+                self.original_pixmap.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
 
     # Add event filter for mouse dragging in preview area
     def eventFilter(self, source, event):
@@ -5348,6 +5663,12 @@ class NBtoRGBstarsTab(QWidget):
             self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
+
+    # Placeholder methods for functionalities
+    def handleImageMouseMove(self, x, y):
+        # Implement handling mouse movement over the image
+        pass
+
 
 class NBtoRGBProcessingThread(QThread):
     preview_generated = pyqtSignal(np.ndarray)
@@ -5409,8 +5730,6 @@ class NBtoRGBProcessingThread(QThread):
         # Emit the processed image for preview
         self.preview_generated.emit(combined_image)
 
-
-
     def apply_star_stretch(self, image):
         # Ensure input image is in the range [0, 1]
         assert np.all(image >= 0) and np.all(image <= 1), "Image must be normalized to [0, 1] before star stretch."
@@ -5454,7 +5773,7 @@ class HaloBGonTab(QWidget):
             Instructions:
             1. Select a stars-only image.
             2. Adjust the reduction amount as needed.
-            3. Click Execute to apply the halo reduction.
+            3. Click Refresh Preview to apply the halo reduction.
         """)
         instruction_box.setWordWrap(True)
         left_layout.addWidget(instruction_box)
@@ -5468,12 +5787,13 @@ class HaloBGonTab(QWidget):
         left_layout.addWidget(self.fileLabel)
 
         # Reduction amount slider
-        self.reductionLabel = QLabel("Reduction Amount:", self)
+        self.reductionLabel = QLabel("Reduction Amount: Extra Low", self)
         self.reductionSlider = QSlider(Qt.Horizontal, self)
         self.reductionSlider.setMinimum(0)
         self.reductionSlider.setMaximum(3)
-        self.reductionSlider.setValue(1)
+        self.reductionSlider.setValue(0)  # 0: Extra Low, 1: Low, 2: Medium, 3: High
         self.reductionSlider.setToolTip("Adjust the amount of halo reduction (Extra Low, Low, Medium, High)")
+        self.reductionSlider.valueChanged.connect(self.updateReductionLabel)
         left_layout.addWidget(self.reductionLabel)
         left_layout.addWidget(self.reductionSlider)
 
@@ -5500,18 +5820,19 @@ class HaloBGonTab(QWidget):
         self.saveButton.clicked.connect(self.saveImage)
         left_layout.addWidget(self.saveButton)
 
-        # Zoom in and out buttons
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton("Zoom In", self)
-        self.zoomInButton.clicked.connect(self.zoomIn)
-        zoom_layout.addWidget(self.zoomInButton)
+        # **Remove Zoom Buttons from Left Panel**
+        # Comment out or remove the existing zoom buttons in the left panel
+        # zoom_layout = QHBoxLayout()
+        # self.zoomInButton = QPushButton("Zoom In", self)
+        # self.zoomInButton.clicked.connect(self.zoomIn)
+        # zoom_layout.addWidget(self.zoomInButton)
+        #
+        # self.zoomOutButton = QPushButton("Zoom Out", self)
+        # self.zoomOutButton.clicked.connect(self.zoomOut)
+        # zoom_layout.addWidget(self.zoomOutButton)
+        # left_layout.addLayout(zoom_layout)
 
-        self.zoomOutButton = QPushButton("Zoom Out", self)
-        self.zoomOutButton.clicked.connect(self.zoomOut)
-        zoom_layout.addWidget(self.zoomOutButton)
-        left_layout.addLayout(zoom_layout)
-
-                # Footer
+        # Footer
         footer_label = QLabel("""
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
@@ -5524,7 +5845,27 @@ class HaloBGonTab(QWidget):
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         main_layout.addWidget(left_widget)
 
-        
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In")
+        zoom_in_button.clicked.connect(self.zoomIn)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out")
+        zoom_out_button.clicked.connect(self.zoomOut)
+        zoom_layout.addWidget(zoom_out_button)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)
+
+        right_layout.addLayout(zoom_layout)
 
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
@@ -5539,8 +5880,21 @@ class HaloBGonTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
 
-        main_layout.addWidget(self.scrollArea)
+        right_layout.addWidget(self.scrollArea)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
+
         self.setLayout(main_layout)
+        self.scrollArea.viewport().setMouseTracking(True)
+        self.scrollArea.viewport().installEventFilter(self)
+
+    def updateReductionLabel(self, value):
+        labels = ["Extra Low", "Low", "Medium", "High"]
+        if 0 <= value < len(labels):
+            self.reductionLabel.setText(f"Reduction Amount: {labels[value]}")
+        else:
+            self.reductionLabel.setText("Reduction Amount: Unknown")
 
     def zoomIn(self):
         self.zoom_factor *= 1.2  # Increase zoom by 20%
@@ -5550,6 +5904,39 @@ class HaloBGonTab(QWidget):
         self.zoom_factor /= 1.2  # Decrease zoom by 20%
         self.updatePreview(self.image)
     
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        if self.image is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the original image width from the numpy array
+            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
+            if self.image.ndim == 3:
+                image_width = self.image.shape[1]
+            elif self.image.ndim == 2:
+                image_width = self.image.shape[1]
+            else:
+                print("Unexpected image dimensions!")
+                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                return
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+        else:
+            print("No image loaded. Cannot fit to preview.")
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.updatePreview(self.image)  # Call without extra arguments; it will calculate dimensions based on zoom factor
 
     def selectImage(self):
         selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
@@ -5860,14 +6247,17 @@ class ContinuumSubtractTab(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
-        self.nb_image = None  # Changed from ha_image to nb_image
+        self.nb_image = None  # Selected NB image
+        self.continuum_image = None  # Selected Continuum image
         self.filename = None  # Store the selected file path
         self.is_mono = True
-        self.continuum_image = None  # Changed from red_continuum_image to continuum_image
-        self.processing_thread = None  # For background processing
         self.combined_image = None  # Store the result of the continuum subtraction
-        self.zoom_factor = 0.25  # Initial zoom factor
+        self.zoom_factor = 1.0  # Initialize zoom factor for preview scaling
+        self.dragging = False
+        self.last_pos = None
+        self.processing_thread = None  # For background processing
         self.original_header = None
+        self.original_pixmap = None  # To store the original QPixmap for zooming
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -5891,53 +6281,54 @@ class ContinuumSubtractTab(QWidget):
         # File Selection Buttons
         self.nb_button = QPushButton("Load NB Image")
         self.nb_button.clicked.connect(lambda: self.selectImage("nb"))
-        self.nb_label = QLabel("No NB image selected")  # Updated label
+        self.nb_label = QLabel("No NB image selected")
         left_layout.addWidget(self.nb_button)
         left_layout.addWidget(self.nb_label)
 
         self.continuum_button = QPushButton("Load Continuum Image")
         self.continuum_button.clicked.connect(lambda: self.selectImage("continuum"))
-        self.continuum_label = QLabel("No Continuum image selected")  # Updated label
+        self.continuum_label = QLabel("No Continuum image selected")
         left_layout.addWidget(self.continuum_button)
         left_layout.addWidget(self.continuum_label)
 
+        # Linear Output Checkbox
         self.linear_output_checkbox = QCheckBox("Output Linear Image Only")
         left_layout.addWidget(self.linear_output_checkbox)
 
         # Progress indicator (spinner) label
         self.spinnerLabel = QLabel(self)
         self.spinnerLabel.setAlignment(Qt.AlignCenter)
-        # Use the resource path function to access the GIF
-        self.spinnerMovie = QMovie(resource_path("spinner.gif"))  # Updated path
+        self.spinnerMovie = QMovie(resource_path("spinner.gif"))  # Ensure spinner.gif is in the correct path
         self.spinnerLabel.setMovie(self.spinnerMovie)
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)
 
-        # Status label to show what is happening in the background
+        # Status label to show processing status
         self.statusLabel = QLabel(self)
         self.statusLabel.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(self.statusLabel)
-
 
         # Execute Button
         self.execute_button = QPushButton("Execute")
         self.execute_button.clicked.connect(self.startContinuumSubtraction)
         left_layout.addWidget(self.execute_button)
 
-        # Zoom In and Zoom Out Buttons
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton("Zoom In")
-        self.zoomInButton.clicked.connect(self.zoom_in)
-        zoom_layout.addWidget(self.zoomInButton)
-
-        self.zoomOutButton = QPushButton("Zoom Out")
-        self.zoomOutButton.clicked.connect(self.zoom_out)
-        zoom_layout.addWidget(self.zoomOutButton)
-        left_layout.addLayout(zoom_layout)
+        # **Remove Zoom Buttons from Left Panel**
+        # The following code is removed to eliminate zoom buttons from the left panel
+        # zoom_layout = QHBoxLayout()
+        # self.zoomInButton = QPushButton("Zoom In")
+        # self.zoomInButton.clicked.connect(self.zoom_in)
+        # zoom_layout.addWidget(self.zoomInButton)
+        #
+        # self.zoomOutButton = QPushButton("Zoom Out")
+        # self.zoomOutButton.clicked.connect(self.zoom_out)
+        # zoom_layout.addWidget(self.zoomOutButton)
+        # left_layout.addLayout(zoom_layout)
 
         # Save Button
         self.save_button = QPushButton("Save Continuum Subtracted Image")
         self.save_button.clicked.connect(self.save_continuum_subtracted)
+        self.save_button.setEnabled(False)  # Disable until an image is processed
         left_layout.addWidget(self.save_button)
 
         # Footer
@@ -5953,8 +6344,30 @@ class ContinuumSubtractTab(QWidget):
         # Spacer to push elements to the top
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
-        # Add left widget layout to the main layout
+        # Add left widget to the main layout
         main_layout.addWidget(left_widget)
+
+        # **Create Right Panel Layout**
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # **Add Zoom Buttons to Right Panel**
+        zoom_layout = QHBoxLayout()
+        self.zoomInButton = QPushButton("Zoom In")
+        self.zoomInButton.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(self.zoomInButton)
+
+        self.zoomOutButton = QPushButton("Zoom Out")
+        self.zoomOutButton.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(self.zoomOutButton)
+
+        # **Add "Fit to Preview" Button**
+        self.fitToPreviewButton = QPushButton("Fit to Preview")
+        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(self.fitToPreviewButton)        
+
+        # Add the zoom buttons layout to the right panel
+        right_layout.addLayout(zoom_layout)
 
         # Right side for the preview inside a QScrollArea
         self.scrollArea = QScrollArea(self)
@@ -5969,8 +6382,18 @@ class ContinuumSubtractTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
 
-        main_layout.addWidget(self.scrollArea)
+        right_layout.addWidget(self.scrollArea)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
+
         self.setLayout(main_layout)
+        self.scrollArea.viewport().setMouseTracking(True)
+        self.scrollArea.viewport().installEventFilter(self)
+
+        # Initially disable zoom buttons until an image is loaded and previewed
+        self.zoomInButton.setEnabled(False)
+        self.zoomOutButton.setEnabled(False)
 
     def selectImage(self, image_type):
         selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
@@ -5995,35 +6418,84 @@ class ContinuumSubtractTab(QWidget):
         if self.nb_image is not None and self.continuum_image is not None:
             # Show spinner and start background processing
             self.showSpinner()
-            self.processing_thread = ContinuumProcessingThread(self.nb_image, self.continuum_image,
-                                                            self.linear_output_checkbox.isChecked())
+            self.processing_thread = ContinuumProcessingThread(
+                self.nb_image,
+                self.continuum_image,
+                self.linear_output_checkbox.isChecked()
+            )
             self.processing_thread.processing_complete.connect(self.display_image)
             self.processing_thread.finished.connect(self.hideSpinner)
             self.processing_thread.status_update.connect(self.update_status_label)
             self.processing_thread.start()
         else:
+            self.statusLabel.setText("Please select both NB and Continuum images.")
             print("Please select both NB and Continuum images.")
 
     def update_status_label(self, message):
         self.statusLabel.setText(message)
 
     def zoom_in(self):
-        self.zoom_factor *= 1.2
-        self.update_preview()
+        if self.zoom_factor < 5.0:  # Maximum 500% zoom
+            self.zoom_factor *= 1.2  # Increase zoom by 20%
+            self.update_preview()
+            self.statusLabel.setText(f"Zoom: {self.zoom_factor * 100:.0f}%")
+
+        else:
+            self.statusLabel.setText("Maximum zoom level reached.")
 
     def zoom_out(self):
-        self.zoom_factor /= 1.2
-        self.update_preview()
+        if self.zoom_factor > 0.01:  # Minimum 20% zoom
+            self.zoom_factor /= 1.2  # Decrease zoom by ~17%
+            self.update_preview()
+            self.statusLabel.setText(f"Zoom: {self.zoom_factor * 100:.0f}%")
+
+        else:
+            self.statusLabel.setText("Minimum zoom level reached.")
+
+    def fit_to_preview(self):
+        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
+        # Check if the original pixmap exists
+        if self.original_pixmap is not None:
+            # Get the width of the scroll area's viewport (preview area)
+            preview_width = self.scrollArea.viewport().width()
+            
+            # Get the width of the original image from the original_pixmap
+            image_width = self.original_pixmap.width()
+            
+            # Calculate the required zoom factor to fit the image's width into the preview area
+            new_zoom_factor = preview_width / image_width
+            
+            # Update the zoom factor without enforcing any limits
+            self.zoom_factor = new_zoom_factor
+            
+            # Apply the new zoom factor to update the display
+            self.apply_zoom()
+            
+            # Update the status label to reflect the new zoom level
+            self.statusLabel.setText(f"Fit to Preview: {self.zoom_factor * 100:.0f}%")
+
+        else:
+
+            self.statusLabel.setText("No image to fit to preview.")
+
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the image."""
+        self.update_preview()  # Call without extra arguments; it will calculate dimensions based on zoom factor            
 
     def update_preview(self):
-        if self.combined_image is not None:
-            self.display_image(self.combined_image)        
+        if self.original_pixmap is not None:
+            scaled_pixmap = self.original_pixmap.scaled(
+                self.original_pixmap.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+            print(f"Preview updated with zoom factor: {self.zoom_factor}")
+        else:
+            print("Original pixmap is not set. Cannot update preview.")
 
-    def load_image(self, filename):
-        # Placeholder for actual image loading logic
-        image = cv2.imread(filename, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255.0
-        return image, None, None, None
-    
     def save_continuum_subtracted(self):
         if self.combined_image is not None:
             # Pre-populate the save dialog with the original image name
@@ -6045,44 +6517,82 @@ class ContinuumSubtractTab(QWidget):
                 # For TIFF and FITS files, prompt the user to select the bit depth
                 if original_format in ['tiff', 'tif', 'fits', 'fit']:
                     bit_depth_options = ["16-bit", "32-bit unsigned", "32-bit floating point"]
-                    bit_depth, ok = QInputDialog.getItem(self, "Select Bit Depth", "Choose bit depth for saving:", bit_depth_options, 0, False)
+                    bit_depth, ok = QInputDialog.getItem(
+                        self, "Select Bit Depth", "Choose bit depth for saving:", bit_depth_options, 0, False
+                    )
                     
                     if ok and bit_depth:
                         # Call save_image with the necessary parameters
-                        save_image(self.combined_image, save_filename, original_format, bit_depth, self.original_header, self.is_mono)
+                        save_image(
+                            self.combined_image, 
+                            save_filename, 
+                            original_format, 
+                            bit_depth, 
+                            self.original_header, 
+                            self.is_mono
+                        )
                         self.statusLabel.setText(f'Image saved as: {save_filename}')
+                        print(f"Image saved as: {save_filename}")
                     else:
                         self.statusLabel.setText('Save canceled.')
+                        print("Save operation canceled.")
                 else:
                     # For non-TIFF/FITS formats, save directly without bit depth selection
-                    save_image(self.image, save_filename, original_format)
+                    save_image(self.combined_image, save_filename, original_format)
                     self.statusLabel.setText(f'Image saved as: {save_filename}')
+                    print(f"Image saved as: {save_filename}")
             else:
                 self.statusLabel.setText('Save canceled.')
-
-
+                print("Save operation canceled.")
+        else:
+            self.statusLabel.setText("No processed image to save.")
+            print("No processed image to save.")
 
     def display_image(self, processed_image):
-        self.combined_image = processed_image
+        if processed_image is not None:
+            self.combined_image = processed_image
 
-        # Convert the processed image to a displayable format
-        preview_image = (processed_image * 255).astype(np.uint8)
-        
-        # Check if the image is mono or RGB
-        if preview_image.ndim == 2:  # Mono image
-            # Create a 3-channel RGB image by duplicating the single channel
-            preview_image = np.stack([preview_image] * 3, axis=-1)  # Stack to create RGB
+            # Convert the processed image to a displayable format
+            preview_image = (processed_image * 255).astype(np.uint8)
+            
+            # Check if the image is mono or RGB
+            if preview_image.ndim == 2:  # Mono image
+                # Create a 3-channel RGB image by duplicating the single channel
+                preview_image = np.stack([preview_image] * 3, axis=-1)  # Stack to create RGB
 
-        h, w = preview_image.shape[:2]
+            h, w = preview_image.shape[:2]
 
-        # Change the format to RGB888 for displaying an RGB image
-        q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            # Ensure the array is contiguous
+            preview_image = np.ascontiguousarray(preview_image)
 
-        pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.imageLabel.setPixmap(scaled_pixmap)
-        self.imageLabel.resize(scaled_pixmap.size())
+            # Change the format to RGB888 for displaying an RGB image
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
 
+            pixmap = QPixmap.fromImage(q_image)
+
+            # Store the original pixmap only once
+            if self.original_pixmap is None:
+                self.original_pixmap = pixmap.copy()
+
+            # Scale from original pixmap based on zoom_factor
+            scaled_pixmap = self.original_pixmap.scaled(
+                self.original_pixmap.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+
+            # Enable save and zoom buttons now that an image is processed
+            self.save_button.setEnabled(True)
+            self.zoomInButton.setEnabled(True)
+            self.zoomOutButton.setEnabled(True)
+
+            self.statusLabel.setText("Continuum subtraction completed.")
+            print("Continuum subtraction completed.")
+        else:
+            self.statusLabel.setText("Continuum subtraction failed.")
+            print("Continuum subtraction failed.")
 
     def showSpinner(self):
         self.spinnerLabel.show()
@@ -6101,8 +6611,12 @@ class ContinuumSubtractTab(QWidget):
                 self.dragging = False
             elif event.type() == event.MouseMove and self.dragging:
                 delta = event.pos() - self.last_pos
-                self.scrollArea.horizontalScrollBar().setValue(self.scrollArea.horizontalScrollBar().value() - delta.x())
-                self.scrollArea.verticalScrollBar().setValue(self.scrollArea.verticalScrollBar().value() - delta.y())
+                self.scrollArea.horizontalScrollBar().setValue(
+                    self.scrollArea.horizontalScrollBar().value() - delta.x()
+                )
+                self.scrollArea.verticalScrollBar().setValue(
+                    self.scrollArea.verticalScrollBar().value() - delta.y()
+                )
                 self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
