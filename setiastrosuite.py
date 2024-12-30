@@ -23,6 +23,7 @@ import platform
 import glob
 import time
 from datetime import datetime
+import pywt
 
 
 
@@ -32,6 +33,7 @@ import numpy as np
 import pandas as pd
 import cv2
 from PIL import Image, ImageDraw, ImageFont
+
 
 # Astropy and Astroquery imports
 from astropy.io import fits
@@ -104,6 +106,8 @@ class AstroEditingSuite(QWidget):
         theme_menu.addAction(light_theme_action)
         theme_menu.addAction(dark_theme_action)
 
+        quicknav_menu = menubar.addMenu("Quick Navigation")
+
         # Add the menu bar to the layout
         layout.setMenuBar(menubar)
 
@@ -118,6 +122,7 @@ class AstroEditingSuite(QWidget):
         self.tabs.addTab(FullCurvesTab(), "Curves Utility")
         self.tabs.addTab(NBtoRGBstarsTab(), "NB to RGB Stars")  # Placeholder        
         self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
+        self.tabs.addTab(FrequencySeperationTab(), "Frequency Seperation")
         self.tabs.addTab(HaloBGonTab(), "Halo-B-Gon")  # Placeholder
         self.tabs.addTab(ContinuumSubtractTab(), "Continuum Subtraction")
         self.tabs.addTab(MainWindow(), "What's In My Image")
@@ -128,7 +133,15 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.9')
+        self.setWindowTitle('Seti Astro\'s Suite V1.10')
+
+        # Populate the Quick Navigation menu with each tab name
+        for i in range(self.tabs.count()):
+            tab_title = self.tabs.tabText(i)
+            action = QAction(tab_title, self)
+            # Connect each action so that it jumps to that tab index
+            action.triggered.connect(lambda checked, index=i: self.tabs.setCurrentIndex(index))
+            quicknav_menu.addAction(action)        
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
@@ -192,6 +205,14 @@ class AstroEditingSuite(QWidget):
             QTabBar::tab:!selected {
                 margin-top: 2px;  /* Push unselected tabs down for better clarity */
             }
+            QMenu {
+                background-color: #f0f0f0;
+                color: #000000;
+            }
+            QMenu::item:selected {
+                background-color: #d0d0d0; 
+                color: #000000;
+            }            
             """
             self.setStyleSheet(light_stylesheet)
 
@@ -252,6 +273,14 @@ class AstroEditingSuite(QWidget):
             QTabBar::tab:!selected {
                 margin-top: 2px;  /* Push unselected tabs down for better clarity */
             }
+            QMenu {
+                background-color: #2b2b2b;
+                color: #dcdcdc;
+            }
+            QMenu::item:selected {
+                background-color: #505050; 
+                color: #ffffff;
+            }            
             """
             self.setStyleSheet(dark_stylesheet)
 
@@ -5296,7 +5325,1100 @@ class FullCurvesProcessingThread(QThread):
         rgb = np.clip(rgb, 0, 1)
         return rgb
 
+class FrequencySeperationTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.filename = None
+        self.image = None  # Original input image
+        self.low_freq_image = None
+        self.high_freq_image = None
+        self.original_header = None
+        self.is_mono = False
+        self.processing_thread = None
+        self.hfEnhancementThread = None
 
+        # Default parameters
+        self.method = 'Gaussian'
+        self.radius = 25
+        self.mirror = False
+        self.tolerance = 50  # new tolerance param
+
+        # Zoom/pan control
+        self.zoom_factor = 1.0
+        self.dragging = False
+        self.last_mouse_pos = QPoint()
+
+        # For the preview
+        self.spinnerLabel = None
+        self.spinnerMovie = None
+
+        # A guard variable to avoid infinite scroll loops
+        self.syncing_scroll = False
+
+        self.initUI()
+
+    def initUI(self):
+        """
+        Set up the GUI layout:
+          - Left panel with controls (Load, Method, Radius, Mirror, Tolerance, Apply, Save, etc.)
+          - Right panel with two scroll areas for HF/LF previews
+        """
+        main_layout = QHBoxLayout(self)
+        self.setLayout(main_layout)
+
+        # -----------------------------
+        # Left side: Controls
+        # -----------------------------
+        left_widget = QWidget(self)
+        left_widget.setFixedWidth(250)
+        left_layout = QVBoxLayout(left_widget)
+
+        # 1) Load image
+        self.loadButton = QPushButton("Load Image", self)
+        self.loadButton.clicked.connect(self.selectImage)
+        left_layout.addWidget(self.loadButton)
+
+        self.fileLabel = QLabel("No file selected", self)
+        left_layout.addWidget(self.fileLabel)
+
+        # Method Combo
+        self.method_combo = QComboBox(self)
+        self.method_combo.addItems(['Gaussian', 'Median', 'Bilateral'])
+        self.method_combo.currentTextChanged.connect(self.on_method_changed)
+        left_layout.addWidget(QLabel("Method:", self))
+        left_layout.addWidget(self.method_combo)
+
+        # Radius Slider + Label
+        self.radiusSlider = QSlider(Qt.Horizontal, self)
+        self.radiusSlider.setRange(1, 100)
+        self.radiusSlider.setValue(10)  # or whatever integer in [1..100] you want
+        self.radiusSlider.valueChanged.connect(self.on_radius_changed)
+
+        self.radiusLabel = QLabel("Radius:", self)
+        left_layout.addWidget(self.radiusLabel)   
+        left_layout.addWidget(self.radiusSlider)
+
+        # Now force an initial update so label is correct from the start
+        self.on_radius_changed(self.radiusSlider.value())
+
+        # Tolerance Slider + Label
+        self.toleranceSlider = QSlider(Qt.Horizontal, self)
+        self.toleranceSlider.setRange(0, 100)
+        self.toleranceSlider.setValue(self.tolerance)
+        self.toleranceSlider.valueChanged.connect(self.on_tolerance_changed)
+        self.toleranceLabel = QLabel(f"Tolerance: {self.tolerance}%", self)
+        self.toleranceSlider.setEnabled(False)
+        self.toleranceLabel.setEnabled(False)
+        left_layout.addWidget(self.toleranceLabel)
+        left_layout.addWidget(self.toleranceSlider)
+
+        # Apply button
+        self.applyButton = QPushButton("Apply - Split HF and LF", self)
+        self.applyButton.clicked.connect(self.apply_frequency_separation)
+        left_layout.addWidget(self.applyButton)        
+
+        # -----------------------------------
+        # *** New Sharpening Controls ***
+        # -----------------------------------
+        # 1) Checkbox for "Enable Sharpen Scale"
+        self.sharpenScaleCheckBox = QCheckBox("Enable Sharpen Scale", self)
+        self.sharpenScaleCheckBox.setChecked(True)  # or False by default
+        left_layout.addWidget(self.sharpenScaleCheckBox)
+
+        # Sharpen Scale Label + Slider
+        self.sharpenScaleLabel = QLabel("Sharpen Scale: 1.00", self)
+        left_layout.addWidget(self.sharpenScaleLabel)
+
+        self.sharpenScaleSlider = QSlider(Qt.Horizontal, self)
+        self.sharpenScaleSlider.setRange(10, 300)  # => 0.1..3.0
+        self.sharpenScaleSlider.setValue(100)      # 1.00 initially
+        self.sharpenScaleSlider.valueChanged.connect(self.onSharpenScaleChanged)
+        left_layout.addWidget(self.sharpenScaleSlider)
+
+        # 2) Checkbox for "Enable Wavelet Sharpening"
+        self.waveletCheckBox = QCheckBox("Enable Wavelet Sharpening", self)
+        self.waveletCheckBox.setChecked(True)  # or False by default
+        left_layout.addWidget(self.waveletCheckBox)
+
+        # Wavelet Sharpening Sliders
+        wavelet_title = QLabel("<b>Wavelet Sharpening:</b>", self)
+        left_layout.addWidget(wavelet_title)
+
+        self.waveletLevelLabel = QLabel("Wavelet Level: 2", self)
+        left_layout.addWidget(self.waveletLevelLabel)
+
+        self.waveletLevelSlider = QSlider(Qt.Horizontal, self)
+        self.waveletLevelSlider.setRange(1, 5)
+        self.waveletLevelSlider.setValue(2)
+        self.waveletLevelSlider.valueChanged.connect(self.onWaveletLevelChanged)
+        left_layout.addWidget(self.waveletLevelSlider)
+
+        self.waveletBoostLabel = QLabel("Wavelet Boost: 1.20", self)
+        left_layout.addWidget(self.waveletBoostLabel)
+
+        self.waveletBoostSlider = QSlider(Qt.Horizontal, self)
+        self.waveletBoostSlider.setRange(50, 300)  # => 0.5..3.0
+        self.waveletBoostSlider.setValue(120)      # 1.20 initially
+        self.waveletBoostSlider.valueChanged.connect(self.onWaveletBoostChanged)
+        left_layout.addWidget(self.waveletBoostSlider)
+
+        self.enableDenoiseCheckBox = QCheckBox("Enable HF Denoise", self)
+        self.enableDenoiseCheckBox.setChecked(False)  # default off or on, your choice
+        left_layout.addWidget(self.enableDenoiseCheckBox)
+
+        # Label + Slider for denoise strength
+        self.denoiseStrengthLabel = QLabel("Denoise Strength: 3.00", self)
+        left_layout.addWidget(self.denoiseStrengthLabel)
+
+        self.denoiseStrengthSlider = QSlider(Qt.Horizontal, self)
+        self.denoiseStrengthSlider.setRange(0, 50)  # Example range -> 1..50 => 1.0..50.0
+        self.denoiseStrengthSlider.setValue(3)      # default 3
+        self.denoiseStrengthSlider.valueChanged.connect(self.onDenoiseStrengthChanged)
+        left_layout.addWidget(self.denoiseStrengthSlider)
+        self.onDenoiseStrengthChanged(self.denoiseStrengthSlider.value())
+
+        # Button to apply HF enhancements
+        self.applyHFEnhancementsButton = QPushButton("Apply HF Enhancements", self)
+        self.applyHFEnhancementsButton.clicked.connect(self.applyHFEnhancements)
+        left_layout.addWidget(self.applyHFEnhancementsButton)
+
+        # Save HF / LF
+        self.saveHFButton = QPushButton("Save High Frequency", self)
+        self.saveHFButton.clicked.connect(self.save_high_frequency)
+        left_layout.addWidget(self.saveHFButton)
+
+        self.saveLFButton = QPushButton("Save Low Frequency", self)
+        self.saveLFButton.clicked.connect(self.save_low_frequency)
+        left_layout.addWidget(self.saveLFButton)
+
+        # Import HF / LF
+        self.importHFButton = QPushButton("Load High Frequency", self)
+        self.importHFButton.clicked.connect(self.loadHF)
+        left_layout.addWidget(self.importHFButton)
+
+        self.importLFButton = QPushButton("Load Low Frequency", self)
+        self.importLFButton.clicked.connect(self.loadLF)
+        left_layout.addWidget(self.importLFButton)
+
+        # Combine HF + LF
+        self.combineButton = QPushButton("Combine HF + LF", self)
+        self.combineButton.clicked.connect(self.combineHFandLF)
+        left_layout.addWidget(self.combineButton)
+
+        # Spinner for background processing
+        self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignCenter)
+        self.spinnerMovie = QMovie(resource_path("spinner.gif"))  # Provide your spinner path
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.hide()
+        left_layout.addWidget(self.spinnerLabel)
+
+        # Spacer
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        main_layout.addWidget(left_widget)
+
+        # -----------------------------
+        # Right Panel (vertical layout)
+        # -----------------------------
+        right_widget = QWidget(self)
+        right_vbox = QVBoxLayout(right_widget)
+
+        # 1) Zoom Buttons row (top)
+        zoom_hbox = QHBoxLayout()
+        self.zoom_in_btn = QPushButton("Zoom In")
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_hbox.addWidget(self.zoom_in_btn)
+
+        self.zoom_out_btn = QPushButton("Zoom Out")
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        zoom_hbox.addWidget(self.zoom_out_btn)
+
+        right_vbox.addLayout(zoom_hbox)
+
+        # 2) HF / LF previews row (below)
+        scroll_hbox = QHBoxLayout()
+
+        self.scrollHF = QScrollArea(self)
+        self.scrollHF.setWidgetResizable(False)
+        self.labelHF = QLabel("High Frequency", self)
+        self.labelHF.setAlignment(Qt.AlignCenter)
+        self.labelHF.setStyleSheet("background-color: #333; color: #CCC;")
+        self.scrollHF.setWidget(self.labelHF)
+
+        self.scrollLF = QScrollArea(self)
+        self.scrollLF.setWidgetResizable(False)
+        self.labelLF = QLabel("Low Frequency", self)
+        self.labelLF.setAlignment(Qt.AlignCenter)
+        self.labelLF.setStyleSheet("background-color: #333; color: #CCC;")
+        self.scrollLF.setWidget(self.labelLF)
+
+        scroll_hbox.addWidget(self.scrollHF, stretch=1)
+        scroll_hbox.addWidget(self.scrollLF, stretch=1)
+
+        right_vbox.addLayout(scroll_hbox, stretch=1)
+        main_layout.addWidget(right_widget, stretch=1)
+
+        # Sync scrollbars
+        self.scrollHF.horizontalScrollBar().valueChanged.connect(self.syncHFHScroll)
+        self.scrollHF.verticalScrollBar().valueChanged.connect(self.syncHFVScroll)
+        self.scrollLF.horizontalScrollBar().valueChanged.connect(self.syncLFHScroll)
+        self.scrollLF.verticalScrollBar().valueChanged.connect(self.syncLFVScroll)
+
+        # Mouse drag panning
+        self.scrollHF.viewport().installEventFilter(self)
+        self.scrollLF.viewport().installEventFilter(self)
+
+        # Force initial label update
+        self.on_radius_changed(self.radiusSlider.value())
+        self.on_tolerance_changed(self.toleranceSlider.value())
+
+    def map_slider_to_radius(self, slider_pos):
+        """
+        Convert a slider position (0..100) into a non-linear float radius.
+        Segment A: [0..10]   -> [0.1..1.0]
+        Segment B: [10..50]  -> [1.0..10.0]
+        Segment C: [50..100] -> [10.0..100.0]
+        """
+        if slider_pos <= 10:
+            # Scale 0..10 -> 0.1..1.0
+            t = slider_pos / 10.0           # t in [0..1]
+            radius = 0.1 + t*(1.0 - 0.1)    # 0.1 -> 1.0
+        elif slider_pos <= 50:
+            # Scale 10..50 -> 1.0..10.0
+            t = (slider_pos - 10) / 40.0    # t in [0..1]
+            radius = 1.0 + t*(10.0 - 1.0)   # 1.0 -> 10.0
+        else:
+            # Scale 50..100 -> 10.0..100.0
+            t = (slider_pos - 50) / 50.0    # t in [0..1]
+            radius = 10.0 + t*(100.0 - 10.0)  # 10.0 -> 100.0
+        
+        return radius
+
+    def onSharpenScaleChanged(self, val):
+        scale = val / 100.0  # 10..300 => 0.1..3.0
+        self.sharpenScaleLabel.setText(f"Sharpen Scale: {scale:.2f}")
+
+    def onWaveletLevelChanged(self, val):
+        self.waveletLevelLabel.setText(f"Wavelet Level: {val}")
+
+    def onWaveletBoostChanged(self, val):
+        boost = val / 100.0  # e.g. 50..300 => 0.50..3.00
+        self.waveletBoostLabel.setText(f"Wavelet Boost: {boost:.2f}")
+
+    def onDenoiseStrengthChanged(self, val):
+        # Map 0..50 => 0..5.0 by dividing by 10
+        denoise_strength = val / 10.0
+        self.denoiseStrengthLabel.setText(f"Denoise Strength: {denoise_strength:.2f}")
+
+    # -------------------------------------------------
+    # Event Filter for Drag Panning
+    # -------------------------------------------------
+    def eventFilter(self, obj, event):
+        if obj in (self.scrollHF.viewport(), self.scrollLF.viewport()):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self.dragging = True
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseMove and self.dragging:
+                delta = event.pos() - self.last_mouse_pos
+                self.last_mouse_pos = event.pos()
+
+                if obj == self.scrollHF.viewport():
+                    # Move HF scrollbars
+                    self.syncing_scroll = True
+                    try:
+                        self.scrollHF.horizontalScrollBar().setValue(
+                            self.scrollHF.horizontalScrollBar().value() - delta.x()
+                        )
+                        self.scrollHF.verticalScrollBar().setValue(
+                            self.scrollHF.verticalScrollBar().value() - delta.y()
+                        )
+                        # Sync LF
+                        self.scrollLF.horizontalScrollBar().setValue(
+                            self.scrollHF.horizontalScrollBar().value()
+                        )
+                        self.scrollLF.verticalScrollBar().setValue(
+                            self.scrollHF.verticalScrollBar().value()
+                        )
+                    finally:
+                        self.syncing_scroll = False
+                else:
+                    # Move LF scrollbars
+                    self.syncing_scroll = True
+                    try:
+                        self.scrollLF.horizontalScrollBar().setValue(
+                            self.scrollLF.horizontalScrollBar().value() - delta.x()
+                        )
+                        self.scrollLF.verticalScrollBar().setValue(
+                            self.scrollLF.verticalScrollBar().value() - delta.y()
+                        )
+                        # Sync HF
+                        self.scrollHF.horizontalScrollBar().setValue(
+                            self.scrollLF.horizontalScrollBar().value()
+                        )
+                        self.scrollHF.verticalScrollBar().setValue(
+                            self.scrollLF.verticalScrollBar().value()
+                        )
+                    finally:
+                        self.syncing_scroll = False
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self.dragging = False
+                return True
+        return super().eventFilter(obj, event)
+
+    # -----------------------------
+    # Scrolling Sync
+    # -----------------------------
+    def syncHFHScroll(self, value):
+        if not self.syncing_scroll:
+            self.syncing_scroll = True
+            self.scrollLF.horizontalScrollBar().setValue(value)
+            self.syncing_scroll = False
+
+    def syncHFVScroll(self, value):
+        if not self.syncing_scroll:
+            self.syncing_scroll = True
+            self.scrollLF.verticalScrollBar().setValue(value)
+            self.syncing_scroll = False
+
+    def syncLFHScroll(self, value):
+        if not self.syncing_scroll:
+            self.syncing_scroll = True
+            self.scrollHF.horizontalScrollBar().setValue(value)
+            self.syncing_scroll = False
+
+    def syncLFVScroll(self, value):
+        if not self.syncing_scroll:
+            self.syncing_scroll = True
+            self.scrollHF.verticalScrollBar().setValue(value)
+            self.syncing_scroll = False
+
+    # -----------------------------
+    # Zooming
+    # -----------------------------
+    def zoom_in(self):
+        self.zoom_factor *= 1.25
+        self.update_previews()
+
+    def zoom_out(self):
+        self.zoom_factor /= 1.25
+        self.update_previews()
+
+    # -----------------------------
+    # Control Handlers
+    # -----------------------------
+    def on_method_changed(self, text):
+        """
+        Called whenever the method dropdown changes (Gaussian, Median, Bilateral).
+        Enable the tolerance slider only for 'Bilateral'.
+        """
+        self.method = text
+        if self.method == 'Bilateral':
+            self.toleranceSlider.setEnabled(True)
+            self.toleranceLabel.setEnabled(True)
+        else:
+            self.toleranceSlider.setEnabled(False)
+            self.toleranceLabel.setEnabled(False)
+
+    def on_radius_changed(self, value):
+        new_radius = self.map_slider_to_radius(value)  # use self.
+        self.radius = new_radius
+        self.radiusLabel.setText(f"Radius: {new_radius:.2f}")
+
+
+    def on_tolerance_changed(self, value):
+        self.tolerance = value
+        self.toleranceLabel.setText(f"Tolerance: {value}%")  # Update label
+
+    def applyHFEnhancements(self):
+        if self.high_freq_image is None:
+            self.fileLabel.setText("No HF image to enhance.")
+            return
+
+        self.showSpinner()
+
+        # If a previous thread is running, kill it safely
+        if self.hfEnhancementThread and self.hfEnhancementThread.isRunning():
+            self.hfEnhancementThread.quit()
+            self.hfEnhancementThread.wait()
+
+        # Check Sharpen Scale
+        enable_scale = self.sharpenScaleCheckBox.isChecked()
+        sharpen_scale = self.sharpenScaleSlider.value() / 100.0
+
+        # Wavelet
+        enable_wavelet = self.waveletCheckBox.isChecked()
+        wavelet_level = self.waveletLevelSlider.value()
+        wavelet_boost = self.waveletBoostSlider.value() / 100.0
+
+        # Denoise
+        enable_denoise = self.enableDenoiseCheckBox.isChecked()
+        denoise_strength = float(self.denoiseStrengthSlider.value()/10.0)  # or do /10 if you want finer steps
+
+        # Instantiate HFEnhancementThread with denoise params
+        self.hfEnhancementThread = HFEnhancementThread(
+            hf_image=self.high_freq_image,
+            enable_scale=enable_scale,
+            sharpen_scale=sharpen_scale,
+            enable_wavelet=enable_wavelet,
+            wavelet_level=wavelet_level,
+            wavelet_boost=wavelet_boost,
+            wavelet_name='db2',
+            enable_denoise=enable_denoise,
+            denoise_strength=denoise_strength
+        )
+        self.hfEnhancementThread.enhancement_done.connect(self.onHFEnhancementDone)
+        self.hfEnhancementThread.error_signal.connect(self.onHFEnhancementError)
+        self.hfEnhancementThread.start()
+
+
+    def onHFEnhancementDone(self, newHF):
+        self.hideSpinner()
+        self.high_freq_image = newHF  # updated HF
+        self.update_previews()
+        self.fileLabel.setText("HF enhancements applied (thread).")
+
+    def onHFEnhancementError(self, msg):
+        self.hideSpinner()
+        self.fileLabel.setText(f"HF enhancement error: {msg}")
+
+    # -----------------------------
+    # Load / Save
+    # -----------------------------
+    def selectImage(self):
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpeg *.jpg)"
+        )
+        if selected_file:
+            try:
+                img, header, _, is_mono = load_image(selected_file)
+                self.image = img
+                self.original_header = header
+                self.is_mono = is_mono
+                self.filename = selected_file
+                self.fileLabel.setText(os.path.basename(selected_file))
+                # Reset HF / LF placeholders
+                self.low_freq_image = None
+                self.high_freq_image = None
+                self.apply_frequency_separation()
+            except Exception as e:
+                self.fileLabel.setText(f"Error: {str(e)}")
+
+    def save_high_frequency(self):
+        if self.high_freq_image is None:
+            self.fileLabel.setText("No high-frequency image to save.")
+            return
+        self._save_image_with_dialog(self.high_freq_image, suffix="_HF")
+
+    def save_low_frequency(self):
+        if self.low_freq_image is None:
+            self.fileLabel.setText("No low-frequency image to save.")
+            return
+        self._save_image_with_dialog(self.low_freq_image, suffix="_LF")
+
+    def _save_image_with_dialog(self, image_to_save, suffix=""):
+        """
+        Always save HF in 32-bit floating point, either .tif or .fits.
+        """
+        if self.filename:
+            base_name = os.path.basename(self.filename)
+            default_save_name = os.path.splitext(base_name)[0] + suffix + '.tif'
+            original_dir = os.path.dirname(self.filename)
+        else:
+            default_save_name = "untitled" + suffix + '.tif'
+            original_dir = os.getcwd()
+
+        # Restrict the file dialog to TIF/FITS by default,
+        # but let's keep .png, etc., in case user tries to pick it.
+        # We'll override if they do.
+        save_filename, _ = QFileDialog.getSaveFileName(
+            self,
+            'Save HF Image as 32-bit Float',
+            os.path.join(original_dir, default_save_name),
+            'TIFF or FITS (*.tif *.tiff *.fits *.fit);;All Files (*)'
+        )
+        if save_filename:
+            # Identify extension
+            file_ext = os.path.splitext(save_filename)[1].lower().strip('.')  # e.g. 'tif', 'fits', etc.
+
+            # If user picks something else (png/jpg), override to .tif
+            if file_ext not in ['tif', 'tiff', 'fit', 'fits']:
+                file_ext = 'tif'
+                # Force the filename to end with .tif
+                save_filename = os.path.splitext(save_filename)[0] + '.tif'
+
+            # We skip prompting for bit depth since we always want 32-bit float
+            bit_depth = "32-bit floating point"
+
+            # Force original_format to the extension we ended up with
+            save_image(
+                image_to_save,
+                save_filename,
+                original_format=file_ext,     # e.g. 'tif' or 'fits'
+                bit_depth=bit_depth,
+                original_header=self.original_header,
+                is_mono=self.is_mono
+            )
+            self.fileLabel.setText(f"Saved 32-bit float HF: {os.path.basename(save_filename)}")
+
+
+    def loadHF(self):
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self, "Load High Frequency Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        )
+        if selected_file:
+            try:
+                hf, _, _, _ = load_image(selected_file)
+                self.high_freq_image = hf
+                self.update_previews()
+            except Exception as e:
+                self.fileLabel.setText(f"Error loading HF: {str(e)}")
+
+    def loadLF(self):
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self, "Load Low Frequency Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        )
+        if selected_file:
+            try:
+                lf, _, _, _ = load_image(selected_file)
+                self.low_freq_image = lf
+                self.update_previews()
+            except Exception as e:
+                self.fileLabel.setText(f"Error loading LF: {str(e)}")
+
+    def combineHFandLF(self):
+        if self.low_freq_image is None or self.high_freq_image is None:
+            self.fileLabel.setText("Cannot combine; LF or HF is missing.")
+            return
+
+        # Check shape
+        if self.low_freq_image.shape != self.high_freq_image.shape:
+            self.fileLabel.setText("Error: LF and HF dimensions do not match.")
+            return
+
+        # Combine
+        combined = self.low_freq_image + self.high_freq_image
+        combined = np.clip(combined, 0, 1)  # float32 in [0,1]
+
+        # Create a new preview window (non-modal)
+        self.combined_window = CombinedPreviewWindow(
+            combined, 
+            original_header=self.original_header,
+            is_mono=self.is_mono
+        )
+        # Show it. Because we use `show()`, it won't block the main UI
+        self.combined_window.show()
+
+
+    # -----------------------------
+    # Applying Frequency Separation (background thread)
+    # -----------------------------
+    def apply_frequency_separation(self):
+        if self.image is None:
+            self.fileLabel.setText("No input image loaded.")
+            return
+
+        self.showSpinner()
+
+        if self.processing_thread and self.processing_thread.isRunning():
+            self.processing_thread.quit()
+            self.processing_thread.wait()
+
+        # pass in 'tolerance' too
+        self.processing_thread = FrequencySeperationThread(
+            image=self.image,
+            method=self.method,
+            radius=self.radius,
+            tolerance=self.tolerance
+        )
+        self.processing_thread.separation_done.connect(self.onSeparationDone)
+        self.processing_thread.error_signal.connect(self.onSeparationError)
+        self.processing_thread.start()
+
+    def onSeparationDone(self, lf, hf):
+        self.hideSpinner()
+        self.low_freq_image = lf
+        self.high_freq_image = hf
+        self.update_previews()
+
+    def onSeparationError(self, msg):
+        self.hideSpinner()
+        self.fileLabel.setText(f"Error during separation: {msg}")
+
+    # -----------------------------
+    # Spinner control
+    # -----------------------------
+    def showSpinner(self):
+        self.spinnerLabel.show()
+        self.spinnerMovie.start()
+
+    def hideSpinner(self):
+        self.spinnerLabel.hide()
+        self.spinnerMovie.stop()
+
+    # -----------------------------
+    # Preview
+    # -----------------------------
+    def update_previews(self):
+        """
+        Render HF/LF images with current zoom_factor.
+        HF gets an offset of +0.5 for display.
+        """
+        # Low Frequency
+        if self.low_freq_image is not None:
+            lf_disp = np.clip(self.low_freq_image, 0, 1)
+            pixmap_lf = self._numpy_to_qpixmap(lf_disp)
+            # Scale by zoom_factor (cast to int)
+            scaled_lf = pixmap_lf.scaled(
+                int(pixmap_lf.width() * self.zoom_factor),
+                int(pixmap_lf.height() * self.zoom_factor),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.labelLF.setPixmap(scaled_lf)
+            self.labelLF.resize(scaled_lf.size())
+        else:
+            self.labelLF.setText("Low Frequency")
+            self.labelLF.resize(self.labelLF.sizeHint())
+
+        # High Frequency
+        if self.high_freq_image is not None:
+            hf_disp = self.high_freq_image + 0.5
+            hf_disp = np.clip(hf_disp, 0, 1)
+            pixmap_hf = self._numpy_to_qpixmap(hf_disp)
+            scaled_hf = pixmap_hf.scaled(
+                int(pixmap_hf.width() * self.zoom_factor),
+                int(pixmap_hf.height() * self.zoom_factor),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.labelHF.setPixmap(scaled_hf)
+            self.labelHF.resize(scaled_hf.size())
+        else:
+            self.labelHF.setText("High Frequency")
+            self.labelHF.resize(self.labelHF.sizeHint())
+
+    def _numpy_to_qpixmap(self, img_float32):
+        """
+        Convert float32 [0,1] array (H,W) or (H,W,3) to a QPixmap for display.
+        """
+        if img_float32.ndim == 2:
+            img_float32 = np.stack([img_float32]*3, axis=-1)
+
+        img_ubyte = (img_float32 * 255).astype(np.uint8)
+        h, w, ch = img_ubyte.shape
+        bytes_per_line = ch * w
+        q_img = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        return QPixmap.fromImage(q_img)
+
+class CombinedPreviewWindow(QWidget):
+    """
+    A pop-out window that shows the combined HF+LF image in a scrollable, zoomable preview.
+    """
+    def __init__(self, combined_image, original_header=None, is_mono=False, parent=None):
+        """
+        :param combined_image: Float32 numpy array in [0,1], shape = (H,W) or (H,W,3).
+        :param original_header: Optional metadata (for saving as FITS, etc.).
+        :param is_mono: Boolean indicating grayscale vs. color.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Combined HF + LF Preview")
+        self.combined_image = combined_image
+        self.original_header = original_header
+        self.is_mono = is_mono
+
+        # Zoom/panning
+        self.zoom_factor = 1.0
+        self.dragging = False
+        self.last_mouse_pos = QPoint()
+
+        self.initUI()
+        # Render the combined image initially
+        self.updatePreview()
+
+    def initUI(self):
+        main_layout = QVBoxLayout(self)
+        self.setLayout(main_layout)
+
+        # --- Top: Zoom / Fit / Save Buttons ---
+        top_btn_layout = QHBoxLayout()
+        self.zoom_in_btn = QPushButton("Zoom In", self)
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        top_btn_layout.addWidget(self.zoom_in_btn)
+
+        self.zoom_out_btn = QPushButton("Zoom Out", self)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        top_btn_layout.addWidget(self.zoom_out_btn)
+
+        self.fit_btn = QPushButton("Fit to Preview", self)
+        self.fit_btn.clicked.connect(self.fit_to_preview)
+        top_btn_layout.addWidget(self.fit_btn)
+
+        self.save_btn = QPushButton("Save Combined", self)
+        self.save_btn.clicked.connect(self.save_combined_image)
+        top_btn_layout.addWidget(self.save_btn)
+
+        main_layout.addLayout(top_btn_layout)
+
+        # --- Scroll Area with a QLabel for image ---
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(False)
+        self.imageLabel = QLabel(self)
+        self.imageLabel.setAlignment(Qt.AlignCenter)
+
+        # Put the label inside the scroll area
+        self.scrollArea.setWidget(self.imageLabel)
+        main_layout.addWidget(self.scrollArea)
+
+        # Enable mouse-drag panning
+        self.scrollArea.viewport().installEventFilter(self)
+
+        # Provide a decent default window size
+        self.resize(1000, 600)
+
+    def eventFilter(self, source, event):
+        if source == self.scrollArea.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self.dragging = True
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseMove and self.dragging:
+                delta = event.pos() - self.last_mouse_pos
+                self.last_mouse_pos = event.pos()
+                # Adjust scrollbars
+                self.scrollArea.horizontalScrollBar().setValue(
+                    self.scrollArea.horizontalScrollBar().value() - delta.x()
+                )
+                self.scrollArea.verticalScrollBar().setValue(
+                    self.scrollArea.verticalScrollBar().value() - delta.y()
+                )
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                self.dragging = False
+                return True
+        return super().eventFilter(source, event)
+
+    def updatePreview(self):
+        """
+        Render the combined image into self.imageLabel at the current zoom_factor.
+        """
+        if self.combined_image is None:
+            self.imageLabel.setText("No combined image.")
+            return
+
+        # Convert float32 [0,1] -> QPixmap
+        pixmap = self.numpy_to_qpixmap(self.combined_image)
+        # Scale by zoom_factor
+        new_width = int(pixmap.width() * self.zoom_factor)
+        new_height = int(pixmap.height() * self.zoom_factor)
+        scaled = pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        # Update label
+        self.imageLabel.setPixmap(scaled)
+        self.imageLabel.resize(scaled.size())
+
+    def numpy_to_qpixmap(self, img_float32):
+        """
+        Convert float32 [0,1] array (H,W) or (H,W,3) to QPixmap.
+        """
+        if img_float32.ndim == 2:
+            # grayscale
+            img_float32 = np.stack([img_float32]*3, axis=-1)
+        img_ubyte = (np.clip(img_float32, 0, 1) * 255).astype(np.uint8)
+        h, w, ch = img_ubyte.shape
+        bytes_per_line = ch * w
+        q_image = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        return QPixmap.fromImage(q_image)
+
+    # -----------------------------
+    # Zoom
+    # -----------------------------
+    def zoom_in(self):
+        self.zoom_factor *= 1.2
+        self.updatePreview()
+
+    def zoom_out(self):
+        self.zoom_factor /= 1.2
+        self.updatePreview()
+
+    def fit_to_preview(self):
+        """
+        Adjust zoom_factor so the combined image width fits in the scrollArea width.
+        """
+        if self.combined_image is None:
+            return
+
+        # Get the actual image size
+        h, w = self.combined_image.shape[:2]
+        # The scrollArea's viewport is how much space we have to show it
+        viewport_width = self.scrollArea.viewport().width()
+
+        # Estimate new zoom factor so image fits horizontally
+        # (You could also consider fitting by height or whichever is smaller.)
+        # Must convert w from image to display pixel scale.
+        # We'll guess the "base" is 1.0 => original width => we guess that is w pixels wide
+        # So new_zoom = viewport_width / (w in original scale).
+        new_zoom = viewport_width / float(w)
+        if new_zoom < 0.01:
+            new_zoom = 0.01
+
+        self.zoom_factor = new_zoom
+        self.updatePreview()
+
+    # -----------------------------
+    # Save
+    # -----------------------------
+    def save_combined_image(self):
+        """
+        Let the user save the combined image (float32 [0,1]) with a typical "Save As" dialog.
+        - TIF/TIFF, FIT/FITS, XISF: prompt for 16-bit or 32-bit.
+        - PNG/JPG/JPEG: automatically save as 8-bit (no prompt).
+        - Otherwise, default to 8-bit.
+        """
+        if self.combined_image is None:
+            return
+
+        options = "Images (*.tif *.tiff *.fits *.fit *.png *.xisf);;All Files (*)"
+        default_filename = "combined_image.tif"
+        save_filename, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save Combined Image", 
+            default_filename, 
+            options
+        )
+        if not save_filename:
+            return  # user canceled
+
+        file_ext = os.path.splitext(save_filename)[1].lower().strip('.')  # e.g., 'tif', 'fits', 'png', etc.
+        
+        # Decide bit depth
+        if file_ext in ['tif', 'tiff', 'fit', 'fits', 'xisf']:
+            # Prompt user for bit depth
+            bit_depth_options = ["16-bit", "32-bit floating point"]
+            bit_depth, ok = QInputDialog.getItem(
+                self,
+                "Select Bit Depth",
+                "Choose bit depth for saving:",
+                bit_depth_options,
+                1,  # default index = "32-bit floating point"
+                False
+            )
+            if not ok:
+                return  # user canceled the bit-depth dialog
+        elif file_ext in ['png']:
+            # Force 8-bit
+            bit_depth = "8-bit"
+        else:
+            # Some other extension: default to "8-bit" (or you can ask user, or raise an error)
+            bit_depth = "8-bit"
+
+        # Now call your global save_image
+        save_image(
+            self.combined_image,         # float32 in [0,1]
+            save_filename,
+            original_format=file_ext,    # 'tif', 'fits', 'png', etc.
+            bit_depth=bit_depth,
+            original_header=self.original_header,
+            is_mono=self.is_mono
+        )
+
+        QMessageBox.information(
+            self,
+            "Save Complete",
+            f"Saved {bit_depth} {file_ext.upper()} image to:\n{os.path.basename(save_filename)}"
+        )
+
+class HFEnhancementThread(QThread):
+    """
+    A QThread that can:
+      1) Scale HF by 'sharpen_scale' (if enabled)
+      2) Wavelet-sharpen HF (if enabled)
+      3) Denoise HF (if enabled)
+    """
+    enhancement_done = pyqtSignal(np.ndarray)
+    error_signal = pyqtSignal(str)
+
+    def __init__(
+        self, 
+        hf_image, 
+        enable_scale=True,
+        sharpen_scale=1.0, 
+        enable_wavelet=True,
+        wavelet_level=2, 
+        wavelet_boost=1.2, 
+        wavelet_name='db2',
+        enable_denoise=False,
+        denoise_strength=3.0,
+        parent=None
+    ):
+        super().__init__(parent)
+        self.hf_image = hf_image
+        self.enable_scale = enable_scale
+        self.sharpen_scale = sharpen_scale
+        self.enable_wavelet = enable_wavelet
+        self.wavelet_level = wavelet_level
+        self.wavelet_boost = wavelet_boost
+        self.wavelet_name = wavelet_name
+        self.enable_denoise = enable_denoise
+        self.denoise_strength = denoise_strength
+
+    def run(self):
+        try:
+            # Make a copy so we don't mutate the original
+            enhanced_hf = self.hf_image.copy()
+
+            # 1) Sharpen Scale
+            if self.enable_scale:
+                enhanced_hf *= self.sharpen_scale
+
+            # 2) Wavelet Sharpen
+            if self.enable_wavelet:
+                enhanced_hf = self.wavelet_sharpen(
+                    enhanced_hf,
+                    wavelet=self.wavelet_name,
+                    level=self.wavelet_level,
+                    boost=self.wavelet_boost
+                )
+
+            # 3) Denoise
+            if self.enable_denoise:
+                enhanced_hf = self.denoise_hf(enhanced_hf, self.denoise_strength)
+
+            self.enhancement_done.emit(enhanced_hf.astype(np.float32))
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+    # -------------------------------------
+    # Wavelet Sharpen Methods
+    # -------------------------------------
+    def wavelet_sharpen(self, hf, wavelet='db2', level=2, boost=1.2):
+        # color or mono
+        if hf.ndim == 3 and hf.shape[2] == 3:
+            # color
+            channels = []
+            for c in range(3):
+                c_data = hf[..., c]
+                c_sharp = self.wavelet_sharpen_mono(c_data, wavelet, level, boost)
+                channels.append(c_sharp)
+            return np.stack(channels, axis=-1)
+        else:
+            return self.wavelet_sharpen_mono(hf, wavelet, level, boost)
+
+    def wavelet_sharpen_mono(self, mono_hf, wavelet, level, boost):
+        coeffs = pywt.wavedec2(mono_hf, wavelet=wavelet, level=level)
+        new_coeffs = [coeffs[0]]
+        for detail in coeffs[1:]:
+            cH, cV, cD = detail
+            cH *= boost
+            cV *= boost
+            cD *= boost
+            new_coeffs.append((cH, cV, cD))
+        result = pywt.waverec2(new_coeffs, wavelet=wavelet)
+        return result
+
+    # -------------------------------------
+    # Denoise HF
+    # -------------------------------------
+    def denoise_hf(self, hf, strength=3.0):
+        """
+        Use OpenCV's fastNlMeansDenoisingColored or fastNlMeansDenoising for HF.
+        Because HF can be negative, we offset +0.5 -> [0..1], scale -> [0..255].
+        """
+        # If color
+        if hf.ndim == 3 and hf.shape[2] == 3:
+            bgr = cv2.cvtColor(hf, cv2.COLOR_RGB2BGR)
+            tmp = np.clip(bgr + 0.5, 0, 1)
+            tmp8 = (tmp * 255).astype(np.uint8)
+            # fastNlMeansDenoisingColored(src, None, hColor, hLuminance, templateWindowSize, searchWindowSize)
+            denoised8 = cv2.fastNlMeansDenoisingColored(tmp8, None, strength, strength, 7, 21)
+            denoised_f32 = denoised8.astype(np.float32) / 255.0 - 0.5
+            denoised_rgb = cv2.cvtColor(denoised_f32, cv2.COLOR_BGR2RGB)
+            return denoised_rgb
+        else:
+            # Mono
+            tmp = np.clip(hf + 0.5, 0, 1)
+            tmp8 = (tmp * 255).astype(np.uint8)
+            denoised8 = cv2.fastNlMeansDenoising(tmp8, None, strength, 7, 21)
+            denoised_f32 = denoised8.astype(np.float32) / 255.0 - 0.5
+            return denoised_f32
+
+class FrequencySeperationThread(QThread):
+    """
+    A QThread that performs frequency separation on a float32 [0,1] image array.
+    This keeps the GUI responsive while processing.
+
+    Signals:
+        separation_done(np.ndarray, np.ndarray):
+            Emitted with (low_freq, high_freq) images when finished.
+        error_signal(str):
+            Emitted if an error or exception occurs.
+    """
+
+    # Signal emitted when separation is complete. 
+    # The arguments are low-frequency (LF) and high-frequency (HF) images.
+    separation_done = pyqtSignal(np.ndarray, np.ndarray)
+
+    # Signal emitted if there's an error during processing
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, image, method='Gaussian', radius=5, tolerance=50, parent=None):
+        """
+        :param image: Float32 NumPy array in [0,1], shape = (H,W) or (H,W,3).
+        :param method: 'Gaussian', 'Median', or 'Bilateral' (default: 'Gaussian').
+        :param radius: Numeric value controlling the filter's strength (e.g., Gaussian sigma).
+        :param mirror: Boolean to indicate if border handling is mirrored (optional example param).
+        """
+        super().__init__(parent)
+        self.image = image
+        self.method = method
+        self.radius = radius
+        self.tolerance = tolerance
+
+    def run(self):
+        try:
+            # Convert the input image from RGB to BGR if it's 3-channel
+            if self.image.ndim == 3 and self.image.shape[2] == 3:
+                bgr = cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)
+            else:
+                # If mono, just use it as is
+                bgr = self.image.copy()
+
+            # Choose the filter based on self.method
+            if self.method == 'Gaussian':
+                # For Gaussian, interpret radius as sigma
+                low_bgr = cv2.GaussianBlur(bgr, (0, 0), self.radius)
+            elif self.method == 'Median':
+                # For Median, the radius is the kernel size (must be odd)
+                ksize = max(1, int(self.radius) // 2 * 2 + 1)
+                low_bgr = cv2.medianBlur(bgr, ksize)
+            elif self.method == 'Bilateral':
+                # Example usage: interpret "tolerance" as a fraction of the default 50
+                # so if tolerance=50 => sigmaColor=50*(50/100)=25, sigmaSpace=25
+                # Or do your own logic for how tolerance modifies Bilateral
+                sigma = 50 * (self.tolerance / 100.0)
+                d = int(self.radius)
+                low_bgr = cv2.bilateralFilter(bgr, d, sigma, sigma)
+            else:
+                # Fallback to Gaussian if unknown
+                low_bgr = cv2.GaussianBlur(bgr, (0, 0), self.radius)
+
+            # Convert low frequency image back to RGB if it's 3-channel
+            if low_bgr.ndim == 3 and low_bgr.shape[2] == 3:
+                low_rgb = cv2.cvtColor(low_bgr, cv2.COLOR_BGR2RGB)
+            else:
+                low_rgb = low_bgr
+
+            # Calculate the high frequency
+            # (note: keep in float32 to preserve negative/positive values)
+            high_rgb = self.image - low_rgb
+
+            # Emit the results
+            self.separation_done.emit(low_rgb, high_rgb)
+
+        except Exception as e:
+            # Any error gets reported via the error_signal
+            self.error_signal.emit(str(e))
 
 class NBtoRGBstarsTab(QWidget):
     def __init__(self):
