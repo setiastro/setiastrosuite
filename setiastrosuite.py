@@ -5336,6 +5336,7 @@ class FrequencySeperationTab(QWidget):
         self.is_mono = False
         self.processing_thread = None
         self.hfEnhancementThread = None
+        self.hf_history = []
 
         # Default parameters
         self.method = 'Gaussian'
@@ -5375,6 +5376,7 @@ class FrequencySeperationTab(QWidget):
 
         # 1) Load image
         self.loadButton = QPushButton("Load Image", self)
+        self.loadButton.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         self.loadButton.clicked.connect(self.selectImage)
         left_layout.addWidget(self.loadButton)
 
@@ -5477,31 +5479,59 @@ class FrequencySeperationTab(QWidget):
         left_layout.addWidget(self.denoiseStrengthSlider)
         self.onDenoiseStrengthChanged(self.denoiseStrengthSlider.value())
 
-        # Button to apply HF enhancements
+        # Create a horizontal layout for HF Enhancements and Undo
+        hfEnhance_hlayout = QHBoxLayout()
+
+        # Apply HF Enhancements button
         self.applyHFEnhancementsButton = QPushButton("Apply HF Enhancements", self)
+        self.applyHFEnhancementsButton.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
         self.applyHFEnhancementsButton.clicked.connect(self.applyHFEnhancements)
-        left_layout.addWidget(self.applyHFEnhancementsButton)
+        hfEnhance_hlayout.addWidget(self.applyHFEnhancementsButton)
 
-        # Save HF / LF
-        self.saveHFButton = QPushButton("Save High Frequency", self)
+        # Undo button (tool button with back arrow icon)
+        self.undoHFButton = QToolButton(self)
+        self.undoHFButton.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.undoHFButton.setToolTip("Undo last HF enhancement")
+        self.undoHFButton.clicked.connect(self.undoHFEnhancement)
+        self.undoHFButton.setEnabled(False)  # Initially disabled
+        hfEnhance_hlayout.addWidget(self.undoHFButton)
+
+        # Now add this horizontal layout to the main left_layout
+        left_layout.addLayout(hfEnhance_hlayout)
+
+        # ------------------------------------
+        # Save HF / LF - in a horizontal layout
+        # ------------------------------------
+        save_hlayout = QHBoxLayout()
+
+        self.saveHFButton = QPushButton("Save HF", self)
         self.saveHFButton.clicked.connect(self.save_high_frequency)
-        left_layout.addWidget(self.saveHFButton)
+        save_hlayout.addWidget(self.saveHFButton)
 
-        self.saveLFButton = QPushButton("Save Low Frequency", self)
+        self.saveLFButton = QPushButton("Save LF", self)
         self.saveLFButton.clicked.connect(self.save_low_frequency)
-        left_layout.addWidget(self.saveLFButton)
+        save_hlayout.addWidget(self.saveLFButton)
 
-        # Import HF / LF
-        self.importHFButton = QPushButton("Load High Frequency", self)
+        left_layout.addLayout(save_hlayout)
+
+        # ------------------------------------
+        # Import HF / LF - in a separate horizontal layout
+        # ------------------------------------
+        load_hlayout = QHBoxLayout()
+
+        self.importHFButton = QPushButton("Load HF", self)
         self.importHFButton.clicked.connect(self.loadHF)
-        left_layout.addWidget(self.importHFButton)
+        load_hlayout.addWidget(self.importHFButton)
 
-        self.importLFButton = QPushButton("Load Low Frequency", self)
+        self.importLFButton = QPushButton("Load LF", self)
         self.importLFButton.clicked.connect(self.loadLF)
-        left_layout.addWidget(self.importLFButton)
+        load_hlayout.addWidget(self.importLFButton)
+
+        left_layout.addLayout(load_hlayout)
 
         # Combine HF + LF
         self.combineButton = QPushButton("Combine HF + LF", self)
+        self.combineButton.setIcon(self.style().standardIcon(QStyle.SP_DialogYesButton))
         self.combineButton.clicked.connect(self.combineHFandLF)
         left_layout.addWidget(self.combineButton)
 
@@ -5731,10 +5761,36 @@ class FrequencySeperationTab(QWidget):
         self.tolerance = value
         self.toleranceLabel.setText(f"Tolerance: {value}%")  # Update label
 
+    def undoHFEnhancement(self):
+        """
+        Revert HF to the last state from hf_history, if available.
+        Disable Undo if no more history is left.
+        """
+        if len(self.hf_history) == 0:
+            return  # No history to revert
+        
+        # Pop the last saved HF
+        old_hf = self.hf_history.pop()
+
+        # Restore it
+        self.high_freq_image = old_hf
+        self.update_previews()
+        self.fileLabel.setText("Undid last HF enhancement.")
+
+        # If no more states are left, disable the Undo button again
+        if len(self.hf_history) == 0:
+            self.undoHFButton.setEnabled(False)
+
+
     def applyHFEnhancements(self):
         if self.high_freq_image is None:
             self.fileLabel.setText("No HF image to enhance.")
             return
+        
+        self.hf_history.append(self.high_freq_image.copy())
+
+        # Enable the Undo button because now we have at least one state
+        self.undoHFButton.setEnabled(True)
 
         self.showSpinner()
 
