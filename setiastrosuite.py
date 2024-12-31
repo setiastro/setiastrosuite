@@ -70,6 +70,13 @@ from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCore
 from math import sqrt
 
 
+if hasattr(sys, '_MEIPASS'):
+    # PyInstaller path
+    icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+else:
+    # Development path
+    icon_path = 'astrosuite.png'
+
 
 class AstroEditingSuite(QWidget):
     def __init__(self):
@@ -78,14 +85,6 @@ class AstroEditingSuite(QWidget):
         self.initUI()
 
     def initUI(self):
-        # Determine the correct path to the icon
-        if hasattr(sys, '_MEIPASS'):
-            # PyInstaller path
-            icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
-        else:
-            # Development path
-            icon_path = 'astrosuite.png'
-
         self.setWindowIcon(QIcon(icon_path))
         layout = QVBoxLayout()
 
@@ -133,7 +132,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.10')
+        self.setWindowTitle('Seti Astro\'s Suite V1.10.1')
 
         # Populate the Quick Navigation menu with each tab name
         for i in range(self.tabs.count()):
@@ -1171,11 +1170,11 @@ class CosmicClarityTab(QWidget):
 
         # Set the path for the wrench icon
         if hasattr(sys, '_MEIPASS'):
-            icon_path = os.path.join(sys._MEIPASS, "wrench_icon.png")
+            wrench_path = os.path.join(sys._MEIPASS, "wrench_icon.png")
         else:
-            icon_path = "wrench_icon.png"
+            wrench_path = "wrench_icon.png"
 
-        self.wrench_button.setIcon(QIcon(icon_path))  # Set the wrench icon with the dynamic path
+        self.wrench_button.setIcon(QIcon(wrench_path))  # Set the wrench icon with the dynamic path
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)  
 
@@ -2395,6 +2394,7 @@ class CosmicClaritySatelliteTab(QWidget):
         self.settings_file = "cosmic_clarity_satellite_folder.txt"
         self.file_watcher = QFileSystemWatcher()  # Watcher for input and output folders
         self.file_watcher.directoryChanged.connect(self.on_folder_changed)  # Connect signal
+        self.sensitivity = 0.1
         self.initUI()
         self.load_cosmic_clarity_folder()
 
@@ -2434,6 +2434,26 @@ class CosmicClaritySatelliteTab(QWidget):
         self.clip_trail_checkbox.setChecked(True)
         left_layout.addWidget(self.clip_trail_checkbox)
 
+        # **Add Sensitivity Slider**
+        sensitivity_layout = QHBoxLayout()
+        sensitivity_label = QLabel("Clipping Sensitivity (Lower Values more Aggressive Clipping):")
+        sensitivity_layout.addWidget(sensitivity_label)
+
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setMinimum(1)    # Represents 0.01
+        self.sensitivity_slider.setMaximum(50)   # Represents 0.5
+        self.sensitivity_slider.setValue(int(self.sensitivity * 100))  # e.g., 0.1 * 100 = 10
+        self.sensitivity_slider.setTickInterval(1)
+        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity)
+        sensitivity_layout.addWidget(self.sensitivity_slider)
+
+        # Label to display current sensitivity value
+        self.sensitivity_value_label = QLabel(f"{self.sensitivity:.2f}")
+        sensitivity_layout.addWidget(self.sensitivity_value_label)
+
+        left_layout.addLayout(sensitivity_layout)        
+
         # Skip Save
         self.skip_save_checkbox = QCheckBox("Skip Save if No Satellite Trail Detected")
         self.skip_save_checkbox.setChecked(False)
@@ -2459,7 +2479,7 @@ class CosmicClaritySatelliteTab(QWidget):
         self.folder_label = QLabel("No folder selected")
         left_layout.addWidget(self.folder_label)
         self.wrench_button = QPushButton()
-        self.wrench_button.setIcon(QIcon(icon_path))  # Ensure the icon is available
+        self.wrench_button.setIcon(QIcon(wrench_path))  # Ensure the icon is available
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)
 
@@ -2502,6 +2522,17 @@ class CosmicClaritySatelliteTab(QWidget):
         main_layout.addLayout(right_layout, stretch=1)  # Less space for the right layout
 
         self.setLayout(main_layout)
+
+    def update_sensitivity(self, value):
+        """
+        Update the sensitivity value based on the slider's position.
+        """
+        self.sensitivity = value / 100.0  # Convert from integer to float (0.01 to 0.5)
+        self.sensitivity_value_label.setText(f"{self.sensitivity:.2f}")  # Update label
+
+
+
+
 
     def preview_image(self, treebox):
         """Preview the selected image."""
@@ -2695,6 +2726,9 @@ class CosmicClaritySatelliteTab(QWidget):
         if self.skip_save_checkbox.isChecked():
             command.append("--skip-save")
 
+        # **Add Sensitivity Argument**
+        command.extend(["--sensitivity", str(self.sensitivity)])            
+
         # Run the command in a separate thread
         self.satellite_thread = SatelliteProcessingThread(command)
         self.satellite_thread.finished.connect(lambda: QMessageBox.information(self, "Success", "Batch processing finished."))
@@ -2727,12 +2761,30 @@ class CosmicClaritySatelliteTab(QWidget):
         if self.skip_save_checkbox.isChecked():
             command.append("--skip-save")
 
+        # **Add Sensitivity Argument**
+        command.extend(["--sensitivity", str(self.sensitivity)])            
+
         # Run the command in a separate thread
+        self.sensitivity_slider.setEnabled(False)
         self.satellite_thread = SatelliteProcessingThread(command)
         self.satellite_thread.finished.connect(lambda: QMessageBox.information(self, "Success", "Live monitoring stopped."))
+        self.satellite_thread.finished.connect(lambda:self.sensitivity_slider.setEnabled(True))
         self.satellite_thread.start()
 
+        # **Disable the sensitivity slider**
+        
 
+
+    def on_live_monitor_finished(self):
+        """
+        Slot to handle actions after live monitoring has finished.
+        """
+        QMessageBox.information(self, "Live Monitoring", "Live monitoring has been stopped.")
+        self.sensitivity_slider.setEnabled(True)
+
+        self.live_monitor_button.setEnabled(True)
+        self.stop_monitor_button.setEnabled(False)
+        
     @staticmethod
     def create_temp_folder(base_folder="~"):
         """
@@ -2776,6 +2828,9 @@ class CosmicClaritySatelliteTab(QWidget):
             command.append("--monitor")
         else:
             command.append("--batch")
+
+        # **Add Sensitivity Argument**
+        command.extend(["--sensitivity", str(self.sensitivity)])
 
         # Debugging: Print the command to verify
         print(f"Running command: {' '.join(command)}")
@@ -3066,6 +3121,7 @@ class ImagePreviewDialog(QDialog):
 
 class SatelliteProcessingThread(QThread):
     log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal()
 
     def __init__(self, command):
         super().__init__()
@@ -3080,6 +3136,8 @@ class SatelliteProcessingThread(QThread):
             self.log_signal.emit(f"Processing failed: {e}")
         except Exception as e:
             self.log_signal.emit(f"Unexpected error: {e}")
+        finally:
+            self.finished_signal.emit()  # Emit the finished signal            
 
 
 class StatisticalStretchTab(QWidget):
@@ -8592,7 +8650,7 @@ conf.dataurl = f'file://{data_path}/'
 
 # Access wrench_icon.png, adjusting for PyInstaller executable
 if hasattr(sys, '_MEIPASS'):
-    icon_path = os.path.join(sys._MEIPASS, 'wrench_icon.png')
+    wrench_path = os.path.join(sys._MEIPASS, 'wrench_icon.png')
     eye_icon_path = os.path.join(sys._MEIPASS, 'eye.png')
     disk_icon_path = os.path.join(sys._MEIPASS, 'disk.png')
     nuke_path = os.path.join(sys._MEIPASS, 'nuke.png')  
@@ -8603,7 +8661,7 @@ if hasattr(sys, '_MEIPASS'):
     font_path = os.path.join(sys._MEIPASS, 'font.png')
     csv_icon_path = os.path.join(sys._MEIPASS, 'cvs.png')
 else:
-    icon_path = 'wrench_icon.png'  # Path for running as a script
+    wrench_path = 'wrench_icon.png'  # Path for running as a script
     eye_icon_path = 'eye.png'  # Path for running as a script
     disk_icon_path = 'disk.png'   
     nuke_path = 'nuke.png' 
@@ -10038,7 +10096,7 @@ class MainWindow(QMainWindow):
 
         # Settings button (wrench icon)
         self.settings_button = QPushButton()
-        self.settings_button.setIcon(QIcon(icon_path))  # Adjust icon path as needed
+        self.settings_button.setIcon(QIcon(wrench_path))  # Adjust icon path as needed
         self.settings_button.clicked.connect(self.open_settings_dialog)
         button_layout.addWidget(self.settings_button)
 
@@ -12582,7 +12640,7 @@ class WhatsInMySky(QWidget):
 
         # Settings button to change the number of objects displayed
         settings_button = QPushButton()
-        settings_button.setIcon(QIcon(icon_path))  # Use icon_path for the button's icon
+        settings_button.setIcon(QIcon(wrench_path))  # Use icon_path for the button's icon
         settings_button.setFixedWidth(fixed_width)
         layout.addWidget(settings_button, 12, 2)
         settings_button.clicked.connect(self.open_settings)        
