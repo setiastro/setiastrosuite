@@ -132,7 +132,7 @@ class AstroEditingSuite(QWidget):
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.10.1')
+        self.setWindowTitle('Seti Astro\'s Suite V1.10.2')
 
         # Populate the Quick Navigation menu with each tab name
         for i in range(self.tabs.count()):
@@ -6407,28 +6407,65 @@ class HFEnhancementThread(QThread):
     # Wavelet Sharpen Methods
     # -------------------------------------
     def wavelet_sharpen(self, hf, wavelet='db2', level=2, boost=1.2):
-        # color or mono
+        """
+        Apply wavelet sharpening to the HF image.
+        Handles both color and monochrome images.
+        """
+        # Check if the image is color or mono
         if hf.ndim == 3 and hf.shape[2] == 3:
-            # color
+            # Color image: process each channel separately
             channels = []
             for c in range(3):
                 c_data = hf[..., c]
                 c_sharp = self.wavelet_sharpen_mono(c_data, wavelet, level, boost)
                 channels.append(c_sharp)
+            # Stack the channels back into a color image
             return np.stack(channels, axis=-1)
         else:
+            # Monochrome image
             return self.wavelet_sharpen_mono(hf, wavelet, level, boost)
 
     def wavelet_sharpen_mono(self, mono_hf, wavelet, level, boost):
-        coeffs = pywt.wavedec2(mono_hf, wavelet=wavelet, level=level)
-        new_coeffs = [coeffs[0]]
+        """
+        Apply wavelet sharpening to a single-channel (monochrome) HF image.
+        Ensures that the output image has the same dimensions as the input.
+        """
+        # Perform wavelet decomposition with 'periodization' mode to preserve dimensions
+        coeffs = pywt.wavedec2(mono_hf, wavelet=wavelet, level=level, mode='periodization')
+
+        # Boost the detail coefficients
+        new_coeffs = [coeffs[0]]  # Approximation coefficients remain unchanged
         for detail in coeffs[1:]:
             cH, cV, cD = detail
             cH *= boost
             cV *= boost
             cD *= boost
             new_coeffs.append((cH, cV, cD))
-        result = pywt.waverec2(new_coeffs, wavelet=wavelet)
+
+        # Reconstruct the image with 'periodization' mode
+        result = pywt.waverec2(new_coeffs, wavelet=wavelet, mode='periodization')
+
+        # Ensure the reconstructed image has the same shape as the original
+        original_shape = mono_hf.shape
+        reconstructed_shape = result.shape
+
+        if reconstructed_shape != original_shape:
+            # Calculate the difference in dimensions
+            delta_h = reconstructed_shape[0] - original_shape[0]
+            delta_w = reconstructed_shape[1] - original_shape[1]
+
+            # Crop the excess pixels if the reconstructed image is larger
+            if delta_h > 0 or delta_w > 0:
+                result = result[:original_shape[0], :original_shape[1]]
+            # Pad the image with zeros if it's smaller (rare, but for robustness)
+            elif delta_h < 0 or delta_w < 0:
+                pad_h = max(-delta_h, 0)
+                pad_w = max(-delta_w, 0)
+                result = np.pad(result, 
+                               ((0, pad_h), (0, pad_w)), 
+                               mode='constant', 
+                               constant_values=0)
+
         return result
 
     # -------------------------------------
