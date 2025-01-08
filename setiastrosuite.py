@@ -359,7 +359,7 @@ class AstroEditingSuite(QMainWindow):
     def open_image(self):
         """Open an image and load it into the ImageManager."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
-                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+                                            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
         if file_path:
             try:
@@ -4938,10 +4938,23 @@ class StarStretchTab(QWidget):
         selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
         if selected_file:
             try:
-                self.image, self.original_header, _, self.is_mono = load_image(selected_file)  # Load image with header
+                # Load image with header
+                self.image, self.original_header, _, self.is_mono = load_image(selected_file)
                 self.filename = selected_file  # Store the selected file path
                 self.fileLabel.setText(os.path.basename(selected_file))
-                self.generatePreview()
+
+                # Push the loaded image to ImageManager so it can be tracked for undo/redo
+                metadata = {
+                    'file_path': self.filename,
+                    'original_header': self.original_header,
+                    'bit_depth': 'Unknown',  # You can update this if needed
+                    'is_mono': self.is_mono
+                }
+                self.image_manager.add_image(self.image_manager.current_slot, self.image, metadata)
+                print(f"Image {self.filename} pushed to ImageManager.")
+
+                # Update the display with the loaded image (before applying any stretch)
+                self.updateImageDisplay()
 
             except Exception as e:
                 self.fileLabel.setText(f"Error: {str(e)}")
