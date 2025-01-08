@@ -24,6 +24,7 @@ import glob
 import time
 from datetime import datetime
 import pywt
+from io import BytesIO
 
 
 
@@ -142,6 +143,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs = QTabWidget()
         # Add individual tabs for each tool
         self.tabs.addTab(XISFViewer(image_manager=self.image_manager), "XISF Liberator")
+        self.tabs.addTab(BlinkTab(image_manager=self.image_manager), "Blink Comparator")
         self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity Sharpen/Denoise")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
@@ -163,7 +165,7 @@ class AstroEditingSuite(QMainWindow):
         self.setCentralWidget(central_widget)
 
         # Set the layout for the main window
-        self.setLayout(layout)
+
         self.setWindowTitle('Seti Astro\'s Suite V2.0')
 
         # Populate the Quick Navigation menu with each tab name
@@ -1512,6 +1514,230 @@ class BatchProcessDialog(QDialog):
     def update_status(self, message):
         self.status_label.setText(message)
         QApplication.processEvents()  # Ensures UI updates immediately
+
+class BlinkTab(QWidget):
+    def __init__(self, image_manager=None):
+        super().__init__()
+
+        self.image_paths = []  # Store the file paths of loaded images
+        self.loaded_images = []  # Store the image objects (as numpy arrays)
+        self.image_labels = []  # Store corresponding file names for the TreeWidget
+        self.image_manager = image_manager  # Reference to ImageManager
+
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QHBoxLayout(self)
+
+        # Left Column for the file loading and TreeView
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+
+        # File Selection Button
+        self.fileButton = QPushButton('Select Images', self)
+        self.fileButton.clicked.connect(self.openFileDialog)
+        left_layout.addWidget(self.fileButton)
+
+        # Tree view for file names
+        self.fileTree = QTreeWidget(self)
+        self.fileTree.setColumnCount(1)
+        self.fileTree.setHeaderLabels(["Image Files"])
+        self.fileTree.itemClicked.connect(self.on_item_clicked)
+        self.fileTree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fileTree.customContextMenuRequested.connect(self.on_right_click)
+        left_layout.addWidget(self.fileTree)
+
+        left_widget.setFixedWidth(300)
+
+        # Right Column for Image Preview
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # QLabel to display the preview
+        self.preview_label = QLabel(self)
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.preview_label)
+
+        # Add both widgets to the main layout
+        main_layout.addWidget(left_widget)
+        main_layout.addWidget(right_widget)
+
+        self.setLayout(main_layout)
+
+        # Connect the selection change signal to update the preview when arrow keys are used
+        self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
+
+    def openFileDialog(self):
+        """Allow users to select multiple images."""
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Images", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+        
+        if file_paths:
+            self.image_paths = file_paths
+            self.fileTree.clear()  # Clear the existing tree items
+
+            # Load and display the file names in the treeview
+            for file_path in file_paths:
+                file_name = os.path.basename(file_path)
+                item = QTreeWidgetItem([file_name])
+                self.fileTree.addTopLevelItem(item)
+
+            # Load the images into memory (storing both file path and image data)
+            self.loaded_images = []
+            for file_path in file_paths:
+                image, header, bit_depth, is_mono = load_image(file_path)
+                self.loaded_images.append({
+                    'file_path': file_path,
+                    'image_data': image,
+                    'header': header,
+                    'bit_depth': bit_depth,
+                    'is_mono': is_mono
+                })
+
+            print(f"Loaded {len(self.loaded_images)} images into memory.")
+
+
+    def on_item_clicked(self, item, column):
+        """Handle click on a file name in the tree to preview the image."""
+        file_name = item.text(0)
+        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+
+        if file_path:
+            # Get the index of the clicked image
+            index = self.image_paths.index(file_path)
+            
+            # Retrieve the corresponding image data from the loaded images
+            image_data = self.loaded_images[index]['image_data']  # Access the image data, not the whole dictionary
+
+            # Apply auto-stretch (assumed mono or color)
+            target_median = 0.25
+            if image_data.ndim == 2:  # Mono image
+                stretched_image = stretch_mono_image(image_data, target_median)
+            else:  # Color image
+                stretched_image = stretch_color_image(image_data, target_median, linked=False)
+
+            # Convert to QImage and display
+            qimage = self.convert_to_qimage(stretched_image)
+            pixmap = QPixmap.fromImage(qimage)
+
+            # Scale the pixmap to fit the preview window's fixed size
+            preview_size = self.preview_label.size()  # Get the size of the preview QLabel
+            scaled_pixmap = pixmap.scaled(preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            # Set the scaled pixmap to the preview label
+            self.preview_label.setPixmap(scaled_pixmap)
+
+            # Ensure the window doesn't resize: prevent layout from stretching
+            self.preview_label.setFixedSize(preview_size)  # Fix the size of the preview label
+
+
+    def on_right_click(self, pos):
+        """Allow deleting an image file from the list and pushing image to ImageManager."""
+        item = self.fileTree.itemAt(pos)
+        if item:
+            menu = QMenu(self)
+            
+            # Add action to push image to ImageManager
+            push_action = QAction("Push Image for Processing", self)
+            push_action.triggered.connect(lambda: self.push_image_to_manager(item))
+            menu.addAction(push_action)
+
+            # Add action to delete image from the list
+            delete_action = QAction("Delete", self)
+            delete_action.triggered.connect(lambda: self.delete_item(item))
+            menu.addAction(delete_action)
+
+            menu.exec_(self.fileTree.mapToGlobal(pos))
+
+    def push_image_to_manager(self, item):
+        """Push the selected image to the ImageManager."""
+        file_name = item.text(0)
+        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+
+        if file_path and self.image_manager:
+            # Load the image into ImageManager
+            image, header, bit_depth, is_mono = load_image(file_path)
+            metadata = {
+                'file_path': file_path,
+                'original_header': header,
+                'bit_depth': bit_depth,
+                'is_mono': is_mono
+            }
+
+            # Add the image to ImageManager (use the current slot)
+            self.image_manager.add_image(self.image_manager.current_slot, image, metadata)
+            print(f"Image {file_path} pushed to ImageManager for processing.")
+
+    def delete_item(self, item):
+        """Delete the selected item from the tree, the loaded images list, and the file system."""
+        file_name = item.text(0)
+        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+
+        if file_path:
+            try:
+                # Remove the image from image_paths
+                if file_path in self.image_paths:
+                    self.image_paths.remove(file_path)
+                    print(f"Image path {file_path} removed from image_paths.")
+                else:
+                    print(f"Image path {file_path} not found in image_paths.")
+
+                # Remove the corresponding image from loaded_images
+                matching_image_data = next((item for item in self.loaded_images if item['file_path'] == file_path), None)
+                if matching_image_data:
+                    self.loaded_images.remove(matching_image_data)  # Remove the image-data dictionary
+                    print(f"Image {file_name} removed from loaded_images.")
+                else:
+                    print(f"Image {file_name} not found in loaded_images.")
+
+            except ValueError as e:
+                print(f"Error removing image from lists: {e}")
+                QMessageBox.critical(self, "Error", "Error removing image from loaded list.")
+
+            # Now delete the file from the filesystem
+            try:
+                os.remove(file_path)  # Delete the image file
+                print(f"File {file_path} deleted successfully.")
+            except Exception as e:
+                print(f"Failed to delete {file_path}: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
+
+            # Clear the existing tree and repopulate it (without the deleted file)
+            self.fileTree.clear()
+
+            # Re-add remaining images to the tree (this should exclude the deleted one)
+            for file_path in self.image_paths:
+                file_name = os.path.basename(file_path)
+                item = QTreeWidgetItem([file_name])
+                self.fileTree.addTopLevelItem(item)
+
+            print(f"Image {file_name} and its data have been deleted.")
+
+            # Clear the preview if it was showing the deleted image
+            self.preview_label.clear()  # Clear the preview label
+            self.preview_label.setText('No image selected.')  # Optional: Set a default message
+
+            # Reset the current image as the deleted one should no longer be shown
+            self.current_image = None
+
+
+
+    def on_selection_changed(self, selected, deselected):
+        """Handle the selection change event."""
+        # Get the selected item from the TreeView
+        selected_items = self.fileTree.selectedItems()
+        if selected_items:
+            item = selected_items[0]  # Get the first selected item (assuming single selection)
+            self.on_item_clicked(item, 0)  # Update the preview with the selected image
+
+    def convert_to_qimage(self, img_array):
+        """Convert numpy image array to QImage."""
+        img_array = (img_array * 255).astype(np.uint8)  # Ensure image is in uint8
+        h, w = img_array.shape[:2]
+
+        if img_array.ndim == 3:  # RGB Image
+            return QImage(img_array.data, w, h, 3 * w, QImage.Format_RGB888)
+        else:  # Grayscale Image
+            return QImage(img_array.data, w, h, w, QImage.Format_Grayscale8)
 
 
 class CosmicClarityTab(QWidget):
