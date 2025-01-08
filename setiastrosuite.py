@@ -4111,10 +4111,21 @@ class StatisticalStretchTab(QWidget):
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)      
 
-        # Preview button
+        # Buttons (Undo and Preview Stretch)
+        button_layout = QHBoxLayout()
+
         self.previewButton = QPushButton('Preview Stretch', self)
         self.previewButton.clicked.connect(self.previewStretch)
-        left_layout.addWidget(self.previewButton)
+        button_layout.addWidget(self.previewButton)
+
+        self.undoButton = QPushButton('Undo', self)
+        undo_icon = self.style().standardIcon(QStyle.SP_ArrowBack)  # Standard left arrow icon
+        self.undoButton.setIcon(undo_icon)
+        self.undoButton.clicked.connect(self.undo_image)
+        button_layout.addWidget(self.undoButton)
+
+
+        left_layout.addLayout(button_layout)
 
         # **Remove Zoom Buttons from Left Panel**
         # Commented out to move to the right panel
@@ -4331,7 +4342,14 @@ class StatisticalStretchTab(QWidget):
 
             print("Image added to ImageManager.")
 
-
+    def undo_image(self):
+        """Undo the last action."""
+        if self.image_manager.can_undo():
+            self.image_manager.undo()  # Reverts to the previous image
+            self.updateImageDisplay()  # Update the display with the reverted image
+            print("Undo performed.")
+        else:
+            QMessageBox.information(self, "Undo", "No actions to undo.")
 
     def updateMedianLabel(self, value):
         self.medianLabel.setText(f'Target Median: {value / 100:.2f}')
