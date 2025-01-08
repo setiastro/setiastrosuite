@@ -59,12 +59,12 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
     QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton
+    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton, QStatusBar
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor, QBrush
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize, QObject
 
 # Math functions
 from math import sqrt
@@ -78,24 +78,49 @@ else:
     icon_path = 'astrosuite.png'
 
 
-class AstroEditingSuite(QWidget):
+class AstroEditingSuite(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_theme = "dark"  # Default theme
+        self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
+        self.image_manager.image_changed.connect(self.update_file_name)
         self.initUI()
 
     def initUI(self):
         self.setWindowIcon(QIcon(icon_path))
         layout = QVBoxLayout()
 
+        # Enable drag and drop
+        self.setAcceptDrops(True)
+
         # Create a menu bar
-        menubar = QMenuBar()
+        menubar = self.menuBar()  # Use the menu bar directly from QMainWindow
+
+        # File Menu
+        file_menu = menubar.addMenu("File")
+        
+        # Add actions for File menu
+        open_action = QAction("Open Image", self)
+        save_action = QAction("Save As", self)
+        undo_action = QAction("Undo", self)
+        redo_action = QAction("Redo", self)
+        exit_action = QAction("Exit", self)
+        
+        open_action.triggered.connect(self.open_image)
+        save_action.triggered.connect(self.save_image)
+        undo_action.triggered.connect(self.undo_image)
+        redo_action.triggered.connect(self.redo_image)
+        exit_action.triggered.connect(self.close)  # Close the application
+
+        # Add actions to the file menu
+        file_menu.addAction(open_action)
+        file_menu.addAction(save_action)
+        file_menu.addAction(undo_action)
+        file_menu.addAction(redo_action)
+        file_menu.addAction(exit_action)
+
+        # Themes Menu
         theme_menu = menubar.addMenu("Themes")
-
-        # Add tooltip to the "Themes" menu
-        theme_menu.setToolTip("Click to select Light or Dark theme")
-
-        # Add theme options
         light_theme_action = QAction("Light Theme", self)
         dark_theme_action = QAction("Dark Theme", self)
 
@@ -105,45 +130,91 @@ class AstroEditingSuite(QWidget):
         theme_menu.addAction(light_theme_action)
         theme_menu.addAction(dark_theme_action)
 
-        quicknav_menu = menubar.addMenu("Quick Navigation")
+        # Create the status bar
+        self.statusBar = QStatusBar(self)
+        self.setStatusBar(self.statusBar)
 
-        # Add the menu bar to the layout
-        layout.setMenuBar(menubar)
+        # Create the file label to display the current file name in the status bar
+        self.file_name_label = QLabel("No file selected")
+        self.statusBar.addWidget(self.file_name_label, 1)  # Add label to status bar
 
-        # Create tab widget
+        # Create the tab widget
         self.tabs = QTabWidget()
-
         # Add individual tabs for each tool
-        self.tabs.addTab(XISFViewer(), "XISF Liberator")
-        self.tabs.addTab(CosmicClarityTab(), "Cosmic Clarity Sharpen/Denoise")
+        self.tabs.addTab(XISFViewer(image_manager=self.image_manager), "XISF Liberator")
+        self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity Sharpen/Denoise")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
-        self.tabs.addTab(StatisticalStretchTab(), "Statistical Stretch")
-        self.tabs.addTab(FullCurvesTab(), "Curves Utility")
-        self.tabs.addTab(NBtoRGBstarsTab(), "NB to RGB Stars")  # Placeholder        
-        self.tabs.addTab(StarStretchTab(), "Star Stretch")  # Placeholder
-        self.tabs.addTab(FrequencySeperationTab(), "Frequency Seperation")
-        self.tabs.addTab(HaloBGonTab(), "Halo-B-Gon")  # Placeholder
-        self.tabs.addTab(ContinuumSubtractTab(), "Continuum Subtraction")
+        self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
+        self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
+        self.tabs.addTab(NBtoRGBstarsTab(image_manager=self.image_manager), "NB to RGB Stars")
+        self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
+        self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
+        self.tabs.addTab(HaloBGonTab(image_manager=self.image_manager), "Halo-B-Gon")
+        self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
 
-        # Add the tab widget to the main layout
-        layout.addWidget(self.tabs)
+        # Set the layout for the main window
+        central_widget = QWidget(self)  # Create a central widget
+        layout = QVBoxLayout(central_widget)
+        layout.addWidget(self.tabs)  # Add tabs to the central widget
+
+        # Set the central widget of the main window
+        self.setCentralWidget(central_widget)
 
         # Set the layout for the main window
         self.setLayout(layout)
-        self.setWindowTitle('Seti Astro\'s Suite V1.10.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.0')
 
         # Populate the Quick Navigation menu with each tab name
+        quicknav_menu = menubar.addMenu("Quick Navigation")
         for i in range(self.tabs.count()):
             tab_title = self.tabs.tabText(i)
             action = QAction(tab_title, self)
-            # Connect each action so that it jumps to that tab index
             action.triggered.connect(lambda checked, index=i: self.tabs.setCurrentIndex(index))
-            quicknav_menu.addAction(action)        
+            quicknav_menu.addAction(action)
 
         # Apply the default theme
         self.apply_theme(self.current_theme)
+
+    def dragEnterEvent(self, event):
+        """Handle the drag enter event."""
+        # Check if the dragged content is a file
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """Handle the drop event."""
+        # Get the file path from the dropped file
+        file_path = event.mimeData().urls()[0].toLocalFile()
+        
+        # Check if the file is an image (you can customize this check as needed)
+        if file_path.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.xisf', '.fit', '.jpg', '.jpeg', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            try:
+                # Load the image into ImageManager
+                image, header, bit_depth, is_mono = load_image(file_path)
+                metadata = {
+                    'file_path': file_path,
+                    'original_header': header,
+                    'bit_depth': bit_depth,
+                    'is_mono': is_mono
+                }
+                self.image_manager.add_image(self.image_manager.current_slot, image, metadata)  # Make sure to specify the slot here
+                print(f"Image {file_path} loaded successfully via drag and drop.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+        else:
+            QMessageBox.warning(self, "Invalid File", "Only image files are supported.")
+
+    def update_file_name(self, slot, image, metadata):
+        """Update the file name in the status bar."""
+        file_path = metadata.get('file_path', None)
+        if file_path:
+            self.file_name_label.setText(os.path.basename(file_path))  # Update the label with file name
+        else:
+            self.file_name_label.setText("No file selected")
 
     def apply_theme(self, theme):
         """Apply the selected theme to the application."""
@@ -283,20 +354,321 @@ class AstroEditingSuite(QWidget):
             """
             self.setStyleSheet(dark_stylesheet)
 
+    def open_image(self):
+        """Open an image and load it into the ImageManager."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
+                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+
+        if file_path:
+            try:
+                # Load the image into ImageManager
+                image, header, bit_depth, is_mono = load_image(file_path)
+                metadata = {
+                    'file_path': file_path,
+                    'original_header': header,
+                    'bit_depth': bit_depth,
+                    'is_mono': is_mono
+                }
+                self.image_manager.add_image(self.image_manager.current_slot, image, metadata)  # Make sure to specify the slot here
+                print(f"Image {file_path} loaded successfully.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+
+
+    def save_image(self):
+        """Save the current image to a selected path."""
+        if self.image_manager.image is not None:
+            save_file, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Images (*.png *.tif *.tiff *.fits);;All Files (*)")
+            
+            if save_file:
+                # Prompt the user for bit depth
+                bit_depth, ok = QInputDialog.getItem(self, "Select Bit Depth", "Choose bit depth for saving:",
+                                                    ["8-bit", "16-bit", "32-bit floating point"], 0, False)
+                if ok:
+                    # Get the original format based on the file extension
+                    original_format = save_file.split('.')[-1].lower()
+
+                    try:
+                        # Call the global save_image function
+                        save_image(self.image_manager.image, save_file, original_format, bit_depth=bit_depth)
+                        print(f"Image saved to {save_file}.")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+        else:
+            QMessageBox.warning(self, "Warning", "No image loaded.")
+
+
+    def undo_image(self):
+        """Undo the last action."""
+        if self.image_manager.can_undo():
+            self.image_manager.undo()
+            print("Undo performed.")
+        else:
+            QMessageBox.information(self, "Undo", "No actions to undo.")
+
+    def redo_image(self):
+        """Redo the last undone action."""
+        if self.image_manager.can_redo():
+            self.image_manager.redo()
+            print("Redo performed.")
+        else:
+            QMessageBox.information(self, "Redo", "No actions to redo.")            
+
+class ImageManager(QObject):
+    """
+    Manages multiple image slots with associated metadata and supports undo/redo operations for each slot.
+    Emits a signal whenever an image or its metadata changes.
+    """
+    
+    # Signal emitted when an image or its metadata changes.
+    # Parameters:
+    # - slot (int): The slot number.
+    # - image (np.ndarray): The new image data.
+    # - metadata (dict): Associated metadata for the image.
+    image_changed = pyqtSignal(int, np.ndarray, dict)
+
+    def __init__(self, max_slots=5):
+        """
+        Initializes the ImageManager with a specified number of slots.
+        
+        :param max_slots: Maximum number of image slots to manage.
+        """
+        super().__init__()
+        self.max_slots = max_slots
+        self._images = {i: None for i in range(max_slots)}
+        self._metadata = {i: {} for i in range(max_slots)}
+        self._undo_stacks = {i: [] for i in range(max_slots)}
+        self._redo_stacks = {i: [] for i in range(max_slots)}
+        self.current_slot = 0  # Default to the first slot
+
+    def set_current_slot(self, slot):
+        """
+        Sets the current active slot if the slot number is valid and has an image.
+        
+        :param slot: The slot number to activate.
+        """
+        if 0 <= slot < self.max_slots and self._images[slot] is not None:
+            self.current_slot = slot
+            self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
+            print(f"ImageManager: Current slot set to {slot}.")
+        else:
+            print(f"ImageManager: Slot {slot} is invalid or empty.")
+
+    def add_image(self, slot, image, metadata):
+        """
+        Adds an image and its metadata to a specified slot.
+        
+        :param slot: The slot number where the image will be added.
+        :param image: The image data (numpy array).
+        :param metadata: A dictionary containing metadata for the image.
+        """
+        if 0 <= slot < self.max_slots:
+            self._images[slot] = image
+            self._metadata[slot] = metadata
+            # Clear undo/redo stacks when a new image is added
+            self._undo_stacks[slot].clear()
+            self._redo_stacks[slot].clear()
+            self.current_slot = slot
+            self.image_changed.emit(slot, image, metadata)
+            print(f"ImageManager: Image added to slot {slot} with metadata.")
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Max slots: {self.max_slots}")
+
+    def set_image(self, new_image, metadata):
+        """
+        Sets a new image and metadata for the current slot, adding the previous state to the undo stack.
+        
+        :param new_image: The new image data (numpy array).
+        :param metadata: A dictionary containing metadata for the new image.
+        """
+        slot = self.current_slot
+        if self._images[slot] is not None:
+            # Save current state to undo stack
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+            # Clear redo stack since new action invalidates the redo history
+            self._redo_stacks[slot].clear()
+            print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
+        else:
+            print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
+        self._images[slot] = new_image
+        self._metadata[slot] = metadata
+        self.image_changed.emit(slot, new_image, metadata)
+        print(f"ImageManager: Image set for slot {slot} with new metadata.")
+
+    @property
+    def image(self):
+        """
+        Gets the image from the current slot.
+        
+        :return: The image data (numpy array) of the current slot.
+        """
+        return self._images[self.current_slot]
+
+    @image.setter
+    def image(self, new_image):
+        """
+        Sets a new image for the current slot, adding the previous state to the undo stack.
+        
+        :param new_image: The new image data (numpy array).
+        """
+        slot = self.current_slot
+        if self._images[slot] is not None:
+            # Save current state to undo stack
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+            # Clear redo stack since new action invalidates the redo history
+            self._redo_stacks[slot].clear()
+            print(f"ImageManager: Previous image in slot {slot} pushed to undo stack via property setter.")
+        else:
+            print(f"ImageManager: No existing image in slot {slot} to push to undo stack via property setter.")
+        self._images[slot] = new_image
+        self.image_changed.emit(slot, new_image, self._metadata[slot])
+        print(f"ImageManager: Image set for slot {slot} via property setter.")
+
+    def set_metadata(self, metadata):
+        """
+        Sets new metadata for the current slot, adding the previous state to the undo stack.
+        
+        :param metadata: A dictionary containing new metadata.
+        """
+        slot = self.current_slot
+        if self._images[slot] is not None:
+            # Save current state to undo stack
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+            # Clear redo stack since new action invalidates the redo history
+            self._redo_stacks[slot].clear()
+            print(f"ImageManager: Previous metadata in slot {slot} pushed to undo stack.")
+        else:
+            print(f"ImageManager: No existing image in slot {slot} to set metadata.")
+        self._metadata[slot] = metadata
+        self.image_changed.emit(slot, self._images[slot], metadata)
+        print(f"ImageManager: Metadata set for slot {slot}.")
+
+    def update_image(self, updated_image, metadata=None, slot=None):
+        """
+        Updates the image in the specified slot with an existing image, optionally updating metadata.
+        Adds the previous state to the undo stack.
+        
+        :param updated_image: The updated image data (numpy array).
+        :param metadata: (Optional) A dictionary containing metadata for the image.
+        :param slot: (Optional) The slot number to update. If None, uses current_slot.
+        """
+        if slot is None:
+            slot = self.current_slot
+
+        if 0 <= slot < self.max_slots:
+            if self._images[slot] is not None:
+                # Save current state to undo stack
+                self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+                # Clear redo stack since new action invalidates the redo history
+                self._redo_stacks[slot].clear()
+                print(f"ImageManager: Previous image and metadata in slot {slot} pushed to undo stack via update_image.")
+            else:
+                print(f"ImageManager: No existing image in slot {slot} to push to undo stack via update_image.")
+            
+            self._images[slot] = updated_image
+            if metadata is not None:
+                self._metadata[slot] = metadata
+                print(f"ImageManager: Metadata updated for slot {slot} via update_image.")
+            else:
+                print(f"ImageManager: Metadata not provided; retaining existing metadata for slot {slot}.")
+            
+            self.image_changed.emit(slot, updated_image, self._metadata[slot])
+            print(f"ImageManager: Image updated for slot {slot} via update_image.")
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Max slots: {self.max_slots}")
+
+    def can_undo(self, slot=None):
+        """
+        Determines if there are actions available to undo for the specified slot.
+        
+        :param slot: (Optional) The slot number to check. If None, uses current_slot.
+        :return: True if undo is possible, False otherwise.
+        """
+        if slot is None:
+            slot = self.current_slot
+        if 0 <= slot < self.max_slots:
+            return len(self._undo_stacks[slot]) > 0
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Cannot check can_undo.")
+            return False
+
+    def can_redo(self, slot=None):
+        """
+        Determines if there are actions available to redo for the specified slot.
+        
+        :param slot: (Optional) The slot number to check. If None, uses current_slot.
+        :return: True if redo is possible, False otherwise.
+        """
+        if slot is None:
+            slot = self.current_slot
+        if 0 <= slot < self.max_slots:
+            return len(self._redo_stacks[slot]) > 0
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Cannot check can_redo.")
+            return False
+
+    def undo(self, slot=None):
+        """
+        Undoes the last change in the specified slot, restoring the previous image and metadata.
+        
+        :param slot: (Optional) The slot number to perform undo on. If None, uses current_slot.
+        """
+        if slot is None:
+            slot = self.current_slot
+        if 0 <= slot < self.max_slots:
+            if self.can_undo(slot):
+                # Save current state to redo stack
+                self._redo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+                # Restore the last state from undo stack
+                self._images[slot], self._metadata[slot] = self._undo_stacks[slot].pop()
+                self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
+                print(f"ImageManager: Undo performed on slot {slot}.")
+            else:
+                print(f"ImageManager: No actions to undo in slot {slot}.")
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Cannot perform undo.")
+
+    def redo(self, slot=None):
+        """
+        Redoes the last undone change in the specified slot, restoring the image and metadata.
+        
+        :param slot: (Optional) The slot number to perform redo on. If None, uses current_slot.
+        """
+        if slot is None:
+            slot = self.current_slot
+        if 0 <= slot < self.max_slots:
+            if self.can_redo(slot):
+                # Save current state to undo stack
+                self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+                # Restore the last state from redo stack
+                self._images[slot], self._metadata[slot] = self._redo_stacks[slot].pop()
+                self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
+                print(f"ImageManager: Redo performed on slot {slot}.")
+            else:
+                print(f"ImageManager: No actions to redo in slot {slot}.")
+        else:
+            print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
+
 
 class XISFViewer(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
-        self.initUI()
+        self.image_manager = image_manager  # Reference to the ImageManager
         self.image_data = None
         self.file_meta = None
         self.image_meta = None
         self.is_mono = False
         self.bit_depth = None
-        self.scale_factor = 0.25
+        self.scale_factor = 1.0
         self.dragging = False
         self.drag_start_pos = QPoint()
         self.autostretch_enabled = False
+        self.current_pixmap = None
+        self.initUI()
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal
+            self.image_manager.image_changed.connect(self.on_image_changed)
     
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -372,6 +744,7 @@ class XISFViewer(QWidget):
         footer_label.setStyleSheet("font-size: 10px;")
         left_layout.addWidget(footer_label)
 
+        self.load_logo()
 
         # Right side layout for metadata display
         right_widget = QWidget()
@@ -400,6 +773,65 @@ class XISFViewer(QWidget):
         self.setLayout(main_layout)
         self.setWindowTitle("XISF Liberator V1.2")
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        This method is triggered when the image in ImageManager changes.
+        It updates the UI with the new image.
+        """
+        if image is None:
+            return
+
+        # Ensure the image is a numpy array if it is not already
+        if not isinstance(image, np.ndarray):
+            image = np.array(image)  # Convert to numpy array if needed
+
+        # Update the image data and metadata
+        self.image_data = image
+        self.original_header = metadata.get('original_header', None)
+        self.is_mono = metadata.get('is_mono', False)
+
+        # Extract file path from metadata and pass to display_metadata
+        file_path = metadata.get('file_path', None)
+        if file_path:
+            self.display_metadata(file_path)  # Pass the file path to display_metadata
+
+        # Determine if the image is mono or color
+        im_data = self.image_data
+        if self.is_mono:
+            # If the image is mono, skip squeezing as it should be 2D
+            if len(im_data.shape) == 3 and im_data.shape[2] == 1:
+                im_data = np.squeeze(im_data, axis=2)  # Remove the singleton channel dimension
+
+        # Convert to the appropriate display format and update the display
+        self.display_image()
+
+
+    def load_logo(self):
+        """
+        Load and display the XISF Liberator logo before any image is loaded.
+        """
+        logo_path = resource_path("astrosuite.png")
+        if not os.path.exists(logo_path):
+            print(f"Logo image not found at path: {logo_path}")
+            self.image_label.setText("XISF Liberator")
+            return
+
+        # Load the logo image
+        logo_pixmap = QPixmap(logo_path)
+        if logo_pixmap.isNull():
+            print(f"Failed to load logo image from: {logo_path}")
+            self.image_label.setText("XISF Liberator")
+            return
+
+        self.current_pixmap = logo_pixmap  # Store the logo pixmap
+        scaled_pixmap = logo_pixmap.scaled(
+            logo_pixmap.size() * self.scale_factor, 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled_pixmap)
+        self.image_label.resize(scaled_pixmap.size())
+
     def toggle_autostretch(self):
         self.autostretch_enabled = not self.autostretch_enabled
         if self.autostretch_enabled:
@@ -422,63 +854,112 @@ class XISFViewer(QWidget):
 
 
     def load_xisf(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open XISF File", "", "XISF Files (*.xisf)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Open XISF File", 
+            "", 
+            "XISF Files (*.xisf)"
+        )
         
         if file_name:
             try:
+                # Load the XISF file and image data
                 xisf = XISF(file_name)
-                im_data = xisf.read_image(0)
+                im_data = xisf.read_image(0)  # Image data from XISF
                 
-                # Load metadata for saving later
+                # Convert the image data to a numpy array, if not already
+                if not isinstance(im_data, np.ndarray):
+                    im_data = np.array(im_data)  # Convert to numpy array
+
+                # If the image is mono (single channel), collapse it to a 2D array (height, width)
+                if im_data.ndim == 3 and im_data.shape[2] == 1:
+                    im_data = np.squeeze(im_data, axis=2)  # Collapse the third dimension
+                
+                # Set image metadata
                 self.file_meta = xisf.get_file_metadata()
                 self.image_meta = xisf.get_images_metadata()[0]
                 
                 # Display metadata
-                self.display_metadata()
+                self.display_metadata(file_name)
 
-                # Determine if the image is mono or RGB, and set bit depth
-                self.is_mono = im_data.shape[2] == 1
+                # Determine if the image is mono or RGB
+                self.is_mono = im_data.shape[2] == 1 if len(im_data.shape) == 3 else True
                 self.bit_depth = str(im_data.dtype)
                 self.image_data = im_data
 
-                # Display image with scaling and normalization as before
+                # Reset scale factor when a new image is loaded
+                self.scale_factor = 0.25
+
+                # Display image with scaling and normalization
                 self.display_image()
-                
+
+                # Push the loaded image to ImageManager
+                if hasattr(self, 'image_manager'):
+                    metadata = {
+                        'file_path': file_name,
+                        'is_mono': self.is_mono,
+                        'bit_depth': self.bit_depth,
+                        'source': 'XISF'
+                    }
+                    # Push the numpy array to ImageManager (not memoryview)
+                    self.image_manager.update_image(np.array(self.image_data), metadata, slot=0)  # Add image to slot 0 in ImageManager
+                    
                 # Enable save button
                 self.save_button.setEnabled(True)
+                
             except Exception as e:
                 self.image_label.setText(f"Failed to load XISF file: {e}")
+
+
 
     def display_image(self):
         if self.image_data is None:
             return
 
         im_data = self.stretched_image if self.autostretch_enabled else self.image_data
+
         if self.is_mono:
-            im_data = np.squeeze(im_data, axis=2)
-            height, width = im_data.shape
+            # For mono images, we expect either (height, width) or (height, width, 1) shapes.
+            # If the image has 3 channels but is mono, collapse it to one channel
+            if len(im_data.shape) == 3 and im_data.shape[2] == 3:
+                im_data = np.mean(im_data, axis=-1)  # Convert to grayscale by averaging the channels
+                print(f"Mono image with 3 channels collapsed to 1 channel: {im_data.shape}")
+
+            elif len(im_data.shape) != 2:
+                print(f"Unexpected mono image shape: {im_data.shape}")
+                return  # Exit if the shape is not 2D or (height, width, 1)
+
+            # Now im_data should be 2D (height, width) for mono images
+            height, width = im_data.shape  # Unpacking 2D shape
             bytes_per_line = width
-            
+
             if im_data.dtype == np.uint8:
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
             elif im_data.dtype == np.uint16:
                 im_data = (im_data / 256).astype(np.uint8)
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
-            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+            elif im_data.dtype in [np.float32, np.float64]:
                 im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            else:
+                print(f"Unsupported mono image format: {im_data.dtype}")
+                return
         else:
+            # For color images, we expect (height, width, channels) shape
             height, width, channels = im_data.shape
             bytes_per_line = channels * width
-            
+
             if im_data.dtype == np.uint8:
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
             elif im_data.dtype == np.uint16:
                 im_data = (im_data / 256).astype(np.uint8)
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
-            elif im_data.dtype == np.float32 or im_data.dtype == np.float64:
+            elif im_data.dtype in [np.float32, np.float64]:
                 im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
                 q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            else:
+                print(f"Unsupported color image format: {im_data.dtype}")
+                return
 
         # Calculate scaled dimensions
         scaled_width = int(q_image.width() * self.scale_factor)
@@ -491,11 +972,11 @@ class XISFViewer(QWidget):
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
-        
+
         pixmap = QPixmap.fromImage(scaled_image)
+        self.current_pixmap = pixmap  # **Store the current pixmap**
         self.image_label.setPixmap(pixmap)
         self.image_label.resize(scaled_image.size())
-
 
 
     def zoom_in(self):
@@ -551,36 +1032,55 @@ class XISFViewer(QWidget):
         if event.button() == Qt.LeftButton:
             self.dragging = False
 
-    def display_metadata(self):
-        self.metadata_tree.clear()
-        
-        file_meta_item = QTreeWidgetItem(["File Metadata"])
-        self.metadata_tree.addTopLevelItem(file_meta_item)
-        for key, value in self.file_meta.items():
-            item = QTreeWidgetItem([key, str(value['value'])])
-            file_meta_item.addChild(item)
+    def display_metadata(self, file_path):
+        """
+        Load and display metadata from the given XISF file, if the file is an XISF file.
+        """
+        if not file_path.lower().endswith('.xisf'):
+            print("The file is not an XISF file. Skipping metadata loading.")
+            return  # Skip the metadata loading for non-XISF files
 
-        image_meta_item = QTreeWidgetItem(["Image Metadata"])
-        self.metadata_tree.addTopLevelItem(image_meta_item)
-        for key, value in self.image_meta.items():
-            if key == 'FITSKeywords':
-                fits_item = QTreeWidgetItem(["FITS Keywords"])
-                image_meta_item.addChild(fits_item)
-                for kw, kw_values in value.items():
-                    for kw_value in kw_values:
-                        item = QTreeWidgetItem([kw, kw_value["value"]])
-                        fits_item.addChild(item)
-            elif key == 'XISFProperties':
-                props_item = QTreeWidgetItem(["XISF Properties"])
-                image_meta_item.addChild(props_item)
-                for prop_name, prop in value.items():
-                    item = QTreeWidgetItem([prop_name, str(prop["value"])])
-                    props_item.addChild(item)
-            else:
-                item = QTreeWidgetItem([key, str(value)])
-                image_meta_item.addChild(item)
-        
-        self.metadata_tree.expandAll()
+        try:
+            # Load XISF file for metadata
+            xisf = XISF(file_path)
+            file_meta = xisf.get_file_metadata()
+            image_meta = xisf.get_images_metadata()[0]
+
+            self.metadata_tree.clear()  # Clear previous metadata
+            
+            # Add File Metadata
+            file_meta_item = QTreeWidgetItem(["File Metadata"])
+            self.metadata_tree.addTopLevelItem(file_meta_item)
+            for key, value in file_meta.items():
+                item = QTreeWidgetItem([key, str(value.get('value', ''))])  # Ensure 'value' exists
+                file_meta_item.addChild(item)
+
+            # Add Image Metadata
+            image_meta_item = QTreeWidgetItem(["Image Metadata"])
+            self.metadata_tree.addTopLevelItem(image_meta_item)
+            for key, value in image_meta.items():
+                if key == 'FITSKeywords':
+                    fits_item = QTreeWidgetItem(["FITS Keywords"])
+                    image_meta_item.addChild(fits_item)
+                    for kw, kw_values in value.items():
+                        for kw_value in kw_values:
+                            item = QTreeWidgetItem([kw, str(kw_value.get("value", ''))])
+                            fits_item.addChild(item)
+                elif key == 'XISFProperties':
+                    props_item = QTreeWidgetItem(["XISF Properties"])
+                    image_meta_item.addChild(props_item)
+                    for prop_name, prop in value.items():
+                        item = QTreeWidgetItem([prop_name, str(prop.get("value", ''))])
+                        props_item.addChild(item)
+                else:
+                    item = QTreeWidgetItem([key, str(value)])
+                    image_meta_item.addChild(item)
+
+            self.metadata_tree.expandAll()  # Expand all metadata items
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load metadata: {e}")
+
+
 
     def save_as(self):
         output_path, _ = QFileDialog.getSaveFileName(self, "Save Image As", "", "XISF (*.xisf);;FITS (*.fits);;TIFF (*.tif);;PNG (*.png)")
@@ -1015,11 +1515,10 @@ class BatchProcessDialog(QDialog):
 
 
 class CosmicClarityTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
-        self.cosmic_clarity_folder = None
+        self.image_manager = image_manager  # Reference to the ImageManager
         self.loaded_image_path = None
-        self.image = None  # Store the loaded image data
         self.original_header = None
         self.bit_depth = None
         self.is_mono = False
@@ -1039,6 +1538,10 @@ class CosmicClarityTab(QWidget):
         self.initUI()
 
         self.load_cosmic_clarity_folder()
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal
+            self.image_manager.image_changed.connect(self.on_image_changed)
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -1365,18 +1868,15 @@ class CosmicClarityTab(QWidget):
 
     def undo(self):
         """Undo to the original image without changing zoom and scroll position."""
-        if self.original_image is not None:
-            self.restore_image(self.original_image)
-            self.redo_button.setEnabled(True)
-            self.undo_button.setEnabled(False)
-
+        self.image_manager.undo()
+        self.redo_button.setEnabled(True)
+        self.undo_button.setEnabled(False)
 
     def redo(self):
         """Redo to the processed image without changing zoom and scroll position."""
-        if self.processed_image is not None:
-            self.restore_image(self.processed_image)
-            self.redo_button.setEnabled(False)
-            self.undo_button.setEnabled(True)
+        self.image_manager.redo()
+        self.redo_button.setEnabled(False)
+        self.undo_button.setEnabled(True)
 
 
     def restore_image(self, image_array):
@@ -1419,27 +1919,70 @@ class CosmicClarityTab(QWidget):
         else:
             print("No saved Cosmic Clarity folder found.")
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            self.loaded_image_path = metadata.get('file_path', None)  # Assuming metadata contains file path
+            self.original_header = metadata.get('original_header', None)
+            self.bit_depth = metadata.get('bit_depth', None)
+            self.is_mono = metadata.get('is_mono', False)
+
+            # Ensure image is in numpy array format
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if not already
+
+            self.image = image
+
+            # Handle mono images by checking the dimensions before passing to display functions
+            if self.is_mono:
+                # For mono images, ensure the image is 2D (height, width) rather than (height, width, 1)
+                if len(image.shape) == 3 and image.shape[2] == 1:
+                    image = np.squeeze(image, axis=2)  # Remove singleton channel
+                # If already 2D (height, width), we keep it as is
+            else:
+                # For color images, ensure the image has 3 channels (RGB)
+                if len(image.shape) == 2:
+                    raise ValueError("Unexpected image format! Image must be either RGB or Grayscale.")
+
+            # Show the image using the show_image method
+            self.show_image(image)
+
+            # Update the image display (it will account for zoom and other parameters)
+            self.update_image_display()
+            
+            print(f"CosmicClarityTab: Image updated from ImageManager slot {slot}.")
+
+
+
+
     def load_image(self):
         """Load an image and set it as the current and original image."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Image Files (*.png *.jpg *.tif *.tiff *.fits *.fit *.jpeg *.xisf)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Image", 
+            "", 
+            "Image Files (*.png *.jpg *.tif *.tiff *.fits *.fit *.jpeg *.xisf)"
+        )
         if file_path:
-            self.loaded_image_path = file_path
             print(f"Loading file: {file_path}")
 
             # Load the image and store it as the original image
-            self.image, self.original_header, self.bit_depth, self.is_mono = load_image(file_path)
+            image, original_header, bit_depth, is_mono = load_image(file_path)
             
             # Check if the image was loaded successfully
-            if self.image is None:
+            if image is None:
                 print("Error: Failed to load the image data.")
                 QMessageBox.critical(self, "Error", "Failed to load the image. Please try a different file.")
                 return
 
-            print(f"Image loaded successfully. Shape: {self.image.shape}, Dtype: {self.image.dtype}")
+            print(f"Image loaded successfully. Shape: {image.shape}, Dtype: {image.dtype}")
 
             # Make a copy of the original image for reference
             try:
-                self.original_image = self.image.copy()
+                self.original_image = image.copy()
                 print("Original image copied successfully.")
             except Exception as e:
                 print(f"Error copying original image: {e}")
@@ -1451,7 +1994,7 @@ class CosmicClarityTab(QWidget):
 
             # Attempt to display the loaded image in the preview
             try:
-                self.show_image()  # Ensure this function can handle 32-bit float images
+                self.show_image(image)  # Ensure this function can handle 32-bit float images
                 print("Image displayed successfully.")
             except Exception as e:
                 print(f"Error displaying image: {e}")
@@ -1476,6 +2019,15 @@ class CosmicClarityTab(QWidget):
             except Exception as e:
                 print(f"Error updating image display: {e}")
 
+            # Update ImageManager with the new image
+            metadata = {
+                'file_path': file_path,
+                'original_header': original_header,
+                'bit_depth': bit_depth,
+                'is_mono': is_mono
+            }
+            self.image_manager.add_image(slot=self.image_manager.current_slot, image=image, metadata=metadata)
+
         else:
             print("No file selected.")
 
@@ -1488,21 +2040,23 @@ class CosmicClarityTab(QWidget):
         h_scroll.setValue((h_scroll.maximum() + h_scroll.minimum()) // 2)
         v_scroll.setValue((v_scroll.maximum() + v_scroll.minimum()) // 2)
 
-    def show_image(self, file_path=None):
+    def show_image(self, image=None):
         """Display the loaded image or a specified image, preserving zoom and scroll position."""
-        # Load and display the specified file if provided, otherwise use the currently loaded image
-        if file_path is not None:
-            # If file_path is a string, load the image from the file; otherwise, use the numpy array directly
-            if isinstance(file_path, str):
-                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(file_path)
-                self.loaded_image_path = file_path
-            else:
-                # If file_path is an image array (like self.original_image), set it directly
-                self.image = file_path
 
-        if self.image is None:
-            return
-        
+        if image is None:
+            image = self.image  # Use the current image from ImageManager
+
+
+        if image is None:
+            print("[ERROR] No image to display.")
+            QMessageBox.warning(self, "No Image", "No image data available to display.")
+            return False  # Indicate failure
+
+        if not isinstance(image, np.ndarray):
+            print(f"[ERROR] Invalid image data. Expected a NumPy array, got {type(image)}.")
+            QMessageBox.critical(self, "Error", "Invalid image data. Cannot display the image.")
+            return False  # Indicate failure
+
 
 
         # Save the current scroll position if it exists
@@ -1511,48 +2065,100 @@ class CosmicClarityTab(QWidget):
             self.scroll_area.verticalScrollBar().value()
         )
 
+
         # Stretch and display the image
-        display_image = self.image
+        display_image = image.copy()
         target_median = 0.25
 
         # Determine if the image is mono based on dimensions
         is_mono = display_image.ndim == 2 or (display_image.ndim == 3 and display_image.shape[2] == 1)
 
+
         if self.auto_stretch_button.isChecked():
+
             if is_mono:
-                stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
-                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
+                if display_image.ndim == 2:
+                    stretched_mono = stretch_mono_image(display_image, target_median=0.25)
+
+                else:
+                    stretched_mono = stretch_mono_image(display_image[:, :, 0], target_median=0.25)
+
+                # Convert to RGB by stacking
+                display_image = np.stack([stretched_mono] * 3, axis=-1)
+
             else:
-                display_image = stretch_color_image(display_image, target_median, linked=False)
+                display_image = stretch_color_image(display_image, target_median=0.25, linked=False)
+
+        else:
+            print("AutoStretch is disabled.")
 
         # Convert to QImage for display
-        display_image_uint8 = (display_image * 255).astype(np.uint8)
+        try:
+            display_image_uint8 = (display_image * 255).astype(np.uint8)
+
+        except Exception as e:
+            print(f"[ERROR] Error converting image to uint8: {e}")
+            QMessageBox.critical(self, "Error", f"Error processing image for display:\n{e}")
+            return False  # Indicate failure
 
         if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
             height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage = QImage(
+                display_image_uint8.data, 
+                width, 
+                height, 
+                bytes_per_line, 
+                QImage.Format_RGB888
+            )
+
         elif display_image_uint8.ndim == 2:  # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            qimage = QImage(
+                display_image_uint8.data, 
+                width, 
+                height, 
+                bytes_per_line, 
+                QImage.Format_Grayscale8
+            )
+
         else:
-            print("Unexpected image format!")
-            return
+            print("[ERROR] Unexpected image format! Image must be either RGB or Grayscale.")
+            QMessageBox.critical(self, "Error", "Unexpected image format! Image must be either RGB or Grayscale.")
+            return False  # Indicate failure
+
+        # Create QPixmap from QImage
+        pixmap = QPixmap.fromImage(qimage)
+
+
+        if pixmap.isNull():
+            print("[ERROR] Failed to convert QImage to QPixmap.")
+            QMessageBox.critical(self, "Error", "Failed to display the image.")
+            return False  # Indicate failure
 
         # Set pixmap without applying additional scaling (keep the original zoom level)
-        pixmap = QPixmap.fromImage(qimage)
         self.image_label.setPixmap(pixmap)
+
+
+        # Force the label to update
+        self.image_label.repaint()
+        self.image_label.update()
+
 
         # Restore the previous scroll position
         self.scroll_area.horizontalScrollBar().setValue(current_scroll_position[0])
         self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
+
+        return True  # Indicate success
+
 
 
 
     def update_image_display(self, display_width=None, display_height=None):
         """Update the displayed image according to the current zoom level and autostretch setting."""
         if self.image is None:
+            print("No image to display.")
             return
 
         # Get the current center point of the visible area
@@ -1564,33 +2170,43 @@ class CosmicClarityTab(QWidget):
         if self.auto_stretch_button.isChecked():
             target_median = 0.25
             if self.is_mono:
+                print("Autostretch enabled for mono image.")
                 stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
                 display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert mono to RGB for display
             else:
+                print("Autostretch enabled for color image.")
                 display_image = stretch_color_image(display_image, target_median, linked=False)
 
-        # Convert to QImage for display
+        # Convert to QImage for display (Ensure the data is in 8-bit for QImage)
+        print(f"Image dtype before conversion: {display_image.dtype}")
         display_image_uint8 = (display_image * 255).astype(np.uint8)
+
+        # Debugging the shape of the image
+        print(f"Image shape after conversion to uint8: {display_image_uint8.shape}")
 
         # Handle mono and RGB images differently
         if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:
+            print("Detected RGB image.")
             # RGB image
             height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
         elif display_image_uint8.ndim == 2:  # Grayscale image
+            print("Detected Grayscale image.")
             height, width = display_image_uint8.shape
             bytes_per_line = width
             qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
         else:
             print("Unexpected image format!")
+            print(f"Image dimensions: {display_image_uint8.ndim}")
+            print(f"Image shape: {display_image_uint8.shape}")
             return
 
         # Calculate the new dimensions based on the zoom factor
         if display_width is None or display_height is None:
             display_width = int(width * self.zoom_factor)
             display_height = int(height * self.zoom_factor)
-        
+
         # Scale QPixmap and set it on the image label
         pixmap = QPixmap.fromImage(qimage).scaled(display_width, display_height, Qt.KeepAspectRatio)
         self.image_label.setPixmap(pixmap)
@@ -1604,13 +2220,40 @@ class CosmicClarityTab(QWidget):
         self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
 
 
-
-    def store_processed_image(self):
-        """Store the currently displayed image as the processed image."""
-        if self.image is not None:
-            self.processed_image = self.image.copy()  # Store a copy of the processed image
+    def store_processed_image(self, processed_image):
+        """Store the processed image and update the ImageManager."""
+        if processed_image is not None:
+            # Store a copy of the processed image
+            self.processed_image = processed_image.copy()
+            
+            # Enable the undo button and reset the redo button
             self.undo_button.setEnabled(True)
             self.redo_button.setEnabled(False)  # Reset redo button for new process
+            
+            # Prepare metadata for the ImageManager
+            metadata = {
+                'file_path': self.loaded_image_path,      # Ensure this is correctly set elsewhere
+                'original_header': self.original_header,  # Ensure this is correctly set elsewhere
+                'bit_depth': self.bit_depth,              # Ensure this is correctly set elsewhere
+                'is_mono': self.is_mono                   # Ensure this is correctly set elsewhere
+            }
+            
+            # Update the ImageManager with the new image and metadata
+            if self.image_manager:
+                try:
+                    self.image_manager.update_image(updated_image=self.processed_image, metadata=metadata)
+                    print("FullCurvesTab: Processed image stored in ImageManager.")
+                except Exception as e:
+                    # Handle potential errors during the update
+                    QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+                    print(f"Error updating ImageManager: {e}")
+            else:
+                print("ImageManager is not initialized.")
+                QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
+        else:
+            print("No processed image available to store.")
+            QMessageBox.warning(self, "Warning", "No processed image available to store.")
+
 
     def toggle_auto_stretch(self, checked):
         """Toggle autostretch and apply it to the current image display."""
@@ -1756,7 +2399,7 @@ class CosmicClarityTab(QWidget):
         output_file_glob = os.path.join(
             output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*"
         )
-        self.wait_thread = WaitForFileWorker(output_file_glob, timeout=1800)
+        self.wait_thread = WaitForFileWorker(output_file_glob, timeout=3000)
         self.wait_thread.fileFound.connect(self.on_file_found)
         self.wait_thread.error.connect(self.on_file_error)
         self.wait_thread.cancelled.connect(self.on_file_cancelled)
@@ -1828,48 +2471,97 @@ class CosmicClarityTab(QWidget):
             # You can handle any cleanup here if needed
 
     def on_file_found(self, output_file_path):
+
         self.wait_dialog.close()
         self.wait_thread = None
 
         if getattr(self, 'is_cropped_mode', False):
+
             # Cropped image logic
             processed_image, _, _, _ = load_image(output_file_path)
-            
+            if processed_image is None:
+                print(f"[ERROR] Failed to load cropped image from {output_file_path}")
+                QMessageBox.critical(self, "Error", f"Failed to load cropped image from {output_file_path}.")
+                return
+
+
             # Apply autostretch if requested
             if getattr(self, 'cropped_apply_autostretch', False):
+
                 if self.is_mono:
-                    processed_image = np.stack([stretch_mono_image(processed_image[:, :, 0], target_median=0.25)] * 3, axis=-1)
+                    stretched_mono = stretch_mono_image(processed_image[:, :, 0], target_median=0.25)
+
+                    processed_image = np.stack([stretched_mono] * 3, axis=-1)
+
                 else:
                     processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
 
+
             # Update the preview dialog
-            self.preview_dialog.display_qimage(processed_image)
+            try:
+                self.preview_dialog.display_qimage(processed_image)
+
+            except Exception as e:
+                print(f"[ERROR] Failed to update preview dialog: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update preview dialog:\n{e}")
+                return
 
             # Cleanup with known paths
             input_file_path = os.path.join(self.cosmic_clarity_folder, "input", "cropped_preview_image.tiff")
             self.cleanup_files(input_file_path, output_file_path)
 
+
             # Reset cropped mode
             self.is_cropped_mode = False
+
         else:
+
             # Normal mode logic
             processed_image_path = output_file_path
             self.loaded_image_path = processed_image_path
 
-            # Show the processed image
-            self.show_image(processed_image_path)
+
+            # Attempt to load the image with retries
+            processed_image, original_header, bit_depth, is_mono = self.load_image_with_retry(processed_image_path)
+            if processed_image is None:
+                QMessageBox.critical(self, "Error", f"Failed to load image from {processed_image_path} after multiple attempts.")
+                print(f"[ERROR] Failed to load image from {processed_image_path} after multiple attempts.")
+                return
+
+
+            # Show the processed image by passing the image data
+            try:
+                self.show_image(processed_image)
+
+            except Exception as e:
+                print(f"[ERROR] Exception occurred while showing image: {e}")
+                QMessageBox.critical(self, "Error", f"Exception occurred while showing image:\n{e}")
+                return
 
             # Store the image in memory
-            self.store_processed_image()
+            try:
+                self.store_processed_image(processed_image)
+
+            except Exception as e:
+                print(f"[ERROR] Failed to store processed image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to store processed image:\n{e}")
+                return
 
             # Use the stored input file path
             input_file_path = self.current_input_file_path
 
+
+            # Cleanup input and output files
             self.cleanup_files(input_file_path, processed_image_path)
 
-            self.update_image_display()
 
+            # Update the image display
+            try:
+                self.update_image_display()
 
+            except Exception as e:
+                print(f"[ERROR] Failed to update image display: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update image display:\n{e}")
 
 
     def on_file_error(self, msg):
@@ -2061,17 +2753,58 @@ class CosmicClarityTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
 
-    def wait_for_output_file(self, output_file_glob, timeout=1800):
-        """Wait for the output file with any extension within the specified timeout."""
+    def load_image_with_retry(self, file_path, retries=5, delay=2):
+        """
+        Attempts to load an image multiple times with delays between attempts.
+
+        :param file_path: Path to the image file.
+        :param retries: Number of retry attempts.
+        :param delay: Delay between retries in seconds.
+        :return: Tuple of (image_array, original_header, bit_depth, is_mono) or (None, None, None, None) if failed.
+        """
+
+        for attempt in range(1, retries + 1):
+            image, original_header, bit_depth, is_mono = load_image(file_path)
+            if image is not None:
+
+                return image, original_header, bit_depth, is_mono
+            else:
+                print(f"[WARNING] Attempt {attempt} failed to load image. Retrying in {delay} seconds...")
+                time.sleep(delay)
+        print("[ERROR] All attempts to load the image failed.")
+        return None, None, None, None
+
+
+    def wait_for_output_file(self, output_file_glob, timeout=3000, check_interval=1, stable_checks=3):
+        """
+        Wait for the output file with any extension within the specified timeout.
+        Ensures the file size remains constant over a series of checks to confirm it's fully written.
+
+        :param output_file_glob: Glob pattern to match the output file.
+        :param timeout: Maximum time to wait in seconds.
+        :param check_interval: Time between size checks in seconds.
+        :param stable_checks: Number of consecutive checks with the same size.
+        :return: Path to the output file or None if not found.
+        """
         start_time = time.time()
+        last_size = -1
+        stable_count = 0
+
         while time.time() - start_time < timeout:
-            # Use glob to find any file matching the pattern
             matching_files = glob.glob(output_file_glob)
-            time.sleep(2)
             if matching_files:
-                print(f"Output file found: {matching_files[0]}")
-                return matching_files[0]
-            time.sleep(1)  # Wait a bit before checking again
+                current_size = os.path.getsize(matching_files[0])
+                if current_size == last_size:
+                    stable_count += 1
+                    if stable_count >= stable_checks:
+                        print(f"Output file found and stable: {matching_files[0]}")
+                        return matching_files[0]
+                else:
+                    stable_count = 0
+                    last_size = current_size
+            time.sleep(check_interval)
+        
+        print("Timeout reached. Output file not found or not stable.")
         return None
 
     def display_image(self, file_path):
@@ -2659,8 +3392,12 @@ class CosmicClaritySatelliteTab(QWidget):
                     self.folder_label.setText(f"Folder: {folder}")
 
     def process_single_image(self):
+        # Step 1: Open File Dialog to Select Image
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "", "Image Files ('.png', '.tif', '.tiff', '.fit', '.fits', '.xisf', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')"
+            self, 
+            "Select Image", 
+            "", 
+            "Image Files (*.png *.tif *.tiff *.fit *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
         if not file_path:
             QMessageBox.warning(self, "Warning", "No file selected.")
@@ -2723,6 +3460,10 @@ class CosmicClaritySatelliteTab(QWidget):
             command.append("--use-gpu")
         if self.clip_trail_checkbox.isChecked():
             command.append("--clip-trail")
+            print("--clip-trail argument added.")
+        else:
+            command.append("--no-clip-trail")
+            print("--no-clip-trail argument added.")
         if self.skip_save_checkbox.isChecked():
             command.append("--skip-save")
 
@@ -2758,6 +3499,10 @@ class CosmicClaritySatelliteTab(QWidget):
             command.append("--use-gpu")
         if self.clip_trail_checkbox.isChecked():
             command.append("--clip-trail")
+            print("--clip-trail argument added.")
+        else:
+            command.append("--no-clip-trail")
+            print("--no-clip-trail argument added.")
         if self.skip_save_checkbox.isChecked():
             command.append("--skip-save")
 
@@ -2822,6 +3567,10 @@ class CosmicClaritySatelliteTab(QWidget):
             command.append("--use-gpu")
         if self.clip_trail_checkbox.isChecked():
             command.append("--clip-trail")
+            print("--clip-trail argument added.")
+        else:
+            command.append("--no-clip-trail")
+            print("--no-clip-trail argument added.")
         if self.skip_save_checkbox.isChecked():
             command.append("--skip-save")
         if live_monitor:
@@ -2841,101 +3590,6 @@ class CosmicClaritySatelliteTab(QWidget):
             QMessageBox.information(self, "Success", "Processing complete.")
         except subprocess.CalledProcessError as e:
             QMessageBox.critical(self, "Error", f"Processing failed: {e}")
-
-
-
-    def run_satellite_removal(self, input_file_path=None, batch_mode=False, monitor_mode=False):
-        """Run the Satellite Removal tool with the current parameters."""
-        if not self.cosmic_clarity_folder:
-            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
-            return
-        
-        exe_name = "cosmicclarity_satellite"  # Satellite removal executable
-        input_folder = self.input_folder if input_file_path is None else os.path.dirname(input_file_path)
-        output_folder = self.output_folder
-        batch_file_path = os.path.join(self.cosmic_clarity_folder, "run_satellite_removal")
-
-        if not input_folder or not output_folder:
-            QMessageBox.warning(self, "Warning", "Please select input and output folders.")
-            return
-
-        # Ensure the input folder for single image
-        if input_file_path and not batch_mode:
-            input_folder = os.path.join(self.cosmic_clarity_folder, "temp_input")
-            output_folder = os.path.join(self.cosmic_clarity_folder, "temp_output")
-            os.makedirs(input_folder, exist_ok=True)
-            os.makedirs(output_folder, exist_ok=True)
-            shutil.copy(input_file_path, input_folder)
-
-        # Generate the batch or shell script
-        batch_script_path = self.create_batch_script(
-            batch_file_path=batch_file_path,
-            exe_name=exe_name,
-            input_folder=input_folder,
-            output_folder=output_folder,
-            batch_mode=batch_mode,
-            monitor_mode=monitor_mode,
-        )
-        if not batch_script_path:
-            QMessageBox.critical(self, "Error", "Failed to create batch/shell script.")
-            return
-
-        # Run the script
-        self.execute_script(batch_script_path)
-
-        if not monitor_mode:
-            # Wait for the output files
-            if input_file_path:  # Single image processing
-                output_file_glob = os.path.join(output_folder, f"{os.path.splitext(os.path.basename(input_file_path))[0]}_satellited.*")
-            else:  # Batch processing
-                output_file_glob = os.path.join(output_folder, "*_satellited.*")
-
-            output_files = self.wait_for_output_files(output_file_glob)
-            if not output_files:
-                QMessageBox.critical(self, "Error", "No output files found within timeout.")
-            else:
-                QMessageBox.information(self, "Success", f"Processed files saved to: {output_folder}")
-
-        # Cleanup temporary folders for single image processing
-        if input_file_path and not batch_mode:
-            shutil.rmtree(input_folder)
-            shutil.rmtree(output_folder)
-
-    def create_batch_script(self, batch_file_path, exe_name, input_folder, output_folder, batch_mode, monitor_mode):
-        """Generate the batch or shell script to run Satellite Removal."""
-        if os.name == 'nt':  # Windows
-            batch_file_path += ".bat"
-            exe_path = os.path.join(self.cosmic_clarity_folder, f"{exe_name}.exe")
-            batch_content = f'@echo off\ncd /d "{self.cosmic_clarity_folder}"\n"{exe_path}" '
-        else:  # macOS/Linux
-            batch_file_path += ".sh"
-            exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
-            batch_content = f'#!/bin/bash\ncd "{self.cosmic_clarity_folder}"\n"./{exe_path}" '
-
-        # Add arguments
-        batch_content += f'--input "{input_folder}" --output "{output_folder}" '
-        if self.gpu_dropdown.currentText() == "Yes":
-            batch_content += "--use-gpu "
-        if batch_mode:
-            batch_content += "--batch "
-        if monitor_mode:
-            batch_content += "--monitor "
-        if self.mode_dropdown.currentText().lower() == "luminance":
-            batch_content += "--mode luminance "
-        if self.clip_trail_checkbox.isChecked():
-            batch_content += "--clip-trail "
-        if self.skip_save_checkbox.isChecked():
-            batch_content += "--skip-save "
-
-        # Write to file
-        try:
-            with open(batch_file_path, "w") as batch_file:
-                batch_file.write(batch_content)
-            os.chmod(batch_file_path, 0o755)  # Ensure it's executable
-            return batch_file_path
-        except Exception as e:
-            print(f"Error creating batch file: {e}")
-            return None
 
     def execute_script(self, script_path):
         """Execute the batch or shell script."""
@@ -3141,13 +3795,22 @@ class SatelliteProcessingThread(QThread):
 
 
 class StatisticalStretchTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
-        self.initUI()
-        self.image = None
-        self.filename = None
-        self.zoom_factor = 1.0
+        self.image_manager = image_manager  # Reference to the ImageManager
+        self.loaded_image_path = None
         self.original_header = None
+        self.bit_depth = None
+        self.is_mono = False
+        self.zoom_factor = 1.0
+        self.image = None  # Current image (from ImageManager)
+        self.stretched_image = None  # Processed image
+        self.initUI()
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal
+            self.image_manager.image_changed.connect(self.on_image_changed)
+
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -3173,7 +3836,7 @@ class StatisticalStretchTab(QWidget):
         self.fileButton.clicked.connect(self.openFileDialog)
         left_layout.addWidget(self.fileButton)
 
-        self.fileLabel = QLabel('No file selected', self)
+        self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
         # Target median slider
@@ -3306,6 +3969,99 @@ class StatisticalStretchTab(QWidget):
         self.dragging = False
         self.last_pos = QPoint()
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array before proceeding
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if necessary
+            
+            self.image = image  # Set the original image
+            self.preview_image = None  # Reset the preview image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = metadata.get('file_path', self.fileLabel)
+
+            # Update the image display
+            self.updateImageDisplay()
+
+            print(f"Statistical Stretch: Image updated from ImageManager slot {slot}.")
+
+    def updateImageDisplay(self):
+        if self.image is not None:
+            # Prepare the image for display by normalizing and converting to uint8
+            display_image = (self.image * 255).astype(np.uint8)
+            h, w = display_image.shape[:2]
+
+            if display_image.ndim == 3:  # RGB Image
+                # Convert the image to QImage format
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+            else:  # Grayscale Image
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+
+            # Create a QPixmap from QImage
+            pixmap = QPixmap.fromImage(q_image)
+            self.current_pixmap = pixmap  # Store the original pixmap for future reference
+
+            # Scale the pixmap based on the zoom factor
+            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            # Set the pixmap on the image label
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())  # Resize the label to fit the image
+        else:
+            # If no image is available, clear the label and show a message
+            self.imageLabel.clear()
+            self.imageLabel.setText('No image loaded.')
+
+    def updatePreview(self, stretched_image):
+        # Store the stretched image for saving
+        self.preview_image = stretched_image
+
+        # Update the ImageManager with the new stretched image
+        metadata = {
+            'file_path': self.filename if self.filename else "Stretched Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'is_mono': self.is_mono,
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Original': self.filename if self.filename else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new processed image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
+                print("StarStretchTab: Processed image stored in ImageManager.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
+
+        # Update the preview once the processing thread emits the result
+        preview_image = (stretched_image * 255).astype(np.uint8)
+        h, w = preview_image.shape[:2]
+        if preview_image.ndim == 3:
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+        else:
+            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
+
+        pixmap = QPixmap.fromImage(q_image)
+        self.current_pixmap = pixmap  # **Store the original pixmap**
+        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.imageLabel.setPixmap(scaled_pixmap)
+        self.imageLabel.resize(scaled_pixmap.size())
+
+        # Hide the spinner after processing is done
+        self.hideSpinner()
+
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
             self.dragging = True
@@ -3322,11 +4078,33 @@ class StatisticalStretchTab(QWidget):
 
 
     def openFileDialog(self):
-        self.filename, _ = QFileDialog.getOpenFileName(self, 'Open Image File', '', 'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)')
+        if not self.image_manager:
+            QMessageBox.warning(self, "Warning", "ImageManager not initialized.")
+            return
+
+        self.filename, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
+                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
         if self.filename:
             self.fileLabel.setText(self.filename)
-            # Unpack all four values returned by load_image
-            self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.filename)
+
+            # Load the image using ImageManager
+            image, original_header, bit_depth, is_mono = load_image(self.filename)
+
+            if image is None:
+                QMessageBox.critical(self, "Error", "Failed to load the image. Please try a different file.")
+                return
+
+            # Update ImageManager with the new image
+            metadata = {
+                'file_path': self.filename,
+                'original_header': original_header,
+                'bit_depth': bit_depth,
+                'is_mono': is_mono
+            }
+            self.image_manager.add_image(slot=self.image_manager.current_slot, image=image, metadata=metadata)
+
+            print("Image added to ImageManager.")
+
 
 
     def updateMedianLabel(self, value):
@@ -3358,6 +4136,7 @@ class StatisticalStretchTab(QWidget):
             self.processing_thread.preview_generated.connect(self.update_preview)
             self.processing_thread.start()
 
+
     def update_preview(self, stretched_image):
         # Save the stretched image for later use in zoom functions
         self.stretched_image = stretched_image
@@ -3373,6 +4152,7 @@ class StatisticalStretchTab(QWidget):
             bytes_per_line = w
             q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
 
+        # Create QPixmap from QImage
         pixmap = QPixmap.fromImage(q_image)
         scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.imageLabel.setPixmap(scaled_pixmap)
@@ -3380,6 +4160,37 @@ class StatisticalStretchTab(QWidget):
 
         # Hide the spinner after processing is done
         self.hideSpinner()
+
+        # Prepare metadata with safeguards
+        metadata = {
+            'file_path': self.filename if self.filename else "Processed Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'target_median': self.medianSlider.value() / 100.0,
+                'linked_stretch': self.linkedCheckBox.isChecked(),
+                'normalize_image': self.normalizeCheckBox.isChecked(),
+                'curves_adjustment': self.curvesCheckBox.isChecked(),
+                'curves_boost': self.curvesBoostSlider.value() / 100.0
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Original': self.filename if self.filename else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new processed image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.stretched_image, metadata=metadata)
+                print("StatisticalStretchTab: Processed image stored in ImageManager.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
 
 
     def showSpinner(self):
@@ -3391,48 +4202,55 @@ class StatisticalStretchTab(QWidget):
         self.spinnerMovie.stop()    
 
     def zoom_in(self):
-        if hasattr(self, 'stretched_image'):
+        if self.current_pixmap is not None:
             self.zoom_factor *= 1.2
-            self.update_preview(self.stretched_image)  # Pass the latest stretched image
+            self.apply_zoom()
+        else:
+            print("No image available to zoom in.")
+            QMessageBox.warning(self, "Warning", "No image available to zoom in.")
 
     def zoom_out(self):
-        if hasattr(self, 'stretched_image'):
+        if self.current_pixmap is not None:
             self.zoom_factor /= 1.2
-            self.update_preview(self.stretched_image)  # Pass the latest stretched image
+            self.apply_zoom()
+        else:
+            print("No image available to zoom out.")
+            QMessageBox.warning(self, "Warning", "No image available to zoom out.")
 
     def fit_to_preview(self):
         """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        if self.image is not None:
+        if self.current_pixmap is not None:
             # Get the width of the scroll area's viewport (preview area)
             preview_width = self.scrollArea.viewport().width()
             
-            # Get the original image width from the numpy array
-            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
-            if self.image.ndim == 3:
-                image_width = self.image.shape[1]
-            elif self.image.ndim == 2:
-                image_width = self.image.shape[1]
-            else:
-                print("Unexpected image dimensions!")
-                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
-                return
+            # Get the original image width from the pixmap
+            image_width = self.current_pixmap.width()
             
             # Calculate the required zoom factor to fit the image's width into the preview area
             new_zoom_factor = preview_width / image_width
             
-            # Update the zoom factor without enforcing any limits
+            # Update the zoom factor
             self.zoom_factor = new_zoom_factor
             
             # Apply the new zoom factor to update the display
             self.apply_zoom()
-            
-            # Update the status label to reflect the new zoom level
         else:
             print("No image loaded. Cannot fit to preview.")
+            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
     def apply_zoom(self):
-        """Apply the current zoom level to the image."""
-        self.update_preview(self.stretched_image)  # Call without extra arguments; it will calculate dimensions based on zoom factor
+        """Apply the current zoom level to the stored pixmap and update the display."""
+        if self.current_pixmap is not None:
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.zoom_factor, 
+                Qt.KeepAspectRatio, 
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+        else:
+            print("No pixmap available to apply zoom.")
+            QMessageBox.warning(self, "Warning", "No pixmap available to apply zoom.")
 
     def saveImage(self):
         if hasattr(self, 'stretched_image') and self.stretched_image is not None:
@@ -3548,9 +4366,13 @@ class ProcessingThread(QThread):
         return np.clip(image_array, 0, 1)
 
 class StarStretchTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager):
         super().__init__()
+        self.image_manager = image_manager  # Store the ImageManager instance
         self.initUI()
+        
+        # Connect to ImageManager's image_changed signal
+        self.image_manager.image_changed.connect(self.on_image_changed)
         self.image = None  # Store the selected image
         self.stretch_factor = 5.0
         self.sat_amount = 1.0
@@ -3563,6 +4385,7 @@ class StarStretchTab(QWidget):
         self.last_pos = None
         self.processing_thread = None  # Thread for background processing
         self.original_header = None
+        self.current_pixmap = None  # **New Attribute**
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -3587,7 +4410,7 @@ class StarStretchTab(QWidget):
         self.fileButton.clicked.connect(self.selectImage)
         left_layout.addWidget(self.fileButton)
 
-        self.fileLabel = QLabel('No file selected', self)
+        self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
         # Stretch Amount slider with more precision
@@ -3614,10 +4437,32 @@ class StarStretchTab(QWidget):
         self.scnrCheckBox = QCheckBox("Remove Green via SCNR (Optional)", self)
         left_layout.addWidget(self.scnrCheckBox)
 
-        # Refresh preview button
+        # **Create a horizontal layout for Refresh Preview, Undo, and Redo buttons**
+        action_buttons_layout = QHBoxLayout()
+
+        # Refresh Preview button
         self.refreshButton = QPushButton("Refresh Preview", self)
         self.refreshButton.clicked.connect(self.generatePreview)
-        left_layout.addWidget(self.refreshButton)
+        action_buttons_layout.addWidget(self.refreshButton)
+
+        # Undo button with left arrow icon
+        self.undoButton = QPushButton("Undo", self)
+        undo_icon = self.style().standardIcon(QStyle.SP_ArrowBack)  # Standard left arrow icon
+        self.undoButton.setIcon(undo_icon)
+        self.undoButton.clicked.connect(self.undoAction)
+        self.undoButton.setEnabled(False)  # Disabled by default
+        action_buttons_layout.addWidget(self.undoButton)
+
+        # Redo button with right arrow icon
+        self.redoButton = QPushButton("Redo", self)
+        redo_icon = self.style().standardIcon(QStyle.SP_ArrowForward)  # Standard right arrow icon
+        self.redoButton.setIcon(redo_icon)
+        self.redoButton.clicked.connect(self.redoAction)
+        self.redoButton.setEnabled(False)  # Disabled by default
+        action_buttons_layout.addWidget(self.redoButton)
+
+        # Add the horizontal layout to the left layout
+        left_layout.addLayout(action_buttons_layout)
 
         # Progress indicator (spinner) label
         self.spinnerLabel = QLabel(self)
@@ -3704,11 +4549,11 @@ class StarStretchTab(QWidget):
 
     def saveImage(self):
         # Use the processed/stretched image for saving
-        if hasattr(self, 'stretched_image') and self.stretched_image is not None:
+        if self.preview_image is not None:
             # Pre-populate the save dialog with the original image name
-            base_name = os.path.basename(self.filename)
+            base_name = os.path.basename(self.filename) if self.filename else "stretched_image"
             default_save_name = os.path.splitext(base_name)[0] + '_stretched.tif'
-            original_dir = os.path.dirname(self.filename)
+            original_dir = os.path.dirname(self.filename) if self.filename else os.getcwd()
 
             # Open the save file dialog
             save_filename, _ = QFileDialog.getSaveFileName(
@@ -3728,18 +4573,121 @@ class StarStretchTab(QWidget):
                     
                     if ok and bit_depth:
                         # Call save_image with the necessary parameters
-                        save_image(self.stretched_image, save_filename, original_format, bit_depth, self.original_header, self.is_mono)
+                        save_image(
+                            self.preview_image, 
+                            save_filename, 
+                            original_format, 
+                            bit_depth, 
+                            self.original_header, 
+                            self.is_mono
+                        )
                         self.fileLabel.setText(f'Image saved as: {save_filename}')
                     else:
                         self.fileLabel.setText('Save canceled.')
                 else:
                     # For non-TIFF/FITS formats, save directly without bit depth selection
-                    save_image(self.stretched_image, save_filename, original_format)
+                    save_image(
+                        self.preview_image, 
+                        save_filename, 
+                        original_format
+                    )
                     self.fileLabel.setText(f'Image saved as: {save_filename}')
             else:
                 self.fileLabel.setText('Save canceled.')
         else:
             self.fileLabel.setText('No stretched image to save. Please generate a preview first.')
+
+
+    def undoAction(self):
+        if self.image_manager and self.image_manager.can_undo():
+            try:
+                # Perform the undo operation
+                self.image_manager.undo()
+                print("StarStretchTab: Undo performed.")
+            except Exception as e:
+                print(f"Error performing undo: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to perform undo:\n{e}")
+        else:
+            QMessageBox.information(self, "Info", "Nothing to undo.")
+            print("StarStretchTab: No actions to undo.")
+
+        # Update the state of the Undo and Redo buttons
+        if self.image_manager:
+            self.undoButton.setEnabled(self.image_manager.can_undo())
+            self.redoButton.setEnabled(self.image_manager.can_redo())
+
+    def redoAction(self):
+        if self.image_manager and self.image_manager.can_redo():
+            try:
+                # Perform the redo operation
+                self.image_manager.redo()
+                print("StarStretchTab: Redo performed.")
+            except Exception as e:
+                print(f"Error performing redo: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to perform redo:\n{e}")
+        else:
+            QMessageBox.information(self, "Info", "Nothing to redo.")
+            print("StarStretchTab: No actions to redo.")
+
+        # Update the state of the Undo and Redo buttons
+        if self.image_manager:
+            self.undoButton.setEnabled(self.image_manager.can_undo())
+            self.redoButton.setEnabled(self.image_manager.can_redo())
+
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array before proceeding
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if necessary
+            
+            self.image = image  # Set the original image
+            self.preview_image = None  # Reset the preview image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = metadata.get('file_path', self.filename)
+
+            # Update the image display
+            self.updateImageDisplay()
+
+            print(f"StarStretchTab: Image updated from ImageManager slot {slot}.")
+
+            # **Update Undo and Redo Button States**
+            if self.image_manager:
+                self.undoButton.setEnabled(self.image_manager.can_undo())
+                self.redoButton.setEnabled(self.image_manager.can_redo())
+
+
+
+    def updateImageDisplay(self):
+        if self.image is not None:
+            # Prepare the image for display by normalizing and converting to uint8
+            display_image = (self.image * 255).astype(np.uint8)
+            h, w = display_image.shape[:2]
+
+            if display_image.ndim == 3:  # RGB Image
+                # Convert the image to QImage format
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+            else:  # Grayscale Image
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+
+            # Create a QPixmap from QImage
+            pixmap = QPixmap.fromImage(q_image)
+            self.current_pixmap = pixmap  # Store the original pixmap for future reference
+
+            # Scale the pixmap based on the zoom factor
+            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            # Set the pixmap on the image label
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())  # Resize the label to fit the image
+        else:
+            # If no image is available, clear the label and show a message
+            self.imageLabel.clear()
+            self.imageLabel.setText('No image loaded.')
 
 
     def selectImage(self):
@@ -3775,7 +4723,36 @@ class StarStretchTab(QWidget):
 
     def updatePreview(self, stretched_image):
         # Store the stretched image for saving
-        self.stretched_image = stretched_image
+        self.preview_image = stretched_image
+
+        # Update the ImageManager with the new stretched image
+        metadata = {
+            'file_path': self.filename if self.filename else "Stretched Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'stretch_factor': self.stretch_factor,
+                'color_boost': self.sat_amount,
+                'remove_green': self.scnrCheckBox.isChecked()
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Original': self.filename if self.filename else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new processed image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
+                print("StarStretchTab: Processed image stored in ImageManager.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
 
         # Update the preview once the processing thread emits the result
         preview_image = (stretched_image * 255).astype(np.uint8)
@@ -3786,12 +4763,14 @@ class StarStretchTab(QWidget):
             q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
 
         pixmap = QPixmap.fromImage(q_image)
+        self.current_pixmap = pixmap  # **Store the original pixmap**
         scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.imageLabel.setPixmap(scaled_pixmap)
         self.imageLabel.resize(scaled_pixmap.size())
 
         # Hide the spinner after processing is done
         self.hideSpinner()
+
 
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -3817,46 +4796,56 @@ class StarStretchTab(QWidget):
         self.spinnerMovie.stop()
 
     def zoom_in(self):
-        self.zoom_factor *= 1.2
-        self.generatePreview()
+        if self.current_pixmap is not None:
+            self.zoom_factor *= 1.2
+            self.apply_zoom()
+        else:
+            print("No image available to zoom in.")
+            QMessageBox.warning(self, "Warning", "No image available to zoom in.")
 
     def zoom_out(self):
-        self.zoom_factor /= 1.2
-        self.generatePreview()
+        if self.current_pixmap is not None:
+            self.zoom_factor /= 1.2
+            self.apply_zoom()
+        else:
+            print("No image available to zoom out.")
+            QMessageBox.warning(self, "Warning", "No image available to zoom out.")
 
     def fit_to_preview(self):
         """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        if self.image is not None:
+        if self.current_pixmap is not None:
             # Get the width of the scroll area's viewport (preview area)
             preview_width = self.scrollArea.viewport().width()
             
-            # Get the original image width from the numpy array
-            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
-            if self.image.ndim == 3:
-                image_width = self.image.shape[1]
-            elif self.image.ndim == 2:
-                image_width = self.image.shape[1]
-            else:
-                print("Unexpected image dimensions!")
-                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
-                return
+            # Get the original image width from the pixmap
+            image_width = self.current_pixmap.width()
             
             # Calculate the required zoom factor to fit the image's width into the preview area
             new_zoom_factor = preview_width / image_width
             
-            # Update the zoom factor without enforcing any limits
+            # Update the zoom factor
             self.zoom_factor = new_zoom_factor
             
             # Apply the new zoom factor to update the display
             self.apply_zoom()
-            
-            # Update the status label to reflect the new zoom level
         else:
             print("No image loaded. Cannot fit to preview.")
+            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
     def apply_zoom(self):
-        """Apply the current zoom level to the image."""
-        self.generatePreview()  # Call without extra arguments; it will calculate dimensions based on zoom factor
+        """Apply the current zoom level to the stored pixmap and update the display."""
+        if self.current_pixmap is not None:
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.zoom_factor, 
+                Qt.KeepAspectRatio, 
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+        else:
+            print("No pixmap available to apply zoom.")
+            QMessageBox.warning(self, "Warning", "No pixmap available to apply zoom.")
+
 
     def applyStretch(self):
         if self.image is not None and self.image.size > 0:
@@ -3864,10 +4853,11 @@ class StarStretchTab(QWidget):
             self.generatePreview()
 
 class FullCurvesTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
         self.initUI()
         self.image = None
+        self.image_manager = image_manager
         self.filename = None
         self.original_image = None  # Reference to the original image
         self.preview_image = None   # Reference to the preview image        
@@ -3893,7 +4883,11 @@ class FullCurvesTab(QWidget):
             [ 3.2404542, -1.5371385, -0.4985314],
             [-0.9692660,  1.8760108,  0.0415560],
             [ 0.0556434, -0.2040259,  1.0572252]
-        ], dtype=np.float32)        
+        ], dtype=np.float32)   
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal
+            self.image_manager.image_changed.connect(self.on_image_changed)             
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -3910,7 +4904,7 @@ class FullCurvesTab(QWidget):
         left_layout.addWidget(self.fileButton)
 
         # File label
-        self.fileLabel = QLabel('No file selected', self)
+        self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
         # Curve Mode Selection
@@ -4015,6 +5009,15 @@ class FullCurvesTab(QWidget):
 
         # left_layout.addLayout(zoom_layout)
 
+
+        # **Add Spinner Label**
+        self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignCenter)
+        self.spinnerMovie = QMovie("spinner.gif")  # Ensure spinner.gif exists in your project directory
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.hide()  # Initially hidden
+        left_layout.addWidget(self.spinnerLabel)
+
         # Spacer
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
 
@@ -4084,6 +5087,19 @@ class FullCurvesTab(QWidget):
         self.scrollArea.viewport().installEventFilter(self)
         self.dragging = False
         self.last_pos = QPoint()
+
+    # -----------------------------
+    # Spinner Control Methods
+    # -----------------------------
+    def showSpinner(self):
+        """Show the spinner animation."""
+        self.spinnerLabel.show()
+        self.spinnerMovie.start()
+
+    def hideSpinner(self):
+        """Hide the spinner animation."""
+        self.spinnerLabel.hide()
+        self.spinnerMovie.stop()
 
     def set_curve_mode(self):
         selected_button = self.curveModeGroup.checkedButton()
@@ -4472,8 +5488,10 @@ class FullCurvesTab(QWidget):
             self.statusLabel.setText(text)  # For example, reuse fileLabel or add a dedicated status label.
 
     def startProcessing(self):
-        if self.preview_image is None:
+        if self.original_image is None:
+            QMessageBox.warning(self, "Warning", "No image loaded to apply curve.")
             return
+
         curve_mode = self.curveModeGroup.checkedButton().text()
         curve_func = self.curveEditor.getCurveFunction()
 
@@ -4486,24 +5504,18 @@ class FullCurvesTab(QWidget):
         # Push the current image to the undo stack before modifying
         self.pushUndo(self.image.copy())
 
-        # Show the spinner separately, not on imageLabel.
-        self.spinnerLabel = QLabel(self)
-        self.spinnerLabel.setAlignment(Qt.AlignCenter)
-        self.spinnerMovie = QMovie(resource_path("spinner.gif"))
-        self.spinnerLabel.setMovie(self.spinnerMovie)
-        self.spinnerLabel.setGeometry((self.width() - 64)//2, (self.height() - 64)//2, 64, 64)
-        self.spinnerLabel.show()
-        self.spinnerMovie.start()
+        # Show the spinner before starting processing
+        self.showSpinner()
 
-        # Pass curve_func instead of lut
+        # Initialize and start the processing thread
         self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, curve_func)
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
+        print("Started FullCurvesProcessingThread.")
 
     def finishProcessing(self, adjusted_image):
-        # Hide the spinner
-        self.spinnerLabel.hide()
-        self.spinnerMovie.stop()
+        # Hide the spinner after processing is done
+        self.hideSpinner()
 
         # Update the image state based on apply mode without modifying original_image
         self.image = adjusted_image.copy()
@@ -4511,6 +5523,17 @@ class FullCurvesTab(QWidget):
         # Update the preview to reflect the applied changes
         self.preview_image = self.image.copy()
         self.updatePreview(self.preview_image)
+
+        # Optionally, emit a signal to ImageManager if needed
+        if self.image_manager:
+            metadata = {
+                'file_path': self.loaded_image_path,  # Update as needed
+                'original_header': self.original_header,
+                'bit_depth': self.bit_depth,
+                'is_mono': self.is_mono
+            }
+            self.image_manager.update_image(updated_image=self.image, metadata=metadata)
+            print("FullCurvesTab: Image updated in ImageManager after processing.")
 
     def pushUndo(self, image_state):
         """Push the current image state onto the undo stack."""
@@ -4534,34 +5557,43 @@ class FullCurvesTab(QWidget):
         # Pop the last state from the stack
         last_state = self.undo_stack.pop()
 
-        # Update the image and preview
-        self.image = last_state.copy()
-        self.preview_image = self.image.copy()
-        self.updatePreview(self.preview_image)
+        # Update ImageManager with the previous image state
+        if self.image_manager:
+            metadata = {
+                'file_path': self.loaded_image_path,  # Update as needed
+                'original_header': self.original_header,
+                'bit_depth': self.bit_depth,
+                'is_mono': self.is_mono
+            }
+            self.image_manager.update_image(updated_image=last_state)
+            print("Undo: Image reverted in ImageManager.")
 
         # Update the Undo button state
         self.updateUndoButtonState()
 
 
-
-
     def resetCurve(self):
         # Reset the curve in the curve editor
         self.curveEditor.initCurve()
-        
+
         # Reset the image to the original image
         if self.original_image is not None:
             # Push the current image to the undo stack before resetting
             self.pushUndo(self.image.copy())
 
-            self.image = self.original_image.copy()
-            self.preview_image = self.original_image.copy()
-            self.updatePreview(self.preview_image)
-
+            # Update ImageManager with the original image
+            if self.image_manager:
+                metadata = {
+                    'file_path': self.loaded_image_path,  # Update as needed
+                    'original_header': self.original_header,
+                    'bit_depth': self.bit_depth,
+                    'is_mono': self.is_mono
+                }
+                self.image_manager.update_image(updated_image=self.original_image.copy())
+                print("Curve reset: Original image restored in ImageManager.")
         else:
             QMessageBox.warning(self, "Warning", "Original image not loaded.")
             print("Reset Curve called, but original image not loaded.")
-
 
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -4577,22 +5609,25 @@ class FullCurvesTab(QWidget):
 
         return super().eventFilter(source, event)
 
+
     def openFileDialog(self):
         try:
-            self.filename, _ = QFileDialog.getOpenFileName(
-                self, 'Open Image File', '', 
-                'Images (*.png *.tiff *.tif *.fits *.fit *.xisf);;All Files (*)'
-            )
-            if self.filename:
-                self.fileLabel.setText(self.filename)
-                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.filename)
+            self.loaded_image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
+                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+            if self.loaded_image_path:
+                self.fileLabel.setText(self.loaded_image_path)
+                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.loaded_image_path)
                 # Keep a copy of the original image
                 self.original_image = self.image.copy()
                 # Initialize the preview image as a copy of the original
-                self.preview_image = self.original_image.copy()
-                self.updatePreview(self.preview_image)
+                self.stretched_image = self.original_image.copy()
+                self.updatePreview(self.stretched_image)
+                self.applyButton.setEnabled(True)
+                self.saveButton.setEnabled(True)
+                print(f"Image loaded successfully from {self.loaded_image_path}.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+            print(f"Failed to load image: {e}")
 
     def updatePreview(self, preview_image=None):
         """Display the preview_image on the imageLabel."""
@@ -4623,19 +5658,184 @@ class FullCurvesTab(QWidget):
             self.imageLabel.setPixmap(scaled_pixmap)
             self.imageLabel.resize(scaled_pixmap.size())
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array before proceeding
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if necessary
+                
+            # Set the image and store a copy for later use
+            self.loaded_image_path = metadata.get('file_path', None)
+            self.image = image
+            self.original_image = image.copy()  # Store a copy of the original image
+            self.original_header = metadata.get('original_header', None)
+            self.bit_depth = metadata.get('bit_depth', None)
+            self.is_mono = metadata.get('is_mono', False)
+            
+            # Save the previous scroll position
+            self.previous_scroll_pos = (
+                self.scrollArea.horizontalScrollBar().value(),
+                self.scrollArea.verticalScrollBar().value()
+            )
+            
+            # Make a copy of the image for stretching
+            self.stretched_image = image.copy()
+
+            # Update the UI elements (buttons, etc.)
+            self.show_image(image)
+            self.update_image_display()
+
+            # Enable or disable buttons based on image processing state
+            self.applyButton.setEnabled(True)
+            self.saveButton.setEnabled(True)
+            self.undoButton.setEnabled(len(self.undo_stack) > 0)
+
+            print(f"FullCurvesTab: Image updated from ImageManager slot {slot}.")
 
 
 
+
+    def show_image(self, image):
+        """
+        Display the loaded image in the imageLabel.
+        """
+        try:
+            # Normalize image to 0-255 and convert to uint8
+            display_image = (image * 255).astype(np.uint8)
+
+            if display_image.ndim == 3 and display_image.shape[2] == 3:
+                # RGB Image
+                height, width, channels = display_image.shape
+                bytes_per_line = 3 * width
+                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            elif display_image.ndim == 2:
+                # Grayscale Image
+                height, width = display_image.shape
+                bytes_per_line = width
+                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            else:
+                print("Unsupported image format for display.")
+                QMessageBox.critical(self, "Error", "Unsupported image format for display.")
+                return
+
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(
+                pixmap.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+
+            # Restore the previous scroll position
+            if hasattr(self, 'previous_scroll_pos'):
+                self.scrollArea.horizontalScrollBar().setValue(self.previous_scroll_pos[0])
+                self.scrollArea.verticalScrollBar().setValue(self.previous_scroll_pos[1])
+
+            print("Image displayed successfully.")
+        except Exception as e:
+            print(f"Error displaying image: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
+
+
+    def update_image_display(self):
+        if self.image is not None:
+            # Prepare the image for display by normalizing and converting to uint8
+            display_image = (self.image * 255).astype(np.uint8)
+            h, w = display_image.shape[:2]
+
+            if display_image.ndim == 3:  # RGB Image
+                # Convert the image to QImage format
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+            else:  # Grayscale Image
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+
+            # Create a QPixmap from QImage
+            pixmap = QPixmap.fromImage(q_image)
+            self.current_pixmap = pixmap  # Store the original pixmap for future reference
+
+            # Scale the pixmap based on the zoom factor
+            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            # Set the pixmap on the image label
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())  # Resize the label to fit the image
+        else:
+            # If no image is available, clear the label and show a message
+            self.imageLabel.clear()
+            self.imageLabel.setText('No image loaded.')
+
+    def updatePreview(self, preview_image=None):
+        # Store the stretched image for saving
+        self.preview_image = preview_image
+        # Update the ImageManager with the new stretched image
+        metadata = {
+            'file_path': self.filename if self.filename else "Stretched Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'is_mono': self.is_mono,
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Original': self.filename if self.filename else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new processed image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
+                print("StarStretchTab: Processed image stored in ImageManager.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
+
+        # Update the preview once the processing thread emits the result
+        preview_image = (preview_image * 255).astype(np.uint8)
+        h, w = preview_image.shape[:2]
+        if preview_image.ndim == 3:
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+        else:
+            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
+
+        pixmap = QPixmap.fromImage(q_image)
+        self.current_pixmap = pixmap  # **Store the original pixmap**
+        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.imageLabel.setPixmap(scaled_pixmap)
+        self.imageLabel.resize(scaled_pixmap.size())
+
+        # Hide the spinner after processing is done
+        self.hideSpinner()
 
     def zoom_in(self):
-        if self.image is not None:
+        """
+        Zoom into the image by increasing the zoom factor.
+        """
+        if self.stretched_image is not None:
             self.zoom_factor *= 1.2
-            self.updatePreview()
+            self.refresh_display()
+            print(f"Zoomed in. New zoom factor: {self.zoom_factor:.2f}")
+        else:
+            print("No stretched image to zoom in.")
+            QMessageBox.warning(self, "Warning", "No stretched image to zoom in.")
 
     def zoom_out(self):
-        if self.image is not None:
+        """
+        Zoom out of the image by decreasing the zoom factor.
+        """
+        if self.stretched_image is not None:
             self.zoom_factor /= 1.2
-            self.updatePreview()
+            self.refresh_display()
+            print(f"Zoomed out. New zoom factor: {self.zoom_factor:.2f}")
+        else:
+            print("No stretched image to zoom out.")
+            QMessageBox.warning(self, "Warning", "No stretched image to zoom out.")
 
     def fit_to_preview(self):
         """Adjust the zoom factor so that the image's width fits within the preview area's width."""
@@ -4651,7 +5851,7 @@ class FullCurvesTab(QWidget):
                 image_width = self.image.shape[1]
             else:
                 print("Unexpected image dimensions!")
-                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
+                QMessageBox.warning(self, "Warning", "Cannot fit image to preview due to unexpected dimensions.")
                 return
             
             # Calculate the required zoom factor to fit the image's width into the preview area
@@ -4661,11 +5861,48 @@ class FullCurvesTab(QWidget):
             self.zoom_factor = new_zoom_factor
             
             # Apply the new zoom factor to update the display
-            self.apply_zoom()
+            self.refresh_display()
             
-            # Update the status label to reflect the new zoom level
+            print(f"Fit to preview applied. New zoom factor: {self.zoom_factor:.2f}")
         else:
             print("No image loaded. Cannot fit to preview.")
+            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
+
+    def refresh_display(self):
+        """
+        Refresh the image display based on the current zoom factor.
+        """
+        if self.stretched_image is None:
+            print("No stretched image to display.")
+            return
+
+        try:
+            # Normalize and convert to uint8 for display
+            img = (self.stretched_image * 255).astype(np.uint8)
+            h, w = img.shape[:2]
+
+            if img.ndim == 3 and img.shape[2] == 3:
+                bytes_per_line = 3 * w
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+            elif img.ndim == 2:
+                bytes_per_line = w
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
+            else:
+                raise ValueError("Unsupported image format for display.")
+
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(
+                pixmap.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())
+
+            print("Display refreshed successfully.")
+        except Exception as e:
+            print(f"Error refreshing display: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to refresh display: {e}")
 
     def apply_zoom(self):
         """Apply the current zoom level to the image."""
@@ -5384,8 +6621,9 @@ class FullCurvesProcessingThread(QThread):
         return rgb
 
 class FrequencySeperationTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
+        self.image_manager = image_manager  # Reference to the shared ImageManager
         self.filename = None
         self.image = None  # Original input image
         self.low_freq_image = None
@@ -5416,6 +6654,17 @@ class FrequencySeperationTab(QWidget):
 
         self.initUI()
 
+        # Connect to ImageManager's image_changed signal if available
+        if self.image_manager:
+            self.image_manager.image_changed.connect(self.on_image_changed)
+            # Load the existing image from ImageManager, if any
+            if self.image_manager.image is not None:
+                self.on_image_changed(
+                    slot=self.image_manager.current_slot,
+                    image=self.image_manager.image,
+                    metadata=self.image_manager.current_metadata
+                )
+
     def initUI(self):
         """
         Set up the GUI layout:
@@ -5438,7 +6687,7 @@ class FrequencySeperationTab(QWidget):
         self.loadButton.clicked.connect(self.selectImage)
         left_layout.addWidget(self.loadButton)
 
-        self.fileLabel = QLabel("No file selected", self)
+        self.fileLabel = QLabel("", self)
         left_layout.addWidget(self.fileLabel)
 
         # Method Combo
@@ -5659,6 +6908,47 @@ class FrequencySeperationTab(QWidget):
         # Force initial label update
         self.on_radius_changed(self.radiusSlider.value())
         self.on_tolerance_changed(self.toleranceSlider.value())
+
+    # -----------------------------
+    # Image Manager Integration
+    # -----------------------------
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the FrequencySeperationTab if the change is relevant.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if needed
+
+            # Update internal state with the new image and metadata
+            self.loaded_image_path = metadata.get('file_path', None)
+            self.image = image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = self.loaded_image_path
+
+            # Reset HF / LF placeholders
+            self.low_freq_image = None
+            self.high_freq_image = None
+
+            # Update UI label to show the file name or indicate no file
+            # Update the fileLabel in the Frequency Separation Tab (or any other tab)
+            if self.image_manager.image is not None:
+                # Retrieve the file path from the metadata in ImageManager
+                file_path = self.image_manager._metadata[self.image_manager.current_slot].get('file_path', None)
+                # Update the file label with the basename of the file path
+                self.fileLabel.setText(os.path.basename(file_path) if file_path else "No file selected")
+            else:
+                self.fileLabel.setText("No file selected")
+
+
+            # Automatically apply frequency separation
+            self.apply_frequency_separation()
+
+            print(f"FrequencySeperationTab: Image updated from ImageManager slot {slot}.")
+
 
     def map_slider_to_radius(self, slider_pos):
         """
@@ -5898,26 +7188,47 @@ class FrequencySeperationTab(QWidget):
         self.fileLabel.setText(f"HF enhancement error: {msg}")
 
     # -----------------------------
-    # Load / Save
+    # Image Selection and Preview Methods
     # -----------------------------
     def selectImage(self):
-        selected_file, _ = QFileDialog.getOpenFileName(
-            self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpeg *.jpg)"
-        )
+        if not self.image_manager:
+            QMessageBox.warning(self, "Warning", "ImageManager not initialized.")
+            return
+
+        selected_file, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
+                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
         if selected_file:
             try:
-                img, header, _, is_mono = load_image(selected_file)
+                img, header, bit_depth, is_mono = load_image(selected_file)
+                if img is None:
+                    QMessageBox.critical(self, "Error", "Failed to load the image. Please try a different file.")
+                    return
+
+                print(f"FrequencySeperationTab: Image loaded successfully. Shape: {img.shape}, Dtype: {img.dtype}")
+
                 self.image = img
                 self.original_header = header
                 self.is_mono = is_mono
                 self.filename = selected_file
                 self.fileLabel.setText(os.path.basename(selected_file))
+
                 # Reset HF / LF placeholders
                 self.low_freq_image = None
                 self.high_freq_image = None
-                self.apply_frequency_separation()
+
+                # Update ImageManager with the new image
+                metadata = {
+                    'file_path': self.filename,
+                    'original_header': self.original_header,
+                    'bit_depth': bit_depth,
+                    'is_mono': self.is_mono
+                }
+                self.image_manager.set_current_image(image=img, metadata=metadata)
+                print("FrequencySeperationTab: Image updated in ImageManager.")
+
             except Exception as e:
                 self.fileLabel.setText(f"Error: {str(e)}")
+                print(f"FrequencySeperationTab: Error loading image: {e}")
 
     def save_high_frequency(self):
         if self.high_freq_image is None:
@@ -6018,6 +7329,7 @@ class FrequencySeperationTab(QWidget):
         # Create a new preview window (non-modal)
         self.combined_window = CombinedPreviewWindow(
             combined, 
+            image_manager=self.image_manager,
             original_header=self.original_header,
             is_mono=self.is_mono
         )
@@ -6130,7 +7442,7 @@ class CombinedPreviewWindow(QWidget):
     """
     A pop-out window that shows the combined HF+LF image in a scrollable, zoomable preview.
     """
-    def __init__(self, combined_image, original_header=None, is_mono=False, parent=None):
+    def __init__(self, combined_image, image_manager, original_header=None, is_mono=False, parent=None):
         """
         :param combined_image: Float32 numpy array in [0,1], shape = (H,W) or (H,W,3).
         :param original_header: Optional metadata (for saving as FITS, etc.).
@@ -6139,6 +7451,7 @@ class CombinedPreviewWindow(QWidget):
         super().__init__(parent)
         self.setWindowTitle("Combined HF + LF Preview")
         self.combined_image = combined_image
+        self.image_manager = image_manager  # Reference to ImageManage
         self.original_header = original_header
         self.is_mono = is_mono
 
@@ -6343,6 +7656,21 @@ class CombinedPreviewWindow(QWidget):
             f"Saved {bit_depth} {file_ext.upper()} image to:\n{os.path.basename(save_filename)}"
         )
 
+        # Update ImageManager with the new combined image
+        metadata = {
+            'file_path': save_filename,
+            'original_header': self.original_header,
+            'bit_depth': bit_depth,
+            'is_mono': self.is_mono
+        }
+
+        # Set the combined image in ImageManager's current slot
+        self.image_manager.set_image(self.combined_image, metadata)
+
+        # Optionally, update any labels or statuses if needed
+        # For example, you might want to update the title or notify the user
+        self.close()  # Close the preview window after saving, if desired        
+
 class HFEnhancementThread(QThread):
     """
     A QThread that can:
@@ -6450,7 +7778,7 @@ class HFEnhancementThread(QThread):
         reconstructed_shape = result.shape
 
         if reconstructed_shape != original_shape:
-            # Calculate the difference in dimensions
+            # Calculate the difference in dimensions                                            
             delta_h = reconstructed_shape[0] - original_shape[0]
             delta_w = reconstructed_shape[1] - original_shape[1]
 
@@ -6572,8 +7900,9 @@ class FrequencySeperationThread(QThread):
             self.error_signal.emit(str(e))
 
 class NBtoRGBstarsTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
+        self.image_manager = image_manager  # Reference to the ImageManager
         self.initUI()
         self.ha_image = None
         self.oiii_image = None
@@ -6581,6 +7910,11 @@ class NBtoRGBstarsTab(QWidget):
         self.osc_image = None
         self.combined_image = None
         self.is_mono = False
+        # Filenames
+        self.ha_filename = None
+        self.oiii_filename = None
+        self.sii_filename = None
+        self.osc_filename = None        
         self.filename = None  # Store the selected file path
         self.zoom_factor = 1.0  # Initialize to 1.0 for normal size
         self.dragging = False
@@ -6588,6 +7922,11 @@ class NBtoRGBstarsTab(QWidget):
         self.processing_thread = None
         self.original_header = None
         self.original_pixmap = None  # To store the original QPixmap for zooming
+        self.bit_depth = "Unknown"
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal if needed
+            self.image_manager.image_changed.connect(self.on_image_changed)
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -6728,6 +8067,29 @@ class NBtoRGBstarsTab(QWidget):
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if needed
+
+            # Update internal state with the new image and metadata
+            self.combined_image = image
+            self.original_header = metadata.get('original_header', None)
+            self.bit_depth = metadata.get('bit_depth', None)
+            self.is_mono = metadata.get('is_mono', False)
+
+            # Update image display (assuming updateImageDisplay handles the proper rendering)
+            self.updateImageDisplay()
+
+            print(f"NBtoRGBstarsTab: Image updated from ImageManager slot {slot}.")
+
+
+
     def createRatioSlider(self, label_text, default_value):
         label = QLabel(f"{label_text}: {default_value / 100:.2f}", self)
         slider = QSlider(Qt.Horizontal)
@@ -6752,24 +8114,47 @@ class NBtoRGBstarsTab(QWidget):
         self.stretchSlider.setVisible(enabled)
 
     def selectImage(self, image_type):
-        selected_file, _ = QFileDialog.getOpenFileName(self, f"Select {image_type} Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self, f"Select {image_type} Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        )
         if selected_file:
             try:
+                image, original_header, bit_depth, is_mono = load_image(selected_file)
+                if image is None:
+                    raise ValueError("Failed to load image data.")
+
                 if image_type == 'Ha':
-                    self.ha_image, self.original_header, _, _ = load_image(selected_file)  # Store header
-                    self.filename = selected_file
+                    self.ha_image = image
+                    self.ha_filename = selected_file
+                    self.original_header = original_header
+                    self.bit_depth = bit_depth
+                    self.is_mono = is_mono
                     self.haLabel.setText(f"{os.path.basename(selected_file)} selected")
                 elif image_type == 'OIII':
-                    self.oiii_image, self.original_header, _, _ = load_image(selected_file)
+                    self.oiii_image = image
+                    self.oiii_filename = selected_file
+                    self.original_header = original_header
+                    self.bit_depth = bit_depth
+                    self.is_mono = is_mono
                     self.oiiiLabel.setText(f"{os.path.basename(selected_file)} selected")
                 elif image_type == 'SII':
-                    self.sii_image, self.original_header, _, _ = load_image(selected_file)
+                    self.sii_image = image
+                    self.sii_filename = selected_file
+                    self.original_header = original_header
+                    self.bit_depth = bit_depth
+                    self.is_mono = is_mono
                     self.siiLabel.setText(f"{os.path.basename(selected_file)} selected")
                 elif image_type == 'OSC':
-                    self.osc_image, self.original_header, _, _ = load_image(selected_file)
+                    self.osc_image = image
+                    self.osc_filename = selected_file
+                    self.original_header = original_header
+                    self.bit_depth = bit_depth
+                    self.is_mono = is_mono
                     self.oscLabel.setText(f"{os.path.basename(selected_file)} selected")
+
             except Exception as e:
                 print(f"Failed to load {image_type} image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to load {image_type} image:\n{e}")
 
     def previewCombine(self):
         ha_to_oii_ratio = self.haToOiiRatioSlider.value() / 100.0
@@ -6795,9 +8180,15 @@ class NBtoRGBstarsTab(QWidget):
         self.combined_image = combined_image
 
         # Convert the image to display format
-        preview_image = (combined_image * 255).astype(np.uint8)
-        h, w = preview_image.shape[:2]
-        q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+        try:
+            preview_image = (combined_image * 255).astype(np.uint8)
+            h, w = preview_image.shape[:2]
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+        except Exception as e:
+            print(f"Error converting combined image for display: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to prepare image for display:\n{e}")
+            self.hideSpinner()
+            return
 
         # Store original pixmap for zooming
         self.original_pixmap = QPixmap.fromImage(q_image)
@@ -6813,6 +8204,39 @@ class NBtoRGBstarsTab(QWidget):
 
         # Hide the spinner after processing is done
         self.hideSpinner()
+
+        # Prepare metadata with safeguards
+        metadata = {
+            'file_path': self.ha_filename if self.ha_image is not None else "Combined Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': self.bit_depth if self.bit_depth else "Unknown",
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'ha_to_oii_ratio': self.haToOiiRatioSlider.value() / 100.0,
+                'enable_star_stretch': self.starStretchCheckBox.isChecked(),
+                'stretch_factor': self.stretchSlider.value() / 100.0
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
+                'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
+                'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
+                'OSC': self.osc_filename if self.osc_image is not None else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new combined image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.combined_image, metadata=metadata)
+                print("NBtoRGBstarsTab: Combined image stored in ImageManager.")
+                
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the combined image.")
 
     def showSpinner(self):
         self.spinnerLabel.show()
@@ -7017,9 +8441,10 @@ class NBtoRGBProcessingThread(QThread):
         return image
 
 class HaloBGonTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager=None):
         super().__init__()
-        self.initUI()
+        self.image_manager = image_manager  # Reference to the ImageManager
+
         self.image = None  # Selected image
         self.filename = None  # Store the selected file path
         self.preview_image = None  # Store the preview result
@@ -7030,6 +8455,11 @@ class HaloBGonTab(QWidget):
         self.last_pos = None
         self.processing_thread = None  # For background processing
         self.original_header = None
+        self.initUI()
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal
+            self.image_manager.image_changed.connect(self.on_image_changed)
         
 
     def initUI(self):
@@ -7056,7 +8486,7 @@ class HaloBGonTab(QWidget):
         self.fileButton.clicked.connect(self.selectImage)
         left_layout.addWidget(self.fileButton)
 
-        self.fileLabel = QLabel('No file selected', self)
+        self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
         # Reduction amount slider
@@ -7084,10 +8514,24 @@ class HaloBGonTab(QWidget):
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)
 
-        # Execute and Save buttons
+        # **Create a horizontal layout for Refresh Preview and Undo buttons**
+        action_buttons_layout = QHBoxLayout()
+
+        # Refresh Preview button
         self.executeButton = QPushButton("Refresh Preview", self)
         self.executeButton.clicked.connect(self.generatePreview)
-        left_layout.addWidget(self.executeButton)
+        action_buttons_layout.addWidget(self.executeButton)
+
+        # Undo button with left arrow icon
+        self.undoButton = QPushButton("Undo", self)
+        undo_icon = self.style().standardIcon(QStyle.SP_ArrowBack)  # Standard left arrow icon
+        self.undoButton.setIcon(undo_icon)
+        self.undoButton.clicked.connect(self.undoAction)
+        self.undoButton.setEnabled(False)  # Disabled by default
+        action_buttons_layout.addWidget(self.undoButton)
+
+        # Add the horizontal layout to the left layout
+        left_layout.addLayout(action_buttons_layout)
 
         self.saveButton = QPushButton("Save Image", self)
         self.saveButton.clicked.connect(self.saveImage)
@@ -7162,6 +8606,78 @@ class HaloBGonTab(QWidget):
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
 
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array before proceeding
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if necessary
+            
+            self.image = image  # Set the original image
+            self.preview_image = None  # Reset the preview image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = metadata.get('file_path', self.filename)
+
+            # Update the image display
+            self.updateImageDisplay()
+
+            print(f"Halo-B-Gon Tab: Image updated from ImageManager slot {slot}.")
+
+            # **Update Undo and Redo Button States**
+            if self.image_manager:
+                self.undoButton.setEnabled(self.image_manager.can_undo())
+
+
+
+    def updateImageDisplay(self):
+        if self.image is not None:
+            # Prepare the image for display by normalizing and converting to uint8
+            display_image = (self.image * 255).astype(np.uint8)
+            h, w = display_image.shape[:2]
+
+            if display_image.ndim == 3:  # RGB Image
+                # Convert the image to QImage format
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+            else:  # Grayscale Image
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+
+            # Create a QPixmap from QImage
+            pixmap = QPixmap.fromImage(q_image)
+            self.current_pixmap = pixmap  # Store the original pixmap for future reference
+
+            # Scale the pixmap based on the zoom factor
+            scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+            # Set the pixmap on the image label
+            self.imageLabel.setPixmap(scaled_pixmap)
+            self.imageLabel.resize(scaled_pixmap.size())  # Resize the label to fit the image
+        else:
+            # If no image is available, clear the label and show a message
+            self.imageLabel.clear()
+            self.imageLabel.setText('No image loaded.')
+
+
+
+    def undoAction(self):
+        if self.image_manager and self.image_manager.can_undo():
+            try:
+                # Perform the undo operation
+                self.image_manager.undo()
+                print("HaloBGonTab: Undo performed.")
+            except Exception as e:
+                print(f"Error performing undo: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to perform undo:\n{e}")
+        else:
+            QMessageBox.information(self, "Info", "Nothing to undo.")
+            print("HaloBGonTab: No actions to undo.")
+
+        # Update the state of the Undo button
+        self.undoButton.setEnabled(self.image_manager.can_undo())
+
     def updateReductionLabel(self, value):
         labels = ["Extra Low", "Low", "Medium", "High"]
         if 0 <= value < len(labels):
@@ -7171,11 +8687,11 @@ class HaloBGonTab(QWidget):
 
     def zoomIn(self):
         self.zoom_factor *= 1.2  # Increase zoom by 20%
-        self.updatePreview(self.image)
+        self.updateImageDisplay()
 
     def zoomOut(self):
         self.zoom_factor /= 1.2  # Decrease zoom by 20%
-        self.updatePreview(self.image)
+        self.updateImageDisplay()
     
     def fit_to_preview(self):
         """Adjust the zoom factor so that the image's width fits within the preview area's width."""
@@ -7209,19 +8725,37 @@ class HaloBGonTab(QWidget):
 
     def apply_zoom(self):
         """Apply the current zoom level to the image."""
-        self.updatePreview(self.image)  # Call without extra arguments; it will calculate dimensions based on zoom factor
+        self.updateImageDisplay()
 
     def selectImage(self):
-        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Stars Only Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Stars Only Image", 
+            "", 
+            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        )
         if selected_file:
             try:
-                # Match the StarStretchTab loading method here
-                self.image, self.original_header, _, self.is_mono = load_image(selected_file)  # Load image with header
+                # Load the image with header information
+                self.image, self.original_header, _, self.is_mono = load_image(selected_file)  # Ensure load_image returns (image, header, bit_depth, is_mono)
                 self.filename = selected_file 
                 self.fileLabel.setText(os.path.basename(selected_file))
+                
+                # Update ImageManager with the loaded image
+                if self.image_manager:
+                    metadata = {
+                        'file_path': selected_file,
+                        'original_header': self.original_header,
+                        'bit_depth': 'Unknown',  # Update if available
+                        'is_mono': self.is_mono
+                    }
+                    self.image_manager.update_image(updated_image=self.image, metadata=metadata)
+                    print(f"HaloBGonTab: Loaded image stored in ImageManager.")
+                
                 self.generatePreview()  # Generate preview after loading
             except Exception as e:
                 self.fileLabel.setText(f"Error: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
                 print(f"Failed to load image: {e}")
 
 
@@ -7242,12 +8776,36 @@ class HaloBGonTab(QWidget):
         self.processing_thread.started.connect(self.processing_worker.process)
         self.processing_thread.start()
 
-    def updatePreview(self, processed_image):
-        # Store the processed image for saving
-        self.processed_image = processed_image
+    def updatePreview(self, stretched_image):
+        # Store the stretched image for saving
+        self.preview_image = stretched_image
+
+        # Update the ImageManager with the new stretched image
+        metadata = {
+            'file_path': self.filename if self.filename else "Stretched Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'is_mono': self.is_mono,
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Original': self.filename if self.filename else "Not Provided"
+            }
+        }
+
+        # Update ImageManager with the new processed image
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
+                print("StarStretchTab: Processed image stored in ImageManager.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            print("ImageManager is not initialized.")
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
 
         # Update the preview once the processing thread emits the result
-        preview_image = (processed_image * 255).astype(np.uint8)
+        preview_image = (stretched_image * 255).astype(np.uint8)
         h, w = preview_image.shape[:2]
         if preview_image.ndim == 3:
             q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
@@ -7255,12 +8813,14 @@ class HaloBGonTab(QWidget):
             q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
 
         pixmap = QPixmap.fromImage(q_image)
+        self.current_pixmap = pixmap  # **Store the original pixmap**
         scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.imageLabel.setPixmap(scaled_pixmap)
         self.imageLabel.resize(scaled_pixmap.size())
 
         # Hide the spinner after processing is done
         self.hideSpinner()
+
 
     def saveImage(self):
         if self.processed_image is not None:
@@ -7316,27 +8876,16 @@ class HaloBGonTab(QWidget):
             self.showSpinner()
 
             # Start background processing with HaloProcessingThread
-            self.processing_thread = HaloProcessingThread(self.image, self.reductionSlider.value(), self.linearDataCheckbox.isChecked())
+            self.processing_thread = HaloProcessingThread(
+                self.image, 
+                self.reductionSlider.value(), 
+                self.linearDataCheckbox.isChecked()
+            )
             self.processing_thread.preview_generated.connect(self.updatePreview)
             self.processing_thread.start()
-
-    def updatePreview(self, processed_image):
-        # Update the preview with the processed (non-linear if is_linear is checked) image
-        self.processed_image = processed_image  # Save for use in saving
-        preview_image = (processed_image * 255).astype(np.uint8)
-        h, w = preview_image.shape[:2]
-        if preview_image.ndim == 3:
-            q_image = QImage(preview_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
         else:
-            q_image = QImage(preview_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
-
-        pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.imageLabel.setPixmap(scaled_pixmap)
-        self.imageLabel.resize(scaled_pixmap.size())
-
-        # Hide the spinner after processing is done
-        self.hideSpinner()
+            QMessageBox.warning(self, "Warning", "No image loaded. Please load an image first.")
+            print("HaloBGonTab: No image loaded. Cannot generate preview.")
 
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -7517,8 +9066,9 @@ class HaloProcessingThread(QThread):
 
 
 class ContinuumSubtractTab(QWidget):
-    def __init__(self):
+    def __init__(self, image_manager):
         super().__init__()
+        self.image_manager = image_manager
         self.initUI()
         self.nb_image = None  # Selected NB image
         self.continuum_image = None  # Selected Continuum image
@@ -7531,6 +9081,10 @@ class ContinuumSubtractTab(QWidget):
         self.processing_thread = None  # For background processing
         self.original_header = None
         self.original_pixmap = None  # To store the original QPixmap for zooming
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal if needed
+            self.image_manager.image_changed.connect(self.on_image_changed)
 
     def initUI(self):
         main_layout = QHBoxLayout()
@@ -7667,6 +9221,29 @@ class ContinuumSubtractTab(QWidget):
         # Initially disable zoom buttons until an image is loaded and previewed
         self.zoomInButton.setEnabled(False)
         self.zoomOutButton.setEnabled(False)
+
+    def on_image_changed(self, slot, image, metadata):
+        """
+        Slot to handle image changes from ImageManager.
+        Updates the display if the current slot is affected.
+        """
+        if slot == 0:  # Assuming slot 0 is used for shared images
+            # Ensure the image is a numpy array
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if needed
+
+            # Update internal state with the new image and metadata
+            self.combined_image = image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = metadata.get('file_path', None)
+
+            # Update the preview
+            self.update_preview()
+
+            print(f"ContinuumSubtractTab: Image updated from ImageManager slot {slot}.")
+
+
 
     def selectImage(self, image_type):
         selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
@@ -7862,7 +9439,17 @@ class ContinuumSubtractTab(QWidget):
             self.zoomOutButton.setEnabled(True)
 
             self.statusLabel.setText("Continuum subtraction completed.")
-            print("Continuum subtraction completed.")
+            # Push the processed image to ImageManager
+            if self.image_manager:
+                metadata = {
+                    'file_path': self.filename,
+                    'original_header': self.original_header,
+                    'is_mono': self.is_mono,
+                    'source': 'Continuum Subtraction'
+                }
+                self.image_manager.update_image(self.combined_image, metadata, slot=0)
+
+                print("ContinuumSubtractTab: Image pushed to ImageManager.")
         else:
             self.statusLabel.setText("Continuum subtraction failed.")
             print("Continuum subtraction failed.")
@@ -8211,6 +9798,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 # Retrieve metadata
                 image_meta = xisf.get_images_metadata()[0]  # Assuming single image
                 file_meta = xisf.get_file_metadata()
+
 
                 # Determine bit depth and normalize
                 if image_data.dtype == np.uint8:
@@ -10036,19 +11624,47 @@ class MainWindow(QMainWindow):
         # Left Column Layout
         left_panel = QVBoxLayout()
 
-        # Create the instruction QLabel for search region
-        self.title_label = QLabel("What's In My Image")
-        self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")    
-        left_panel.addWidget(self.title_label)    
+        # Load the image using the resource_path function
+        wimilogo_path = resource_path("wimilogo.png")
 
-      
+        # Create a QLabel to display the logo
+        self.logo_label = QLabel()
+
+        # Set the logo image to the label
+        logo_pixmap = QPixmap(wimilogo_path)
+
+        # Scale the pixmap to fit within a desired size, maintaining the aspect ratio
+        scaled_pixmap = logo_pixmap.scaled(200, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        # Set the scaled pixmap to the label
+        self.logo_label.setPixmap(scaled_pixmap)
+
+        # Set alignment to center the logo horizontally
+        self.logo_label.setAlignment(Qt.AlignCenter)
+
+        # Optionally, you can set a fixed size for the label (this is for layout purposes)
+        self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
+
+        # Add the logo_label to your layout
+        left_panel.addWidget(self.logo_label)
+       
+        button_layout = QHBoxLayout()
         
         # Load button
         self.load_button = QPushButton("Load Image")
         self.load_button.setIcon(QApplication.style().standardIcon(QStyle.SP_FileDialogStart))
         self.load_button.clicked.connect(self.open_image)
-        left_panel.addWidget(self.load_button)
+
+        # AutoStretch button
+        self.auto_stretch_button = QPushButton("AutoStretch")
+        self.auto_stretch_button.clicked.connect(self.toggle_autostretch)
+
+        # Add both buttons to the horizontal layout
+        button_layout.addWidget(self.load_button)
+        button_layout.addWidget(self.auto_stretch_button)
+
+        # Add the button layout to the left panel
+        left_panel.addLayout(button_layout)
 
         # Create the instruction QLabel for search region
         search_region_instruction_label = QLabel("Shift+Click to define a search region")
@@ -10164,10 +11780,7 @@ class MainWindow(QMainWindow):
         self.mini_preview.mouseReleaseEvent = self.on_mini_preview_release
         left_panel.addWidget(self.mini_preview)
 
-        # Toggle Theme button
-        self.theme_toggle_button = QPushButton("Switch to Light Theme")
-        self.theme_toggle_button.clicked.connect(self.toggle_theme)
-        left_panel.addWidget(self.theme_toggle_button)        
+  
 
         footer_label = QLabel("""
             Written by Franklin Marek<br>
@@ -10429,9 +12042,6 @@ class MainWindow(QMainWindow):
         self.selected_color = QColor(Qt.red)  # Default annotation color
         self.selected_font = QFont("Arial", 12)  # Default font for text annotations        
 
-        # Initialize the dark theme
-        self.apply_light_theme()
-
     def update_object_count(self):
         count = self.results_tree.topLevelItemCount()
         self.object_count_label.setText(f"Objects Found: {count}")
@@ -10464,6 +12074,51 @@ class MainWindow(QMainWindow):
         # Display the context menu at the cursor position
         menu.exec_(self.results_tree.viewport().mapToGlobal(position))
 
+    def toggle_autostretch(self):
+        if not hasattr(self, 'original_image'):
+            # Store the original image the first time AutoStretch is applied
+            self.original_image = self.image_data.copy()
+        
+        if self.is_mono:
+            # Call stretch_mono_image if the image is mono
+            stretched_image = stretch_mono_image(self.image_data, target_median=0.25, normalize=True)
+        else:
+            # Call stretch_color_image if the image is color
+            stretched_image = stretch_color_image(self.image_data, target_median=0.25, linked=True, normalize=True)
+        
+        # If the AutoStretch is toggled off (using the same button), restore the original image
+        if self.auto_stretch_button.text() == "AutoStretch":
+            # Store the stretched image and update the button text to indicate it's on
+            self.stretched_image = stretched_image
+            self.auto_stretch_button.setText("Turn Off AutoStretch")
+        else:
+            # Revert to the original image and update the button text to indicate it's off
+            stretched_image = self.original_image
+            self.auto_stretch_button.setText("AutoStretch")
+        
+        # Convert the image to uint8 format for display
+        stretched_image = (stretched_image * 255).astype(np.uint8)
+
+        # Update the display with the stretched image (or original if toggled off)
+        height, width = stretched_image.shape[:2]
+        bytes_per_line = 3 * width
+        qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        self.main_image = pixmap
+        scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.mini_preview.setPixmap(scaled_pixmap)
+
+        self.main_scene.clear()
+        self.main_scene.addPixmap(pixmap)
+        self.main_preview.setSceneRect(QRectF(pixmap.rect()))
+        self.zoom_level = 1.0
+        self.main_preview.resetTransform()
+        self.main_preview.centerOn(self.main_scene.sceneRect().center())
+        self.update_green_box()
+
+        # Optionally, you can also update any other parts of the UI after stretching the image
+        print(f"AutoStretch {'applied to' if self.auto_stretch_button.text() == 'Turn Off AutoStretch' else 'removed from'} the image.")
 
 
     def zoom_to_object(self, item):
@@ -12219,60 +13874,6 @@ class MainWindow(QMainWindow):
         dialog.accept()  # Close the settings dialog
         self.prompt_blind_solve()  # Call the blind solve function
 
-    def apply_dark_theme(self):
-        """Apply the dark theme stylesheet."""
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #2E2E2E;
-                color: #FFFFFF;
-            }
-            QPushButton {
-                background-color: #3C3F41;
-                color: #FFFFFF;
-                border: 1px solid #5A5A5A;
-                padding: 5px;
-            }
-            QPushButton:hover {
-                background-color: #4C4F51;
-            }
-            QPushButton:pressed {
-                background-color: #5C5F61;
-            }
-            QHeaderView::section {
-                background-color: #3C3F41;
-                color: #FFFFFF;
-                padding: 4px;
-                border: 1px solid #5A5A5A;
-            }
-            QTreeWidget::item {
-                background-color: #2E2E2E;
-                color: #FFFFFF;
-            }
-            QTreeWidget::item:selected {  /* Style for selected items */
-                background-color: #505050;  /* Dark gray background for selected item */
-                color: #FFFFFF;  /* White text color for selected item */
-            }
-            QTreeWidget::item:selected:active {  /* Style for selected items in active state */
-                background-color: #707070;  /* Slightly lighter gray for active selected item */
-                color: #FFFFFF;
-            }
-        """)
-        self.theme_toggle_button.setText("Switch to Light Theme")
-        self.title_label.setStyleSheet("font-size: 20px; color: lightgrey;")  # Set title color for dark theme
-
-    def apply_light_theme(self):
-        """Clear the stylesheet to revert to the default light theme."""
-        self.setStyleSheet("")  # Clear the stylesheet
-        self.theme_toggle_button.setText("Switch to Dark Theme")
-        self.title_label.setStyleSheet("font-size: 20px; color: black;")  # Set title color for light theme
-
-    def toggle_theme(self):
-        """Toggle between dark and light themes."""
-        if self.is_dark_mode:
-            self.apply_light_theme()
-        else:
-            self.apply_dark_theme()
-        self.is_dark_mode = not self.is_dark_mode
 
 def extract_wcs_data(file_path):
     try:
