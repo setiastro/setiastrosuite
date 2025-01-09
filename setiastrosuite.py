@@ -166,7 +166,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.0')
+        self.setWindowTitle('Seti Astro\'s Suite V2.0.2')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -1585,6 +1585,8 @@ class BlinkTab(QWidget):
             self.loaded_images = []
             for file_path in file_paths:
                 image, header, bit_depth, is_mono = load_image(file_path)
+                if is_mono:  # Check if image is color (non-mono)
+                    image = self.debayer_image(image, file_path, header)  # Debayer the image if needed
                 self.loaded_images.append({
                     'file_path': file_path,
                     'image_data': image,
@@ -1596,6 +1598,93 @@ class BlinkTab(QWidget):
             print(f"Loaded {len(self.loaded_images)} images into memory.")
 
 
+    def debayer_image(self, image, file_path, header):
+        """Check if image is OSC (One-Shot Color) and debayer if required."""
+        # Check for OSC (Bayer pattern in FITS or RAW data)
+        if file_path.lower().endswith(('.fits', '.fit')):
+            # Check if the FITS header contains BAYERPAT (Bayer pattern)
+            bayer_pattern = header.get('BAYERPAT', None)
+            if bayer_pattern:
+                print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
+                # Apply debayering logic for FITS
+                image = self.debayer_fits(image, bayer_pattern)
+            else:
+                print(f"No Bayer pattern found in FITS header: {file_path}")
+        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            # If it's RAW (Bayer pattern detected), debayer it
+            print(f"Debayering RAW image: {file_path}")
+            # Apply debayering to the RAW image (assuming debayer_raw exists)
+            image = self.debayer_raw(image)
+        
+        return image
+
+    def debayer_fits(self, image_data, bayer_pattern):
+        """Debayer a FITS image using a basic Bayer pattern (2x2)."""
+        if bayer_pattern == 'RGGB':
+            # RGGB Bayer pattern (Debayering logic example)
+            r = image_data[::2, ::2]  # Red
+            g1 = image_data[::2, 1::2]  # Green 1
+            g2 = image_data[1::2, ::2]  # Green 2
+            b = image_data[1::2, 1::2]  # Blue
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+        else:
+            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+
+
+    def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
+        """Debayer a RAW image based on the Bayer pattern."""
+        if bayer_pattern == 'RGGB':
+            # RGGB Bayer pattern (Debayering logic example)
+            r = raw_image_data[::2, ::2]  # Red
+            g1 = raw_image_data[::2, 1::2]  # Green 1
+            g2 = raw_image_data[1::2, ::2]  # Green 2
+            b = raw_image_data[1::2, 1::2]  # Blue
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+        
+        elif bayer_pattern == 'BGGR':
+            # BGGR Bayer pattern
+            b = raw_image_data[::2, ::2]  # Blue
+            g1 = raw_image_data[::2, 1::2]  # Green 1
+            g2 = raw_image_data[1::2, ::2]  # Green 2
+            r = raw_image_data[1::2, 1::2]  # Red
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GRBG':
+            # GRBG Bayer pattern
+            g1 = raw_image_data[::2, ::2]  # Green 1
+            r = raw_image_data[::2, 1::2]  # Red
+            b = raw_image_data[1::2, ::2]  # Blue
+            g2 = raw_image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GBRG':
+            # GBRG Bayer pattern
+            g1 = raw_image_data[::2, ::2]  # Green 1
+            b = raw_image_data[::2, 1::2]  # Blue
+            r = raw_image_data[1::2, ::2]  # Red
+            g2 = raw_image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        else:
+            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+    
+
+
     def on_item_clicked(self, item, column):
         """Handle click on a file name in the tree to preview the image."""
         file_name = item.text(0)
@@ -1604,10 +1693,10 @@ class BlinkTab(QWidget):
         if file_path:
             # Get the index of the clicked image
             index = self.image_paths.index(file_path)
-            
-            # Retrieve the corresponding image data from the loaded images
-            image_data = self.loaded_images[index]['image_data']  # Access the image data, not the whole dictionary
 
+            # Retrieve the corresponding image data and header from the loaded images
+            image_data = self.loaded_images[index]['image_data']
+            
             # Apply auto-stretch (assumed mono or color)
             target_median = 0.25
             if image_data.ndim == 2:  # Mono image
@@ -1628,6 +1717,11 @@ class BlinkTab(QWidget):
 
             # Ensure the window doesn't resize: prevent layout from stretching
             self.preview_label.setFixedSize(preview_size)  # Fix the size of the preview label
+
+
+
+
+
 
 
     def on_right_click(self, pos):
@@ -1656,6 +1750,33 @@ class BlinkTab(QWidget):
         if file_path and self.image_manager:
             # Load the image into ImageManager
             image, header, bit_depth, is_mono = load_image(file_path)
+
+            # Check for Bayer pattern or RAW image type (For FITS and RAW images)
+            if file_path.lower().endswith(('.fits', '.fit')):
+                # For FITS, check the header for Bayer pattern
+                bayer_pattern = header.get('BAYERPAT', None) if header else None
+                if bayer_pattern:
+                    print(f"Bayer pattern detected in FITS image: {bayer_pattern}")
+                    # Debayer the FITS image based on the Bayer pattern
+                    image = self.debayer_fits(image, bayer_pattern)
+                    is_mono = False  # After debayering, the image is no longer mono
+
+            elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                # For RAW images, debayer directly using the raw image data
+                print(f"Debayering RAW image: {file_path}")
+                # We assume `header` contains the Bayer pattern info from rawpy
+                bayer_pattern = header.get('BAYERPAT', None) if header else None
+                if bayer_pattern:
+                    # Debayer the RAW image based on the Bayer pattern
+                    image = self.debayer_raw(image, bayer_pattern)
+                    is_mono = False  # After debayering, the image is no longer mono
+                else:
+                    # If no Bayer pattern in the header, default to RGGB for debayering
+                    print("No Bayer pattern found in RAW header. Defaulting to RGGB.")
+                    image = self.debayer_raw(image, 'RGGB')
+                    is_mono = False  # After debayering, the image is no longer mono
+
+            # Create metadata for the image
             metadata = {
                 'file_path': file_path,
                 'original_header': header,
@@ -1663,9 +1784,12 @@ class BlinkTab(QWidget):
                 'is_mono': is_mono
             }
 
-            # Add the image to ImageManager (use the current slot)
+            # Add the debayered image to ImageManager (use the current slot)
             self.image_manager.add_image(self.image_manager.current_slot, image, metadata)
             print(f"Image {file_path} pushed to ImageManager for processing.")
+
+
+
 
     def delete_item(self, item):
         """Delete the selected item from the tree, the loaded images list, and the file system."""
@@ -1673,51 +1797,57 @@ class BlinkTab(QWidget):
         file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
         if file_path:
-            try:
-                # Remove the image from image_paths
-                if file_path in self.image_paths:
-                    self.image_paths.remove(file_path)
-                    print(f"Image path {file_path} removed from image_paths.")
-                else:
-                    print(f"Image path {file_path} not found in image_paths.")
+            # Show confirmation dialog before deleting
+            reply = QMessageBox.question(self, 'Confirm Deletion', 
+                f"Are you sure you want to permanently delete the image: {file_name}? This action is irreversible.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
 
-                # Remove the corresponding image from loaded_images
-                matching_image_data = next((item for item in self.loaded_images if item['file_path'] == file_path), None)
-                if matching_image_data:
-                    self.loaded_images.remove(matching_image_data)  # Remove the image-data dictionary
-                    print(f"Image {file_name} removed from loaded_images.")
-                else:
-                    print(f"Image {file_name} not found in loaded_images.")
+            if reply == QMessageBox.Yes:
+                try:
+                    # Remove the image from image_paths
+                    if file_path in self.image_paths:
+                        self.image_paths.remove(file_path)
+                        print(f"Image path {file_path} removed from image_paths.")
+                    else:
+                        print(f"Image path {file_path} not found in image_paths.")
 
-            except ValueError as e:
-                print(f"Error removing image from lists: {e}")
-                QMessageBox.critical(self, "Error", "Error removing image from loaded list.")
+                    # Remove the corresponding image from loaded_images
+                    matching_image_data = next((item for item in self.loaded_images if item['file_path'] == file_path), None)
+                    if matching_image_data:
+                        self.loaded_images.remove(matching_image_data)  # Remove the image-data dictionary
+                        print(f"Image {file_name} removed from loaded_images.")
+                    else:
+                        print(f"Image {file_name} not found in loaded_images.")
 
-            # Now delete the file from the filesystem
-            try:
-                os.remove(file_path)  # Delete the image file
-                print(f"File {file_path} deleted successfully.")
-            except Exception as e:
-                print(f"Failed to delete {file_path}: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
+                except ValueError as e:
+                    print(f"Error removing image from lists: {e}")
+                    QMessageBox.critical(self, "Error", "Error removing image from loaded list.")
 
-            # Clear the existing tree and repopulate it (without the deleted file)
-            self.fileTree.clear()
+                # Now delete the file from the filesystem
+                try:
+                    os.remove(file_path)  # Delete the image file
+                    print(f"File {file_path} deleted successfully.")
+                except Exception as e:
+                    print(f"Failed to delete {file_path}: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
 
-            # Re-add remaining images to the tree (this should exclude the deleted one)
-            for file_path in self.image_paths:
-                file_name = os.path.basename(file_path)
-                item = QTreeWidgetItem([file_name])
-                self.fileTree.addTopLevelItem(item)
+                # Clear the existing tree and repopulate it (without the deleted file)
+                self.fileTree.clear()
 
-            print(f"Image {file_name} and its data have been deleted.")
+                # Re-add remaining images to the tree (this should exclude the deleted one)
+                for file_path in self.image_paths:
+                    file_name = os.path.basename(file_path)
+                    item = QTreeWidgetItem([file_name])
+                    self.fileTree.addTopLevelItem(item)
 
-            # Clear the preview if it was showing the deleted image
-            self.preview_label.clear()  # Clear the preview label
-            self.preview_label.setText('No image selected.')  # Optional: Set a default message
+                print(f"Image {file_name} and its data have been deleted.")
 
-            # Reset the current image as the deleted one should no longer be shown
-            self.current_image = None
+                # Clear the preview if it was showing the deleted image
+                self.preview_label.clear()  # Clear the preview label
+                self.preview_label.setText('No image selected.')  # Optional: Set a default message
+
+                # Reset the current image as the deleted one should no longer be shown
+                self.current_image = None
 
 
 
@@ -1734,10 +1864,14 @@ class BlinkTab(QWidget):
         img_array = (img_array * 255).astype(np.uint8)  # Ensure image is in uint8
         h, w = img_array.shape[:2]
 
+        # Convert the image data to a byte buffer
+        img_data = img_array.tobytes()  # This converts the image to a byte buffer
+
         if img_array.ndim == 3:  # RGB Image
-            return QImage(img_array.data, w, h, 3 * w, QImage.Format_RGB888)
+            return QImage(img_data, w, h, 3 * w, QImage.Format_RGB888)
         else:  # Grayscale Image
-            return QImage(img_array.data, w, h, w, QImage.Format_Grayscale8)
+            return QImage(img_data, w, h, w, QImage.Format_Grayscale8)
+
 
 
 class CosmicClarityTab(QWidget):
