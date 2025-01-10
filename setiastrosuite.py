@@ -166,7 +166,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.0.3')
+        self.setWindowTitle('Seti Astro\'s Suite V2.1')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -687,7 +687,7 @@ class XISFViewer(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_widget.setMinimumSize(600, 600)
         
-        self.load_button = QPushButton("Load XISF File")
+        self.load_button = QPushButton("Load Image File")
         self.load_button.clicked.connect(self.load_xisf)
         left_layout.addWidget(self.load_button)
 
@@ -732,7 +732,7 @@ class XISFViewer(QWidget):
         left_layout.addLayout(save_layout)
 
         # Add a Batch Process button
-        self.batch_process_button = QPushButton("Batch Process")
+        self.batch_process_button = QPushButton("XISF Converter Batch Process")
         self.batch_process_button.clicked.connect(self.open_batch_process_window)
         left_layout.addWidget(self.batch_process_button)
 
@@ -782,6 +782,10 @@ class XISFViewer(QWidget):
         """
         if image is None:
             return
+
+        # Clear the previous content before updating
+        self.image_label.clear()
+        self.metadata_tree.clear()  # Clear previous metadata display
 
         # Ensure the image is a numpy array if it is not already
         if not isinstance(image, np.ndarray):
@@ -858,60 +862,184 @@ class XISFViewer(QWidget):
     def load_xisf(self):
         file_name, _ = QFileDialog.getOpenFileName(
             self, 
-            "Open XISF File", 
+            "Open Image File", 
             "", 
-            "XISF Files (*.xisf)"
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
-        
+
         if file_name:
             try:
-                # Load the XISF file and image data
-                xisf = XISF(file_name)
-                im_data = xisf.read_image(0)  # Image data from XISF
+                # Use the global load_image function to load the image and its metadata
+                image, header, bit_depth, is_mono = load_image(file_name)
                 
-                # Convert the image data to a numpy array, if not already
-                if not isinstance(im_data, np.ndarray):
-                    im_data = np.array(im_data)  # Convert to numpy array
+                # Apply debayering if needed (for non-mono images)
+                if is_mono:  # Only debayer if the image is not mono
+                    image, is_mono = self.debayer_image(image, file_name, header, is_mono)
 
-                # If the image is mono (single channel), collapse it to a 2D array (height, width)
-                if im_data.ndim == 3 and im_data.shape[2] == 1:
-                    im_data = np.squeeze(im_data, axis=2)  # Collapse the third dimension
-                
-                # Set image metadata
-                self.file_meta = xisf.get_file_metadata()
-                self.image_meta = xisf.get_images_metadata()[0]
-                
-                # Display metadata
-                self.display_metadata(file_name)
-
-                # Determine if the image is mono or RGB
-                self.is_mono = im_data.shape[2] == 1 if len(im_data.shape) == 3 else True
-                self.bit_depth = str(im_data.dtype)
-                self.image_data = im_data
+                # Check if the image is mono or RGB
+                self.is_mono = is_mono
+                self.bit_depth = bit_depth
+                self.image_data = image
 
                 # Reset scale factor when a new image is loaded
                 self.scale_factor = 0.25
 
-                # Display image with scaling and normalization
+                # If autostretch is enabled, apply stretch immediately after loading
+                if self.autostretch_enabled:
+                    self.apply_autostretch()
+
+                # Display the image with scaling and normalization
+                
                 self.display_image()
 
-                # Push the loaded image to ImageManager
+                # Set image metadata (using header from load_image)
+                self.file_meta = header  # Use the loaded header for metadata
+                self.image_meta = None  # No separate image metadata for XISF in this example
+                
+                # Display metadata (using the global display_metadata method for appropriate file types)
+                self.display_metadata(file_name)
+
+                # Push the loaded image to ImageManager (only if image_manager exists)
                 if hasattr(self, 'image_manager'):
                     metadata = {
                         'file_path': file_name,
                         'is_mono': self.is_mono,
                         'bit_depth': self.bit_depth,
-                        'source': 'XISF'
+                        'source': 'XISF'  # Or specify 'FITS' if applicable
                     }
                     # Push the numpy array to ImageManager (not memoryview)
                     self.image_manager.update_image(np.array(self.image_data), metadata, slot=0)  # Add image to slot 0 in ImageManager
-                    
-                # Enable save button
+
+                # Enable save button if the image is loaded successfully
                 self.save_button.setEnabled(True)
-                
+
             except Exception as e:
                 self.image_label.setText(f"Failed to load XISF file: {e}")
 
+
+    def debayer_image(self, image, file_path, header, is_mono):
+        """Check if image is OSC (One-Shot Color) and debayer if required."""
+        # Check for OSC (Bayer pattern in FITS or RAW data)
+        if file_path.lower().endswith(('.fits', '.fit')):
+            # Check if the FITS header contains BAYERPAT (Bayer pattern)
+            bayer_pattern = header.get('BAYERPAT', None)
+            if bayer_pattern:
+                print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
+                # Apply debayering logic for FITS
+                is_mono = False
+                image = self.debayer_fits(image, bayer_pattern)
+
+            else:
+                print(f"No Bayer pattern found in FITS header: {file_path}")
+        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            # If it's RAW (Bayer pattern detected), debayer it
+            print(f"Debayering RAW image: {file_path}")
+            # Apply debayering to the RAW image (assuming debayer_raw exists)
+            is_mono = False
+            image = self.debayer_raw(image)
+        
+        return image, is_mono
+
+    def debayer_fits(self, image_data, bayer_pattern):
+        """Debayer a FITS image using a basic Bayer pattern (2x2)."""
+        if bayer_pattern == 'RGGB':
+            # RGGB Bayer pattern
+            r = image_data[::2, ::2]  # Red
+            g1 = image_data[::2, 1::2]  # Green 1
+            g2 = image_data[1::2, ::2]  # Green 2
+            b = image_data[1::2, 1::2]  # Blue
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'BGGR':
+            # BGGR Bayer pattern
+            b = image_data[::2, ::2]  # Blue
+            g1 = image_data[::2, 1::2]  # Green 1
+            g2 = image_data[1::2, ::2]  # Green 2
+            r = image_data[1::2, 1::2]  # Red
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GRBG':
+            # GRBG Bayer pattern
+            g1 = image_data[::2, ::2]  # Green 1
+            r = image_data[::2, 1::2]  # Red
+            b = image_data[1::2, ::2]  # Blue
+            g2 = image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GBRG':
+            # GBRG Bayer pattern
+            g1 = image_data[::2, ::2]  # Green 1
+            b = image_data[::2, 1::2]  # Blue
+            r = image_data[1::2, ::2]  # Red
+            g2 = image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        else:
+            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+
+
+
+
+    def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
+        """Debayer a RAW image based on the Bayer pattern."""
+        if bayer_pattern == 'RGGB':
+            # RGGB Bayer pattern (Debayering logic example)
+            r = raw_image_data[::2, ::2]  # Red
+            g1 = raw_image_data[::2, 1::2]  # Green 1
+            g2 = raw_image_data[1::2, ::2]  # Green 2
+            b = raw_image_data[1::2, 1::2]  # Blue
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+        
+        elif bayer_pattern == 'BGGR':
+            # BGGR Bayer pattern
+            b = raw_image_data[::2, ::2]  # Blue
+            g1 = raw_image_data[::2, 1::2]  # Green 1
+            g2 = raw_image_data[1::2, ::2]  # Green 2
+            r = raw_image_data[1::2, 1::2]  # Red
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GRBG':
+            # GRBG Bayer pattern
+            g1 = raw_image_data[::2, ::2]  # Green 1
+            r = raw_image_data[::2, 1::2]  # Red
+            b = raw_image_data[1::2, ::2]  # Blue
+            g2 = raw_image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GBRG':
+            # GBRG Bayer pattern
+            g1 = raw_image_data[::2, ::2]  # Green 1
+            b = raw_image_data[::2, 1::2]  # Blue
+            r = raw_image_data[1::2, ::2]  # Red
+            g2 = raw_image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        else:
+            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
 
 
     def display_image(self):
@@ -1036,52 +1164,114 @@ class XISFViewer(QWidget):
 
     def display_metadata(self, file_path):
         """
-        Load and display metadata from the given XISF file, if the file is an XISF file.
+        Load and display metadata from the given file if the file is an XISF or FITS file.
+        For other file types, simply skip without failing.
         """
-        if not file_path.lower().endswith('.xisf'):
-            print("The file is not an XISF file. Skipping metadata loading.")
-            return  # Skip the metadata loading for non-XISF files
+        if file_path.lower().endswith('.xisf'):
+            print("Loading metadata from XISF file.")
+            # XISF handling (as before)
+            try:
+                # Load XISF file for metadata
+                xisf = XISF(file_path)
+                file_meta = xisf.get_file_metadata()
+                image_meta = xisf.get_images_metadata()[0]
 
-        try:
-            # Load XISF file for metadata
-            xisf = XISF(file_path)
-            file_meta = xisf.get_file_metadata()
-            image_meta = xisf.get_images_metadata()[0]
+                self.metadata_tree.clear()  # Clear previous metadata
+                
+                # Add File Metadata
+                file_meta_item = QTreeWidgetItem(["File Metadata"])
+                self.metadata_tree.addTopLevelItem(file_meta_item)
+                for key, value in file_meta.items():
+                    item = QTreeWidgetItem([key, str(value.get('value', ''))])  # Ensure 'value' exists
+                    file_meta_item.addChild(item)
 
-            self.metadata_tree.clear()  # Clear previous metadata
-            
-            # Add File Metadata
-            file_meta_item = QTreeWidgetItem(["File Metadata"])
-            self.metadata_tree.addTopLevelItem(file_meta_item)
-            for key, value in file_meta.items():
-                item = QTreeWidgetItem([key, str(value.get('value', ''))])  # Ensure 'value' exists
-                file_meta_item.addChild(item)
+                # Add Image Metadata
+                image_meta_item = QTreeWidgetItem(["Image Metadata"])
+                self.metadata_tree.addTopLevelItem(image_meta_item)
+                for key, value in image_meta.items():
+                    if key == 'FITSKeywords':
+                        fits_item = QTreeWidgetItem(["FITS Keywords"])
+                        image_meta_item.addChild(fits_item)
+                        for kw, kw_values in value.items():
+                            for kw_value in kw_values:
+                                item = QTreeWidgetItem([kw, str(kw_value.get("value", ''))])
+                                fits_item.addChild(item)
+                    elif key == 'XISFProperties':
+                        props_item = QTreeWidgetItem(["XISF Properties"])
+                        image_meta_item.addChild(props_item)
+                        for prop_name, prop in value.items():
+                            item = QTreeWidgetItem([prop_name, str(prop.get("value", ''))])
+                            props_item.addChild(item)
+                    else:
+                        item = QTreeWidgetItem([key, str(value)])
+                        image_meta_item.addChild(item)
 
-            # Add Image Metadata
-            image_meta_item = QTreeWidgetItem(["Image Metadata"])
-            self.metadata_tree.addTopLevelItem(image_meta_item)
-            for key, value in image_meta.items():
-                if key == 'FITSKeywords':
-                    fits_item = QTreeWidgetItem(["FITS Keywords"])
-                    image_meta_item.addChild(fits_item)
-                    for kw, kw_values in value.items():
-                        for kw_value in kw_values:
-                            item = QTreeWidgetItem([kw, str(kw_value.get("value", ''))])
-                            fits_item.addChild(item)
-                elif key == 'XISFProperties':
-                    props_item = QTreeWidgetItem(["XISF Properties"])
-                    image_meta_item.addChild(props_item)
-                    for prop_name, prop in value.items():
-                        item = QTreeWidgetItem([prop_name, str(prop.get("value", ''))])
-                        props_item.addChild(item)
-                else:
-                    item = QTreeWidgetItem([key, str(value)])
-                    image_meta_item.addChild(item)
+                self.metadata_tree.expandAll()  # Expand all metadata items
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load XISF metadata: {e}")
 
-            self.metadata_tree.expandAll()  # Expand all metadata items
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load metadata: {e}")
+        elif file_path.lower().endswith(('.fits', '.fit')):
+            print("Loading metadata from FITS file.")
+            # FITS handling
+            try:
+                # Open the FITS file using Astropy
+                hdul = fits.open(file_path)
+                header = hdul[0].header  # Extract header from primary HDU
+                hdul.close()
 
+                self.metadata_tree.clear()  # Clear previous metadata
+
+                # Add FITS Header Metadata
+                fits_header_item = QTreeWidgetItem(["FITS Header"])
+                self.metadata_tree.addTopLevelItem(fits_header_item)
+
+                # Loop through the header and add each keyword
+                for keyword, value in header.items():
+                    item = QTreeWidgetItem([keyword, str(value)])
+                    fits_header_item.addChild(item)
+
+                self.metadata_tree.expandAll()  # Expand all metadata items
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load FITS metadata: {e}")
+
+        # Handle Camera Raw files (e.g., .cr2, .nef, .arw, .dng)
+        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            print("Loading metadata from Camera RAW file.")
+            try:
+                # Use pyexiv2 to read RAW file metadata
+                raw_meta_item = QTreeWidgetItem(["Camera RAW Metadata"])
+                self.metadata_tree.addTopLevelItem(raw_meta_item)
+
+                # Handle RAW file metadata using rawpy
+                with rawpy.imread(file_path) as raw:
+                    camera_info_item = QTreeWidgetItem(["Camera Info"])
+                    raw_meta_item.addChild(camera_info_item)
+
+                    # Camera-specific info (e.g., white balance, camera model)
+
+                    camera_info_item.addChild(QTreeWidgetItem(["White Balance", str(raw.camera_whitebalance)]))
+
+                    # Additional rawpy metadata
+                    if raw.camera_white_level_per_channel is not None:
+                        white_level_item = QTreeWidgetItem(["Camera White Level"])
+                        raw_meta_item.addChild(white_level_item)
+                        for i, level in enumerate(raw.camera_white_level_per_channel):
+                            white_level_item.addChild(QTreeWidgetItem([f"Channel {i+1}", str(level)]))
+
+                    # Add tone curve data if available
+                    if raw.tone_curve is not None:
+                        tone_curve_item = QTreeWidgetItem(["Tone Curve"])
+                        raw_meta_item.addChild(tone_curve_item)
+                        tone_curve_item.addChild(QTreeWidgetItem(["Tone Curve Length", str(len(raw.tone_curve))]))
+
+                self.metadata_tree.expandAll()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load Camera RAW metadata: {e}")
+
+
+        else:
+            # If the file is not a FITS or XISF file, simply return without displaying metadata
+            print(f"Skipping metadata for unsupported file type: {file_path}")
 
 
     def save_as(self):
