@@ -166,7 +166,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.0.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.0.3')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -1547,6 +1547,15 @@ class BlinkTab(QWidget):
         self.fileTree.customContextMenuRequested.connect(self.on_right_click)
         left_layout.addWidget(self.fileTree)
 
+        # Add progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setRange(0, 100)
+        left_layout.addWidget(self.progress_bar)
+
+        # Add loading message label
+        self.loading_label = QLabel("Loading images...", self)
+        left_layout.addWidget(self.loading_label)
+
         left_widget.setFixedWidth(300)
 
         # Right Column for Image Preview
@@ -1583,19 +1592,43 @@ class BlinkTab(QWidget):
 
             # Load the images into memory (storing both file path and image data)
             self.loaded_images = []
-            for file_path in file_paths:
+            total_files = len(file_paths)
+
+            for index, file_path in enumerate(file_paths):
                 image, header, bit_depth, is_mono = load_image(file_path)
-                if is_mono:  # Check if image is color (non-mono)
-                    image = self.debayer_image(image, file_path, header)  # Debayer the image if needed
+
+                # Debayer the image if needed (for non-mono images)
+                if is_mono:
+                    image = self.debayer_image(image, file_path, header)
+
+                # Stretch the image now while loading it
+                target_median = 0.25
+                if image.ndim == 2:  # Mono image
+                    stretched_image = stretch_mono_image(image, target_median)
+                else:  # Color image
+                    stretched_image = stretch_color_image(image, target_median, linked=False)
+
+                # Append the stretched image data
                 self.loaded_images.append({
                     'file_path': file_path,
-                    'image_data': image,
+                    'image_data': stretched_image,
                     'header': header,
                     'bit_depth': bit_depth,
                     'is_mono': is_mono
                 })
 
+                # Update progress bar
+                progress = int((index + 1) / total_files * 100)
+                self.progress_bar.setValue(progress)
+                QApplication.processEvents()  # Ensure the UI updates in real-time
+
             print(f"Loaded {len(self.loaded_images)} images into memory.")
+            self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
+
+            # Optionally, reset the progress bar and loading message when done
+            self.progress_bar.setValue(100)
+            self.loading_label.setText("Loading complete.")
+
 
 
     def debayer_image(self, image, file_path, header):
@@ -1621,7 +1654,7 @@ class BlinkTab(QWidget):
     def debayer_fits(self, image_data, bayer_pattern):
         """Debayer a FITS image using a basic Bayer pattern (2x2)."""
         if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern (Debayering logic example)
+            # RGGB Bayer pattern
             r = image_data[::2, ::2]  # Red
             g1 = image_data[::2, 1::2]  # Green 1
             g2 = image_data[1::2, ::2]  # Green 2
@@ -1630,8 +1663,44 @@ class BlinkTab(QWidget):
             # Average green channels
             g = (g1 + g2) / 2
             return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'BGGR':
+            # BGGR Bayer pattern
+            b = image_data[::2, ::2]  # Blue
+            g1 = image_data[::2, 1::2]  # Green 1
+            g2 = image_data[1::2, ::2]  # Green 2
+            r = image_data[1::2, 1::2]  # Red
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GRBG':
+            # GRBG Bayer pattern
+            g1 = image_data[::2, ::2]  # Green 1
+            r = image_data[::2, 1::2]  # Red
+            b = image_data[1::2, ::2]  # Blue
+            g2 = image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
+        elif bayer_pattern == 'GBRG':
+            # GBRG Bayer pattern
+            g1 = image_data[::2, ::2]  # Green 1
+            b = image_data[::2, 1::2]  # Blue
+            r = image_data[1::2, ::2]  # Red
+            g2 = image_data[1::2, 1::2]  # Green 2
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
+
         else:
             raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+
+
 
 
     def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
@@ -1695,15 +1764,8 @@ class BlinkTab(QWidget):
             index = self.image_paths.index(file_path)
 
             # Retrieve the corresponding image data and header from the loaded images
-            image_data = self.loaded_images[index]['image_data']
-            
-            # Apply auto-stretch (assumed mono or color)
-            target_median = 0.25
-            if image_data.ndim == 2:  # Mono image
-                stretched_image = stretch_mono_image(image_data, target_median)
-            else:  # Color image
-                stretched_image = stretch_color_image(image_data, target_median, linked=False)
-
+            stretched_image = self.loaded_images[index]['image_data']
+  
             # Convert to QImage and display
             qimage = self.convert_to_qimage(stretched_image)
             pixmap = QPixmap.fromImage(qimage)
