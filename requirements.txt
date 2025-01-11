@@ -1,0 +1,16 @@
+numpy
+pandas
+opencv-python
+Pillow
+astropy
+astroquery
+tifffile
+pytz
+scipy
+rawpy
+requests
+pyqt5
+lz4
+zstandard
+xisf
+base64
