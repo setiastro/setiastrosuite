@@ -12,5 +12,3 @@ requests
 pyqt5
 lz4
 zstandard
-xisf
-base64
