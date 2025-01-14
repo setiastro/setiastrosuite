@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.2.1')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -15689,7 +15689,7 @@ class CalculationThread(QThread):
             # Emit lunar phase data
             self.lunar_phase_calculated.emit(phase_percentage, phase_image_name)
 
-            # Determine the path to celestial_catalog.csv, compatible with both PyInstaller and normal environments
+            # Determine the path to celestial_catalog.csv
             catalog_file = os.path.join(
                 getattr(sys, '_MEIPASS', os.path.dirname(__file__)), "celestial_catalog.csv"
             )
@@ -15705,23 +15705,12 @@ class CalculationThread(QThread):
             df = df[df['Catalog'].isin(self.catalog_filters)]
             df.dropna(subset=['RA', 'Dec'], inplace=True)
 
-            # Filter objects by RA within +/- 6 hours of LST
-            ra_threshold = 6  # Hours
-            lst_ra_lower = (lst.hour - ra_threshold) % 24
-            lst_ra_upper = (lst.hour + ra_threshold) % 24
-
-            if lst_ra_lower < lst_ra_upper:
-                df = df[(df['RA'] >= lst_ra_lower) & (df['RA'] <= lst_ra_upper)]
-            else:
-                df = df[(df['RA'] >= lst_ra_lower) | (df['RA'] <= lst_ra_upper)]
-
             # Check altitude and calculate additional metrics
             altaz_frame = AltAz(obstime=astropy_time, location=location)
             altitudes, azimuths, minutes_to_transit, degrees_from_moon = [], [], [], []
+            before_or_after = []
 
             moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
-
-            before_or_after = []  # Initialize the list for "Before/After Transit"
 
             for _, row in df.iterrows():
                 sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
@@ -15750,9 +15739,14 @@ class CalculationThread(QThread):
             df['Before/After Transit'] = before_or_after
             df['Degrees from Moon'] = degrees_from_moon
 
+            # Apply altitude filter
+            df = df[df['Altitude'] >= self.min_altitude]
 
-            # Filter by minimum altitude and limit results
-            df = df[df['Altitude'] >= self.min_altitude].head(self.object_limit)
+            # Sort by "Minutes to Transit"
+            df = df.sort_values(by='Minutes to Transit')
+
+            # Limit the results to the object_limit
+            df = df.head(self.object_limit)
 
             self.calculation_complete.emit(df, "Calculation complete.")
         except Exception as e:
