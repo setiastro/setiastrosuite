@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.2.1')
+        self.setWindowTitle('Seti Astro\'s Suite V2.2.3')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -381,26 +381,86 @@ class AstroEditingSuite(QMainWindow):
     def save_image(self):
         """Save the current image to a selected path."""
         if self.image_manager.image is not None:
-            save_file, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Images (*.png *.tif *.tiff *.fits);;All Files (*)")
+            save_file, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Images (*.png *.tif *.tiff *.fits *.fit);;All Files (*)")
             
             if save_file:
                 # Prompt the user for bit depth
-                bit_depth, ok = QInputDialog.getItem(self, "Select Bit Depth", "Choose bit depth for saving:",
-                                                    ["8-bit", "16-bit", "32-bit floating point"], 0, False)
+                bit_depth, ok = QInputDialog.getItem(
+                    self,
+                    "Select Bit Depth",
+                    "Choose bit depth for saving:",
+                    ["16-bit", "32-bit floating point"],
+                    0,
+                    False
+                )
                 if ok:
-                    # Get the original format based on the file extension
-                    original_format = save_file.split('.')[-1].lower()
+                    # Determine the user-selected format from the filename
+                    _, ext = os.path.splitext(save_file)
+                    selected_format = ext.lower().strip('.')
+
+                    # Validate the selected format
+                    valid_formats = ['png', 'tif', 'tiff', 'fits', 'fit']
+                    if selected_format not in valid_formats:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            f"Unsupported file format: {selected_format}. Supported formats are: {', '.join(valid_formats)}"
+                        )
+                        return
 
                     try:
-                        # Call the global save_image function
-                        save_image(self.image_manager.image, save_file, original_format, bit_depth=bit_depth)
-                        print(f"Image saved to {save_file}.")
+                        # Retrieve the image and metadata
+                        image_data = self.image_manager.image
+                        metadata = self.image_manager._metadata[self.image_manager.current_slot]
+                        original_header = metadata.get('original_header', None)
+                        is_mono = metadata.get('is_mono', False)
+
+                        # Create a minimal header if the original header is missing
+                        if original_header is None and selected_format in ['fits', 'fit']:
+                            print("Creating a minimal FITS header for the data...")
+                            original_header = self.create_minimal_fits_header(image_data, is_mono)
+
+                        # Pass the image to the global save_image function
+                        save_image(
+                            img_array=image_data,
+                            filename=save_file,
+                            original_format=selected_format,
+                            bit_depth=bit_depth,
+                            original_header=original_header,
+                            is_mono=is_mono
+                        )
+                        print(f"Image successfully saved to {save_file}.")
+                        self.statusBar.showMessage(f"Image saved to: {save_file}", 5000)
                     except Exception as e:
                         QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+                        print(f"Error saving image: {e}")
         else:
             QMessageBox.warning(self, "Warning", "No image loaded.")
 
 
+
+
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
+    
     def undo_image(self):
         """Undo the last action."""
         if self.image_manager.can_undo():
@@ -2875,16 +2935,22 @@ class CosmicClarityTab(QWidget):
         self.update_image_display()  # Redraw with autostretch if enabled
 
     def save_input_image(self, file_path):
-        """Save the image directly to the specified input path for Cosmic Clarity without prompting."""
-        if self.image is None:
-            print("No image to save.")
-            return
-        
-        # Get the file extension as original_format
-        original_format = os.path.splitext(self.loaded_image_path)[-1].lstrip('.').lower()  # E.g., 'tiff', 'png', etc.
-        
-        # Call save_image with the correct format
-        save_image(self.image, file_path, original_format, self.bit_depth, self.original_header, self.is_mono)
+        """Save the current image to the specified path in TIF format."""
+        if self.image is not None:
+            try:
+                from tifffile import imwrite
+                # Force saving as `.tif` format
+                if not file_path.endswith(".tif"):
+                    file_path += ".tif"
+                imwrite(file_path, self.image.astype(np.float32))
+                print(f"Image saved as TIFF to {file_path}")  # Debug print
+            except Exception as e:
+                print(f"Error saving input image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to save input image:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "No image to save.")
+
+
 
 
     def update_ui_for_mode(self):
@@ -2976,20 +3042,26 @@ class CosmicClarityTab(QWidget):
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
-        input_extension = os.path.splitext(self.loaded_image_path)[-1].lower() 
-        input_file_path = os.path.join(input_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{input_extension}")
+
+        # Construct the base filename from the loaded image path
+        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
-        self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
-
-        # After defining input_file_path:
+        input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
+        self.save_input_image(input_file_path)  # Save as `.tif`
         self.current_input_file_path = input_file_path
+
+        # Construct the expected output file glob
+        output_file_glob = os.path.join(output_folder, f"{base_filename}{output_suffix}.tif")
+        print(f"Waiting for output file matching: {output_file_glob}")  # Debug print
 
 
 
         cmd = self.build_command_args(exe_name, mode)
         exe_path = cmd[0]
         args = cmd[1:]  # Separate the executable from its arguments
+        print(f"Running command: {exe_path} {' '.join(args)}")  # Debug print
 
         # Use QProcess instead of subprocess
         self.process_q = QProcess(self)
@@ -3009,9 +3081,6 @@ class CosmicClarityTab(QWidget):
             return
 
         # Set up file waiting worker and wait dialog as before
-        output_file_glob = os.path.join(
-            output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*"
-        )
         self.wait_thread = WaitForFileWorker(output_file_glob, timeout=3000)
         self.wait_thread.fileFound.connect(self.on_file_found)
         self.wait_thread.error.connect(self.on_file_error)
@@ -3027,6 +3096,7 @@ class CosmicClarityTab(QWidget):
         # Once the dialog is closed (either by file found, error, or cancellation), restore autostretch if needed
         if was_autostretch_enabled:
             self.auto_stretch_button.setChecked(True)
+
 
 
     ########################################
@@ -3084,7 +3154,7 @@ class CosmicClarityTab(QWidget):
             # You can handle any cleanup here if needed
 
     def on_file_found(self, output_file_path):
-
+        print(f"File found: {output_file_path}")
         self.wait_dialog.close()
         self.wait_thread = None
 
@@ -3725,7 +3795,6 @@ class WaitForFileWorker(QThread):
         if self._running:
             self.error.emit("Output file not found within timeout.")
         else:
-            # Thread stopped by user
             self.cancelled.emit()
 
     def stop(self):
@@ -9348,60 +9417,114 @@ class PerfectPalettePickerTab(QWidget):
 
     def save_image(self):
         """
-        Saves the combined image to disk.
+        Save the current combined image to a selected path.
         """
         if self.combined_image is not None:
-            options = QFileDialog.Options()
-            save_filename, _ = QFileDialog.getSaveFileName(
+            save_file, _ = QFileDialog.getSaveFileName(
                 self,
-                "Save Combined Image",
+                "Save As",
                 "",
-                "Images (*.tiff *.tif *.png *.fit *.fits);;All Files (*)",
-                options=options
+                "Images (*.png *.tif *.tiff *.fits *.fit);;All Files (*)"
             )
-            if save_filename:
-                try:
-                    # Determine the format from the filename
-                    _, ext = os.path.splitext(save_filename)
-                    ext = ext.lower()
-                    if ext in ['.tiff', '.tif']:
-                        # Save as TIFF
-                        # Implement actual saving logic using Seti Astro Suite's APIs
-                        # Example: save_image_function(self.combined_image, save_filename, format='TIFF')
-                        from PIL import Image
-                        img = Image.fromarray((self.combined_image * 255).astype(np.uint8))
-                        img.save(save_filename, format='TIFF')
-                        print(f"Saving image as TIFF to {save_filename}")
-                    elif ext in ['.png']:
-                        # Save as PNG
-                        q_image = self.numpy_to_qimage(self.combined_image)
-                        q_image.save(save_filename, "PNG")
-                        print(f"Saving image as PNG to {save_filename}")
-                    elif ext in ['.fit', '.fits']:
-                        # Save as FITS
-                        # Implement actual saving logic using Seti Astro Suite's APIs
-                        # Example: save_fits(self.combined_image, save_filename)
-                        # Using astropy for demonstration
-                        from astropy.io import fits
-                        hdu = fits.PrimaryHDU(self.combined_image)
-                        hdul = fits.HDUList([hdu])
-                        hdul.writeto(save_filename, overwrite=True)
-                        print(f"Saving image as FITS to {save_filename}")
-                    else:
-                        # Default to PNG
-                        q_image = self.numpy_to_qimage(self.combined_image)
-                        q_image.save(save_filename, "PNG")
-                        print(f"Saving image as PNG to {save_filename} by default.")
 
-                    self.status_label.setText(f"Image saved as: {save_filename}")
-                except Exception as e:
-                    print(f"Error saving image: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to save image:\n{e}")
+            if save_file:
+                # Prompt the user for bit depth
+                bit_depth, ok = QInputDialog.getItem(
+                    self,
+                    "Select Bit Depth",
+                    "Choose bit depth for saving:",
+                    ["16-bit", "32-bit floating point"],
+                    0,
+                    False
+                )
+                if ok:
+                    # Determine the user-selected format from the filename
+                    _, ext = os.path.splitext(save_file)
+                    selected_format = ext.lower().strip('.')
+
+                    # Validate the selected format
+                    valid_formats = ['png', 'tif', 'tiff', 'fits', 'fit']
+                    if selected_format not in valid_formats:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            f"Unsupported file format: {selected_format}. Supported formats are: {', '.join(valid_formats)}"
+                        )
+                        return
+
+                    # Ensure correct data ordering for FITS format
+                    final_image = self.combined_image
+                    if selected_format in ['fits', 'fit']:
+                        if self.combined_image.ndim == 3:  # RGB image
+                            # Transpose to (channels, height, width)
+                            final_image = np.transpose(self.combined_image, (2, 0, 1))
+                            print(f"Transposed for FITS: {final_image.shape}")
+                        elif self.combined_image.ndim == 2:  # Mono image
+                            print(f"Mono image, no transposition needed: {final_image.shape}")
+                        else:
+                            QMessageBox.critical(
+                                self,
+                                "Error",
+                                "Unsupported image dimensions for FITS saving."
+                            )
+                            return
+
+                    # Check if any loaded image file paths have the `.xisf` extension
+                    loaded_file_paths = [
+                        self.ha_filename, self.oiii_filename,
+                        self.sii_filename, self.osc_filename
+                    ]
+                    contains_xisf = any(
+                        file_path.lower().endswith('.xisf') for file_path in loaded_file_paths if file_path
+                    )
+
+                    # Create a minimal header if any loaded image is XISF
+                    sanitized_header = self.original_header if not contains_xisf else self.create_minimal_fits_header(final_image)
+
+                    # Pass the correctly ordered image to the global save_image function
+                    try:
+                        save_image(
+                            img_array=final_image,
+                            filename=save_file,
+                            original_format=selected_format,
+                            bit_depth=bit_depth,
+                            original_header=sanitized_header,  # Pass minimal or original header
+                            is_mono=self.is_mono
+                        )
+                        print(f"Image successfully saved to {save_file}.")
+                        self.status_label.setText(f"Image saved to: {save_file}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+                        print(f"Error saving image: {e}")
             else:
                 self.status_label.setText("Save canceled.")
         else:
             QMessageBox.warning(self, "Warning", "No combined image to save.")
             self.status_label.setText("No combined image to save.")
+
+
+    def create_minimal_fits_header(self, img_array):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if self.is_mono else 3
+        header['NAXIS1'] = self.combined_image.shape[1]  # Image width
+        header['NAXIS2'] = self.combined_image.shape[0]  # Image height
+        if not self.is_mono:
+            header['NAXIS3'] = self.combined_image.shape[2]  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header['COMMENT'] = "Minimal FITS header generated by Perfect Palette Picker."
+
+        return header
+
+
+
 
     def zoom_in(self):
         """
@@ -9486,9 +9609,22 @@ class PerfectPalettePickerTab(QWidget):
         Pushes the final combined image to the ImageManager for further processing.
         """
         if self.combined_image is not None:
+            # Check if any of the loaded file paths have an XISF extension
+            loaded_files = [self.ha_filename, self.oiii_filename, self.sii_filename, self.osc_filename]
+            was_xisf = any(file_path and file_path.lower().endswith('.xisf') for file_path in loaded_files)
+
+            # Generate a minimal FITS header if the original header is missing or if the format was XISF
+            sanitized_header = self.original_header
+            if was_xisf or sanitized_header is None:
+                sanitized_header = self.create_minimal_fits_header(self.combined_image)
+
+            # Ensure a valid file path exists
+            file_path = self.ha_filename if self.ha_image is not None else "Combined Image"
+
+            # Create metadata for the combined image
             metadata = {
-                'file_path': self.ha_filename if self.ha_image is not None else "Combined Image",
-                'original_header': self.original_header if hasattr(self, 'original_header') else {},
+                'file_path': file_path,
+                'original_header': sanitized_header,  # Use the sanitized or minimal header
                 'bit_depth': self.bit_depth if hasattr(self, 'bit_depth') else "Unknown",
                 'is_mono': self.is_mono if hasattr(self, 'is_mono') else False,
                 'processing_parameters': {
@@ -9504,11 +9640,13 @@ class PerfectPalettePickerTab(QWidget):
                 }
             }
 
-            # Update ImageManager with the new combined image
+            # Push the image and metadata into the ImageManager
             if self.image_manager:
                 try:
-                    self.image_manager.update_image(updated_image=self.combined_image, metadata=metadata)
-                    print("PalettePicker: Final palette image stored in ImageManager.")
+                    self.image_manager.update_image(
+                        updated_image=self.combined_image
+                    )
+                    print(f"Image pushed to ImageManager with metadata: {metadata}")
                     self.status_label.setText("Final palette image pushed for further processing.")
                 except Exception as e:
                     print(f"Error updating ImageManager: {e}")
@@ -9519,6 +9657,7 @@ class PerfectPalettePickerTab(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "No final palette image to push.")
             self.status_label.setText("No final palette image to push.")
+
 
     def mousePressEvent(self, event):
         """
