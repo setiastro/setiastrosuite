@@ -59,7 +59,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, 
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
-    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
+    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QAbstractItemView,
     QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton, QStatusBar
 )
 from PyQt5.QtGui import (
@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.2.3')
+        self.setWindowTitle('Seti Astro\'s Suite V2.3')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -1774,11 +1774,17 @@ class BlinkTab(QWidget):
         self.loaded_images = []  # Store the image objects (as numpy arrays)
         self.image_labels = []  # Store corresponding file names for the TreeWidget
         self.image_manager = image_manager  # Reference to ImageManager
+        self.zoom_level = 0.5  # Default zoom level
+        self.dragging = False  # Track whether the mouse is dragging
+        self.last_mouse_pos = None  # Store the last mouse position
 
         self.initUI()
 
     def initUI(self):
         main_layout = QHBoxLayout(self)
+
+        # Create a QSplitter to allow resizing between left and right panels
+        splitter = QSplitter(Qt.Horizontal, self)
 
         # Left Column for the file loading and TreeView
         left_widget = QWidget(self)
@@ -1789,10 +1795,40 @@ class BlinkTab(QWidget):
         self.fileButton.clicked.connect(self.openFileDialog)
         left_layout.addWidget(self.fileButton)
 
+        # Playback controls (left arrow, play, pause, right arrow)
+        playback_controls_layout = QHBoxLayout()
+
+        # Left Arrow Button
+        self.left_arrow_button = QPushButton(self)
+        self.left_arrow_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.left_arrow_button.clicked.connect(self.previous_item)
+        playback_controls_layout.addWidget(self.left_arrow_button)
+
+        # Play Button
+        self.play_button = QPushButton(self)
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.play_button.clicked.connect(self.start_playback)
+        playback_controls_layout.addWidget(self.play_button)
+
+        # Pause Button
+        self.pause_button = QPushButton(self)
+        self.pause_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.pause_button.clicked.connect(self.stop_playback)
+        playback_controls_layout.addWidget(self.pause_button)
+
+        # Right Arrow Button
+        self.right_arrow_button = QPushButton(self)
+        self.right_arrow_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.right_arrow_button.clicked.connect(self.next_item)
+        playback_controls_layout.addWidget(self.right_arrow_button)
+
+        left_layout.addLayout(playback_controls_layout)
+
         # Tree view for file names
         self.fileTree = QTreeWidget(self)
         self.fileTree.setColumnCount(1)
         self.fileTree.setHeaderLabels(["Image Files"])
+        self.fileTree.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Allow multiple selections
         self.fileTree.itemClicked.connect(self.on_item_clicked)
         self.fileTree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fileTree.customContextMenuRequested.connect(self.on_right_click)
@@ -1807,25 +1843,106 @@ class BlinkTab(QWidget):
         self.loading_label = QLabel("Loading images...", self)
         left_layout.addWidget(self.loading_label)
 
-        left_widget.setFixedWidth(300)
+        # Set the layout for the left widget
+        left_widget.setLayout(left_layout)
+
+        # Add the left widget to the splitter
+        splitter.addWidget(left_widget)
 
         # Right Column for Image Preview
         right_widget = QWidget(self)
         right_layout = QVBoxLayout(right_widget)
 
-        # QLabel to display the preview
+        # Zoom controls: Add Zoom In and Zoom Out buttons
+        zoom_controls_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_controls_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_controls_layout.addWidget(self.zoom_out_button)
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self.fit_to_preview)
+        zoom_controls_layout.addWidget(self.fit_to_preview_button)
+
+        right_layout.addLayout(zoom_controls_layout)
+
+        # Scroll area for the preview
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # QLabel for the image preview
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.preview_label)
+        self.scroll_area.setWidget(self.preview_label)
 
-        # Add both widgets to the main layout
-        main_layout.addWidget(left_widget)
-        main_layout.addWidget(right_widget)
+        right_layout.addWidget(self.scroll_area)
 
+        # Set the layout for the right widget
+        right_widget.setLayout(right_layout)
+
+        # Add the right widget to the splitter
+        splitter.addWidget(right_widget)
+
+        # Set initial splitter sizes
+        splitter.setSizes([300, 700])  # Adjust proportions as needed
+
+        # Add the splitter to the main layout
+        main_layout.addWidget(splitter)
+
+        # Set the main layout for the widget
         self.setLayout(main_layout)
+
+        # Initialize playback timer
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(200)  # Set the playback interval to 500ms
+        self.playback_timer.timeout.connect(self.next_item)
 
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
+
+
+    def previous_item(self):
+        """Select the previous item in the TreeWidget."""
+        current_item = self.fileTree.currentItem()
+        if current_item:
+            current_index = self.fileTree.indexOfTopLevelItem(current_item)
+            if current_index > 0:
+                previous_item = self.fileTree.topLevelItem(current_index - 1)
+                self.fileTree.setCurrentItem(previous_item)
+                self.on_item_clicked(previous_item, 0)  # Update the preview
+
+    def next_item(self):
+        """Select the next item in the TreeWidget, looping back to the first item if at the end."""
+        current_item = self.fileTree.currentItem()
+        if current_item:
+            current_index = self.fileTree.indexOfTopLevelItem(current_item)
+            if current_index < self.fileTree.topLevelItemCount() - 1:
+                # Move to the next item
+                next_item = self.fileTree.topLevelItem(current_index + 1)
+            else:
+                # Loop back to the first item
+                next_item = self.fileTree.topLevelItem(0)
+
+            self.fileTree.setCurrentItem(next_item)
+            self.on_item_clicked(next_item, 0)  # Update the preview
+
+    def start_playback(self):
+        """Start playing through the items in the TreeWidget."""
+        if not self.playback_timer.isActive():
+            self.playback_timer.start()
+
+    def stop_playback(self):
+        """Stop playing through the items."""
+        if self.playback_timer.isActive():
+            self.playback_timer.stop()
+
 
     def openFileDialog(self):
         """Allow users to select multiple images."""
@@ -2016,44 +2133,248 @@ class BlinkTab(QWidget):
 
             # Retrieve the corresponding image data and header from the loaded images
             stretched_image = self.loaded_images[index]['image_data']
-  
+
             # Convert to QImage and display
             qimage = self.convert_to_qimage(stretched_image)
             pixmap = QPixmap.fromImage(qimage)
 
-            # Scale the pixmap to fit the preview window's fixed size
-            preview_size = self.preview_label.size()  # Get the size of the preview QLabel
-            scaled_pixmap = pixmap.scaled(preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # Store the pixmap for zooming
+            self.current_pixmap = pixmap
 
-            # Set the scaled pixmap to the preview label
+            # Apply zoom level
+            self.apply_zoom()
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the pixmap and update the display."""
+        if self.current_pixmap:
+            # Scale the pixmap based on the zoom level
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.zoom_level,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+
+            # Update the QLabel with the scaled pixmap
             self.preview_label.setPixmap(scaled_pixmap)
+            self.preview_label.resize(scaled_pixmap.size())
 
-            # Ensure the window doesn't resize: prevent layout from stretching
-            self.preview_label.setFixedSize(preview_size)  # Fix the size of the preview label
+            # Adjust scroll position to center the view
+            self.scroll_area.horizontalScrollBar().setValue(
+                (self.preview_label.width() - self.scroll_area.viewport().width()) // 2
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                (self.preview_label.height() - self.scroll_area.viewport().height()) // 2
+            )
 
 
+
+    def zoom_in(self):
+        """Increase the zoom level and refresh the image."""
+        self.zoom_level = min(self.zoom_level * 1.2, 3.0)  # Cap at 3x
+        self.apply_zoom()
+
+    def zoom_out(self):
+        """Decrease the zoom level and refresh the image."""
+        self.zoom_level = max(self.zoom_level / 1.2, 0.05)  # Cap at 0.2x
+        self.apply_zoom()
+
+
+    def fit_to_preview(self):
+        """Adjust the zoom level so the image fits within the QScrollArea viewport."""
+        if self.current_pixmap:
+            # Get the size of the QScrollArea's viewport
+            viewport_size = self.scroll_area.viewport().size()
+            pixmap_size = self.current_pixmap.size()
+
+            # Calculate the zoom level required to fit the pixmap in the QScrollArea viewport
+            width_ratio = viewport_size.width() / pixmap_size.width()
+            height_ratio = viewport_size.height() / pixmap_size.height()
+            self.zoom_level = min(width_ratio, height_ratio)
+
+            # Apply the zoom level
+            self.apply_zoom()
+        else:
+            print("No image loaded. Cannot fit to preview.")
+            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
 
 
 
 
     def on_right_click(self, pos):
-        """Allow deleting an image file from the list and pushing image to ImageManager."""
+        """Allow renaming, moving, and deleting an image file from the list."""
         item = self.fileTree.itemAt(pos)
         if item:
             menu = QMenu(self)
-            
+
             # Add action to push image to ImageManager
             push_action = QAction("Push Image for Processing", self)
             push_action.triggered.connect(lambda: self.push_image_to_manager(item))
             menu.addAction(push_action)
 
+            # Add action to rename the image
+            rename_action = QAction("Rename", self)
+            rename_action.triggered.connect(lambda: self.rename_item(item))
+            menu.addAction(rename_action)
+
+
+            # Add action to batch rename items
+            batch_rename_action = QAction("Batch Flag Items", self)
+            batch_rename_action.triggered.connect(lambda: self.batch_rename_items())
+            menu.addAction(batch_rename_action)
+
+            # Add action to move the image
+            move_action = QAction("Move Selected Items", self)
+            move_action.triggered.connect(lambda: self.move_items())
+            menu.addAction(move_action)
+
             # Add action to delete image from the list
-            delete_action = QAction("Delete", self)
-            delete_action.triggered.connect(lambda: self.delete_item(item))
+            delete_action = QAction("Delete Selected Items", self)
+            delete_action.triggered.connect(lambda: self.delete_items())
             menu.addAction(delete_action)
 
             menu.exec_(self.fileTree.mapToGlobal(pos))
+
+    def rename_item(self, item):
+        """Allow the user to rename the selected image."""
+        current_name = item.text(0)
+        new_name, ok = QInputDialog.getText(self, "Rename Image", "Enter new name:", text=current_name)
+
+        if ok and new_name:
+            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+            if file_path:
+                # Get the new file path with the new name
+                new_file_path = os.path.join(os.path.dirname(file_path), new_name)
+
+                try:
+                    # Rename the file
+                    os.rename(file_path, new_file_path)
+                    print(f"File renamed from {current_name} to {new_name}")
+                    
+                    # Update the image paths and tree view
+                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                    item.setText(0, new_name)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to rename the file: {e}")
+
+    def batch_rename_items(self):
+        """Batch rename selected items by adding a prefix or suffix."""
+        selected_items = self.fileTree.selectedItems()
+
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for renaming.")
+            return
+
+        # Create a custom dialog for entering the prefix and suffix
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Batch Rename")
+        dialog_layout = QVBoxLayout(dialog)
+
+        instruction_label = QLabel("Enter a prefix or suffix to rename selected files:")
+        dialog_layout.addWidget(instruction_label)
+
+        # Create fields for prefix and suffix
+        form_layout = QHBoxLayout()
+
+        prefix_field = QLineEdit(dialog)
+        prefix_field.setPlaceholderText("Prefix")
+        form_layout.addWidget(prefix_field)
+
+        current_filename_label = QLabel("currentfilename", dialog)
+        form_layout.addWidget(current_filename_label)
+
+        suffix_field = QLineEdit(dialog)
+        suffix_field.setPlaceholderText("Suffix")
+        form_layout.addWidget(suffix_field)
+
+        dialog_layout.addLayout(form_layout)
+
+        # Add OK and Cancel buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK", dialog)
+        ok_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(ok_button)
+
+        cancel_button = QPushButton("Cancel", dialog)
+        cancel_button.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_button)
+
+        dialog_layout.addLayout(button_layout)
+
+        # Show the dialog and handle user input
+        if dialog.exec_() == QDialog.Accepted:
+            prefix = prefix_field.text().strip()
+            suffix = suffix_field.text().strip()
+
+            # Rename each selected file
+            for item in selected_items:
+                current_name = item.text(0)
+                file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+
+                if file_path:
+                    # Construct the new filename
+                    directory = os.path.dirname(file_path)
+                    new_name = f"{prefix}{current_name}{suffix}"
+                    new_file_path = os.path.join(directory, new_name)
+
+                    try:
+                        # Rename the file
+                        os.rename(file_path, new_file_path)
+                        print(f"File renamed from {file_path} to {new_file_path}")
+
+                        # Update the paths and tree view
+                        self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                        item.setText(0, new_name)
+
+                    except Exception as e:
+                        print(f"Failed to rename {file_path}: {e}")
+                        QMessageBox.critical(self, "Error", f"Failed to rename the file: {e}")
+
+            print(f"Batch renamed {len(selected_items)} items.")
+
+
+    def move_items(self):
+        """Allow the user to move selected images to a different directory."""
+        selected_items = self.fileTree.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for moving.")
+            return
+
+        # Open file dialog to select a new directory
+        new_directory = QFileDialog.getExistingDirectory(self, "Select Destination Folder", "")
+        if not new_directory:
+            return  # User canceled the directory selection
+
+        for item in selected_items:
+            current_name = item.text(0)
+            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+
+            if file_path:
+                new_file_path = os.path.join(new_directory, current_name)
+
+                try:
+                    # Move the file
+                    os.rename(file_path, new_file_path)
+                    print(f"File moved from {file_path} to {new_file_path}")
+                    
+                    # Update the image paths
+                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                    item.setText(0, current_name)  # Update the tree view item's text (if needed)
+
+                except Exception as e:
+                    print(f"Failed to move {file_path}: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to move the file: {e}")
+
+        # Update the tree view to reflect the moved items
+        self.fileTree.clear()
+        for file_path in self.image_paths:
+            file_name = os.path.basename(file_path)
+            item = QTreeWidgetItem([file_name])
+            self.fileTree.addTopLevelItem(item)
+
+        print(f"Moved {len(selected_items)} items.")
+
 
     def push_image_to_manager(self, item):
         """Push the selected image to the ImageManager."""
@@ -2104,65 +2425,92 @@ class BlinkTab(QWidget):
 
 
 
-    def delete_item(self, item):
-        """Delete the selected item from the tree, the loaded images list, and the file system."""
-        file_name = item.text(0)
-        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+    def delete_items(self):
+        """Delete the selected items from the tree, the loaded images list, and the file system."""
+        selected_items = self.fileTree.selectedItems()
 
-        if file_path:
-            # Show confirmation dialog before deleting
-            reply = QMessageBox.question(self, 'Confirm Deletion', 
-                f"Are you sure you want to permanently delete the image: {file_name}? This action is irreversible.",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for deletion.")
+            return
 
-            if reply == QMessageBox.Yes:
-                try:
-                    # Remove the image from image_paths
-                    if file_path in self.image_paths:
-                        self.image_paths.remove(file_path)
-                        print(f"Image path {file_path} removed from image_paths.")
-                    else:
-                        print(f"Image path {file_path} not found in image_paths.")
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            'Confirm Deletion',
+            f"Are you sure you want to permanently delete {len(selected_items)} selected images? This action is irreversible.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
 
-                    # Remove the corresponding image from loaded_images
-                    matching_image_data = next((item for item in self.loaded_images if item['file_path'] == file_path), None)
-                    if matching_image_data:
-                        self.loaded_images.remove(matching_image_data)  # Remove the image-data dictionary
-                        print(f"Image {file_name} removed from loaded_images.")
-                    else:
-                        print(f"Image {file_name} not found in loaded_images.")
+        if reply == QMessageBox.Yes:
+            for item in selected_items:
+                file_name = item.text(0)
+                file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
-                except ValueError as e:
-                    print(f"Error removing image from lists: {e}")
-                    QMessageBox.critical(self, "Error", "Error removing image from loaded list.")
+                if file_path:
+                    try:
+                        # Remove the image from image_paths
+                        if file_path in self.image_paths:
+                            self.image_paths.remove(file_path)
+                            print(f"Image path {file_path} removed from image_paths.")
+                        else:
+                            print(f"Image path {file_path} not found in image_paths.")
 
-                # Now delete the file from the filesystem
-                try:
-                    os.remove(file_path)  # Delete the image file
-                    print(f"File {file_path} deleted successfully.")
-                except Exception as e:
-                    print(f"Failed to delete {file_path}: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
+                        # Remove the corresponding image from loaded_images
+                        matching_image_data = next((entry for entry in self.loaded_images if entry['file_path'] == file_path), None)
+                        if matching_image_data:
+                            self.loaded_images.remove(matching_image_data)
+                            print(f"Image {file_name} removed from loaded_images.")
+                        else:
+                            print(f"Image {file_name} not found in loaded_images.")
 
-                # Clear the existing tree and repopulate it (without the deleted file)
-                self.fileTree.clear()
+                        # Delete the file from the filesystem
+                        os.remove(file_path)
+                        print(f"File {file_path} deleted successfully.")
 
-                # Re-add remaining images to the tree (this should exclude the deleted one)
-                for file_path in self.image_paths:
-                    file_name = os.path.basename(file_path)
-                    item = QTreeWidgetItem([file_name])
-                    self.fileTree.addTopLevelItem(item)
+                    except Exception as e:
+                        print(f"Failed to delete {file_path}: {e}")
+                        QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
 
-                print(f"Image {file_name} and its data have been deleted.")
+            # Remove the selected items from the TreeWidget
+            for item in selected_items:
+                index = self.fileTree.indexOfTopLevelItem(item)
+                if index != -1:
+                    self.fileTree.takeTopLevelItem(index)
 
-                # Clear the preview if it was showing the deleted image
-                self.preview_label.clear()  # Clear the preview label
-                self.preview_label.setText('No image selected.')  # Optional: Set a default message
+            print(f"Deleted {len(selected_items)} items.")
+            
+            # Clear the preview if the deleted items include the currently displayed image
+            self.preview_label.clear()
+            self.preview_label.setText('No image selected.')
 
-                # Reset the current image as the deleted one should no longer be shown
-                self.current_image = None
+            self.current_image = None
 
 
+    def eventFilter(self, source, event):
+        """Handle mouse events for dragging."""
+        if source == self.scroll_area.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                # Start dragging
+                self.dragging = True
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseMove and self.dragging:
+                # Handle dragging
+                delta = event.pos() - self.last_mouse_pos
+                self.scroll_area.horizontalScrollBar().setValue(
+                    self.scroll_area.horizontalScrollBar().value() - delta.x()
+                )
+                self.scroll_area.verticalScrollBar().setValue(
+                    self.scroll_area.verticalScrollBar().value() - delta.y()
+                )
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                # Stop dragging
+                self.dragging = False
+                return True
+        return super().eventFilter(source, event)
 
     def on_selection_changed(self, selected, deselected):
         """Handle the selection change event."""
@@ -2184,6 +2532,7 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, 3 * w, QImage.Format_RGB888)
         else:  # Grayscale Image
             return QImage(img_data, w, h, w, QImage.Format_Grayscale8)
+
 
 
 
@@ -8835,8 +9184,9 @@ class PerfectPalettePickerTab(QWidget):
         self.image_label.setMouseTracking(True)
 
         self.scroll_area.setWidget(self.image_label)
-        self.scroll_area.setMinimumSize(400, 400)
-        right_layout.addWidget(self.scroll_area)
+        self.scroll_area.setMinimumSize(400, 250)
+        right_layout.addWidget(self.scroll_area, stretch=1)
+
 
         # Preview thumbnails grid
         self.thumbs_grid = QGridLayout()
@@ -8848,19 +9198,30 @@ class PerfectPalettePickerTab(QWidget):
         self.thumbnail_buttons = []
         row = 0
         col = 0
+
         for palette in self.palette_names:
             button = QPushButton(palette, self)
-            button.setFixedSize(200, 130)
-            button.setIconSize(QSize(200, 130))
+            button.setMinimumSize(200, 100)  # Minimum size for buttons
+            button.setMaximumHeight(100)  # Fixed height for buttons
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand width, fixed height
             button.setIcon(QIcon())  # Placeholder, will be set later
             button.clicked.connect(lambda checked, p=palette: self.generate_final_palette_image(p))
+            button.setIconSize(QSize(200, 100))
+            button.setIcon(QIcon())  # Placeholder, will be set later
             self.thumbnail_buttons.append(button)
             self.thumbs_grid.addWidget(button, row, col)
             col += 1
             if col >= 4:
                 col = 0
                 row += 1
-        right_layout.addLayout(self.thumbs_grid)
+
+        # Wrap the grid in a QWidget for better layout handling
+        thumbs_widget = QWidget()
+        thumbs_widget.setLayout(self.thumbs_grid)
+        thumbs_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+        # Add the thumbnails widget to the layout
+        right_layout.addWidget(thumbs_widget, stretch=0)
 
         # Save button
         save_button = QPushButton("Save Combined Image", self)
@@ -9060,7 +9421,7 @@ class PerfectPalettePickerTab(QWidget):
             return
 
         # Downsample the images for mini-previews
-        def downsample_image(image, factor=4):
+        def downsample_image(image, factor=8):
             """
             Downsample the image by an integer factor using cv2.resize.
             """
