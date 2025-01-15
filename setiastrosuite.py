@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.2.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.2.3')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -2994,16 +2994,22 @@ class CosmicClarityTab(QWidget):
         self.update_image_display()  # Redraw with autostretch if enabled
 
     def save_input_image(self, file_path):
-        """Save the image directly to the specified input path for Cosmic Clarity without prompting."""
-        if self.image is None:
-            print("No image to save.")
-            return
-        
-        # Get the file extension as original_format
-        original_format = os.path.splitext(self.loaded_image_path)[-1].lstrip('.').lower()  # E.g., 'tiff', 'png', etc.
-        
-        # Call save_image with the correct format
-        save_image(self.image, file_path, original_format, self.bit_depth, self.original_header, self.is_mono)
+        """Save the current image to the specified path in TIF format."""
+        if self.image is not None:
+            try:
+                from tifffile import imwrite
+                # Force saving as `.tif` format
+                if not file_path.endswith(".tif"):
+                    file_path += ".tif"
+                imwrite(file_path, self.image.astype(np.float32))
+                print(f"Image saved as TIFF to {file_path}")  # Debug print
+            except Exception as e:
+                print(f"Error saving input image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to save input image:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "No image to save.")
+
+
 
 
     def update_ui_for_mode(self):
@@ -3095,20 +3101,26 @@ class CosmicClarityTab(QWidget):
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
-        input_extension = os.path.splitext(self.loaded_image_path)[-1].lower() 
-        input_file_path = os.path.join(input_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{input_extension}")
+
+        # Construct the base filename from the loaded image path
+        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
-        self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
-
-        # After defining input_file_path:
+        input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
+        self.save_input_image(input_file_path)  # Save as `.tif`
         self.current_input_file_path = input_file_path
+
+        # Construct the expected output file glob
+        output_file_glob = os.path.join(output_folder, f"{base_filename}{output_suffix}.tif")
+        print(f"Waiting for output file matching: {output_file_glob}")  # Debug print
 
 
 
         cmd = self.build_command_args(exe_name, mode)
         exe_path = cmd[0]
         args = cmd[1:]  # Separate the executable from its arguments
+        print(f"Running command: {exe_path} {' '.join(args)}")  # Debug print
 
         # Use QProcess instead of subprocess
         self.process_q = QProcess(self)
@@ -3128,9 +3140,6 @@ class CosmicClarityTab(QWidget):
             return
 
         # Set up file waiting worker and wait dialog as before
-        output_file_glob = os.path.join(
-            output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*"
-        )
         self.wait_thread = WaitForFileWorker(output_file_glob, timeout=3000)
         self.wait_thread.fileFound.connect(self.on_file_found)
         self.wait_thread.error.connect(self.on_file_error)
@@ -3146,6 +3155,7 @@ class CosmicClarityTab(QWidget):
         # Once the dialog is closed (either by file found, error, or cancellation), restore autostretch if needed
         if was_autostretch_enabled:
             self.auto_stretch_button.setChecked(True)
+
 
 
     ########################################
@@ -3203,7 +3213,7 @@ class CosmicClarityTab(QWidget):
             # You can handle any cleanup here if needed
 
     def on_file_found(self, output_file_path):
-
+        print(f"File found: {output_file_path}")
         self.wait_dialog.close()
         self.wait_thread = None
 
@@ -3837,6 +3847,8 @@ class WaitForFileWorker(QThread):
         start_time = time.time()
         while self._running and (time.time() - start_time < self.timeout):
             matching_files = glob.glob(self.output_file_glob)
+            print(f"Checking for files: {self.output_file_glob}")  # Debug print
+            print(f"Found files: {matching_files}")  # Debug print
             if matching_files:
                 self.fileFound.emit(matching_files[0])
                 return
@@ -3844,7 +3856,6 @@ class WaitForFileWorker(QThread):
         if self._running:
             self.error.emit("Output file not found within timeout.")
         else:
-            # Thread stopped by user
             self.cancelled.emit()
 
     def stop(self):
@@ -9671,7 +9682,7 @@ class PerfectPalettePickerTab(QWidget):
             # Generate a minimal FITS header if the original header is missing or if the format was XISF
             sanitized_header = self.original_header
             if was_xisf or sanitized_header is None:
-                sanitized_header = self.create_minimal_fits_header(self.combined_image)
+                sanitized_header = None
 
             # Ensure a valid file path exists
             file_path = self.ha_filename if self.ha_image is not None else "Combined Image"
@@ -9699,7 +9710,7 @@ class PerfectPalettePickerTab(QWidget):
             if self.image_manager:
                 try:
                     self.image_manager.update_image(
-                        updated_image=self.combined_image
+                        updated_image=self.combined_image, metadata=metadata
                     )
                     print(f"Image pushed to ImageManager with metadata: {metadata}")
                     self.status_label.setText("Final palette image pushed for further processing.")
