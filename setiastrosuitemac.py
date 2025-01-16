@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.3')
+        self.setWindowTitle('Seti Astro\'s Suite V2.3.1')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -351,10 +351,10 @@ class AstroEditingSuite(QMainWindow):
                 color: #dcdcdc;
             }
             QMenu::item:selected {
-                background-color: #505050; 
-                color: #ffffff;
-            }            
-            """
+                background-color: #3a75c4;  /* Blue background for selected items */
+                color: #ffffff;  /* White text color */
+            }       
+            """          
             self.setStyleSheet(dark_stylesheet)
 
     def open_image(self):
@@ -1832,6 +1832,13 @@ class BlinkTab(QWidget):
         self.fileTree.itemClicked.connect(self.on_item_clicked)
         self.fileTree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fileTree.customContextMenuRequested.connect(self.on_right_click)
+        self.fileTree.currentItemChanged.connect(self.on_current_item_changed) 
+        self.fileTree.setStyleSheet("""
+                QTreeWidget::item:selected {
+                    background-color: #3a75c4;  /* Blue background for selected items */
+                    color: #ffffff;  /* White text color */
+                }
+            """)
         left_layout.addWidget(self.fileTree)
 
         # Add progress bar
@@ -1907,31 +1914,51 @@ class BlinkTab(QWidget):
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
 
+    def on_current_item_changed(self, current, previous):
+        """Ensure the selected item is visible by scrolling to it."""
+        if current:
+            self.fileTree.scrollToItem(current, QAbstractItemView.PositionAtCenter)
 
     def previous_item(self):
         """Select the previous item in the TreeWidget."""
         current_item = self.fileTree.currentItem()
         if current_item:
-            current_index = self.fileTree.indexOfTopLevelItem(current_item)
+            all_items = self.get_all_leaf_items()
+            current_index = all_items.index(current_item)
             if current_index > 0:
-                previous_item = self.fileTree.topLevelItem(current_index - 1)
-                self.fileTree.setCurrentItem(previous_item)
-                self.on_item_clicked(previous_item, 0)  # Update the preview
+                previous_item = all_items[current_index - 1]
+            else:
+                previous_item = all_items[-1]  # Loop back to the last item
+            self.fileTree.setCurrentItem(previous_item)
+            self.on_item_clicked(previous_item, 0)  # Update the preview
 
     def next_item(self):
         """Select the next item in the TreeWidget, looping back to the first item if at the end."""
         current_item = self.fileTree.currentItem()
         if current_item:
-            current_index = self.fileTree.indexOfTopLevelItem(current_item)
-            if current_index < self.fileTree.topLevelItemCount() - 1:
-                # Move to the next item
-                next_item = self.fileTree.topLevelItem(current_index + 1)
+            all_items = self.get_all_leaf_items()
+            current_index = all_items.index(current_item)
+            if current_index < len(all_items) - 1:
+                next_item = all_items[current_index + 1]
             else:
-                # Loop back to the first item
-                next_item = self.fileTree.topLevelItem(0)
-
+                next_item = all_items[0]  # Loop back to the first item
             self.fileTree.setCurrentItem(next_item)
             self.on_item_clicked(next_item, 0)  # Update the preview
+
+    def get_all_leaf_items(self):
+        """Get a flat list of all leaf items (actual files) in the TreeWidget."""
+        def recurse(parent):
+            items = []
+            for index in range(parent.childCount()):
+                child = parent.child(index)
+                if child.childCount() == 0:  # It's a leaf item
+                    items.append(child)
+                else:
+                    items.extend(recurse(child))
+            return items
+
+        root = self.fileTree.invisibleRootItem()
+        return recurse(root)
 
     def start_playback(self):
         """Start playing through the items in the TreeWidget."""
@@ -1952,11 +1979,8 @@ class BlinkTab(QWidget):
             self.image_paths = file_paths
             self.fileTree.clear()  # Clear the existing tree items
 
-            # Load and display the file names in the treeview
-            for file_path in file_paths:
-                file_name = os.path.basename(file_path)
-                item = QTreeWidgetItem([file_name])
-                self.fileTree.addTopLevelItem(item)
+            # Dictionary to store images grouped by filter and exposure time
+            grouped_images = {}
 
             # Load the images into memory (storing both file path and image data)
             self.loaded_images = []
@@ -1985,6 +2009,17 @@ class BlinkTab(QWidget):
                     'is_mono': is_mono
                 })
 
+                # Extract filter and exposure time from FITS header
+                object_name = header.get('OBJECT', 'Unknown')
+                filter_name = header.get('FILTER', 'Unknown')
+                exposure_time = header.get('EXPOSURE', 'Unknown')
+
+                # Group images by filter and exposure time
+                group_key = (object_name, filter_name, exposure_time)
+                if group_key not in grouped_images:
+                    grouped_images[group_key] = []
+                grouped_images[group_key].append(file_path)
+
                 # Update progress bar
                 progress = int((index + 1) / total_files * 100)
                 self.progress_bar.setValue(progress)
@@ -1997,6 +2032,36 @@ class BlinkTab(QWidget):
             self.progress_bar.setValue(100)
             self.loading_label.setText("Loading complete.")
 
+            # Display grouped images in the tree view
+            grouped_by_object = {}
+
+            # First, group by object_name
+            for (object_name, filter_name, exposure_time), paths in grouped_images.items():
+                if object_name not in grouped_by_object:
+                    grouped_by_object[object_name] = {}
+                if filter_name not in grouped_by_object[object_name]:
+                    grouped_by_object[object_name][filter_name] = {}
+                if exposure_time not in grouped_by_object[object_name][filter_name]:
+                    grouped_by_object[object_name][filter_name][exposure_time] = []
+                grouped_by_object[object_name][filter_name][exposure_time].extend(paths)
+
+            # Now, create the tree structure
+            for object_name, filters in grouped_by_object.items():
+                object_item = QTreeWidgetItem([f"Object: {object_name}"])
+                self.fileTree.addTopLevelItem(object_item)
+                object_item.setExpanded(True)  # Expand the object item
+                for filter_name, exposures in filters.items():
+                    filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
+                    object_item.addChild(filter_item)
+                    filter_item.setExpanded(True)  # Expand the filter item
+                    for exposure_time, paths in exposures.items():
+                        exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
+                        filter_item.addChild(exposure_item)
+                        exposure_item.setExpanded(True)  # Expand the exposure item
+                        for file_path in paths:
+                            file_name = os.path.basename(file_path)
+                            item = QTreeWidgetItem([file_name])
+                            exposure_item.addChild(item)
 
 
     def debayer_image(self, image, file_path, header):
@@ -2474,9 +2539,13 @@ class BlinkTab(QWidget):
 
             # Remove the selected items from the TreeWidget
             for item in selected_items:
-                index = self.fileTree.indexOfTopLevelItem(item)
-                if index != -1:
-                    self.fileTree.takeTopLevelItem(index)
+                parent = item.parent()
+                if parent:
+                    parent.removeChild(item)
+                else:
+                    index = self.fileTree.indexOfTopLevelItem(item)
+                    if index != -1:
+                        self.fileTree.takeTopLevelItem(index)
 
             print(f"Deleted {len(selected_items)} items.")
             
@@ -2532,8 +2601,6 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, 3 * w, QImage.Format_RGB888)
         else:  # Grayscale Image
             return QImage(img_data, w, h, w, QImage.Format_Grayscale8)
-
-
 
 
 class CosmicClarityTab(QWidget):
@@ -14253,11 +14320,14 @@ class MainWindow(QMainWindow):
             # Store the original image the first time AutoStretch is applied
             self.original_image = self.image_data.copy()
         
-        if self.is_mono:
+        # Determine if the image is mono or color based on the number of dimensions
+        if self.image_data.ndim == 2:
             # Call stretch_mono_image if the image is mono
+
             stretched_image = stretch_mono_image(self.image_data, target_median=0.25, normalize=True)
         else:
             # Call stretch_color_image if the image is color
+
             stretched_image = stretch_color_image(self.image_data, target_median=0.25, linked=True, normalize=True)
         
         # If the AutoStretch is toggled off (using the same button), restore the original image
@@ -14270,14 +14340,32 @@ class MainWindow(QMainWindow):
             stretched_image = self.original_image
             self.auto_stretch_button.setText("AutoStretch")
         
-        # Convert the image to uint8 format for display
+
         stretched_image = (stretched_image * 255).astype(np.uint8)
 
+
         # Update the display with the stretched image (or original if toggled off)
+
         height, width = stretched_image.shape[:2]
         bytes_per_line = 3 * width
+
+        # Ensure the image has 3 channels (RGB)
+        if stretched_image.ndim == 2:
+            stretched_image = np.stack((stretched_image,) * 3, axis=-1)
+        elif stretched_image.shape[2] == 1:
+            stretched_image = np.repeat(stretched_image, 3, axis=2)
+
+
+
         qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        if qimg.isNull():
+            print("Failed to create QImage")
+            return
+
         pixmap = QPixmap.fromImage(qimg)
+        if pixmap.isNull():
+            print("Failed to create QPixmap")
+            return
 
         self.main_image = pixmap
         scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -14293,6 +14381,8 @@ class MainWindow(QMainWindow):
 
         # Optionally, you can also update any other parts of the UI after stretching the image
         print(f"AutoStretch {'applied to' if self.auto_stretch_button.text() == 'Turn Off AutoStretch' else 'removed from'} the image.")
+
+
 
 
     def zoom_to_object(self, item):
