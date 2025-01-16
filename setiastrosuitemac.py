@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.3.1')
+        self.setWindowTitle('Seti Astro\'s Suite V2.3.2')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -3472,7 +3472,11 @@ class CosmicClarityTab(QWidget):
         output_file_glob = os.path.join(output_folder, f"{base_filename}{output_suffix}.tif")
         print(f"Waiting for output file matching: {output_file_glob}")  # Debug print
 
-
+        # Check if the executable exists
+        exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}. Please use the wrench icon to select the correct folder.")
+            return
 
         cmd = self.build_command_args(exe_name, mode)
         exe_path = cmd[0]
