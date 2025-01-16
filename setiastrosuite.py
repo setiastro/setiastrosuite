@@ -73,15 +73,16 @@ from math import sqrt
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
-    icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+    icon_path = os.path.join(sys._MEIPASS, 'astrosuite.ico')
 else:
     # Development path
-    icon_path = 'astrosuite.png'
+    icon_path = 'astrosuite.ico'
 
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(QIcon(icon_path))
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
         self.image_manager.image_changed.connect(self.update_file_name)
@@ -2490,9 +2491,6 @@ class BlinkTab(QWidget):
             self.image_manager.add_image(self.image_manager.current_slot, image, metadata)
             print(f"Image {file_path} pushed to ImageManager for processing.")
 
-
-
-
     def delete_items(self):
         """Delete the selected items from the tree, the loaded images list, and the file system."""
         selected_items = self.fileTree.selectedItems()
@@ -2542,9 +2540,13 @@ class BlinkTab(QWidget):
 
             # Remove the selected items from the TreeWidget
             for item in selected_items:
-                index = self.fileTree.indexOfTopLevelItem(item)
-                if index != -1:
-                    self.fileTree.takeTopLevelItem(index)
+                parent = item.parent()
+                if parent:
+                    parent.removeChild(item)
+                else:
+                    index = self.fileTree.indexOfTopLevelItem(item)
+                    if index != -1:
+                        self.fileTree.takeTopLevelItem(index)
 
             print(f"Deleted {len(selected_items)} items.")
             
@@ -2553,7 +2555,6 @@ class BlinkTab(QWidget):
             self.preview_label.setText('No image selected.')
 
             self.current_image = None
-
 
     def eventFilter(self, source, event):
         """Handle mouse events for dragging."""
