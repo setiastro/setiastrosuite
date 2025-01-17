@@ -167,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.3.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.4')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -9039,12 +9039,13 @@ class PalettePickerProcessingThread(QThread):
     """
     preview_generated = pyqtSignal(np.ndarray)
 
-    def __init__(self, ha_image, oiii_image, sii_image, osc_image, ha_to_oii_ratio, enable_star_stretch, stretch_factor):
+    def __init__(self, ha_image, oiii_image, sii_image, osc1_image, osc2_image, ha_to_oii_ratio, enable_star_stretch, stretch_factor):
         super().__init__()
         self.ha_image = ha_image
         self.oiii_image = oiii_image
         self.sii_image = sii_image
-        self.osc_image = osc_image
+        self.osc1_image = osc1_image  # Added for OSC1
+        self.osc2_image = osc2_image  # Added for OSC2
         self.ha_to_oii_ratio = ha_to_oii_ratio
         self.enable_star_stretch = enable_star_stretch
         self.stretch_factor = stretch_factor
@@ -9054,29 +9055,81 @@ class PalettePickerProcessingThread(QThread):
         Perform image processing to generate a combined preview.
         """
         try:
-            if self.ha_image is not None and self.oiii_image is not None:
-                combined = (self.ha_image * self.ha_to_oii_ratio + self.oiii_image * (1 - self.ha_to_oii_ratio))
-                if self.enable_star_stretch:
-                    combined = stretch_mono_image(combined, target_median=self.stretch_factor)
-                self.preview_generated.emit(combined)
-            elif self.osc_image is not None:
-                # Extract synthetic Ha and OIII from OSC
-                ha_image = self.osc_image[:, :, 0]  # Red channel -> Ha
-                oiii_image = np.mean(self.osc_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+            combined_ha = self.ha_image.copy() if self.ha_image is not None else None
+            combined_oiii = self.oiii_image.copy() if self.oiii_image is not None else None
+
+            # Process OSC1 if available
+            if self.osc1_image is not None:
+                # Extract synthetic Ha and OIII from OSC1
+                ha_osc1 = self.osc1_image[:, :, 0]  # Red channel -> Ha
+                oiii_osc1 = np.mean(self.osc1_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
 
                 # Apply stretching if enabled
                 if self.enable_star_stretch:
-                    ha_image = stretch_mono_image(ha_image, target_median=self.stretch_factor)
-                    oiii_image = stretch_mono_image(oiii_image, target_median=self.stretch_factor)
+                    ha_osc1 = stretch_mono_image(ha_osc1, target_median=self.stretch_factor)
+                    oiii_osc1 = stretch_mono_image(oiii_osc1, target_median=self.stretch_factor)
 
-                combined = (ha_image * self.ha_to_oii_ratio + oiii_image * (1 - self.ha_to_oii_ratio))
+                # Combine with existing Ha and OIII
+                if combined_ha is not None:
+                    combined_ha = (combined_ha * 0.5) + (ha_osc1 * 0.5)
+                else:
+                    combined_ha = ha_osc1
+
+                if combined_oiii is not None:
+                    combined_oiii = (combined_oiii * 0.5) + (oiii_osc1 * 0.5)
+                else:
+                    combined_oiii = oiii_osc1
+
+            # Process OSC2 if available
+            if self.osc2_image is not None:
+                # Extract synthetic Ha and OIII from OSC2
+                ha_osc2 = self.osc2_image[:, :, 0]  # Red channel -> Ha
+                oiii_osc2 = np.mean(self.osc2_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+                # Apply stretching if enabled
+                if self.enable_star_stretch:
+                    ha_osc2 = stretch_mono_image(ha_osc2, target_median=self.stretch_factor)
+                    oiii_osc2 = stretch_mono_image(oiii_osc2, target_median=self.stretch_factor)
+
+                # Combine with existing Ha and OIII
+                if combined_ha is not None:
+                    combined_ha = (combined_ha * 0.5) + (ha_osc2 * 0.5)
+                else:
+                    combined_ha = ha_osc2
+
+                if combined_oiii is not None:
+                    combined_oiii = (combined_oiii * 0.5) + (oiii_osc2 * 0.5)
+                else:
+                    combined_oiii = oiii_osc2
+
+            # Ensure that combined Ha and OIII are present
+            if combined_ha is not None and combined_oiii is not None:
+                # Combine Ha and OIII based on the specified ratio
+                combined = (combined_ha * self.ha_to_oii_ratio) + (combined_oiii * (1 - self.ha_to_oii_ratio))
+
+                # Apply stretching if enabled
+                if self.enable_star_stretch:
+                    combined = stretch_mono_image(combined, target_median=self.stretch_factor)
+
+                # Incorporate SII channel if available
+                if self.sii_image is not None:
+                    combined = combined + self.sii_image
+                    # Normalize to prevent overflow
+                    combined = self.normalize_image(combined)
+
                 self.preview_generated.emit(combined)
             else:
+                # If required channels are missing, emit a dummy image or handle accordingly
                 combined = np.zeros((100, 100, 3))  # Dummy image
                 self.preview_generated.emit(combined)
         except Exception as e:
             print(f"Error in PalettePickerProcessingThread: {e}")
             self.preview_generated.emit(None)
+
+    @staticmethod
+    def normalize_image(image):
+        return image
+
 
 class PerfectPalettePickerTab(QWidget):
     """
@@ -9090,14 +9143,16 @@ class PerfectPalettePickerTab(QWidget):
         self.ha_image = None
         self.oiii_image = None
         self.sii_image = None
-        self.osc_image = None
+        self.osc1_image = None  # Added for OSC1
+        self.osc2_image = None  # Added for OSC2
         self.combined_image = None
         self.is_mono = False
         # Filenames
         self.ha_filename = None
         self.oiii_filename = None
         self.sii_filename = None
-        self.osc_filename = None        
+        self.osc1_filename = None  # Added for OSC1
+        self.osc2_filename = None  # Added for OSC2      
         self.filename = None  # Store the selected file path
         self.zoom_factor = 1.0  # Initialize to 1.0 for normal size
         self.processing_thread = None
@@ -9110,7 +9165,7 @@ class PerfectPalettePickerTab(QWidget):
         self.selected_palette = None  # To track the currently selected palette
         
         # Preview scale factor
-        self.preview_scale = 1.0  # Start at no scaling
+        self.preview_scale = 1  # Start at no scaling
 
         if self.image_manager:
             # Connect to ImageManager's image_changed signal if needed
@@ -9176,7 +9231,7 @@ class PerfectPalettePickerTab(QWidget):
         self.oiii_label.setWordWrap(True)
         left_layout.addWidget(self.oiii_label)
 
-        self.load_sii_button = QPushButton("Load SII Image (Optional)", self)
+        self.load_sii_button = QPushButton("Load SII Image", self)
         self.load_sii_button.clicked.connect(lambda: self.load_image('SII'))
         left_layout.addWidget(self.load_sii_button)
 
@@ -9184,13 +9239,23 @@ class PerfectPalettePickerTab(QWidget):
         self.sii_label.setWordWrap(True)
         left_layout.addWidget(self.sii_label)
 
-        self.load_osc_button = QPushButton("Load OSC Image (Optional)", self)
-        self.load_osc_button.clicked.connect(lambda: self.load_image('OSC'))
-        left_layout.addWidget(self.load_osc_button)
+        # **Add OSC1 Load Button and Label**
+        self.load_osc1_button = QPushButton("Load OSC HaO3 Image", self)
+        self.load_osc1_button.clicked.connect(lambda: self.load_image('OSC1'))
+        left_layout.addWidget(self.load_osc1_button)
 
-        self.osc_label = QLabel("No OSC image loaded.", self)
-        self.osc_label.setWordWrap(True)
-        left_layout.addWidget(self.osc_label)
+        self.osc1_label = QLabel("No OSC HaO3 image loaded.", self)
+        self.osc1_label.setWordWrap(True)
+        left_layout.addWidget(self.osc1_label)
+
+        # **Add OSC2 Load Button and Label**
+        self.load_osc2_button = QPushButton("Load OSC S2O3 Image", self)
+        self.load_osc2_button.clicked.connect(lambda: self.load_image('OSC2'))
+        left_layout.addWidget(self.load_osc2_button)
+
+        self.osc2_label = QLabel("No OSC S2O3 image loaded.", self)
+        self.osc2_label.setWordWrap(True)
+        left_layout.addWidget(self.osc2_label)
 
         # "Create Palettes" button
         create_palettes_button = QPushButton("Create Palettes", self)
@@ -9312,24 +9377,35 @@ class PerfectPalettePickerTab(QWidget):
 
     def clear_all_images(self):
         """
-        Clears all loaded images (Ha, OIII, SII, OSC).
+        Clears all loaded images (Ha, OIII, SII, OSC1, OSC2).
         """
-        # Clear all images and reset filenames
+        # Clear Ha image and reset filename and label
         self.ha_image = None
         self.ha_filename = None
         self.ha_label.setText("No Ha image loaded.")
 
+        # Clear OIII image and reset filename and label
         self.oiii_image = None
         self.oiii_filename = None
         self.oiii_label.setText("No OIII image loaded.")
 
+        # Clear SII image and reset filename and label
         self.sii_image = None
         self.sii_filename = None
         self.sii_label.setText("No SII image loaded.")
 
-        self.osc_image = None
-        self.osc_filename = None
-        self.osc_label.setText("No OSC image loaded.")
+        # Clear OSC1 image and reset filename and label
+        self.osc1_image = None
+        self.osc1_filename = None
+        self.osc1_label.setText("No OSC HaO3 image loaded.")
+
+        # Clear OSC2 image and reset filename and label
+        self.osc2_image = None
+        self.osc2_filename = None
+        self.osc2_label.setText("No OSC S2O3 image loaded.")
+
+        # Clean up preview windows
+        self.cleanup_preview_windows()        
 
         # Update the status label
         self.status_label.setText("All images cleared.")
@@ -9375,13 +9451,20 @@ class PerfectPalettePickerTab(QWidget):
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
                 self.sii_label.setText(f"Loaded: {os.path.basename(file_path)}")
-            elif image_type == 'OSC':
-                self.osc_image = image
-                self.osc_filename = file_path
+            elif image_type == 'OSC1':
+                self.osc1_image = image
+                self.osc1_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.osc_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                self.osc1_label.setText(f"Loaded: {os.path.basename(file_path)}")
+            elif image_type == 'OSC2':
+                self.osc2_image = image
+                self.osc2_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.osc2_label.setText(f"Loaded: {os.path.basename(file_path)}")
 
             # Apply stretching if linear input is checked and image is mono
             if self.linear_checkbox.isChecked() and is_mono:
@@ -9391,7 +9474,7 @@ class PerfectPalettePickerTab(QWidget):
                     self.oiii_image = stretch_mono_image(self.oiii_image, target_median=0.25)
                 elif image_type == 'SII':
                     self.sii_image = stretch_mono_image(self.sii_image, target_median=0.25)
-                elif image_type == 'OSC':
+                elif image_type in ['OSC1', 'OSC2']:
                     # Assuming OSC has multiple channels; stretching would be handled during processing
                     pass
 
@@ -9401,40 +9484,104 @@ class PerfectPalettePickerTab(QWidget):
 
     def prepare_preview_palettes(self):
         """
+        
         Prepares the preview thumbnails for each palette based on selected images.
         """
         have_ha = self.ha_image is not None
         have_oiii = self.oiii_image is not None
         have_sii = self.sii_image is not None
-        use_osc = self.osc_image is not None and not (have_ha or have_oiii or have_sii)
+        have_osc1 = self.osc1_image is not None
+        have_osc2 = self.osc2_image is not None
 
-        print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC: {use_osc}")
+        print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC1: {have_osc1} | OSC2: {have_osc2}")
 
-        # Cleanup previous previews
-        self.cleanup_preview_windows()
 
-        # If OSC is used, generate synthetic Ha and OIII
-        if use_osc:
-            if self.osc_image is None:
-                QMessageBox.warning(self, "Warning", "OSC image not loaded.")
-                self.status_label.setText("OSC image not loaded.")
-                return
 
-            # Extract synthetic Ha and OIII from OSC
-            self.ha_image = self.osc_image[:, :, 0]  # Red channel -> Ha
-            self.oiii_image = np.mean(self.osc_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
-            self.sii_image = None  # SII remains None unless specifically loaded
+        # Initialize combined channels
+        combined_ha = self.ha_image.copy() if self.ha_image is not None else None
+        combined_oiii = self.oiii_image.copy() if self.oiii_image is not None else None
+        combined_sii = self.sii_image.copy() if self.sii_image is not None else None  # Initialize combined SII
 
-            # Apply stretching if 'Linear Input Data' is checked
+        # Process OSC1 if available
+        if have_osc1:
+            # Extract synthetic Ha and OIII from OSC1
+            ha_osc1 = self.osc1_image[:, :, 0]  # Red channel -> Ha
+            oiii_osc1 = np.mean(self.osc1_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+            # Apply stretching if enabled
             if self.linear_checkbox.isChecked():
-                self.ha_image = stretch_mono_image(self.ha_image, target_median=0.25)
-                self.oiii_image = stretch_mono_image(self.oiii_image, target_median=0.25)
+                ha_osc1 = stretch_mono_image(ha_osc1, target_median=0.25)
+                oiii_osc1 = stretch_mono_image(oiii_osc1, target_median=0.25)
 
-            print(f"Generated synthetic Ha from OSC red channel: shape={self.ha_image.shape}")
-            print(f"Generated synthetic OIII from OSC green/blue average: shape={self.oiii_image.shape}")
+            # Combine with existing Ha and OIII
+            if combined_ha is not None:
+                combined_ha = (combined_ha * 0.5) + (ha_osc1 * 0.5)
+            else:
+                combined_ha = ha_osc1
 
-        if not (have_ha and have_oiii) and not use_osc:
-            QMessageBox.warning(self, "Warning", "Please load at least Ha and OIII images to create palettes.")
+            if combined_oiii is not None:
+                combined_oiii = (combined_oiii * 0.5) + (oiii_osc1 * 0.5)
+            else:
+                combined_oiii = oiii_osc1
+
+        # Process OSC2 if available
+        if have_osc2:
+            # Extract synthetic SII from OSC2 red channel
+            sii_osc2 = self.osc2_image[:, :, 0]  # Red channel -> SII
+            oiii_osc2 = np.mean(self.osc2_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+            # Apply stretching if enabled
+            if self.linear_checkbox.isChecked():
+                sii_osc2 = stretch_mono_image(sii_osc2, target_median=0.25)
+                oiii_osc2 = stretch_mono_image(oiii_osc2, target_median=0.25)
+
+            # Combine with existing SII
+            if combined_sii is not None:
+                combined_sii = (combined_sii * 0.5) + (sii_osc2 * 0.5)
+            else:
+                combined_sii = sii_osc2
+
+            if combined_oiii is not None:
+                combined_oiii = (combined_oiii * 0.5) + (oiii_osc2 * 0.5)
+            else:
+                combined_oiii = oiii_osc2    
+
+        # Assign combined images back to self.ha_image, self.oiii_image, and self.sii_image
+        self.ha_image = combined_ha
+        self.oiii_image = combined_oiii
+        self.sii_image = combined_sii  # Updated SII image
+
+        # Ensure images are single-channel
+        def ensure_single_channel(image, image_type):
+            if image is not None:
+                if image.ndim == 3:
+                    if image.shape[2] == 1:
+                        image = image[:, :, 0]
+                        print(f"Converted {image_type} image to single channel: {image.shape}")
+                    else:
+                        # If image has multiple channels, retain the first channel
+                        image = image[:, :, 0]
+                        print(f"Extracted first channel from multi-channel {image_type} image: {image.shape}")
+                return image
+            return None
+
+        self.ha_image = ensure_single_channel(self.ha_image, 'Ha')
+        self.oiii_image = ensure_single_channel(self.oiii_image, 'OIII')
+        self.sii_image = ensure_single_channel(self.sii_image, 'SII')
+
+        print(f"Combined Ha image shape: {self.ha_image.shape if self.ha_image is not None else 'None'}")
+        print(f"Combined OIII image shape: {self.oiii_image.shape if self.oiii_image is not None else 'None'}")
+        print(f"Combined SII image shape: {self.sii_image.shape if self.sii_image is not None else 'None'}")
+
+        # Validate required channels
+        # Allow if (Ha and OIII) or (SII and OIII) are present
+        if not ((self.ha_image is not None and self.oiii_image is not None) or
+                (self.sii_image is not None and self.oiii_image is not None)):
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Please load at least Ha and OIII images or SII and OIII images to create palettes."
+            )
             self.status_label.setText("Insufficient images loaded.")
             return
 
@@ -9447,7 +9594,8 @@ class PerfectPalettePickerTab(QWidget):
             ha_image=self.ha_image,
             oiii_image=self.oiii_image,
             sii_image=self.sii_image,
-            osc_image=self.osc_image,
+            osc1_image=None,  # OSC1 is already processed
+            osc2_image=None,  # OSC2 is already processed
             ha_to_oii_ratio=ha_to_oii_ratio,
             enable_star_stretch=enable_star_stretch,
             stretch_factor=stretch_factor
@@ -9467,103 +9615,109 @@ class PerfectPalettePickerTab(QWidget):
         if combined_preview is None:
             # Only update the text overlays
             for i, palette in enumerate(self.palette_names):
-                # Get the current button's pixmap
                 pixmap = self.thumbnail_buttons[i].icon().pixmap(self.thumbnail_buttons[i].iconSize())
                 if pixmap.isNull():
                     print(f"Failed to retrieve pixmap for palette '{palette}'. Skipping.")
                     continue
-
-                # Update text overlay color based on the selected palette
                 text_color = Qt.green if self.selected_palette == palette else Qt.white
-
-                # Add text overlay to the existing pixmap
                 painter = QPainter(pixmap)
                 painter.setRenderHint(QPainter.Antialiasing)
                 painter.setPen(QPen(text_color))
-                painter.setFont(QFont("Helvetica", 8, QFont.Normal if self.selected_palette == palette else QFont.Normal))
+                painter.setFont(QFont("Helvetica", 8))
                 painter.drawText(pixmap.rect(), Qt.AlignCenter, palette)
                 painter.end()
-
-                # Update the thumbnail button with the modified pixmap
                 self.thumbnail_buttons[i].setIcon(QIcon(pixmap))
                 QApplication.processEvents()
 
-            self.status_label.setText("Text overlays updated successfully.")
             return
 
-        # Downsample the images for mini-previews
         def downsample_image(image, factor=8):
             """
             Downsample the image by an integer factor using cv2.resize.
             """
             if image is not None:
                 height, width = image.shape[:2]
-                new_size = (width // factor, height // factor)
+                new_size = (max(1, width // factor), max(1, height // factor))  # Ensure size is at least 1x1
                 return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
             return image
 
-        ha_image_preview = downsample_image(self.ha_image) if self.ha_image is not None else None
-        oiii_image_preview = downsample_image(self.oiii_image) if self.oiii_image is not None else None
-        sii_image_preview = downsample_image(self.sii_image) if self.sii_image is not None else None
-        osc_image_preview = downsample_image(self.osc_image) if self.osc_image is not None else None
+        # Downsample images
+        ha = downsample_image(self.ha_image)
+        oiii = downsample_image(self.oiii_image)
+        sii = downsample_image(self.sii_image)
 
-        # Update the previews for each palette
+        # Helper function to extract single channel
+        def extract_channel(image):
+            return image if image is not None and image.ndim == 2 else (image[:, :, 0] if image is not None else None)
+
+        # Helper function for channel substitution
+        def get_channel(preferred, substitute):
+            return preferred if preferred is not None else substitute
+
         for i, palette in enumerate(self.palette_names):
-            # Safely handle 2D and 3D arrays
-            def extract_channel(image):
-                return image if image is not None and image.ndim == 2 else (image[:, :, 0] if image is not None else None)
-            
             text_color = Qt.green if self.selected_palette == palette else Qt.white
 
+            # Determine availability
+            ha_available = self.ha_image is not None
+            sii_available = self.sii_image is not None
+
+            # Define substitution channels
+            substituted_ha = sii if not ha_available and sii_available else ha
+            substituted_sii = ha if not sii_available and ha_available else sii
+
+            # Map channels based on palette
             if palette == "SHO":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(sii_image_preview), extract_channel(ha_image_preview), extract_channel(oiii_image_preview)
-                else:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(ha_image_preview), extract_channel(oiii_image_preview)
+                r = get_channel(extract_channel(sii), substituted_ha)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = extract_channel(oiii)
             elif palette == "HOO":
-                r, g, b = extract_channel(ha_image_preview), extract_channel(oiii_image_preview), extract_channel(oiii_image_preview)
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = extract_channel(oiii)
+                b = extract_channel(oiii)
             elif palette == "HSO":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(sii_image_preview), extract_channel(oiii_image_preview)
-                else:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(ha_image_preview), extract_channel(oiii_image_preview)
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = extract_channel(oiii)
             elif palette == "HOS":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(oiii_image_preview), extract_channel(sii_image_preview)
-                else:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(oiii_image_preview), extract_channel(ha_image_preview)
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = extract_channel(oiii)
+                b = get_channel(extract_channel(sii), substituted_ha)
             elif palette == "OSS":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(sii_image_preview), extract_channel(sii_image_preview)
-                else:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(ha_image_preview), extract_channel(ha_image_preview)
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(sii), substituted_ha)
             elif palette == "OHH":
-                r, g, b = extract_channel(oiii_image_preview), extract_channel(ha_image_preview), extract_channel(ha_image_preview)
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = get_channel(extract_channel(ha), substituted_sii)
             elif palette == "OSH":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(sii_image_preview), extract_channel(ha_image_preview)
-                else:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(ha_image_preview), extract_channel(ha_image_preview)
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(ha), substituted_sii)
             elif palette == "OHS":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(ha_image_preview), extract_channel(sii_image_preview)
-                else:
-                    r, g, b = extract_channel(oiii_image_preview), extract_channel(ha_image_preview), extract_channel(ha_image_preview)
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = get_channel(extract_channel(sii), substituted_ha)
             elif palette == "HSS":
-                if sii_image_preview is not None:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(sii_image_preview), extract_channel(sii_image_preview)
-                else:
-                    r, g, b = extract_channel(ha_image_preview), extract_channel(ha_image_preview), extract_channel(ha_image_preview)
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(sii), substituted_ha)
             elif palette in ["Realistic1", "Realistic2", "Foraxx"]:
-                r, g, b = self.map_special_palettes(palette, ha_image_preview, oiii_image_preview, sii_image_preview)
+                r, g, b = self.map_special_palettes(palette, ha, oiii, sii)
             else:
                 # Fallback to SHO
-                r, g, b = self.map_channels("SHO", ha_image_preview, oiii_image_preview, sii_image_preview)
+                r, g, b = self.map_channels("SHO", ha, oiii, sii)
 
-            # Replace NaNs and clip values to [0, 1]
-            r = np.clip(np.nan_to_num(r, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
-            g = np.clip(np.nan_to_num(g, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
-            b = np.clip(np.nan_to_num(b, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
+            # Replace NaNs and clip to [0, 1]
+            r = np.clip(np.nan_to_num(r, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if r is not None else None
+            g = np.clip(np.nan_to_num(g, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if g is not None else None
+            b = np.clip(np.nan_to_num(b, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if b is not None else None
+
+            if r is None or g is None or b is None:
+                print(f"One of the channels is None for palette '{palette}'. Skipping this palette.")
+                self.thumbnail_buttons[i].setIcon(QIcon())
+                self.thumbnail_buttons[i].setText(palette)
+                continue
 
             combined = self.combine_channels_to_color([r, g, b], f"Preview_{palette}")
             if combined is not None:
@@ -9579,11 +9733,9 @@ class PerfectPalettePickerTab(QWidget):
                     continue
 
                 # Scale pixmap
-                scaled_width = int(pixmap.width() * self.preview_scale)
-                scaled_height = int(pixmap.height() * self.preview_scale)
                 scaled_pixmap = pixmap.scaled(
-                    scaled_width,
-                    scaled_height,
+                    int(pixmap.width() * self.preview_scale),
+                    int(pixmap.height() * self.preview_scale),
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
@@ -9592,7 +9744,7 @@ class PerfectPalettePickerTab(QWidget):
                 painter = QPainter(scaled_pixmap)
                 painter.setRenderHint(QPainter.Antialiasing)
                 painter.setPen(QPen(text_color))
-                painter.setFont(QFont("Helvetica", 8, QFont.Normal if self.selected_palette == palette else QFont.Normal))
+                painter.setFont(QFont("Helvetica", 8))
                 painter.drawText(scaled_pixmap.rect(), Qt.AlignCenter, palette)
                 painter.end()
 
@@ -9608,39 +9760,72 @@ class PerfectPalettePickerTab(QWidget):
         self.status_label.setText("Preview palettes generated successfully.")
 
 
+
+
+
     def generate_final_palette_image(self, palette_name):
         """
         Generates the final combined image for the selected palette.
+        Handles substitution of SII for Ha or Ha for SII if one is missing.
         """
         try:
             print(f"Generating final palette image for: {palette_name}")
+            
+            # Determine availability
+            ha_available = self.ha_image is not None
+            sii_available = self.sii_image is not None
+            
+            # Define substitution
+            if not ha_available and sii_available:
+                # Substitute SII for Ha
+                substituted_ha = self.sii_image
+                substituted_sii = None
+                print("Substituting SII for Ha.")
+            elif not sii_available and ha_available:
+                # Substitute Ha for SII
+                substituted_sii = self.ha_image
+                substituted_ha = None
+                print("Substituting Ha for SII.")
+            else:
+                substituted_ha = self.ha_image
+                substituted_sii = self.sii_image
+            
+            # Temporarily assign substituted channels
+            original_ha = self.ha_image
+            original_sii = self.sii_image
+            
+            self.ha_image = substituted_ha
+            self.sii_image = substituted_sii
+            
+            # Combine channels
             combined_image = self.combine_channels(palette_name)
-
+            
+            # Restore original channels
+            self.ha_image = original_ha
+            self.sii_image = original_sii
+            
             if combined_image is not None:
                 # Ensure the combined image has the correct shape
                 if combined_image.ndim == 4 and combined_image.shape[3] == 3:
                     combined_image = combined_image[:, :, :, 0]  # Remove the extra dimension
-                
+
                 # Convert to QImage
                 q_image = self.numpy_to_qimage(combined_image)
                 if q_image.isNull():
                     raise ValueError(f"Failed to convert combined image for palette '{palette_name}' to QImage.")
-                
+
                 pixmap = QPixmap.fromImage(q_image)
                 if pixmap.isNull():
                     raise ValueError(f"Failed to create QPixmap for palette '{palette_name}'.")
-                
-                # Ensure dimensions are integers
-                scaled_width = int(pixmap.width() * self.zoom_factor)
-                scaled_height = int(pixmap.height() * self.zoom_factor)
 
+                # Scale the pixmap based on zoom factor
                 scaled_pixmap = pixmap.scaled(
-                    scaled_width,
-                    scaled_height,
+                    int(pixmap.width() * self.zoom_factor),
+                    int(pixmap.height() * self.zoom_factor),
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
                 )
-                
+
                 # Display the scaled pixmap in the main preview area
                 self.image_label.setPixmap(scaled_pixmap)
                 self.image_label.resize(scaled_pixmap.size())
@@ -9685,14 +9870,6 @@ class PerfectPalettePickerTab(QWidget):
             r, g, b = self.map_channels("SHO", self.ha_image, self.oiii_image, self.sii_image)
 
         if r is not None and g is not None and b is not None:
-            # Handle single-channel images
-            if r.ndim == 3 and r.shape[2] == 1:
-                r = r[:, :, 0]
-            if g.ndim == 3 and g.shape[2] == 1:
-                g = g[:, :, 0]
-            if b.ndim == 3 and b.shape[2] == 1:
-                b = b[:, :, 0]
-
             # Replace NaN and Inf with 0
             r = np.nan_to_num(r, nan=0.0, posinf=1.0, neginf=0.0)
             g = np.nan_to_num(g, nan=0.0, posinf=1.0, neginf=0.0)
@@ -9702,10 +9879,20 @@ class PerfectPalettePickerTab(QWidget):
             r = np.clip(r, 0, 1)
             g = np.clip(g, 0, 1)
             b = np.clip(b, 0, 1)
+
+            # Ensure single-channel
+            if r.ndim == 3:
+                r = r[:, :, 0]
+            if g.ndim == 3:
+                g = g[:, :, 0]
+            if b.ndim == 3:
+                b = b[:, :, 0]
+
             combined = np.stack([r, g, b], axis=2)
             return combined
         else:
             return None
+
 
     def combine_channels_to_color(self, channels, output_id):
         """
@@ -9719,65 +9906,89 @@ class PerfectPalettePickerTab(QWidget):
             
             # Ensure all channels have the same shape
             for i, channel in enumerate(channels):
+                if channel is None:
+                    raise ValueError(f"Channel {i} is None.")
                 if channel.shape != channels[0].shape:
                     raise ValueError(f"Channel {i} has shape {channel.shape}, expected {channels[0].shape}")
             
-            # Remove any extra dimensions
-            channels = [np.squeeze(channel) for channel in channels]
-
+            # Ensure all channels are 2D
+            channels = [channel[:, :, 0] if channel.ndim == 3 else channel for channel in channels]
+            
+            # Debugging: Print channel shapes after extraction
+            for idx, channel in enumerate(channels):
+                print(f"Channel {idx} shape after extraction: {channel.shape}")
+            
             # Stack channels along the third axis to create RGB
             rgb_image = np.stack(channels, axis=2)
+            print(f"Combined RGB image shape: {rgb_image.shape}")
             return rgb_image
         except Exception as e:
             print(f"Error in combine_channels_to_color: {e}")
             return None
 
-
-
     def map_channels(self, palette_name, ha, oiii, sii):
         """
         Maps the Ha, OIII, SII channels based on the palette name.
+        Substitutes SII for Ha or Ha for SII if one is missing.
         """
-        used_sii = sii if sii is not None else ha
+        # Substitute SII for Ha if Ha is missing
+        if ha is None and sii is not None:
+            ha = sii
+            print("Ha is missing. Substituting SII for Ha.")
+        
+        # Substitute Ha for SII if SII is missing
+        if sii is None and ha is not None:
+            sii = ha
+            print("SII is missing. Substituting Ha for SII.")
+        
+        # Define the channel mappings
         mapping = {
-            "SHO": [used_sii, ha, oiii],
+            "SHO": [sii, ha, oiii],
             "HOO": [ha, oiii, oiii],
-            "HSO": [ha, used_sii, oiii],
-            "HOS": [ha, oiii, used_sii],
-            "OSS": [oiii, used_sii, used_sii],
+            "HSO": [ha, sii, oiii],
+            "HOS": [ha, oiii, sii],
+            "OSS": [oiii, sii, sii],
             "OHH": [oiii, ha, ha],
-            "OSH": [oiii, used_sii, ha],
-            "OHS": [oiii, ha, used_sii],
-            "HSS": [ha, used_sii, used_sii],
+            "OSH": [oiii, sii, ha],
+            "OHS": [oiii, ha, sii],
+            "HSS": [ha, sii, sii],
         }
-        return mapping.get(palette_name, [ha, oiii, sii])
+        
+        # Retrieve the mapped channels based on the palette name
+        mapped_channels = mapping.get(palette_name, [ha, oiii, sii])
+             
+        return mapped_channels
+
 
     def map_special_palettes(self, palette_name, ha, oiii, sii):
         """
         Maps channels for special palettes like Realistic1, Realistic2, Foraxx.
         Ensures all expressions produce values within the [0, 1] range.
+        Substitutes SII for Ha or Ha for SII if one is missing.
         """
         try:
-            # Ensure we only use the first channel for calculations if images are multi-channel
-            if ha is not None and ha.ndim == 3:
-                ha = ha[:, :, 0]
-            if oiii is not None and oiii.ndim == 3:
-                oiii = oiii[:, :, 0]
-            if sii is not None and sii.ndim == 3:
-                sii = sii[:, :, 0]
-
+            # Substitute SII for Ha if Ha is missing
+            if ha is None and sii is not None:
+                ha = sii
+                print("Ha is missing in special palette. Substituting SII for Ha.")
+        
+            # Substitute Ha for SII if SII is missing
+            if sii is None and ha is not None:
+                sii = ha
+                print("SII is missing in special palette. Substituting Ha for SII.")
+        
             # Realistic1 mapping
             if palette_name == "Realistic1":
                 expr_r = (ha + sii) / 2 if (ha is not None and sii is not None) else (ha if ha is not None else 0)
                 expr_g = (0.3 * ha) + (0.7 * oiii) if (ha is not None and oiii is not None) else (ha if ha is not None else 0)
                 expr_b = (0.9 * oiii) + (0.1 * ha) if (ha is not None and oiii is not None) else (oiii if oiii is not None else 0)
-
+        
             # Realistic2 mapping
             elif palette_name == "Realistic2":
                 expr_r = (0.7 * ha + 0.3 * sii) if (ha is not None and sii is not None) else (ha if ha is not None else 0)
                 expr_g = (0.3 * sii + 0.7 * oiii) if (sii is not None and oiii is not None) else (oiii if oiii is not None else 0)
                 expr_b = oiii if oiii is not None else 0
-
+        
             # Foraxx mapping
             elif palette_name == "Foraxx":
                 if ha is not None and oiii is not None and sii is None:
@@ -9794,21 +10005,62 @@ class PerfectPalettePickerTab(QWidget):
                 else:
                     # Fallback to SHO
                     return self.map_channels("SHO", ha, oiii, sii)
-
+        
             else:
                 # Fallback to SHO for any undefined palette
                 return self.map_channels("SHO", ha, oiii, sii)
-
+        
             # Replace invalid values and normalize
             expr_r = np.clip(np.nan_to_num(expr_r, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
             expr_g = np.clip(np.nan_to_num(expr_g, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
             expr_b = np.clip(np.nan_to_num(expr_b, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
-
+        
             return expr_r, expr_g, expr_b
         except Exception as e:
             print(f"[Error] Failed to map palette {palette_name}: {e}")
             return None, None, None
 
+
+    def extract_oscc_channels(self, osc_image, base_id):
+        """
+        Extracts R, G, B channels from the OSC image and assigns unique postfixes.
+        
+        Parameters:
+            osc_image (numpy.ndarray): The OSC image array.
+            base_id (str): The base identifier for naming.
+        
+        Returns:
+            list: A list containing the extracted R, G, B channels as NumPy arrays.
+        """
+        if osc_image is None or osc_image.shape[2] < 3:
+            print(f"[!] OSC image {base_id} has fewer than 3 channels—skipping extraction.")
+            return []
+
+        # Extract channels
+        R = osc_image[:, :, 0]  # Red channel
+        G = osc_image[:, :, 1]  # Green channel
+        B = osc_image[:, :, 2]  # Blue channel
+
+        # Assign unique postfixes
+        R_name = f"{base_id}_pppR"
+        G_name = f"{base_id}_pppG"
+        B_name = f"{base_id}_pppB"
+
+        # For Seti Astro Suite, we might need to create separate image objects or handle naming differently
+        # Here, we'll assume that we can manage the names via dictionaries or similar structures
+
+        # Store the extracted channels with their names
+        extracted_channels = {
+            R_name: R,
+            G_name: G,
+            B_name: B
+        }
+
+        # Optionally, hide these images in the GUI or manage them as needed
+        # For example, you might add them to an internal list for cleanup
+
+        # For demonstration, we'll return the list of channels
+        return [R, G, B]
 
 
 
@@ -9958,6 +10210,10 @@ class PerfectPalettePickerTab(QWidget):
 
 
 
+
+
+
+
     def zoom_in(self):
         """
         Zooms into the main preview image.
@@ -10042,13 +10298,13 @@ class PerfectPalettePickerTab(QWidget):
         """
         if self.combined_image is not None:
             # Check if any of the loaded file paths have an XISF extension
-            loaded_files = [self.ha_filename, self.oiii_filename, self.sii_filename, self.osc_filename]
+            loaded_files = [self.ha_filename, self.oiii_filename, self.sii_filename, self.osc1_filename, self.osc2_filename]
             was_xisf = any(file_path and file_path.lower().endswith('.xisf') for file_path in loaded_files)
 
             # Generate a minimal FITS header if the original header is missing or if the format was XISF
             sanitized_header = self.original_header
             if was_xisf or sanitized_header is None:
-                sanitized_header = self.create_minimal_fits_header(self.combined_image)
+                sanitized_header = None
 
             # Ensure a valid file path exists
             file_path = self.ha_filename if self.ha_image is not None else "Combined Image"
@@ -10068,7 +10324,8 @@ class PerfectPalettePickerTab(QWidget):
                     'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
                     'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
                     'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
-                    'OSC': self.osc_filename if self.osc_image is not None else "Not Provided"
+                    'OSC1': self.osc1_filename if self.osc1_image is not None else "Not Provided",
+                    'OSC2': self.osc2_filename if self.osc2_image is not None else "Not Provided"
                 }
             }
 
@@ -10076,7 +10333,7 @@ class PerfectPalettePickerTab(QWidget):
             if self.image_manager:
                 try:
                     self.image_manager.update_image(
-                        updated_image=self.combined_image
+                        updated_image=self.combined_image, metadata=metadata
                     )
                     print(f"Image pushed to ImageManager with metadata: {metadata}")
                     self.status_label.setText("Final palette image pushed for further processing.")
@@ -10089,6 +10346,7 @@ class PerfectPalettePickerTab(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "No final palette image to push.")
             self.status_label.setText("No final palette image to push.")
+
 
 
     def mousePressEvent(self, event):
@@ -10129,12 +10387,47 @@ class PerfectPalettePickerTab(QWidget):
 
     def cleanup_preview_windows(self):
         """
-        Cleans up any temporary preview windows.
-        Placeholder for actual cleanup logic in Seti Astro Suite.
+        Cleans up temporary preview images by resetting image variables and clearing GUI elements.
         """
-        # Replace with actual logic to close temporary image windows
         print("Cleaning up preview windows...")
-        pass
+        
+        # 1. Reset Temporary Image Variables
+        self.ha_image = None
+        self.oiii_image = None
+        self.sii_image = None
+        print("Temporary preview images (Ha, OIII, SII) have been cleared.")
+        
+        # 2. Clear GUI Elements Displaying Previews
+        # Update the list below with the actual names of your preview labels or buttons
+        preview_labels = ['ha_preview_label', 'oiii_preview_label', 'sii_preview_label']
+        for label_name in preview_labels:
+            if hasattr(self, label_name):
+                label = getattr(self, label_name)
+                label.clear()  # Removes the pixmap or any displayed content
+                print(f"{label_name} has been cleared.")
+        
+        # 3. Clear Final Image Display (if applicable)
+        # Update 'final_image_label' with your actual final image display widget name
+        if hasattr(self, 'image_label'):
+            self.image_label.clear()
+            print("Final image label has been cleared.")
+        
+        # 4. Reset Thumbnail Buttons (if used for previews)
+        # Ensure 'self.thumbnail_buttons' is a list of your thumbnail QPushButtons
+        for button in self.thumbnail_buttons:
+            button.setIcon(QIcon())    # Remove existing icon
+
+
+
+        print("Thumbnail buttons have been reset.")
+        
+        # 5. Update Status Label
+        self.status_label.setText("Preview windows cleaned up.")
+        print("Status label updated to indicate cleanup.")
+        
+        # 6. Process UI Events to Reflect Changes Immediately
+        QApplication.processEvents()
+
 
     def closeEvent(self, event):
         """
