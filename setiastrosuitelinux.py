@@ -59,7 +59,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, 
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
-    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, 
+    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QAbstractItemView,
     QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton, QStatusBar
 )
 from PyQt5.QtGui import (
@@ -148,6 +148,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
         self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
+        self.tabs.addTab(PerfectPalettePickerTab(image_manager=self.image_manager), "Perfect Palette Picker")
         self.tabs.addTab(NBtoRGBstarsTab(image_manager=self.image_manager), "NB to RGB Stars")
         self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
         self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
@@ -166,7 +167,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.1')
+        self.setWindowTitle('Seti Astro\'s Suite V2.4')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -350,9 +351,9 @@ class AstroEditingSuite(QMainWindow):
                 color: #dcdcdc;
             }
             QMenu::item:selected {
-                background-color: #505050; 
-                color: #ffffff;
-            }            
+                background-color: #3a75c4;  /* Blue background for selected items */
+                color: #ffffff;  /* White text color */
+            }              
             """
             self.setStyleSheet(dark_stylesheet)
 
@@ -380,24 +381,85 @@ class AstroEditingSuite(QMainWindow):
     def save_image(self):
         """Save the current image to a selected path."""
         if self.image_manager.image is not None:
-            save_file, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Images (*.png *.tif *.tiff *.fits);;All Files (*)")
+            save_file, _ = QFileDialog.getSaveFileName(self, "Save As", "", "Images (*.png *.tif *.tiff *.fits *.fit);;All Files (*)")
             
             if save_file:
                 # Prompt the user for bit depth
-                bit_depth, ok = QInputDialog.getItem(self, "Select Bit Depth", "Choose bit depth for saving:",
-                                                    ["8-bit", "16-bit", "32-bit floating point"], 0, False)
+                bit_depth, ok = QInputDialog.getItem(
+                    self,
+                    "Select Bit Depth",
+                    "Choose bit depth for saving:",
+                    ["16-bit", "32-bit floating point"],
+                    0,
+                    False
+                )
                 if ok:
-                    # Get the original format based on the file extension
-                    original_format = save_file.split('.')[-1].lower()
+                    # Determine the user-selected format from the filename
+                    _, ext = os.path.splitext(save_file)
+                    selected_format = ext.lower().strip('.')
+
+                    # Validate the selected format
+                    valid_formats = ['png', 'tif', 'tiff', 'fits', 'fit']
+                    if selected_format not in valid_formats:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            f"Unsupported file format: {selected_format}. Supported formats are: {', '.join(valid_formats)}"
+                        )
+                        return
 
                     try:
-                        # Call the global save_image function
-                        save_image(self.image_manager.image, save_file, original_format, bit_depth=bit_depth)
-                        print(f"Image saved to {save_file}.")
+                        # Retrieve the image and metadata
+                        image_data = self.image_manager.image
+                        metadata = self.image_manager._metadata[self.image_manager.current_slot]
+                        original_header = metadata.get('original_header', None)
+                        is_mono = metadata.get('is_mono', False)
+
+                        # Create a minimal header if the original header is missing
+                        if original_header is None and selected_format in ['fits', 'fit']:
+                            print("Creating a minimal FITS header for the data...")
+                            original_header = self.create_minimal_fits_header(image_data, is_mono)
+
+                        # Pass the image to the global save_image function
+                        save_image(
+                            img_array=image_data,
+                            filename=save_file,
+                            original_format=selected_format,
+                            bit_depth=bit_depth,
+                            original_header=original_header,
+                            is_mono=is_mono
+                        )
+                        print(f"Image successfully saved to {save_file}.")
+                        self.statusBar.showMessage(f"Image saved to: {save_file}", 5000)
                     except Exception as e:
                         QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+                        print(f"Error saving image: {e}")
         else:
             QMessageBox.warning(self, "Warning", "No image loaded.")
+
+
+
+
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
 
 
     def undo_image(self):
@@ -1713,11 +1775,17 @@ class BlinkTab(QWidget):
         self.loaded_images = []  # Store the image objects (as numpy arrays)
         self.image_labels = []  # Store corresponding file names for the TreeWidget
         self.image_manager = image_manager  # Reference to ImageManager
+        self.zoom_level = 0.5  # Default zoom level
+        self.dragging = False  # Track whether the mouse is dragging
+        self.last_mouse_pos = None  # Store the last mouse position
 
         self.initUI()
 
     def initUI(self):
         main_layout = QHBoxLayout(self)
+
+        # Create a QSplitter to allow resizing between left and right panels
+        splitter = QSplitter(Qt.Horizontal, self)
 
         # Left Column for the file loading and TreeView
         left_widget = QWidget(self)
@@ -1728,13 +1796,50 @@ class BlinkTab(QWidget):
         self.fileButton.clicked.connect(self.openFileDialog)
         left_layout.addWidget(self.fileButton)
 
+        # Playback controls (left arrow, play, pause, right arrow)
+        playback_controls_layout = QHBoxLayout()
+
+        # Left Arrow Button
+        self.left_arrow_button = QPushButton(self)
+        self.left_arrow_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
+        self.left_arrow_button.clicked.connect(self.previous_item)
+        playback_controls_layout.addWidget(self.left_arrow_button)
+
+        # Play Button
+        self.play_button = QPushButton(self)
+        self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.play_button.clicked.connect(self.start_playback)
+        playback_controls_layout.addWidget(self.play_button)
+
+        # Pause Button
+        self.pause_button = QPushButton(self)
+        self.pause_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+        self.pause_button.clicked.connect(self.stop_playback)
+        playback_controls_layout.addWidget(self.pause_button)
+
+        # Right Arrow Button
+        self.right_arrow_button = QPushButton(self)
+        self.right_arrow_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
+        self.right_arrow_button.clicked.connect(self.next_item)
+        playback_controls_layout.addWidget(self.right_arrow_button)
+
+        left_layout.addLayout(playback_controls_layout)
+
         # Tree view for file names
         self.fileTree = QTreeWidget(self)
         self.fileTree.setColumnCount(1)
         self.fileTree.setHeaderLabels(["Image Files"])
+        self.fileTree.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Allow multiple selections
         self.fileTree.itemClicked.connect(self.on_item_clicked)
         self.fileTree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fileTree.customContextMenuRequested.connect(self.on_right_click)
+        self.fileTree.currentItemChanged.connect(self.on_current_item_changed) 
+        self.fileTree.setStyleSheet("""
+                QTreeWidget::item:selected {
+                    background-color: #3a75c4;  /* Blue background for selected items */
+                    color: #ffffff;  /* White text color */
+                }
+            """)
         left_layout.addWidget(self.fileTree)
 
         # Add progress bar
@@ -1746,25 +1851,126 @@ class BlinkTab(QWidget):
         self.loading_label = QLabel("Loading images...", self)
         left_layout.addWidget(self.loading_label)
 
-        left_widget.setFixedWidth(300)
+        # Set the layout for the left widget
+        left_widget.setLayout(left_layout)
+
+        # Add the left widget to the splitter
+        splitter.addWidget(left_widget)
 
         # Right Column for Image Preview
         right_widget = QWidget(self)
         right_layout = QVBoxLayout(right_widget)
 
-        # QLabel to display the preview
+        # Zoom controls: Add Zoom In and Zoom Out buttons
+        zoom_controls_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_controls_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_controls_layout.addWidget(self.zoom_out_button)
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self.fit_to_preview)
+        zoom_controls_layout.addWidget(self.fit_to_preview_button)
+
+        right_layout.addLayout(zoom_controls_layout)
+
+        # Scroll area for the preview
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # QLabel for the image preview
         self.preview_label = QLabel(self)
         self.preview_label.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.preview_label)
+        self.scroll_area.setWidget(self.preview_label)
 
-        # Add both widgets to the main layout
-        main_layout.addWidget(left_widget)
-        main_layout.addWidget(right_widget)
+        right_layout.addWidget(self.scroll_area)
 
+        # Set the layout for the right widget
+        right_widget.setLayout(right_layout)
+
+        # Add the right widget to the splitter
+        splitter.addWidget(right_widget)
+
+        # Set initial splitter sizes
+        splitter.setSizes([300, 700])  # Adjust proportions as needed
+
+        # Add the splitter to the main layout
+        main_layout.addWidget(splitter)
+
+        # Set the main layout for the widget
         self.setLayout(main_layout)
+
+        # Initialize playback timer
+        self.playback_timer = QTimer(self)
+        self.playback_timer.setInterval(200)  # Set the playback interval to 500ms
+        self.playback_timer.timeout.connect(self.next_item)
 
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
+
+    def on_current_item_changed(self, current, previous):
+        """Ensure the selected item is visible by scrolling to it."""
+        if current:
+            self.fileTree.scrollToItem(current, QAbstractItemView.PositionAtCenter)
+
+    def previous_item(self):
+        """Select the previous item in the TreeWidget."""
+        current_item = self.fileTree.currentItem()
+        if current_item:
+            all_items = self.get_all_leaf_items()
+            current_index = all_items.index(current_item)
+            if current_index > 0:
+                previous_item = all_items[current_index - 1]
+            else:
+                previous_item = all_items[-1]  # Loop back to the last item
+            self.fileTree.setCurrentItem(previous_item)
+            self.on_item_clicked(previous_item, 0)  # Update the preview
+
+    def next_item(self):
+        """Select the next item in the TreeWidget, looping back to the first item if at the end."""
+        current_item = self.fileTree.currentItem()
+        if current_item:
+            all_items = self.get_all_leaf_items()
+            current_index = all_items.index(current_item)
+            if current_index < len(all_items) - 1:
+                next_item = all_items[current_index + 1]
+            else:
+                next_item = all_items[0]  # Loop back to the first item
+            self.fileTree.setCurrentItem(next_item)
+            self.on_item_clicked(next_item, 0)  # Update the preview
+
+    def get_all_leaf_items(self):
+        """Get a flat list of all leaf items (actual files) in the TreeWidget."""
+        def recurse(parent):
+            items = []
+            for index in range(parent.childCount()):
+                child = parent.child(index)
+                if child.childCount() == 0:  # It's a leaf item
+                    items.append(child)
+                else:
+                    items.extend(recurse(child))
+            return items
+
+        root = self.fileTree.invisibleRootItem()
+        return recurse(root)
+
+    def start_playback(self):
+        """Start playing through the items in the TreeWidget."""
+        if not self.playback_timer.isActive():
+            self.playback_timer.start()
+
+    def stop_playback(self):
+        """Stop playing through the items."""
+        if self.playback_timer.isActive():
+            self.playback_timer.stop()
+
 
     def openFileDialog(self):
         """Allow users to select multiple images."""
@@ -1774,11 +1980,8 @@ class BlinkTab(QWidget):
             self.image_paths = file_paths
             self.fileTree.clear()  # Clear the existing tree items
 
-            # Load and display the file names in the treeview
-            for file_path in file_paths:
-                file_name = os.path.basename(file_path)
-                item = QTreeWidgetItem([file_name])
-                self.fileTree.addTopLevelItem(item)
+            # Dictionary to store images grouped by filter and exposure time
+            grouped_images = {}
 
             # Load the images into memory (storing both file path and image data)
             self.loaded_images = []
@@ -1807,6 +2010,17 @@ class BlinkTab(QWidget):
                     'is_mono': is_mono
                 })
 
+                # Extract filter and exposure time from FITS header
+                object_name = header.get('OBJECT', 'Unknown')
+                filter_name = header.get('FILTER', 'Unknown')
+                exposure_time = header.get('EXPOSURE', 'Unknown')
+
+                # Group images by filter and exposure time
+                group_key = (object_name, filter_name, exposure_time)
+                if group_key not in grouped_images:
+                    grouped_images[group_key] = []
+                grouped_images[group_key].append(file_path)
+
                 # Update progress bar
                 progress = int((index + 1) / total_files * 100)
                 self.progress_bar.setValue(progress)
@@ -1819,6 +2033,36 @@ class BlinkTab(QWidget):
             self.progress_bar.setValue(100)
             self.loading_label.setText("Loading complete.")
 
+            # Display grouped images in the tree view
+            grouped_by_object = {}
+
+            # First, group by object_name
+            for (object_name, filter_name, exposure_time), paths in grouped_images.items():
+                if object_name not in grouped_by_object:
+                    grouped_by_object[object_name] = {}
+                if filter_name not in grouped_by_object[object_name]:
+                    grouped_by_object[object_name][filter_name] = {}
+                if exposure_time not in grouped_by_object[object_name][filter_name]:
+                    grouped_by_object[object_name][filter_name][exposure_time] = []
+                grouped_by_object[object_name][filter_name][exposure_time].extend(paths)
+
+            # Now, create the tree structure
+            for object_name, filters in grouped_by_object.items():
+                object_item = QTreeWidgetItem([f"Object: {object_name}"])
+                self.fileTree.addTopLevelItem(object_item)
+                object_item.setExpanded(True)  # Expand the object item
+                for filter_name, exposures in filters.items():
+                    filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
+                    object_item.addChild(filter_item)
+                    filter_item.setExpanded(True)  # Expand the filter item
+                    for exposure_time, paths in exposures.items():
+                        exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
+                        filter_item.addChild(exposure_item)
+                        exposure_item.setExpanded(True)  # Expand the exposure item
+                        for file_path in paths:
+                            file_name = os.path.basename(file_path)
+                            item = QTreeWidgetItem([file_name])
+                            exposure_item.addChild(item)
 
 
     def debayer_image(self, image, file_path, header):
@@ -1955,44 +2199,248 @@ class BlinkTab(QWidget):
 
             # Retrieve the corresponding image data and header from the loaded images
             stretched_image = self.loaded_images[index]['image_data']
-  
+
             # Convert to QImage and display
             qimage = self.convert_to_qimage(stretched_image)
             pixmap = QPixmap.fromImage(qimage)
 
-            # Scale the pixmap to fit the preview window's fixed size
-            preview_size = self.preview_label.size()  # Get the size of the preview QLabel
-            scaled_pixmap = pixmap.scaled(preview_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            # Store the pixmap for zooming
+            self.current_pixmap = pixmap
 
-            # Set the scaled pixmap to the preview label
+            # Apply zoom level
+            self.apply_zoom()
+
+    def apply_zoom(self):
+        """Apply the current zoom level to the pixmap and update the display."""
+        if self.current_pixmap:
+            # Scale the pixmap based on the zoom level
+            scaled_pixmap = self.current_pixmap.scaled(
+                self.current_pixmap.size() * self.zoom_level,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+
+            # Update the QLabel with the scaled pixmap
             self.preview_label.setPixmap(scaled_pixmap)
+            self.preview_label.resize(scaled_pixmap.size())
 
-            # Ensure the window doesn't resize: prevent layout from stretching
-            self.preview_label.setFixedSize(preview_size)  # Fix the size of the preview label
+            # Adjust scroll position to center the view
+            self.scroll_area.horizontalScrollBar().setValue(
+                (self.preview_label.width() - self.scroll_area.viewport().width()) // 2
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                (self.preview_label.height() - self.scroll_area.viewport().height()) // 2
+            )
 
 
+
+    def zoom_in(self):
+        """Increase the zoom level and refresh the image."""
+        self.zoom_level = min(self.zoom_level * 1.2, 3.0)  # Cap at 3x
+        self.apply_zoom()
+
+    def zoom_out(self):
+        """Decrease the zoom level and refresh the image."""
+        self.zoom_level = max(self.zoom_level / 1.2, 0.05)  # Cap at 0.2x
+        self.apply_zoom()
+
+
+    def fit_to_preview(self):
+        """Adjust the zoom level so the image fits within the QScrollArea viewport."""
+        if self.current_pixmap:
+            # Get the size of the QScrollArea's viewport
+            viewport_size = self.scroll_area.viewport().size()
+            pixmap_size = self.current_pixmap.size()
+
+            # Calculate the zoom level required to fit the pixmap in the QScrollArea viewport
+            width_ratio = viewport_size.width() / pixmap_size.width()
+            height_ratio = viewport_size.height() / pixmap_size.height()
+            self.zoom_level = min(width_ratio, height_ratio)
+
+            # Apply the zoom level
+            self.apply_zoom()
+        else:
+            print("No image loaded. Cannot fit to preview.")
+            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
 
 
 
 
     def on_right_click(self, pos):
-        """Allow deleting an image file from the list and pushing image to ImageManager."""
+        """Allow renaming, moving, and deleting an image file from the list."""
         item = self.fileTree.itemAt(pos)
         if item:
             menu = QMenu(self)
-            
+
             # Add action to push image to ImageManager
             push_action = QAction("Push Image for Processing", self)
             push_action.triggered.connect(lambda: self.push_image_to_manager(item))
             menu.addAction(push_action)
 
+            # Add action to rename the image
+            rename_action = QAction("Rename", self)
+            rename_action.triggered.connect(lambda: self.rename_item(item))
+            menu.addAction(rename_action)
+
+
+            # Add action to batch rename items
+            batch_rename_action = QAction("Batch Flag Items", self)
+            batch_rename_action.triggered.connect(lambda: self.batch_rename_items())
+            menu.addAction(batch_rename_action)
+
+            # Add action to move the image
+            move_action = QAction("Move Selected Items", self)
+            move_action.triggered.connect(lambda: self.move_items())
+            menu.addAction(move_action)
+
             # Add action to delete image from the list
-            delete_action = QAction("Delete", self)
-            delete_action.triggered.connect(lambda: self.delete_item(item))
+            delete_action = QAction("Delete Selected Items", self)
+            delete_action.triggered.connect(lambda: self.delete_items())
             menu.addAction(delete_action)
 
             menu.exec_(self.fileTree.mapToGlobal(pos))
+
+    def rename_item(self, item):
+        """Allow the user to rename the selected image."""
+        current_name = item.text(0)
+        new_name, ok = QInputDialog.getText(self, "Rename Image", "Enter new name:", text=current_name)
+
+        if ok and new_name:
+            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+            if file_path:
+                # Get the new file path with the new name
+                new_file_path = os.path.join(os.path.dirname(file_path), new_name)
+
+                try:
+                    # Rename the file
+                    os.rename(file_path, new_file_path)
+                    print(f"File renamed from {current_name} to {new_name}")
+                    
+                    # Update the image paths and tree view
+                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                    item.setText(0, new_name)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to rename the file: {e}")
+
+    def batch_rename_items(self):
+        """Batch rename selected items by adding a prefix or suffix."""
+        selected_items = self.fileTree.selectedItems()
+
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for renaming.")
+            return
+
+        # Create a custom dialog for entering the prefix and suffix
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Batch Rename")
+        dialog_layout = QVBoxLayout(dialog)
+
+        instruction_label = QLabel("Enter a prefix or suffix to rename selected files:")
+        dialog_layout.addWidget(instruction_label)
+
+        # Create fields for prefix and suffix
+        form_layout = QHBoxLayout()
+
+        prefix_field = QLineEdit(dialog)
+        prefix_field.setPlaceholderText("Prefix")
+        form_layout.addWidget(prefix_field)
+
+        current_filename_label = QLabel("currentfilename", dialog)
+        form_layout.addWidget(current_filename_label)
+
+        suffix_field = QLineEdit(dialog)
+        suffix_field.setPlaceholderText("Suffix")
+        form_layout.addWidget(suffix_field)
+
+        dialog_layout.addLayout(form_layout)
+
+        # Add OK and Cancel buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK", dialog)
+        ok_button.clicked.connect(dialog.accept)
+        button_layout.addWidget(ok_button)
+
+        cancel_button = QPushButton("Cancel", dialog)
+        cancel_button.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_button)
+
+        dialog_layout.addLayout(button_layout)
+
+        # Show the dialog and handle user input
+        if dialog.exec_() == QDialog.Accepted:
+            prefix = prefix_field.text().strip()
+            suffix = suffix_field.text().strip()
+
+            # Rename each selected file
+            for item in selected_items:
+                current_name = item.text(0)
+                file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+
+                if file_path:
+                    # Construct the new filename
+                    directory = os.path.dirname(file_path)
+                    new_name = f"{prefix}{current_name}{suffix}"
+                    new_file_path = os.path.join(directory, new_name)
+
+                    try:
+                        # Rename the file
+                        os.rename(file_path, new_file_path)
+                        print(f"File renamed from {file_path} to {new_file_path}")
+
+                        # Update the paths and tree view
+                        self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                        item.setText(0, new_name)
+
+                    except Exception as e:
+                        print(f"Failed to rename {file_path}: {e}")
+                        QMessageBox.critical(self, "Error", f"Failed to rename the file: {e}")
+
+            print(f"Batch renamed {len(selected_items)} items.")
+
+
+    def move_items(self):
+        """Allow the user to move selected images to a different directory."""
+        selected_items = self.fileTree.selectedItems()
+        
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for moving.")
+            return
+
+        # Open file dialog to select a new directory
+        new_directory = QFileDialog.getExistingDirectory(self, "Select Destination Folder", "")
+        if not new_directory:
+            return  # User canceled the directory selection
+
+        for item in selected_items:
+            current_name = item.text(0)
+            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+
+            if file_path:
+                new_file_path = os.path.join(new_directory, current_name)
+
+                try:
+                    # Move the file
+                    os.rename(file_path, new_file_path)
+                    print(f"File moved from {file_path} to {new_file_path}")
+                    
+                    # Update the image paths
+                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
+                    item.setText(0, current_name)  # Update the tree view item's text (if needed)
+
+                except Exception as e:
+                    print(f"Failed to move {file_path}: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to move the file: {e}")
+
+        # Update the tree view to reflect the moved items
+        self.fileTree.clear()
+        for file_path in self.image_paths:
+            file_name = os.path.basename(file_path)
+            item = QTreeWidgetItem([file_name])
+            self.fileTree.addTopLevelItem(item)
+
+        print(f"Moved {len(selected_items)} items.")
+
 
     def push_image_to_manager(self, item):
         """Push the selected image to the ImageManager."""
@@ -2043,65 +2491,96 @@ class BlinkTab(QWidget):
 
 
 
-    def delete_item(self, item):
-        """Delete the selected item from the tree, the loaded images list, and the file system."""
-        file_name = item.text(0)
-        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+    def delete_items(self):
+        """Delete the selected items from the tree, the loaded images list, and the file system."""
+        selected_items = self.fileTree.selectedItems()
 
-        if file_path:
-            # Show confirmation dialog before deleting
-            reply = QMessageBox.question(self, 'Confirm Deletion', 
-                f"Are you sure you want to permanently delete the image: {file_name}? This action is irreversible.",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if not selected_items:
+            QMessageBox.warning(self, "Warning", "No items selected for deletion.")
+            return
 
-            if reply == QMessageBox.Yes:
-                try:
-                    # Remove the image from image_paths
-                    if file_path in self.image_paths:
-                        self.image_paths.remove(file_path)
-                        print(f"Image path {file_path} removed from image_paths.")
-                    else:
-                        print(f"Image path {file_path} not found in image_paths.")
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            'Confirm Deletion',
+            f"Are you sure you want to permanently delete {len(selected_items)} selected images? This action is irreversible.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
 
-                    # Remove the corresponding image from loaded_images
-                    matching_image_data = next((item for item in self.loaded_images if item['file_path'] == file_path), None)
-                    if matching_image_data:
-                        self.loaded_images.remove(matching_image_data)  # Remove the image-data dictionary
-                        print(f"Image {file_name} removed from loaded_images.")
-                    else:
-                        print(f"Image {file_name} not found in loaded_images.")
+        if reply == QMessageBox.Yes:
+            for item in selected_items:
+                file_name = item.text(0)
+                file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
-                except ValueError as e:
-                    print(f"Error removing image from lists: {e}")
-                    QMessageBox.critical(self, "Error", "Error removing image from loaded list.")
+                if file_path:
+                    try:
+                        # Remove the image from image_paths
+                        if file_path in self.image_paths:
+                            self.image_paths.remove(file_path)
+                            print(f"Image path {file_path} removed from image_paths.")
+                        else:
+                            print(f"Image path {file_path} not found in image_paths.")
 
-                # Now delete the file from the filesystem
-                try:
-                    os.remove(file_path)  # Delete the image file
-                    print(f"File {file_path} deleted successfully.")
-                except Exception as e:
-                    print(f"Failed to delete {file_path}: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
+                        # Remove the corresponding image from loaded_images
+                        matching_image_data = next((entry for entry in self.loaded_images if entry['file_path'] == file_path), None)
+                        if matching_image_data:
+                            self.loaded_images.remove(matching_image_data)
+                            print(f"Image {file_name} removed from loaded_images.")
+                        else:
+                            print(f"Image {file_name} not found in loaded_images.")
 
-                # Clear the existing tree and repopulate it (without the deleted file)
-                self.fileTree.clear()
+                        # Delete the file from the filesystem
+                        os.remove(file_path)
+                        print(f"File {file_path} deleted successfully.")
 
-                # Re-add remaining images to the tree (this should exclude the deleted one)
-                for file_path in self.image_paths:
-                    file_name = os.path.basename(file_path)
-                    item = QTreeWidgetItem([file_name])
-                    self.fileTree.addTopLevelItem(item)
+                    except Exception as e:
+                        print(f"Failed to delete {file_path}: {e}")
+                        QMessageBox.critical(self, "Error", f"Failed to delete the image file: {e}")
 
-                print(f"Image {file_name} and its data have been deleted.")
+            # Remove the selected items from the TreeWidget
+            for item in selected_items:
+                parent = item.parent()
+                if parent:
+                    parent.removeChild(item)
+                else:
+                    index = self.fileTree.indexOfTopLevelItem(item)
+                    if index != -1:
+                        self.fileTree.takeTopLevelItem(index)
 
-                # Clear the preview if it was showing the deleted image
-                self.preview_label.clear()  # Clear the preview label
-                self.preview_label.setText('No image selected.')  # Optional: Set a default message
+            print(f"Deleted {len(selected_items)} items.")
+            
+            # Clear the preview if the deleted items include the currently displayed image
+            self.preview_label.clear()
+            self.preview_label.setText('No image selected.')
 
-                # Reset the current image as the deleted one should no longer be shown
-                self.current_image = None
+            self.current_image = None
 
 
+    def eventFilter(self, source, event):
+        """Handle mouse events for dragging."""
+        if source == self.scroll_area.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                # Start dragging
+                self.dragging = True
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseMove and self.dragging:
+                # Handle dragging
+                delta = event.pos() - self.last_mouse_pos
+                self.scroll_area.horizontalScrollBar().setValue(
+                    self.scroll_area.horizontalScrollBar().value() - delta.x()
+                )
+                self.scroll_area.verticalScrollBar().setValue(
+                    self.scroll_area.verticalScrollBar().value() - delta.y()
+                )
+                self.last_mouse_pos = event.pos()
+                return True
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                # Stop dragging
+                self.dragging = False
+                return True
+        return super().eventFilter(source, event)
 
     def on_selection_changed(self, selected, deselected):
         """Handle the selection change event."""
@@ -2123,7 +2602,6 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, 3 * w, QImage.Format_RGB888)
         else:  # Grayscale Image
             return QImage(img_data, w, h, w, QImage.Format_Grayscale8)
-
 
 
 class CosmicClarityTab(QWidget):
@@ -2874,16 +3352,22 @@ class CosmicClarityTab(QWidget):
         self.update_image_display()  # Redraw with autostretch if enabled
 
     def save_input_image(self, file_path):
-        """Save the image directly to the specified input path for Cosmic Clarity without prompting."""
-        if self.image is None:
-            print("No image to save.")
-            return
-        
-        # Get the file extension as original_format
-        original_format = os.path.splitext(self.loaded_image_path)[-1].lstrip('.').lower()  # E.g., 'tiff', 'png', etc.
-        
-        # Call save_image with the correct format
-        save_image(self.image, file_path, original_format, self.bit_depth, self.original_header, self.is_mono)
+        """Save the current image to the specified path in TIF format."""
+        if self.image is not None:
+            try:
+                from tifffile import imwrite
+                # Force saving as `.tif` format
+                if not file_path.endswith(".tif"):
+                    file_path += ".tif"
+                imwrite(file_path, self.image.astype(np.float32))
+                print(f"Image saved as TIFF to {file_path}")  # Debug print
+            except Exception as e:
+                print(f"Error saving input image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to save input image:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "No image to save.")
+
+
 
 
     def update_ui_for_mode(self):
@@ -2975,20 +3459,30 @@ class CosmicClarityTab(QWidget):
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
-        input_extension = os.path.splitext(self.loaded_image_path)[-1].lower() 
-        input_file_path = os.path.join(input_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{input_extension}")
+
+        # Construct the base filename from the loaded image path
+        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
-        self.save_input_image(input_file_path)  # Custom function to save the currently displayed image
-
-        # After defining input_file_path:
+        input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
+        self.save_input_image(input_file_path)  # Save as `.tif`
         self.current_input_file_path = input_file_path
 
+        # Construct the expected output file glob
+        output_file_glob = os.path.join(output_folder, f"{base_filename}{output_suffix}.tif")
+        print(f"Waiting for output file matching: {output_file_glob}")  # Debug print
 
+        # Check if the executable exists
+        exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}. Please use the wrench icon to select the correct folder.")
+            return
 
         cmd = self.build_command_args(exe_name, mode)
         exe_path = cmd[0]
         args = cmd[1:]  # Separate the executable from its arguments
+        print(f"Running command: {exe_path} {' '.join(args)}")  # Debug print
 
         # Use QProcess instead of subprocess
         self.process_q = QProcess(self)
@@ -3008,9 +3502,6 @@ class CosmicClarityTab(QWidget):
             return
 
         # Set up file waiting worker and wait dialog as before
-        output_file_glob = os.path.join(
-            output_folder, f"{os.path.splitext(os.path.basename(self.loaded_image_path))[0]}{output_suffix}.*"
-        )
         self.wait_thread = WaitForFileWorker(output_file_glob, timeout=3000)
         self.wait_thread.fileFound.connect(self.on_file_found)
         self.wait_thread.error.connect(self.on_file_error)
@@ -3026,6 +3517,7 @@ class CosmicClarityTab(QWidget):
         # Once the dialog is closed (either by file found, error, or cancellation), restore autostretch if needed
         if was_autostretch_enabled:
             self.auto_stretch_button.setChecked(True)
+
 
 
     ########################################
@@ -3083,7 +3575,7 @@ class CosmicClarityTab(QWidget):
             # You can handle any cleanup here if needed
 
     def on_file_found(self, output_file_path):
-
+        print(f"File found: {output_file_path}")
         self.wait_dialog.close()
         self.wait_thread = None
 
@@ -3717,6 +4209,8 @@ class WaitForFileWorker(QThread):
         start_time = time.time()
         while self._running and (time.time() - start_time < self.timeout):
             matching_files = glob.glob(self.output_file_glob)
+            print(f"Checking for files: {self.output_file_glob}")  # Debug print
+            print(f"Found files: {matching_files}")  # Debug print
             if matching_files:
                 self.fileFound.emit(matching_files[0])
                 return
@@ -3724,7 +4218,6 @@ class WaitForFileWorker(QThread):
         if self._running:
             self.error.emit("Output file not found within timeout.")
         else:
-            # Thread stopped by user
             self.cancelled.emit()
 
     def stop(self):
@@ -8542,6 +9035,1410 @@ class FrequencySeperationThread(QThread):
             # Any error gets reported via the error_signal
             self.error_signal.emit(str(e))
 
+class PalettePickerProcessingThread(QThread):
+    """
+    Thread for processing images to prevent UI freezing.
+    """
+    preview_generated = pyqtSignal(np.ndarray)
+
+    def __init__(self, ha_image, oiii_image, sii_image, osc1_image, osc2_image, ha_to_oii_ratio, enable_star_stretch, stretch_factor):
+        super().__init__()
+        self.ha_image = ha_image
+        self.oiii_image = oiii_image
+        self.sii_image = sii_image
+        self.osc1_image = osc1_image  # Added for OSC1
+        self.osc2_image = osc2_image  # Added for OSC2
+        self.ha_to_oii_ratio = ha_to_oii_ratio
+        self.enable_star_stretch = enable_star_stretch
+        self.stretch_factor = stretch_factor
+
+    def run(self):
+        """
+        Perform image processing to generate a combined preview.
+        """
+        try:
+            combined_ha = self.ha_image.copy() if self.ha_image is not None else None
+            combined_oiii = self.oiii_image.copy() if self.oiii_image is not None else None
+
+            # Process OSC1 if available
+            if self.osc1_image is not None:
+                # Extract synthetic Ha and OIII from OSC1
+                ha_osc1 = self.osc1_image[:, :, 0]  # Red channel -> Ha
+                oiii_osc1 = np.mean(self.osc1_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+                # Apply stretching if enabled
+                if self.enable_star_stretch:
+                    ha_osc1 = stretch_mono_image(ha_osc1, target_median=self.stretch_factor)
+                    oiii_osc1 = stretch_mono_image(oiii_osc1, target_median=self.stretch_factor)
+
+                # Combine with existing Ha and OIII
+                if combined_ha is not None:
+                    combined_ha = (combined_ha * 0.5) + (ha_osc1 * 0.5)
+                else:
+                    combined_ha = ha_osc1
+
+                if combined_oiii is not None:
+                    combined_oiii = (combined_oiii * 0.5) + (oiii_osc1 * 0.5)
+                else:
+                    combined_oiii = oiii_osc1
+
+            # Process OSC2 if available
+            if self.osc2_image is not None:
+                # Extract synthetic Ha and OIII from OSC2
+                ha_osc2 = self.osc2_image[:, :, 0]  # Red channel -> Ha
+                oiii_osc2 = np.mean(self.osc2_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+                # Apply stretching if enabled
+                if self.enable_star_stretch:
+                    ha_osc2 = stretch_mono_image(ha_osc2, target_median=self.stretch_factor)
+                    oiii_osc2 = stretch_mono_image(oiii_osc2, target_median=self.stretch_factor)
+
+                # Combine with existing Ha and OIII
+                if combined_ha is not None:
+                    combined_ha = (combined_ha * 0.5) + (ha_osc2 * 0.5)
+                else:
+                    combined_ha = ha_osc2
+
+                if combined_oiii is not None:
+                    combined_oiii = (combined_oiii * 0.5) + (oiii_osc2 * 0.5)
+                else:
+                    combined_oiii = oiii_osc2
+
+            # Ensure that combined Ha and OIII are present
+            if combined_ha is not None and combined_oiii is not None:
+                # Combine Ha and OIII based on the specified ratio
+                combined = (combined_ha * self.ha_to_oii_ratio) + (combined_oiii * (1 - self.ha_to_oii_ratio))
+
+                # Apply stretching if enabled
+                if self.enable_star_stretch:
+                    combined = stretch_mono_image(combined, target_median=self.stretch_factor)
+
+                # Incorporate SII channel if available
+                if self.sii_image is not None:
+                    combined = combined + self.sii_image
+                    # Normalize to prevent overflow
+                    combined = self.normalize_image(combined)
+
+                self.preview_generated.emit(combined)
+            else:
+                # If required channels are missing, emit a dummy image or handle accordingly
+                combined = np.zeros((100, 100, 3))  # Dummy image
+                self.preview_generated.emit(combined)
+        except Exception as e:
+            print(f"Error in PalettePickerProcessingThread: {e}")
+            self.preview_generated.emit(None)
+
+    @staticmethod
+    def normalize_image(image):
+        return image
+
+
+class PerfectPalettePickerTab(QWidget):
+    """
+    Perfect Palette Picker Tab for Seti Astro Suite.
+    Creates 12 popular NB palettes from Ha/OIII/SII or OSC channels.
+    """
+    def __init__(self, image_manager=None):
+        super().__init__()
+        self.image_manager = image_manager  # Reference to the ImageManager
+        self.initUI()
+        self.ha_image = None
+        self.oiii_image = None
+        self.sii_image = None
+        self.osc1_image = None  # Added for OSC1
+        self.osc2_image = None  # Added for OSC2
+        self.combined_image = None
+        self.is_mono = False
+        # Filenames
+        self.ha_filename = None
+        self.oiii_filename = None
+        self.sii_filename = None
+        self.osc1_filename = None  # Added for OSC1
+        self.osc2_filename = None  # Added for OSC2      
+        self.filename = None  # Store the selected file path
+        self.zoom_factor = 1.0  # Initialize to 1.0 for normal size
+        self.processing_thread = None
+        self.original_header = None
+        self.original_pixmap = None  # To store the original QPixmap for zooming
+        self.bit_depth = "Unknown"
+        self.dragging = False
+        self.last_mouse_position = None
+        self.selected_palette_button = None
+        self.selected_palette = None  # To track the currently selected palette
+        
+        # Preview scale factor
+        self.preview_scale = 1  # Start at no scaling
+
+        if self.image_manager:
+            # Connect to ImageManager's image_changed signal if needed
+            # self.image_manager.image_changed.connect(self.on_image_changed)
+            pass
+
+    def initUI(self):
+        main_layout = QHBoxLayout()
+
+        # Left column for controls
+        left_widget = QWidget(self)
+        left_layout = QVBoxLayout(left_widget)
+        left_widget.setFixedWidth(300)
+
+        # Title label
+        title_label = QLabel("Perfect Palette Picker v1.0", self)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setFont(QFont("Helvetica", 14, QFont.Bold))
+        left_layout.addWidget(title_label)
+
+        # Instruction label
+        instruction_label = QLabel(self)
+        instruction_label.setText(
+            "Instructions:\n"
+            "1. Add narrowband images or an OSC camera image.\n"
+            "2. Check the 'Linear Input Data' checkbox if the images are linear.\n"
+            "3. Click 'Create Palettes' to generate the palettes.\n"
+            "4. Use the Zoom buttons to zoom in and out.\n"
+            "5. Resize the UI by dragging the lower right corner.\n"
+            "6. Click on a palette from the preview selection to generate that palette.\n\n"
+            "Multiple palettes can be generated."
+        )
+        instruction_label.setWordWrap(True)
+        instruction_label.setAlignment(Qt.AlignLeft)
+        instruction_label.setStyleSheet(
+            "font-size: 8pt; padding: 10px;"
+        )
+        instruction_label.setFixedHeight(200)
+        left_layout.addWidget(instruction_label)
+
+        # "Linear Input Data" checkbox
+        self.linear_checkbox = QCheckBox("Linear Input Data", self)
+        self.linear_checkbox.setChecked(True)
+        self.linear_checkbox.setToolTip(
+            "When checked, we apply the 0.25 stretch for previews/final images."
+        )
+        left_layout.addWidget(self.linear_checkbox)
+
+        # Load buttons for Ha, OIII, SII, OSC
+        self.load_ha_button = QPushButton("Load Ha Image", self)
+        self.load_ha_button.clicked.connect(lambda: self.load_image('Ha'))
+        left_layout.addWidget(self.load_ha_button)
+
+        self.ha_label = QLabel("No Ha image loaded.", self)
+        self.ha_label.setWordWrap(True)
+        left_layout.addWidget(self.ha_label)
+
+        self.load_oiii_button = QPushButton("Load OIII Image", self)
+        self.load_oiii_button.clicked.connect(lambda: self.load_image('OIII'))
+        left_layout.addWidget(self.load_oiii_button)
+
+        self.oiii_label = QLabel("No OIII image loaded.", self)
+        self.oiii_label.setWordWrap(True)
+        left_layout.addWidget(self.oiii_label)
+
+        self.load_sii_button = QPushButton("Load SII Image", self)
+        self.load_sii_button.clicked.connect(lambda: self.load_image('SII'))
+        left_layout.addWidget(self.load_sii_button)
+
+        self.sii_label = QLabel("No SII image loaded.", self)
+        self.sii_label.setWordWrap(True)
+        left_layout.addWidget(self.sii_label)
+
+        # **Add OSC1 Load Button and Label**
+        self.load_osc1_button = QPushButton("Load OSC HaO3 Image", self)
+        self.load_osc1_button.clicked.connect(lambda: self.load_image('OSC1'))
+        left_layout.addWidget(self.load_osc1_button)
+
+        self.osc1_label = QLabel("No OSC HaO3 image loaded.", self)
+        self.osc1_label.setWordWrap(True)
+        left_layout.addWidget(self.osc1_label)
+
+        # **Add OSC2 Load Button and Label**
+        self.load_osc2_button = QPushButton("Load OSC S2O3 Image", self)
+        self.load_osc2_button.clicked.connect(lambda: self.load_image('OSC2'))
+        left_layout.addWidget(self.load_osc2_button)
+
+        self.osc2_label = QLabel("No OSC S2O3 image loaded.", self)
+        self.osc2_label.setWordWrap(True)
+        left_layout.addWidget(self.osc2_label)
+
+        # "Create Palettes" button
+        create_palettes_button = QPushButton("Create Palettes", self)
+        create_palettes_button.clicked.connect(self.prepare_preview_palettes)
+        left_layout.addWidget(create_palettes_button)
+
+        # Spacer
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        self.push_palette_button = QPushButton("Push Final Palette for Further Processing")
+        self.push_palette_button.clicked.connect(self.push_final_palette_to_image_manager)
+        left_layout.addWidget(self.push_palette_button)
+
+        # Spacer
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+        # Add a "Clear All Images" button
+        self.clear_all_button = QPushButton("Clear All Images", self)
+        self.clear_all_button.clicked.connect(self.clear_all_images)
+        left_layout.addWidget(self.clear_all_button)
+
+
+        # Footer
+        footer_label = QLabel("""
+            Written by Franklin Marek<br>
+            <a href='http://www.setiastro.com'>www.setiastro.com</a>
+        """)
+        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setOpenExternalLinks(True)
+        footer_label.setFont(QFont("Helvetica", 8))
+        left_layout.addWidget(footer_label)
+
+        # Add the left widget to the main layout
+        main_layout.addWidget(left_widget)
+
+        # Right column for previews and controls
+        right_widget = QWidget(self)
+        right_layout = QVBoxLayout(right_widget)
+
+        # Zoom controls
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In", self)
+        zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(zoom_in_button)
+
+        zoom_out_button = QPushButton("Zoom Out", self)
+        zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(zoom_out_button)
+
+        fit_to_preview_button = QPushButton("Fit to Preview", self)
+        fit_to_preview_button.clicked.connect(self.fit_to_preview)
+        zoom_layout.addWidget(fit_to_preview_button)
+
+        right_layout.addLayout(zoom_layout)
+
+        # Scroll area for image preview
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.installEventFilter(self)
+        self.image_label.setMouseTracking(True)
+
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setMinimumSize(400, 250)
+        right_layout.addWidget(self.scroll_area, stretch=1)
+
+
+        # Preview thumbnails grid
+        self.thumbs_grid = QGridLayout()
+        self.palette_names = [
+            "SHO", "HOO", "HSO", "HOS",
+            "OSS", "OHH", "OSH", "OHS",
+            "HSS", "Realistic1", "Realistic2", "Foraxx"
+        ]
+        self.thumbnail_buttons = []
+        row = 0
+        col = 0
+
+        for palette in self.palette_names:
+            button = QPushButton(palette, self)
+            button.setMinimumSize(200, 100)  # Minimum size for buttons
+            button.setMaximumHeight(100)  # Fixed height for buttons
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)  # Expand width, fixed height
+            button.setIcon(QIcon())  # Placeholder, will be set later
+            button.clicked.connect(lambda checked, p=palette: self.generate_final_palette_image(p))
+            button.setIconSize(QSize(200, 100))
+            button.setIcon(QIcon())  # Placeholder, will be set later
+            self.thumbnail_buttons.append(button)
+            self.thumbs_grid.addWidget(button, row, col)
+            col += 1
+            if col >= 4:
+                col = 0
+                row += 1
+
+        # Wrap the grid in a QWidget for better layout handling
+        thumbs_widget = QWidget()
+        thumbs_widget.setLayout(self.thumbs_grid)
+        thumbs_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+        # Add the thumbnails widget to the layout
+        right_layout.addWidget(thumbs_widget, stretch=0)
+
+        # Save button
+        save_button = QPushButton("Save Combined Image", self)
+        save_button.clicked.connect(self.save_image)
+        right_layout.addWidget(save_button)
+
+        # Status label
+        self.status_label = QLabel("", self)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.status_label)
+
+        # Add the right widget to the main layout
+        main_layout.addWidget(right_widget)
+
+        self.setLayout(main_layout)
+        self.setWindowTitle("Perfect Palette Picker v1.0")
+
+    def clear_all_images(self):
+        """
+        Clears all loaded images (Ha, OIII, SII, OSC1, OSC2).
+        """
+        # Clear Ha image and reset filename and label
+        self.ha_image = None
+        self.ha_filename = None
+        self.ha_label.setText("No Ha image loaded.")
+
+        # Clear OIII image and reset filename and label
+        self.oiii_image = None
+        self.oiii_filename = None
+        self.oiii_label.setText("No OIII image loaded.")
+
+        # Clear SII image and reset filename and label
+        self.sii_image = None
+        self.sii_filename = None
+        self.sii_label.setText("No SII image loaded.")
+
+        # Clear OSC1 image and reset filename and label
+        self.osc1_image = None
+        self.osc1_filename = None
+        self.osc1_label.setText("No OSC HaO3 image loaded.")
+
+        # Clear OSC2 image and reset filename and label
+        self.osc2_image = None
+        self.osc2_filename = None
+        self.osc2_label.setText("No OSC S2O3 image loaded.")
+
+        # Clean up preview windows
+        self.cleanup_preview_windows()        
+
+        # Update the status label
+        self.status_label.setText("All images cleared.")
+
+
+    def load_image(self, image_type):
+        """
+        Opens a file dialog to load an image based on the image type.
+        """
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Select {image_type} Image",
+            "",
+            file_filter,
+            options=options
+        )
+        if file_path:
+            image, original_header, bit_depth, is_mono = load_image(file_path)
+            if image is None:
+                QMessageBox.critical(self, "Error", f"Failed to load {image_type} image.")
+                return
+            if image_type == 'Ha':
+                self.ha_image = image
+                self.ha_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.ha_label.setText(f"Loaded: {os.path.basename(file_path)}")
+            elif image_type == 'OIII':
+                self.oiii_image = image
+                self.oiii_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.oiii_label.setText(f"Loaded: {os.path.basename(file_path)}")
+            elif image_type == 'SII':
+                self.sii_image = image
+                self.sii_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.sii_label.setText(f"Loaded: {os.path.basename(file_path)}")
+            elif image_type == 'OSC1':
+                self.osc1_image = image
+                self.osc1_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.osc1_label.setText(f"Loaded: {os.path.basename(file_path)}")
+            elif image_type == 'OSC2':
+                self.osc2_image = image
+                self.osc2_filename = file_path
+                self.original_header = original_header
+                self.bit_depth = bit_depth
+                self.is_mono = is_mono
+                self.osc2_label.setText(f"Loaded: {os.path.basename(file_path)}")
+
+            # Apply stretching if linear input is checked and image is mono
+            if self.linear_checkbox.isChecked() and is_mono:
+                if image_type == 'Ha':
+                    self.ha_image = stretch_mono_image(self.ha_image, target_median=0.25)
+                elif image_type == 'OIII':
+                    self.oiii_image = stretch_mono_image(self.oiii_image, target_median=0.25)
+                elif image_type == 'SII':
+                    self.sii_image = stretch_mono_image(self.sii_image, target_median=0.25)
+                elif image_type in ['OSC1', 'OSC2']:
+                    # Assuming OSC has multiple channels; stretching would be handled during processing
+                    pass
+
+            self.status_label.setText(f"{image_type} image loaded successfully.")
+        else:
+            self.status_label.setText(f"{image_type} image loading canceled.")
+
+    def prepare_preview_palettes(self):
+        """
+        
+        Prepares the preview thumbnails for each palette based on selected images.
+        """
+        have_ha = self.ha_image is not None
+        have_oiii = self.oiii_image is not None
+        have_sii = self.sii_image is not None
+        have_osc1 = self.osc1_image is not None
+        have_osc2 = self.osc2_image is not None
+
+        print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC1: {have_osc1} | OSC2: {have_osc2}")
+
+
+
+        # Initialize combined channels
+        combined_ha = self.ha_image.copy() if self.ha_image is not None else None
+        combined_oiii = self.oiii_image.copy() if self.oiii_image is not None else None
+        combined_sii = self.sii_image.copy() if self.sii_image is not None else None  # Initialize combined SII
+
+        # Process OSC1 if available
+        if have_osc1:
+            # Extract synthetic Ha and OIII from OSC1
+            ha_osc1 = self.osc1_image[:, :, 0]  # Red channel -> Ha
+            oiii_osc1 = np.mean(self.osc1_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+            # Apply stretching if enabled
+            if self.linear_checkbox.isChecked():
+                ha_osc1 = stretch_mono_image(ha_osc1, target_median=0.25)
+                oiii_osc1 = stretch_mono_image(oiii_osc1, target_median=0.25)
+
+            # Combine with existing Ha and OIII
+            if combined_ha is not None:
+                combined_ha = (combined_ha * 0.5) + (ha_osc1 * 0.5)
+            else:
+                combined_ha = ha_osc1
+
+            if combined_oiii is not None:
+                combined_oiii = (combined_oiii * 0.5) + (oiii_osc1 * 0.5)
+            else:
+                combined_oiii = oiii_osc1
+
+        # Process OSC2 if available
+        if have_osc2:
+            # Extract synthetic SII from OSC2 red channel
+            sii_osc2 = self.osc2_image[:, :, 0]  # Red channel -> SII
+            oiii_osc2 = np.mean(self.osc2_image[:, :, 1:3], axis=2)  # Average of green and blue channels -> OIII
+
+            # Apply stretching if enabled
+            if self.linear_checkbox.isChecked():
+                sii_osc2 = stretch_mono_image(sii_osc2, target_median=0.25)
+                oiii_osc2 = stretch_mono_image(oiii_osc2, target_median=0.25)
+
+            # Combine with existing SII
+            if combined_sii is not None:
+                combined_sii = (combined_sii * 0.5) + (sii_osc2 * 0.5)
+            else:
+                combined_sii = sii_osc2
+
+            if combined_oiii is not None:
+                combined_oiii = (combined_oiii * 0.5) + (oiii_osc2 * 0.5)
+            else:
+                combined_oiii = oiii_osc2    
+
+        # Assign combined images back to self.ha_image, self.oiii_image, and self.sii_image
+        self.ha_image = combined_ha
+        self.oiii_image = combined_oiii
+        self.sii_image = combined_sii  # Updated SII image
+
+        # Ensure images are single-channel
+        def ensure_single_channel(image, image_type):
+            if image is not None:
+                if image.ndim == 3:
+                    if image.shape[2] == 1:
+                        image = image[:, :, 0]
+                        print(f"Converted {image_type} image to single channel: {image.shape}")
+                    else:
+                        # If image has multiple channels, retain the first channel
+                        image = image[:, :, 0]
+                        print(f"Extracted first channel from multi-channel {image_type} image: {image.shape}")
+                return image
+            return None
+
+        self.ha_image = ensure_single_channel(self.ha_image, 'Ha')
+        self.oiii_image = ensure_single_channel(self.oiii_image, 'OIII')
+        self.sii_image = ensure_single_channel(self.sii_image, 'SII')
+
+        print(f"Combined Ha image shape: {self.ha_image.shape if self.ha_image is not None else 'None'}")
+        print(f"Combined OIII image shape: {self.oiii_image.shape if self.oiii_image is not None else 'None'}")
+        print(f"Combined SII image shape: {self.sii_image.shape if self.sii_image is not None else 'None'}")
+
+        # Validate required channels
+        # Allow if (Ha and OIII) or (SII and OIII) are present
+        if not ((self.ha_image is not None and self.oiii_image is not None) or
+                (self.sii_image is not None and self.oiii_image is not None)):
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Please load at least Ha and OIII images or SII and OIII images to create palettes."
+            )
+            self.status_label.setText("Insufficient images loaded.")
+            return
+
+        # Start processing thread to generate previews
+        ha_to_oii_ratio = 0.3  # Example ratio; adjust as needed
+        enable_star_stretch = self.linear_checkbox.isChecked()
+        stretch_factor = 0.25  # Example stretch factor; adjust as needed
+
+        self.processing_thread = PalettePickerProcessingThread(
+            ha_image=self.ha_image,
+            oiii_image=self.oiii_image,
+            sii_image=self.sii_image,
+            osc1_image=None,  # OSC1 is already processed
+            osc2_image=None,  # OSC2 is already processed
+            ha_to_oii_ratio=ha_to_oii_ratio,
+            enable_star_stretch=enable_star_stretch,
+            stretch_factor=stretch_factor
+        )
+        self.processing_thread.preview_generated.connect(self.update_preview_thumbnails)
+        self.processing_thread.start()
+
+        self.status_label.setText("Generating preview palettes...")
+
+
+
+    def update_preview_thumbnails(self, combined_preview):
+        """
+        Updates the preview thumbnails with the generated combined preview.
+        Downsamples the images for efficient processing of mini-previews.
+        """
+        if combined_preview is None:
+            # Only update the text overlays
+            for i, palette in enumerate(self.palette_names):
+                pixmap = self.thumbnail_buttons[i].icon().pixmap(self.thumbnail_buttons[i].iconSize())
+                if pixmap.isNull():
+                    print(f"Failed to retrieve pixmap for palette '{palette}'. Skipping.")
+                    continue
+                text_color = Qt.green if self.selected_palette == palette else Qt.white
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setPen(QPen(text_color))
+                painter.setFont(QFont("Helvetica", 8))
+                painter.drawText(pixmap.rect(), Qt.AlignCenter, palette)
+                painter.end()
+                self.thumbnail_buttons[i].setIcon(QIcon(pixmap))
+                QApplication.processEvents()
+
+            return
+
+        def downsample_image(image, factor=8):
+            """
+            Downsample the image by an integer factor using cv2.resize.
+            """
+            if image is not None:
+                height, width = image.shape[:2]
+                new_size = (max(1, width // factor), max(1, height // factor))  # Ensure size is at least 1x1
+                return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+            return image
+
+        # Downsample images
+        ha = downsample_image(self.ha_image)
+        oiii = downsample_image(self.oiii_image)
+        sii = downsample_image(self.sii_image)
+
+        # Helper function to extract single channel
+        def extract_channel(image):
+            return image if image is not None and image.ndim == 2 else (image[:, :, 0] if image is not None else None)
+
+        # Helper function for channel substitution
+        def get_channel(preferred, substitute):
+            return preferred if preferred is not None else substitute
+
+        for i, palette in enumerate(self.palette_names):
+            text_color = Qt.green if self.selected_palette == palette else Qt.white
+
+            # Determine availability
+            ha_available = self.ha_image is not None
+            sii_available = self.sii_image is not None
+
+            # Define substitution channels
+            substituted_ha = sii if not ha_available and sii_available else ha
+            substituted_sii = ha if not sii_available and ha_available else sii
+
+            # Map channels based on palette
+            if palette == "SHO":
+                r = get_channel(extract_channel(sii), substituted_ha)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = extract_channel(oiii)
+            elif palette == "HOO":
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = extract_channel(oiii)
+                b = extract_channel(oiii)
+            elif palette == "HSO":
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = extract_channel(oiii)
+            elif palette == "HOS":
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = extract_channel(oiii)
+                b = get_channel(extract_channel(sii), substituted_ha)
+            elif palette == "OSS":
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(sii), substituted_ha)
+            elif palette == "OHH":
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = get_channel(extract_channel(ha), substituted_sii)
+            elif palette == "OSH":
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(ha), substituted_sii)
+            elif palette == "OHS":
+                r = extract_channel(oiii)
+                g = get_channel(extract_channel(ha), substituted_sii)
+                b = get_channel(extract_channel(sii), substituted_ha)
+            elif palette == "HSS":
+                r = get_channel(extract_channel(ha), substituted_sii)
+                g = get_channel(extract_channel(sii), substituted_ha)
+                b = get_channel(extract_channel(sii), substituted_ha)
+            elif palette in ["Realistic1", "Realistic2", "Foraxx"]:
+                r, g, b = self.map_special_palettes(palette, ha, oiii, sii)
+            else:
+                # Fallback to SHO
+                r, g, b = self.map_channels("SHO", ha, oiii, sii)
+
+            # Replace NaNs and clip to [0, 1]
+            r = np.clip(np.nan_to_num(r, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if r is not None else None
+            g = np.clip(np.nan_to_num(g, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if g is not None else None
+            b = np.clip(np.nan_to_num(b, nan=0.0, posinf=1.0, neginf=0.0), 0, 1) if b is not None else None
+
+            if r is None or g is None or b is None:
+                print(f"One of the channels is None for palette '{palette}'. Skipping this palette.")
+                self.thumbnail_buttons[i].setIcon(QIcon())
+                self.thumbnail_buttons[i].setText(palette)
+                continue
+
+            combined = self.combine_channels_to_color([r, g, b], f"Preview_{palette}")
+            if combined is not None:
+                # Convert NumPy array to QImage
+                q_image = self.numpy_to_qimage(combined)
+                if q_image.isNull():
+                    print(f"Failed to convert preview for palette '{palette}' to QImage.")
+                    continue
+
+                pixmap = QPixmap.fromImage(q_image)
+                if pixmap.isNull():
+                    print(f"Failed to create QPixmap for palette '{palette}'.")
+                    continue
+
+                # Scale pixmap
+                scaled_pixmap = pixmap.scaled(
+                    int(pixmap.width() * self.preview_scale),
+                    int(pixmap.height() * self.preview_scale),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+
+                # Add text overlay
+                painter = QPainter(scaled_pixmap)
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setPen(QPen(text_color))
+                painter.setFont(QFont("Helvetica", 8))
+                painter.drawText(scaled_pixmap.rect(), Qt.AlignCenter, palette)
+                painter.end()
+
+                # Set pixmap to the corresponding button
+                self.thumbnail_buttons[i].setIcon(QIcon(scaled_pixmap))
+                self.thumbnail_buttons[i].setIconSize(scaled_pixmap.size())
+                self.thumbnail_buttons[i].setToolTip(f"Palette: {palette}")
+                QApplication.processEvents()
+            else:
+                self.thumbnail_buttons[i].setIcon(QIcon())
+                self.thumbnail_buttons[i].setText(palette)
+
+        self.status_label.setText("Preview palettes generated successfully.")
+
+
+
+
+
+    def generate_final_palette_image(self, palette_name):
+        """
+        Generates the final combined image for the selected palette.
+        Handles substitution of SII for Ha or Ha for SII if one is missing.
+        """
+        try:
+            print(f"Generating final palette image for: {palette_name}")
+            
+            # Determine availability
+            ha_available = self.ha_image is not None
+            sii_available = self.sii_image is not None
+            
+            # Define substitution
+            if not ha_available and sii_available:
+                # Substitute SII for Ha
+                substituted_ha = self.sii_image
+                substituted_sii = None
+                print("Substituting SII for Ha.")
+            elif not sii_available and ha_available:
+                # Substitute Ha for SII
+                substituted_sii = self.ha_image
+                substituted_ha = None
+                print("Substituting Ha for SII.")
+            else:
+                substituted_ha = self.ha_image
+                substituted_sii = self.sii_image
+            
+            # Temporarily assign substituted channels
+            original_ha = self.ha_image
+            original_sii = self.sii_image
+            
+            self.ha_image = substituted_ha
+            self.sii_image = substituted_sii
+            
+            # Combine channels
+            combined_image = self.combine_channels(palette_name)
+            
+            # Restore original channels
+            self.ha_image = original_ha
+            self.sii_image = original_sii
+            
+            if combined_image is not None:
+                # Ensure the combined image has the correct shape
+                if combined_image.ndim == 4 and combined_image.shape[3] == 3:
+                    combined_image = combined_image[:, :, :, 0]  # Remove the extra dimension
+
+                # Convert to QImage
+                q_image = self.numpy_to_qimage(combined_image)
+                if q_image.isNull():
+                    raise ValueError(f"Failed to convert combined image for palette '{palette_name}' to QImage.")
+
+                pixmap = QPixmap.fromImage(q_image)
+                if pixmap.isNull():
+                    raise ValueError(f"Failed to create QPixmap for palette '{palette_name}'.")
+
+                # Scale the pixmap based on zoom factor
+                scaled_pixmap = pixmap.scaled(
+                    int(pixmap.width() * self.zoom_factor),
+                    int(pixmap.height() * self.zoom_factor),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+
+                # Display the scaled pixmap in the main preview area
+                self.image_label.setPixmap(scaled_pixmap)
+                self.image_label.resize(scaled_pixmap.size())
+                self.combined_image = combined_image
+                self.status_label.setText(f"Final palette '{palette_name}' generated successfully.")
+
+                self.selected_palette = palette_name
+                self.update_preview_thumbnails(None)  # Trigger re-render with updated text colors
+
+            else:
+                raise ValueError(f"Failed to generate combined image for palette '{palette_name}'.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate final image: {e}")
+            self.status_label.setText(f"Failed to generate palette '{palette_name}'.")
+            print(f"[Error] {e}")
+
+    def highlight_selected_button(self, palette_name):
+        """
+        Highlights the clicked button by changing its text color and resets others.
+        """
+        for button in self.thumbnail_buttons:
+            if button.text() == palette_name:
+                # Change text color to indicate selection
+                button.setStyleSheet("color: green; font-weight: bold;")
+                self.selected_palette_button = button
+            else:
+                # Reset text color for non-selected buttons
+                button.setStyleSheet("")
+
+
+    def combine_channels(self, palette_name):
+        """
+        Combines Ha, OIII, SII channels based on the palette name.
+        Ensures that all combined channel values are within the [0, 1] range.
+        """
+        if palette_name in self.palette_names[:9]:  # Standard palettes
+            r, g, b = self.map_channels(palette_name, self.ha_image, self.oiii_image, self.sii_image)
+        elif palette_name in self.palette_names[9:]:  # Special palettes
+            r, g, b = self.map_special_palettes(palette_name, self.ha_image, self.oiii_image, self.sii_image)
+        else:
+            # Fallback to SHO
+            r, g, b = self.map_channels("SHO", self.ha_image, self.oiii_image, self.sii_image)
+
+        if r is not None and g is not None and b is not None:
+            # Replace NaN and Inf with 0
+            r = np.nan_to_num(r, nan=0.0, posinf=1.0, neginf=0.0)
+            g = np.nan_to_num(g, nan=0.0, posinf=1.0, neginf=0.0)
+            b = np.nan_to_num(b, nan=0.0, posinf=1.0, neginf=0.0)
+
+            # Normalize to [0,1]
+            r = np.clip(r, 0, 1)
+            g = np.clip(g, 0, 1)
+            b = np.clip(b, 0, 1)
+
+            # Ensure single-channel
+            if r.ndim == 3:
+                r = r[:, :, 0]
+            if g.ndim == 3:
+                g = g[:, :, 0]
+            if b.ndim == 3:
+                b = b[:, :, 0]
+
+            combined = np.stack([r, g, b], axis=2)
+            return combined
+        else:
+            return None
+
+
+    def combine_channels_to_color(self, channels, output_id):
+        """
+        Combines three grayscale images into an RGB image.
+        Ensures that all channels are consistent and have no extra dimensions.
+        """
+        try:
+            # Validate input channels
+            if len(channels) != 3:
+                raise ValueError(f"Expected 3 channels, got {len(channels)}")
+            
+            # Ensure all channels have the same shape
+            for i, channel in enumerate(channels):
+                if channel is None:
+                    raise ValueError(f"Channel {i} is None.")
+                if channel.shape != channels[0].shape:
+                    raise ValueError(f"Channel {i} has shape {channel.shape}, expected {channels[0].shape}")
+            
+            # Ensure all channels are 2D
+            channels = [channel[:, :, 0] if channel.ndim == 3 else channel for channel in channels]
+            
+            # Debugging: Print channel shapes after extraction
+            for idx, channel in enumerate(channels):
+                print(f"Channel {idx} shape after extraction: {channel.shape}")
+            
+            # Stack channels along the third axis to create RGB
+            rgb_image = np.stack(channels, axis=2)
+            print(f"Combined RGB image shape: {rgb_image.shape}")
+            return rgb_image
+        except Exception as e:
+            print(f"Error in combine_channels_to_color: {e}")
+            return None
+
+    def map_channels(self, palette_name, ha, oiii, sii):
+        """
+        Maps the Ha, OIII, SII channels based on the palette name.
+        Substitutes SII for Ha or Ha for SII if one is missing.
+        """
+        # Substitute SII for Ha if Ha is missing
+        if ha is None and sii is not None:
+            ha = sii
+            print("Ha is missing. Substituting SII for Ha.")
+        
+        # Substitute Ha for SII if SII is missing
+        if sii is None and ha is not None:
+            sii = ha
+            print("SII is missing. Substituting Ha for SII.")
+        
+        # Define the channel mappings
+        mapping = {
+            "SHO": [sii, ha, oiii],
+            "HOO": [ha, oiii, oiii],
+            "HSO": [ha, sii, oiii],
+            "HOS": [ha, oiii, sii],
+            "OSS": [oiii, sii, sii],
+            "OHH": [oiii, ha, ha],
+            "OSH": [oiii, sii, ha],
+            "OHS": [oiii, ha, sii],
+            "HSS": [ha, sii, sii],
+        }
+        
+        # Retrieve the mapped channels based on the palette name
+        mapped_channels = mapping.get(palette_name, [ha, oiii, sii])
+             
+        return mapped_channels
+
+
+    def map_special_palettes(self, palette_name, ha, oiii, sii):
+        """
+        Maps channels for special palettes like Realistic1, Realistic2, Foraxx.
+        Ensures all expressions produce values within the [0, 1] range.
+        Substitutes SII for Ha or Ha for SII if one is missing.
+        """
+        try:
+            # Substitute SII for Ha if Ha is missing
+            if ha is None and sii is not None:
+                ha = sii
+                print("Ha is missing in special palette. Substituting SII for Ha.")
+        
+            # Substitute Ha for SII if SII is missing
+            if sii is None and ha is not None:
+                sii = ha
+                print("SII is missing in special palette. Substituting Ha for SII.")
+        
+            # Realistic1 mapping
+            if palette_name == "Realistic1":
+                expr_r = (ha + sii) / 2 if (ha is not None and sii is not None) else (ha if ha is not None else 0)
+                expr_g = (0.3 * ha) + (0.7 * oiii) if (ha is not None and oiii is not None) else (ha if ha is not None else 0)
+                expr_b = (0.9 * oiii) + (0.1 * ha) if (ha is not None and oiii is not None) else (oiii if oiii is not None else 0)
+        
+            # Realistic2 mapping
+            elif palette_name == "Realistic2":
+                expr_r = (0.7 * ha + 0.3 * sii) if (ha is not None and sii is not None) else (ha if ha is not None else 0)
+                expr_g = (0.3 * sii + 0.7 * oiii) if (sii is not None and oiii is not None) else (oiii if oiii is not None else 0)
+                expr_b = oiii if oiii is not None else 0
+        
+            # Foraxx mapping
+            elif palette_name == "Foraxx":
+                if ha is not None and oiii is not None and sii is None:
+                    expr_r = ha
+                    temp = ha * oiii
+                    expr_g = (temp ** (1 - temp)) * ha + (1 - (temp ** (1 - temp))) * oiii
+                    expr_b = oiii
+                elif ha is not None and oiii is not None and sii is not None:
+                    temp = oiii ** (1 - oiii)
+                    expr_r = (temp * sii) + ((1 - temp) * ha)
+                    temp_ha_oiii = ha * oiii
+                    expr_g = (temp_ha_oiii ** (1 - temp_ha_oiii)) * ha + (1 - (temp_ha_oiii ** (1 - temp_ha_oiii))) * oiii
+                    expr_b = oiii
+                else:
+                    # Fallback to SHO
+                    return self.map_channels("SHO", ha, oiii, sii)
+        
+            else:
+                # Fallback to SHO for any undefined palette
+                return self.map_channels("SHO", ha, oiii, sii)
+        
+            # Replace invalid values and normalize
+            expr_r = np.clip(np.nan_to_num(expr_r, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
+            expr_g = np.clip(np.nan_to_num(expr_g, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
+            expr_b = np.clip(np.nan_to_num(expr_b, nan=0.0, posinf=1.0, neginf=0.0), 0, 1)
+        
+            return expr_r, expr_g, expr_b
+        except Exception as e:
+            print(f"[Error] Failed to map palette {palette_name}: {e}")
+            return None, None, None
+
+
+    def extract_oscc_channels(self, osc_image, base_id):
+        """
+        Extracts R, G, B channels from the OSC image and assigns unique postfixes.
+        
+        Parameters:
+            osc_image (numpy.ndarray): The OSC image array.
+            base_id (str): The base identifier for naming.
+        
+        Returns:
+            list: A list containing the extracted R, G, B channels as NumPy arrays.
+        """
+        if osc_image is None or osc_image.shape[2] < 3:
+            print(f"[!] OSC image {base_id} has fewer than 3 channels—skipping extraction.")
+            return []
+
+        # Extract channels
+        R = osc_image[:, :, 0]  # Red channel
+        G = osc_image[:, :, 1]  # Green channel
+        B = osc_image[:, :, 2]  # Blue channel
+
+        # Assign unique postfixes
+        R_name = f"{base_id}_pppR"
+        G_name = f"{base_id}_pppG"
+        B_name = f"{base_id}_pppB"
+
+        # For Seti Astro Suite, we might need to create separate image objects or handle naming differently
+        # Here, we'll assume that we can manage the names via dictionaries or similar structures
+
+        # Store the extracted channels with their names
+        extracted_channels = {
+            R_name: R,
+            G_name: G,
+            B_name: B
+        }
+
+        # Optionally, hide these images in the GUI or manage them as needed
+        # For example, you might add them to an internal list for cleanup
+
+        # For demonstration, we'll return the list of channels
+        return [R, G, B]
+
+
+
+
+    def numpy_to_qimage(self, image_array):
+        """
+        Converts a NumPy array to QImage.
+        Assumes image_array is in the range [0, 1] and in RGB format.
+        """
+        try:
+            # Validate input shape
+            if image_array.ndim == 2:
+                # Grayscale image
+                
+                image_uint8 = (np.clip(image_array, 0, 1) * 255).astype(np.uint8)
+                height, width = image_uint8.shape
+                bytes_per_line = width
+                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                return q_image.copy()
+            elif image_array.ndim == 3 and image_array.shape[2] == 3:
+                # RGB image
+                
+                image_uint8 = (np.clip(image_array, 0, 1) * 255).astype(np.uint8)
+                height, width, channels = image_uint8.shape
+                if channels != 3:
+                    raise ValueError(f"Expected 3 channels for RGB, got {channels}")
+                bytes_per_line = 3 * width
+                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                return q_image.copy()
+            else:
+                # Invalid shape
+                raise ValueError(f"Invalid image shape for QImage conversion: {image_array.shape}")
+        except Exception as e:
+            print(f"Error converting NumPy array to QImage: {e}")
+            return QImage()
+
+
+
+    def save_image(self):
+        """
+        Save the current combined image to a selected path.
+        """
+        if self.combined_image is not None:
+            save_file, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save As",
+                "",
+                "Images (*.png *.tif *.tiff *.fits *.fit);;All Files (*)"
+            )
+
+            if save_file:
+                # Prompt the user for bit depth
+                bit_depth, ok = QInputDialog.getItem(
+                    self,
+                    "Select Bit Depth",
+                    "Choose bit depth for saving:",
+                    ["16-bit", "32-bit floating point"],
+                    0,
+                    False
+                )
+                if ok:
+                    # Determine the user-selected format from the filename
+                    _, ext = os.path.splitext(save_file)
+                    selected_format = ext.lower().strip('.')
+
+                    # Validate the selected format
+                    valid_formats = ['png', 'tif', 'tiff', 'fits', 'fit']
+                    if selected_format not in valid_formats:
+                        QMessageBox.critical(
+                            self,
+                            "Error",
+                            f"Unsupported file format: {selected_format}. Supported formats are: {', '.join(valid_formats)}"
+                        )
+                        return
+
+                    # Ensure correct data ordering for FITS format
+                    final_image = self.combined_image
+                    if selected_format in ['fits', 'fit']:
+                        if self.combined_image.ndim == 3:  # RGB image
+                            # Transpose to (channels, height, width)
+                            final_image = np.transpose(self.combined_image, (2, 0, 1))
+                            print(f"Transposed for FITS: {final_image.shape}")
+                        elif self.combined_image.ndim == 2:  # Mono image
+                            print(f"Mono image, no transposition needed: {final_image.shape}")
+                        else:
+                            QMessageBox.critical(
+                                self,
+                                "Error",
+                                "Unsupported image dimensions for FITS saving."
+                            )
+                            return
+
+                    # Check if any loaded image file paths have the `.xisf` extension
+                    loaded_file_paths = [
+                        self.ha_filename, self.oiii_filename,
+                        self.sii_filename, self.osc_filename
+                    ]
+                    contains_xisf = any(
+                        file_path.lower().endswith('.xisf') for file_path in loaded_file_paths if file_path
+                    )
+
+                    # Create a minimal header if any loaded image is XISF
+                    sanitized_header = self.original_header if not contains_xisf else self.create_minimal_fits_header(final_image)
+
+                    # Pass the correctly ordered image to the global save_image function
+                    try:
+                        save_image(
+                            img_array=final_image,
+                            filename=save_file,
+                            original_format=selected_format,
+                            bit_depth=bit_depth,
+                            original_header=sanitized_header,  # Pass minimal or original header
+                            is_mono=self.is_mono
+                        )
+                        print(f"Image successfully saved to {save_file}.")
+                        self.status_label.setText(f"Image saved to: {save_file}")
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
+                        print(f"Error saving image: {e}")
+            else:
+                self.status_label.setText("Save canceled.")
+        else:
+            QMessageBox.warning(self, "Warning", "No combined image to save.")
+            self.status_label.setText("No combined image to save.")
+
+
+    def create_minimal_fits_header(self, img_array):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if self.is_mono else 3
+        header['NAXIS1'] = self.combined_image.shape[1]  # Image width
+        header['NAXIS2'] = self.combined_image.shape[0]  # Image height
+        if not self.is_mono:
+            header['NAXIS3'] = self.combined_image.shape[2]  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header['COMMENT'] = "Minimal FITS header generated by Perfect Palette Picker."
+
+        return header
+
+
+
+
+
+
+
+
+    def zoom_in(self):
+        """
+        Zooms into the main preview image.
+        """
+        if self.zoom_factor < 5.0:  # Maximum zoom factor
+            self.zoom_factor *= 1.25
+            self.update_main_preview()
+        else:
+            print("Maximum zoom level reached.")
+            self.status_label.setText("Maximum zoom level reached.")
+
+    def zoom_out(self):
+        """
+        Zooms out of the main preview image.
+        """
+        if self.zoom_factor > 0.2:  # Minimum zoom factor
+            self.zoom_factor /= 1.25
+            self.update_main_preview()
+        else:
+            print("Minimum zoom level reached.")
+            self.status_label.setText("Minimum zoom level reached.")
+
+    def fit_to_preview(self):
+        """
+        Fits the main preview image to the scroll area.
+        """
+        if self.combined_image is not None:
+            q_image = self.numpy_to_qimage(self.combined_image)
+            if q_image.isNull():
+                QMessageBox.critical(self, "Error", "Cannot fit image to preview due to conversion error.")
+                return
+            pixmap = QPixmap.fromImage(q_image)
+            scroll_area_width = self.scroll_area.viewport().width()
+            self.zoom_factor = scroll_area_width / pixmap.width()
+            self.update_main_preview()
+            self.status_label.setText("Image fitted to preview area.")
+        else:
+            QMessageBox.warning(self, "Warning", "No image loaded to fit.")
+
+    def update_main_preview(self):
+        """
+        Updates the main preview image based on the current zoom factor.
+        """
+        if self.combined_image is not None:
+            q_image = self.numpy_to_qimage(self.combined_image)
+            pixmap = QPixmap.fromImage(q_image)
+            if pixmap.isNull():
+                QMessageBox.critical(self, "Error", "Failed to update main preview. Invalid QPixmap.")
+                return
+
+            # Ensure dimensions are integers
+            scaled_width = int(pixmap.width() * self.zoom_factor)
+            scaled_height = int(pixmap.height() * self.zoom_factor)
+
+            scaled_pixmap = pixmap.scaled(
+                scaled_width,
+                scaled_height,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+            self.image_label.resize(scaled_pixmap.size())
+        else:
+            self.image_label.clear()
+
+
+
+
+
+    def create_palette_preview(self, palette_name):
+        """
+        Creates a mini-preview image for the given palette.
+        Returns the combined RGB image as a NumPy array.
+        """
+        print(f"Creating mini-preview for palette: {palette_name}")
+        combined = self.combine_channels(palette_name)
+        return combined
+
+    def push_final_palette_to_image_manager(self):
+        """
+        Pushes the final combined image to the ImageManager for further processing.
+        """
+        if self.combined_image is not None:
+            # Check if any of the loaded file paths have an XISF extension
+            loaded_files = [self.ha_filename, self.oiii_filename, self.sii_filename, self.osc1_filename, self.osc2_filename]
+            was_xisf = any(file_path and file_path.lower().endswith('.xisf') for file_path in loaded_files)
+
+            # Generate a minimal FITS header if the original header is missing or if the format was XISF
+            sanitized_header = self.original_header
+            if was_xisf or sanitized_header is None:
+                sanitized_header = None
+
+            # Ensure a valid file path exists
+            file_path = self.ha_filename if self.ha_image is not None else "Combined Image"
+
+            # Create metadata for the combined image
+            metadata = {
+                'file_path': file_path,
+                'original_header': sanitized_header,  # Use the sanitized or minimal header
+                'bit_depth': self.bit_depth if hasattr(self, 'bit_depth') else "Unknown",
+                'is_mono': self.is_mono if hasattr(self, 'is_mono') else False,
+                'processing_parameters': {
+                    'zoom_factor': self.zoom_factor,
+                    'preview_scale': self.preview_scale
+                },
+                'processing_timestamp': datetime.now().isoformat(),
+                'source_images': {
+                    'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
+                    'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
+                    'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
+                    'OSC1': self.osc1_filename if self.osc1_image is not None else "Not Provided",
+                    'OSC2': self.osc2_filename if self.osc2_image is not None else "Not Provided"
+                }
+            }
+
+            # Push the image and metadata into the ImageManager
+            if self.image_manager:
+                try:
+                    self.image_manager.update_image(
+                        updated_image=self.combined_image, metadata=metadata
+                    )
+                    print(f"Image pushed to ImageManager with metadata: {metadata}")
+                    self.status_label.setText("Final palette image pushed for further processing.")
+                except Exception as e:
+                    print(f"Error updating ImageManager: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+            else:
+                print("ImageManager is not initialized.")
+                QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the combined image.")
+        else:
+            QMessageBox.warning(self, "Warning", "No final palette image to push.")
+            self.status_label.setText("No final palette image to push.")
+
+
+
+    def mousePressEvent(self, event):
+        """
+        Starts dragging when the left mouse button is pressed.
+        """
+        if event.button() == Qt.LeftButton:
+            self.dragging = True
+            self.last_mouse_position = event.pos()
+            self.image_label.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event):
+        """
+        Handles dragging by adjusting the scroll area's position.
+        """
+        if self.dragging and self.last_mouse_position is not None:
+            # Calculate the difference in mouse movement
+            delta = event.pos() - self.last_mouse_position
+            self.last_mouse_position = event.pos()
+
+            # Adjust the scroll area's scroll position
+            self.scroll_area.horizontalScrollBar().setValue(
+                self.scroll_area.horizontalScrollBar().value() - delta.x()
+            )
+            self.scroll_area.verticalScrollBar().setValue(
+                self.scroll_area.verticalScrollBar().value() - delta.y()
+            )
+
+    def mouseReleaseEvent(self, event):
+        """
+        Stops dragging when the left mouse button is released.
+        """
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+            self.last_mouse_position = None
+            self.image_label.setCursor(Qt.OpenHandCursor)
+
+
+    def cleanup_preview_windows(self):
+        """
+        Cleans up temporary preview images by resetting image variables and clearing GUI elements.
+        """
+        print("Cleaning up preview windows...")
+        
+        # 1. Reset Temporary Image Variables
+        self.ha_image = None
+        self.oiii_image = None
+        self.sii_image = None
+        print("Temporary preview images (Ha, OIII, SII) have been cleared.")
+        
+        # 2. Clear GUI Elements Displaying Previews
+        # Update the list below with the actual names of your preview labels or buttons
+        preview_labels = ['ha_preview_label', 'oiii_preview_label', 'sii_preview_label']
+        for label_name in preview_labels:
+            if hasattr(self, label_name):
+                label = getattr(self, label_name)
+                label.clear()  # Removes the pixmap or any displayed content
+                print(f"{label_name} has been cleared.")
+        
+        # 3. Clear Final Image Display (if applicable)
+        # Update 'final_image_label' with your actual final image display widget name
+        if hasattr(self, 'image_label'):
+            self.image_label.clear()
+            print("Final image label has been cleared.")
+        
+        # 4. Reset Thumbnail Buttons (if used for previews)
+        # Ensure 'self.thumbnail_buttons' is a list of your thumbnail QPushButtons
+        for button in self.thumbnail_buttons:
+            button.setIcon(QIcon())    # Remove existing icon
+
+
+
+        print("Thumbnail buttons have been reset.")
+        
+        # 5. Update Status Label
+        self.status_label.setText("Preview windows cleaned up.")
+        print("Status label updated to indicate cleanup.")
+        
+        # 6. Process UI Events to Reflect Changes Immediately
+        QApplication.processEvents()
+
+
+    def closeEvent(self, event):
+        """
+        Handle the close event to perform cleanup.
+        """
+        self.cleanup_preview_windows()
+        event.accept()
+
+
 class NBtoRGBstarsTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -12722,11 +14619,14 @@ class MainWindow(QMainWindow):
             # Store the original image the first time AutoStretch is applied
             self.original_image = self.image_data.copy()
         
-        if self.is_mono:
+        # Determine if the image is mono or color based on the number of dimensions
+        if self.image_data.ndim == 2:
             # Call stretch_mono_image if the image is mono
+
             stretched_image = stretch_mono_image(self.image_data, target_median=0.25, normalize=True)
         else:
             # Call stretch_color_image if the image is color
+
             stretched_image = stretch_color_image(self.image_data, target_median=0.25, linked=True, normalize=True)
         
         # If the AutoStretch is toggled off (using the same button), restore the original image
@@ -12739,14 +14639,32 @@ class MainWindow(QMainWindow):
             stretched_image = self.original_image
             self.auto_stretch_button.setText("AutoStretch")
         
-        # Convert the image to uint8 format for display
+
         stretched_image = (stretched_image * 255).astype(np.uint8)
 
+
         # Update the display with the stretched image (or original if toggled off)
+
         height, width = stretched_image.shape[:2]
         bytes_per_line = 3 * width
+
+        # Ensure the image has 3 channels (RGB)
+        if stretched_image.ndim == 2:
+            stretched_image = np.stack((stretched_image,) * 3, axis=-1)
+        elif stretched_image.shape[2] == 1:
+            stretched_image = np.repeat(stretched_image, 3, axis=2)
+
+
+
         qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        if qimg.isNull():
+            print("Failed to create QImage")
+            return
+
         pixmap = QPixmap.fromImage(qimg)
+        if pixmap.isNull():
+            print("Failed to create QPixmap")
+            return
 
         self.main_image = pixmap
         scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -14658,7 +16576,7 @@ class CalculationThread(QThread):
             # Emit lunar phase data
             self.lunar_phase_calculated.emit(phase_percentage, phase_image_name)
 
-            # Determine the path to celestial_catalog.csv, compatible with both PyInstaller and normal environments
+            # Determine the path to celestial_catalog.csv
             catalog_file = os.path.join(
                 getattr(sys, '_MEIPASS', os.path.dirname(__file__)), "celestial_catalog.csv"
             )
@@ -14674,23 +16592,12 @@ class CalculationThread(QThread):
             df = df[df['Catalog'].isin(self.catalog_filters)]
             df.dropna(subset=['RA', 'Dec'], inplace=True)
 
-            # Filter objects by RA within +/- 6 hours of LST
-            ra_threshold = 6  # Hours
-            lst_ra_lower = (lst.hour - ra_threshold) % 24
-            lst_ra_upper = (lst.hour + ra_threshold) % 24
-
-            if lst_ra_lower < lst_ra_upper:
-                df = df[(df['RA'] >= lst_ra_lower) & (df['RA'] <= lst_ra_upper)]
-            else:
-                df = df[(df['RA'] >= lst_ra_lower) | (df['RA'] <= lst_ra_upper)]
-
             # Check altitude and calculate additional metrics
             altaz_frame = AltAz(obstime=astropy_time, location=location)
             altitudes, azimuths, minutes_to_transit, degrees_from_moon = [], [], [], []
+            before_or_after = []
 
             moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
-
-            before_or_after = []  # Initialize the list for "Before/After Transit"
 
             for _, row in df.iterrows():
                 sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
@@ -14719,9 +16626,14 @@ class CalculationThread(QThread):
             df['Before/After Transit'] = before_or_after
             df['Degrees from Moon'] = degrees_from_moon
 
+            # Apply altitude filter
+            df = df[df['Altitude'] >= self.min_altitude]
 
-            # Filter by minimum altitude and limit results
-            df = df[df['Altitude'] >= self.min_altitude].head(self.object_limit)
+            # Sort by "Minutes to Transit"
+            df = df.sort_values(by='Minutes to Transit')
+
+            # Limit the results to the object_limit
+            df = df.head(self.object_limit)
 
             self.calculation_complete.emit(df, "Calculation complete.")
         except Exception as e:
