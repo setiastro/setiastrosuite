@@ -1,6 +1,7 @@
 # Standard library imports
 import os
 import sys
+import tempfile
 import time
 import json
 import csv
@@ -167,7 +168,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Set the layout for the main window
 
-        self.setWindowTitle('Seti Astro\'s Suite V2.4')
+        self.setWindowTitle('Seti Astro\'s Suite V2.4.1')
 
         # Populate the Quick Navigation menu with each tab name
         quicknav_menu = menubar.addMenu("Quick Navigation")
@@ -9181,7 +9182,7 @@ class PerfectPalettePickerTab(QWidget):
         left_widget.setFixedWidth(300)
 
         # Title label
-        title_label = QLabel("Perfect Palette Picker v1.0", self)
+        title_label = QLabel("Perfect Palette Picker", self)
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setFont(QFont("Helvetica", 14, QFont.Bold))
         left_layout.addWidget(title_label)
@@ -10306,8 +10307,45 @@ class PerfectPalettePickerTab(QWidget):
             if was_xisf or sanitized_header is None:
                 sanitized_header = None
 
-            # Ensure a valid file path exists
-            file_path = self.ha_filename if self.ha_image is not None else "Combined Image"
+            # Determine the valid file path:
+            # Prioritize Ha, then OSC1, then OSC2
+            file_path = None
+            if self.ha_image is not None and self.ha_filename:
+                file_path = self.ha_filename
+                print("Using Ha filename as file_path.")
+            elif self.osc1_image is not None and self.osc1_filename:
+                file_path = self.osc1_filename
+                print("Using OSC1 filename as file_path.")
+            elif self.osc2_image is not None and self.osc2_filename:
+                file_path = self.osc2_filename
+                print("Using OSC2 filename as file_path.")
+            else:
+                # No valid source file, save combined_image to a temporary file
+                try:
+                    temp_dir = tempfile.gettempdir()
+                    timestamp = int(time.time())
+                    temp_file_path = os.path.join(temp_dir, f"combined_image_{timestamp}.tif")
+                    
+                    # Save the combined image using your existing save_image function
+                    save_image(
+                        img_array=self.combined_image,
+                        filename=temp_file_path,
+                        original_format='tif',
+                        bit_depth=self.bit_depth,
+                        original_header=self.original_header,
+                        is_mono=self.is_mono
+                    )
+                    
+                    file_path = temp_file_path
+                    print(f"Combined image saved to temporary file: {file_path}")
+                except Exception as e:
+                    print(f"Failed to save combined image to temporary file: {e}")
+                    QMessageBox.critical(
+                        self, 
+                        "Error", 
+                        f"Failed to save combined image to temporary file:\n{e}"
+                    )
+                    return
 
             # Create metadata for the combined image
             metadata = {
@@ -10346,7 +10384,6 @@ class PerfectPalettePickerTab(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "No final palette image to push.")
             self.status_label.setText("No final palette image to push.")
-
 
 
     def mousePressEvent(self, event):
