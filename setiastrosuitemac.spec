@@ -13,7 +13,7 @@ a = Analysis(
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
-        ('hubble.png', '.'), 
+        ('hubble.png', '.'), ('staradd.png', '.'),('starnet.png', '.'),('clahe.png', '.'),('morpho.png', '.'),('whitebalance.png', '.'),('neutral.png', '.'),('green.png', '.'),
         ('imgs', 'imgs'),
         ('collage.png', '.'), 
         ('annotated.png', '.'), 
