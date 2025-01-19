@@ -95,6 +95,7 @@ if hasattr(sys, '_MEIPASS'):
     slot4_path = os.path.join(sys._MEIPASS, 'slot4.png')
     rgbcombo_path = os.path.join(sys._MEIPASS, 'rgbcombo.png')
     rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')
+    copyslot_path = os.path.join(sys._MEIPASS, 'copyslot.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -115,6 +116,7 @@ else:
     slot4_path  = 'slot4.png'
     rgbcombo_path = 'rgbcombo.png'
     rgbextract_path = 'rgbextract.png'
+    copyslot_path = 'copyslot.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -324,6 +326,13 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
+
+        # Add "Copy Slot" Button to Toolbar with Icon
+        copy_slot_icon = QIcon('copyslot.png')  # Ensure 'copyslot.png' is the correct path
+        copy_slot_action = QAction(copy_slot_icon, "Copy Slot", self)
+        copy_slot_action.setStatusTip("Copy the current image in Slot 0 to another slot")
+        copy_slot_action.triggered.connect(self.copy_slot0_to_target)
+        toolbar.addAction(copy_slot_action)
 
         # Add Remove Stars Button to Toolbar with Icon
         remove_stars_icon = QIcon(starnet_path)
@@ -705,7 +714,75 @@ class AstroEditingSuite(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to swap images between Slot {slot_a} and Slot {slot_b}: {e}")
             print(f"Error during swapping slots {slot_a} and {slot_b}: {e}")
 
+    def copy_slot0_to_target(self):
+        """Copy the image from Slot 0 to a user-defined slot."""
+        # Define available target slots (Slot 1 to Slot 4)
+        available_slots = [f"Slot {i}" for i in range(1, self.image_manager.max_slots)]
 
+        # Open the CopySlotDialog
+        dialog = CopySlotDialog(self, available_slots)
+        result = dialog.exec_()
+
+        if result == QDialog.Accepted:
+            target_slot_str = dialog.get_selected_slot()
+            target_slot_num = int(target_slot_str.split()[-1])  # Extract slot number
+            print(f"User selected to copy to {target_slot_str}.")
+
+            # Check if the target slot already has an image
+            if self.image_manager._images[target_slot_num] is not None:
+                overwrite = QMessageBox.question(
+                    self,
+                    "Overwrite Confirmation",
+                    f"{target_slot_str} already contains an image. Do you want to overwrite it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if overwrite != QMessageBox.Yes:
+                    QMessageBox.information(self, "Operation Cancelled", "Copy operation cancelled.")
+                    print("User chose not to overwrite the target slot.")
+                    return
+
+            # Perform the copy operation
+            source_image = self.image_manager._images.get(0, None)
+            source_metadata = self.image_manager._metadata.get(0, {}).copy()
+
+            if source_image is None:
+                QMessageBox.warning(self, "No Image in Slot 0", "There is no image in Slot 0 to copy.")
+                print("Slot 0 is empty. Cannot perform copy.")
+                return
+
+            try:
+                # Save current state of the target slot to undo stack
+                if self.image_manager._images[target_slot_num] is not None:
+                    self.image_manager._undo_stacks[target_slot_num].append(
+                        (self.image_manager._images[target_slot_num].copy(),
+                        self.image_manager._metadata[target_slot_num].copy())
+                    )
+                    print(f"ImageManager: Current state of Slot {target_slot_num} pushed to undo stack.")
+
+                # Clear redo stack since new action invalidates the redo history
+                self.image_manager._redo_stacks[target_slot_num].clear()
+                print(f"ImageManager: Redo stack for Slot {target_slot_num} cleared.")
+
+                # Deep copy to prevent unintended modifications
+                copied_image = source_image.copy()
+                copied_metadata = source_metadata.copy()
+
+                # Assign to target slot
+                self.image_manager._images[target_slot_num] = copied_image
+                self.image_manager._metadata[target_slot_num] = copied_metadata
+
+                # Emit image_changed signal for the target slot
+                self.image_manager.image_changed.emit(target_slot_num, copied_image, copied_metadata)
+
+                QMessageBox.information(self, "Copy Successful", f"Image copied from Slot 0 to {target_slot_str}.")
+                print(f"Image successfully copied from Slot 0 to {target_slot_str}.")
+
+            except Exception as e:
+                QMessageBox.critical(self, "Copy Failed", f"Failed to copy image to {target_slot_str}.\nError: {e}")
+                print(f"Failed to copy image to {target_slot_str}. Error: {e}")
+        else:
+            print("Copy Slot operation cancelled by the user.")
 
     # --------------------
     # Slot Preview Methods
@@ -775,39 +852,112 @@ class AstroEditingSuite(QMainWindow):
     def add_stars(self):
         """
         Add stars back to the current image using the chosen stars-only image and method.
+        Allows using a stars-only image from a slot or from a file.
         """
         try:
             print("Starting star addition process...")
 
-            # Prompt the user to select the stars-only image
-            stars_only_path, _ = QFileDialog.getOpenFileName(
+            # Prompt the user to choose the source of stars-only image
+            source_choice, ok = QInputDialog.getItem(
                 self,
-                "Select Stars-Only Image",
-                "",
-                "Image Files (*.tif *.tiff *.png)"
+                "Select Stars-Only Image Source",
+                "Choose the source of the stars-only image:",
+                ["From File", "From Slot"],
+                editable=False
             )
 
-            if not stars_only_path:
-                QMessageBox.warning(self, "No Image Selected", "No stars-only image selected. Operation cancelled.")
-                print("No stars-only image selected. Exiting star addition process.")
+            if not ok or not source_choice:
+                QMessageBox.warning(self, "Cancelled", "Star addition process cancelled.")
+                print("Star addition process cancelled by the user.")
                 return
 
-            print(f"Stars-only image selected: {stars_only_path}")
+            print(f"Stars-only image source selected: {source_choice}")
 
-            # Load the stars-only image
-            stars_only_image = cv2.imread(stars_only_path, cv2.IMREAD_UNCHANGED).astype('float32') / 65535.0
-            if stars_only_image is None:
-                QMessageBox.critical(self, "Error", "Failed to load stars-only image. Please try again.")
-                print(f"Failed to load stars-only image from {stars_only_path}.")
+            if source_choice == "From File":
+                # Prompt the user to select the stars-only image file
+                stars_only_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Select Stars-Only Image",
+                    "",
+                    "Image Files (*.tif *.tiff *.png)"
+                )
+
+                if not stars_only_path:
+                    QMessageBox.warning(self, "No Image Selected", "No stars-only image selected. Operation cancelled.")
+                    print("No stars-only image selected. Exiting star addition process.")
+                    return
+
+                print(f"Stars-only image selected: {stars_only_path}")
+
+                # Load the stars-only image
+                stars_only_image = cv2.imread(stars_only_path, cv2.IMREAD_UNCHANGED)
+                if stars_only_image is None:
+                    QMessageBox.critical(self, "Error", "Failed to load stars-only image. Please try again.")
+                    print(f"Failed to load stars-only image from {stars_only_path}.")
+                    return
+
+                # Determine bit depth based on image data type
+                if stars_only_image.dtype == np.uint16:
+                    stars_only_image = stars_only_image.astype('float32') / 65535.0
+                elif stars_only_image.dtype == np.uint8:
+                    stars_only_image = stars_only_image.astype('float32') / 255.0
+                else:
+                    stars_only_image = stars_only_image.astype('float32')  # Assuming it's already normalized
+
+            elif source_choice == "From Slot":
+                # Prompt the user to select a slot containing a stars-only image
+                available_slots = [f"Slot {i}" for i in range(1, self.image_manager.max_slots) if self.image_manager._images.get(i, None) is not None]
+                if not available_slots:
+                    QMessageBox.warning(self, "No Available Slots", "No slots contain a stars-only image. Please add a stars-only image to a slot first.")
+                    print("No slots contain a stars-only image.")
+                    return
+
+                slot_choice, ok = QInputDialog.getItem(
+                    self,
+                    "Select Slot",
+                    "Choose a slot containing the stars-only image:",
+                    available_slots,
+                    editable=False
+                )
+
+                if not ok or not slot_choice:
+                    QMessageBox.warning(self, "Cancelled", "Star addition process cancelled.")
+                    print("Star addition process cancelled by the user.")
+                    return
+
+                target_slot_num = int(slot_choice.split()[-1])
+                stars_only_image = self.image_manager._images.get(target_slot_num, None)
+
+                if stars_only_image is None:
+                    QMessageBox.warning(self, "Empty Slot", f"{slot_choice} does not contain a stars-only image.")
+                    print(f"{slot_choice} is empty. Cannot perform star addition.")
+                    return
+
+                print(f"Stars-only image selected from {slot_choice}.")
+
+                # If the stars-only image is integer type, normalize it
+                if stars_only_image.dtype == np.uint16:
+                    stars_only_image = stars_only_image.astype('float32') / 65535.0
+                elif stars_only_image.dtype == np.uint8:
+                    stars_only_image = stars_only_image.astype('float32') / 255.0
+                else:
+                    stars_only_image = stars_only_image.astype('float32')  # Assuming it's already normalized
+
+            else:
+                QMessageBox.warning(self, "Invalid Choice", "Invalid source choice. Operation cancelled.")
+                print("Invalid source choice. Exiting star addition process.")
                 return
 
             # Normalize stars-only image to [0, 1] range
             stars_only_image = np.clip(stars_only_image, 0.0, 1.0)
 
             # Check if current image exists
-            if self.image_manager.image is None:
-                QMessageBox.warning(self, "No Image", "Please load an image before adding stars.")
-                print("No image loaded. Exiting star addition process.")
+            current_slot = self.image_manager.current_slot
+            current_image = self.image_manager._images.get(current_slot, None)
+
+            if current_image is None:
+                QMessageBox.warning(self, "No Image", f"Slot {current_slot} does not contain an image.")
+                print(f"Slot {current_slot} is empty. Cannot perform star addition.")
                 return
 
             # Prompt the user to choose the addition method
@@ -826,9 +976,6 @@ class AstroEditingSuite(QMainWindow):
 
             print(f"Addition method selected: {addition_method}")
 
-            # Retrieve the current image
-            current_image = self.image_manager.image
-
             # Perform the star addition
             print("Performing star addition...")
             if addition_method == "Screen":
@@ -840,14 +987,44 @@ class AstroEditingSuite(QMainWindow):
             combined_image = np.clip(combined_image, 0.0, 1.0)
             print("Star addition completed successfully.")
 
-            # Update the image in the ImageManager
-            self.image_manager.update_image(updated_image=combined_image)
+            # Save current state of the current slot to undo stack
+            if self.image_manager._images[current_slot] is not None:
+                self.image_manager._undo_stacks[current_slot].append(
+                    (self.image_manager._images[current_slot].copy(),
+                    self.image_manager._metadata[current_slot].copy())
+                )
+                print(f"ImageManager: Current state of Slot {current_slot} pushed to undo stack.")
+
+            # Clear redo stack since new action invalidates the redo history
+            self.image_manager._redo_stacks[current_slot].clear()
+            print(f"ImageManager: Redo stack for Slot {current_slot} cleared.")
+
+            # Get current metadata
+            current_metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+
+            # Optionally, update metadata fields if necessary
+            # For example, you might want to update the 'file_path' or add a note about star addition
+            # Here, we'll add a simple note
+            addition_note = f"Stars added using method: {addition_method}"
+            if 'notes' in current_metadata and isinstance(current_metadata['notes'], list):
+                current_metadata['notes'].append(addition_note)
+            else:
+                current_metadata['notes'] = [addition_note]
+
+            # Assign the combined image and updated metadata to the current slot
+            self.image_manager._images[current_slot] = combined_image
+            self.image_manager._metadata[current_slot] = current_metadata
+
+            # Emit the image_changed signal with all required arguments
+            self.image_manager.image_changed.emit(current_slot, combined_image, current_metadata)
+
             QMessageBox.information(self, "Success", "Stars added successfully.")
             print("Stars added successfully.")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An unexpected error occurred:\n{e}")
             print(f"An unexpected error occurred: {e}")
+
 
 
     def remove_stars(self):
@@ -1639,6 +1816,48 @@ class AstroEditingSuite(QMainWindow):
             print("Redo performed.")
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
+
+class CopySlotDialog(QDialog):
+    def __init__(self, parent=None, available_slots=None):
+        super().__init__(parent)
+        self.setWindowTitle("Copy Image to Slot")
+        self.setModal(True)
+        self.selected_slot = None  # To store the user's selection
+
+        # Create layout components
+        label = QLabel("Copy current image to:")
+        self.slot_combo = QComboBox()
+        if available_slots:
+            self.slot_combo.addItems(available_slots)
+
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.apply_clicked)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+
+        # Layout setup
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(cancel_button)
+
+        layout = QVBoxLayout()
+        layout.addWidget(label)
+        layout.addWidget(self.slot_combo)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def apply_clicked(self):
+        """Handle the Apply button click."""
+        self.selected_slot = self.slot_combo.currentText()
+        self.accept()
+
+    def get_selected_slot(self):
+        """Return the selected slot."""
+        return self.selected_slot
+
 
 class ImageManager(QObject):
     """
