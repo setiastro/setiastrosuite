@@ -86,6 +86,15 @@ if hasattr(sys, '_MEIPASS'):
     clahe_path = os.path.join(sys._MEIPASS, 'clahe.png')
     starnet_path = os.path.join(sys._MEIPASS, 'starnet.png')
     staradd_path = os.path.join(sys._MEIPASS, 'staradd.png')
+    LExtract_path = os.path.join(sys._MEIPASS, 'LExtract.png')
+    LInsert_path = os.path.join(sys._MEIPASS, 'LInsert.png')
+    slot0_path = os.path.join(sys._MEIPASS, 'slot0.png')
+    slot1_path = os.path.join(sys._MEIPASS, 'slot1.png')
+    slot2_path = os.path.join(sys._MEIPASS, 'slot2.png')
+    slot3_path = os.path.join(sys._MEIPASS, 'slot3.png')
+    slot4_path = os.path.join(sys._MEIPASS, 'slot4.png')
+    rgbcombo_path = os.path.join(sys._MEIPASS, 'rgbcombo.png')
+    rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -97,6 +106,15 @@ else:
     clahe_path = 'clahe.png'
     starnet_path = 'starnet.png'
     staradd_path = 'staradd.png'
+    LExtract_path = 'LExtract.png'
+    LInsert_path = 'LInsert.png'
+    slot1_path = 'slot1.png'
+    slot0_path = 'slot0.png'
+    slot2_path = 'slot2.png'
+    slot3_path  = 'slot3.png'
+    slot4_path  = 'slot4.png'
+    rgbcombo_path = 'rgbcombo.png'
+    rgbextract_path = 'rgbextract.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -106,9 +124,10 @@ class AstroEditingSuite(QMainWindow):
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
         self.image_manager.image_changed.connect(self.update_file_name)
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "YourCompany" with your actual organization name
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
-
+        self.preview_windows = {}
+        print("Initialized preview_windows dictionary.")
         self.initUI()
 
     def initUI(self):
@@ -205,6 +224,44 @@ class AstroEditingSuite(QMainWindow):
         # Add White Balance to Functions menu
         functions_menu.addAction(whitebalance_action)   
 
+        # Extract Luminance Action with Icon
+        extract_luminance_icon = QIcon(LExtract_path)
+        extract_luminance_action = QAction(extract_luminance_icon, "Extract Luminance", self)
+        extract_luminance_action.setShortcut('Ctrl+Shift+E')  # Assign a keyboard shortcut
+        extract_luminance_action.setStatusTip('Extract luminance from the current image')
+        extract_luminance_action.triggered.connect(self.extract_luminance)
+
+        # Add Extract Luminance to Functions menu
+        functions_menu.addAction(extract_luminance_action)
+
+        # Recombine Luminance Action with Icon
+        recombine_luminance_icon = QIcon(LInsert_path)
+        recombine_luminance_action = QAction(recombine_luminance_icon, "Recombine Luminance", self)
+        recombine_luminance_action.setShortcut('Ctrl+Shift+R')  # Assign a keyboard shortcut
+        recombine_luminance_action.setStatusTip('Recombine luminance into the RGB image in slot 1')
+        recombine_luminance_action.triggered.connect(self.recombine_luminance)
+
+        # Add Recombine Luminance to Functions menu
+        functions_menu.addAction(recombine_luminance_action)
+
+        # RGB Combination Action
+        rgb_combination_icon = QIcon(rgbcombo_path)
+        rgb_combination_action = QAction(rgb_combination_icon, "RGB Combination", self)
+        rgb_combination_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
+        rgb_combination_action.setStatusTip('Combine separate R, G, B images into an RGB image')
+        rgb_combination_action.triggered.connect(self.rgb_combination)
+        # Add RGB Combination to Functions menu
+        functions_menu.addAction(rgb_combination_action)
+        
+        # RGB Extract Action
+        rgb_extract_icon = QIcon(rgbextract_path)
+        rgb_extract_action = QAction(rgb_extract_icon, "RGB Extract", self)
+        rgb_extract_action.setShortcut('Ctrl+Shift+X')  # Assign a keyboard shortcut
+        rgb_extract_action.setStatusTip('Extract R, G, B channels from an RGB image')
+        rgb_extract_action.triggered.connect(self.rgb_extract)
+        # Add RGB Extract to Functions menu
+        functions_menu.addAction(rgb_extract_action)
+
         clahe_action = QAction("CLAHE", self)
         clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
         clahe_action.setStatusTip('Apply Contrast Limited Adaptive Histogram Equalization')
@@ -212,6 +269,7 @@ class AstroEditingSuite(QMainWindow):
         
         # Add CLAHE to Functions menu
         functions_menu.addAction(clahe_action)
+
 
         # Morphological Operations Action
         morpho_action = QAction("Morphological Operations", self)
@@ -237,6 +295,29 @@ class AstroEditingSuite(QMainWindow):
 
         # Add Add Stars to Functions menu
         functions_menu.addAction(add_stars_action)        
+
+        # --------------------
+        # Slot Menu
+        # --------------------
+        slot_menu = menubar.addMenu("Slots")
+
+        # Define the number of slots based on ImageManager
+        num_slots = self.image_manager.max_slots
+
+        for slot in range(num_slots):
+            # Dynamically get the slot icon path
+            slot_icon_path = getattr(sys.modules[__name__], f'slot{slot}_path', 'slot0.png')  # Default to slot0.png if not found
+            slot_icon = QIcon(slot_icon_path)
+
+            # Create a QAction for each slot
+            slot_action = QAction(slot_icon, f"Slot {slot}", self)
+            slot_action.setStatusTip(f"Open preview for Slot {slot}")
+
+            # Connect the action to a method with the slot number as an argument
+            slot_action.triggered.connect(lambda checked, s=slot: self.open_preview_window(s))
+
+            # Add the action to the Slot Menu
+            slot_menu.addAction(slot_action)
 
         # --------------------
         # Toolbar
@@ -272,6 +353,22 @@ class AstroEditingSuite(QMainWindow):
         whitebalance_action.setIcon(whitebalance_icon)
         whitebalance_action.setToolTip("Adjust white balance of the image.")
         toolbar.addAction(whitebalance_action)
+
+        extract_luminance_icon = QIcon(LExtract_path)
+        extract_luminance_action = QAction(extract_luminance_icon, "Extract Luminance", self)
+        extract_luminance_action.triggered.connect(self.extract_luminance)
+        toolbar.addAction(extract_luminance_action)
+
+        recombine_luminance_icon = QIcon(LInsert_path)
+        recombine_luminance_action = QAction(recombine_luminance_icon, "Recombine Luminance", self)
+        recombine_luminance_action.triggered.connect(self.recombine_luminance)
+        toolbar.addAction(recombine_luminance_action)
+
+        # Add RGB Combination Button to Toolbar
+        toolbar.addAction(rgb_combination_action)
+
+        # Add RGB Extract Button to Toolbar
+        toolbar.addAction(rgb_extract_action)
 
         # Add CLAHE Button to Toolbar with Icon
         clahe_icon = QIcon(clahe_path)
@@ -346,6 +443,334 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         self.setWindowTitle('Seti Astro\'s Suite V2.5')
         self.setGeometry(100, 100, 1200, 800)  # Set window size as needed
+
+    def rgb_combination(self):
+        """Handle the RGB Combination action."""
+        dialog = RGBCombinationDialog(self, image_manager=self.image_manager)
+        if dialog.exec_() == QDialog.Accepted:
+            combined_rgb = dialog.rgb_image  # Numpy array with shape (H, W, 3) normalized to [0,1]
+            metadata = {
+                'file_path': "RGB Combination",
+                'is_mono': False,
+                'bit_depth': "32-bit floating point",
+                'original_header': None  # Add header information if available
+            }
+            # Store the combined RGB image in Slot 0
+            self.image_manager._images[0] = combined_rgb
+            self.image_manager._metadata[0] = metadata
+            self.image_manager.image_changed.emit(0, combined_rgb, metadata)
+            print("RGB image stored in Slot 0.")
+            QMessageBox.information(self, "Success", "RGB image combined and stored in Slot 0.")
+        else:
+            print("RGB Combination cancelled by the user.")
+
+    def rgb_extract(self):
+        """Handle the RGB Extract action."""
+        # Determine which slot to extract from
+        # For this example, we'll extract from Slot 0
+        slot_to_extract = 0
+        image = self.image_manager._images.get(slot_to_extract, None)
+        
+        if image is None:
+            QMessageBox.warning(self, "No Image", f"Slot {slot_to_extract} does not contain an image to extract from.")
+            print(f"Slot {slot_to_extract} is empty. Cannot perform RGB Extract.")
+            return
+        
+        if image.ndim != 3 or image.shape[2] != 3:
+            QMessageBox.warning(self, "Invalid Image", "The selected image is not a valid RGB image.")
+            print("Invalid image format for RGB Extract. Expected a 3-channel RGB image.")
+            return
+        
+        try:
+            # Split the RGB channels
+            r_channel = image[..., 0].copy()
+            g_channel = image[..., 1].copy()
+            b_channel = image[..., 2].copy()
+            
+            # Define metadata for each channel
+            metadata_r = {
+                'file_path': f"RGB Extract - Red Channel from Slot {slot_to_extract}",
+                'is_mono': True,
+                'bit_depth': "32-bit floating point",
+                'original_header': None
+            }
+            metadata_g = {
+                'file_path': f"RGB Extract - Green Channel from Slot {slot_to_extract}",
+                'is_mono': True,
+                'bit_depth': "32-bit floating point",
+                'original_header': None
+            }
+            metadata_b = {
+                'file_path': f"RGB Extract - Blue Channel from Slot {slot_to_extract}",
+                'is_mono': True,
+                'bit_depth': "32-bit floating point",
+                'original_header': None
+            }
+            
+            # Store each channel in Slot 2, 3, and 4
+            self.image_manager._images[2] = r_channel
+            self.image_manager._images[3] = g_channel
+            self.image_manager._images[4] = b_channel
+            self.image_manager._metadata[2] = metadata_r
+            self.image_manager._metadata[3] = metadata_g
+            self.image_manager._metadata[4] = metadata_b
+            
+            
+            print(f"Extracted R, G, B channels from Slot {slot_to_extract} and stored in Slots 2, 3, 4 respectively.")
+            QMessageBox.information(self, "Success", "RGB channels extracted and stored in Slots 2, 3, and 4.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to extract RGB channels: {e}")
+            print(f"Error during RGB Extract: {e}")
+
+
+    def extract_luminance(self):
+        """Extracts the luminance from the current image and updates slots."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before extracting luminance.")
+            return
+
+        # Ensure the image is RGB
+        current_image = self.image_manager.image
+        if current_image.ndim != 3 or current_image.shape[2] != 3:
+            QMessageBox.warning(self, "Invalid Image", "Luminance extraction requires an RGB image.")
+            return
+
+        # Clip the current image to [0, 1] to avoid any unexpected values outside the valid range
+        current_image = np.clip(current_image, 0.0, 1.0)
+
+        # Convert the RGB image to Lab to extract L* (luminance)
+        lab_image = self.rgb_to_lab(current_image)
+        luminance = lab_image[..., 0] / 100.0  # Normalize L* to [0, 1] for storage
+
+        # Update slot 1 with the original RGB image (do not change current_slot)
+        self.image_manager._images[1] = current_image
+        self.image_manager._metadata[1] = self.image_manager._metadata[self.image_manager.current_slot].copy()
+        print("Original RGB image moved to slot 1.")
+
+        # Update slot 0 with the luminance image
+        luminance_metadata = {
+            'file_path': "Luminance Extracted",
+            'is_mono': True,
+            'bit_depth': "32-bit floating point",
+        }
+        self.image_manager._images[0] = luminance
+        self.image_manager._metadata[0] = luminance_metadata
+        print("Luminance image updated in slot 0.")
+
+        # Emit signals for both slots to refresh views if necessary
+        self.image_manager.image_changed.emit(0, luminance, luminance_metadata)
+        self.image_manager.image_changed.emit(1, current_image, self.image_manager._metadata[1])
+
+        # Open a preview for the original RGB image in slot 1
+        self.open_preview_window(slot=1)
+
+
+
+
+
+    def recombine_luminance(self):
+        """Recombines luminance from slot 0 with the RGB image in slot 1."""
+        # Ensure slot 1 has the original RGB image
+        original_rgb = self.image_manager._images[1]
+        if original_rgb is None:
+            QMessageBox.warning(self, "No Image", "Slot 1 does not contain an RGB image for recombination.")
+            return
+        if original_rgb.ndim != 3 or original_rgb.shape[2] != 3:
+            QMessageBox.warning(self, "Invalid Image", "Slot 1 must contain an RGB image for recombination.")
+            return
+
+        # Ensure slot 0 has the luminance image
+        luminance = self.image_manager._images[0]
+        if luminance is None or luminance.ndim != 2:
+            QMessageBox.warning(self, "No Luminance", "Slot 0 must contain a luminance image for recombination.")
+            return
+
+        # Clip luminance to [0, 1] to ensure valid data
+        luminance = np.clip(luminance, 0.0, 1.0)
+
+        # Convert the RGB image to Lab color space
+        lab_image = self.rgb_to_lab(original_rgb)
+
+        # Replace the L* channel with the luminance
+        lab_image[..., 0] = luminance * 100.0  # L* is scaled to [0, 100] in Lab
+
+        # Convert the modified Lab image back to RGB color space
+        updated_rgb = self.lab_to_rgb(lab_image)
+
+        # Clip to [0, 1] to ensure valid RGB values
+        updated_rgb = np.clip(updated_rgb, 0.0, 1.0)
+
+        # Update slot 0 with the recombined image
+        metadata = self.image_manager._metadata[1]
+        metadata['file_path'] = "Luminance Recombined"
+        self.image_manager.set_image(updated_rgb, metadata)
+        print("Recombined image updated in slot 0.")
+
+
+    def rgb_to_lab(self, rgb_image):
+        """Convert a 32-bit floating-point RGB image to Lab color space."""
+        # Transformation matrix for RGB to XYZ (D65 reference white)
+        M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+
+        # Convert RGB to linear RGB (no gamma correction needed for 32-bit normalized data)
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        # Convert RGB to XYZ
+        xyz_image = np.dot(rgb_image.reshape(-1, 3), M.T).reshape(rgb_image.shape)
+        xyz_image[..., 0] /= 0.95047  # Normalize by D65 reference white
+        xyz_image[..., 2] /= 1.08883
+
+        # Convert XYZ to Lab
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+        fx = f(xyz_image[..., 0])
+        fy = f(xyz_image[..., 1])
+        fz = f(xyz_image[..., 2])
+
+        L = (116.0 * fy) - 16.0
+        a = 500.0 * (fx - fy)
+        b = 200.0 * (fy - fz)
+
+        return np.stack([L, a, b], axis=-1)
+
+
+    def lab_to_rgb(self, lab_image):
+        """Convert a 32-bit floating-point Lab image to RGB color space."""
+        # Transformation matrix for XYZ to RGB (D65 reference white)
+        M_inv = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)
+
+        # Convert Lab to XYZ
+        fy = (lab_image[..., 0] + 16.0) / 116.0
+        fx = fy + lab_image[..., 1] / 500.0
+        fz = fy - lab_image[..., 2] / 200.0
+
+        def f_inv(t):
+            delta = 6 / 29
+            return np.where(t > delta, t**3, 3 * delta**2 * (t - 4 / 29))
+
+        X = 0.95047 * f_inv(fx)
+        Y = f_inv(fy)
+        Z = 1.08883 * f_inv(fz)
+
+        xyz_image = np.stack([X, Y, Z], axis=-1)
+
+        # Convert XYZ to RGB
+        rgb_image = np.dot(xyz_image.reshape(-1, 3), M_inv.T).reshape(xyz_image.shape)
+
+        # Clip RGB to [0, 1] to maintain valid color ranges
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        return rgb_image
+
+    def swap_slots(self, slot_a, slot_b):
+        """
+        Swap images and metadata between two slots.
+        
+        :param slot_a: The first slot number.
+        :param slot_b: The second slot number.
+        """
+        try:
+            # Retrieve images and metadata from both slots
+            image_a = self.image_manager._images.get(slot_a, None)
+            metadata_a = self.image_manager._metadata.get(slot_a, {}).copy()
+            
+            image_b = self.image_manager._images.get(slot_b, None)
+            metadata_b = self.image_manager._metadata.get(slot_b, {}).copy()
+            
+            # Swap the images and metadata
+            self.image_manager._images[slot_a] = image_b
+            self.image_manager._metadata[slot_a] = metadata_b
+            
+            self.image_manager._images[slot_b] = image_a
+            self.image_manager._metadata[slot_b] = metadata_a
+            
+            # Emit image_changed signals for both slots
+            self.image_manager.image_changed.emit(slot_a, image_b, metadata_b)
+            self.image_manager.image_changed.emit(slot_b, image_a, metadata_a)
+            
+            print(f"Swapped images between Slot {slot_a} and Slot {slot_b}.")
+            QMessageBox.information(self, "Success", f"Swapped images between Slot {slot_a} and Slot {slot_b}.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to swap images between Slot {slot_a} and Slot {slot_b}: {e}")
+            print(f"Error during swapping slots {slot_a} and {slot_b}: {e}")
+
+
+
+    # --------------------
+    # Slot Preview Methods
+    # --------------------
+    def open_preview_window(self, slot):
+        """Opens a separate preview window for the specified slot."""
+        print(f"Attempting to open preview window for Slot {slot}. Current preview_windows: {self.preview_windows}")
+        # Check if the slot index is valid
+        if slot < 0 or slot >= self.image_manager.max_slots:
+            QMessageBox.warning(self, "Invalid Slot", f"Slot {slot} is out of range.")
+            return
+
+        # Check if the slot has an image
+        image = self.image_manager._images[slot]
+        if image is None:
+            QMessageBox.warning(self, "No Image", f"Slot {slot} does not contain an image.")
+            return
+
+        # Check if a preview window for this slot already exists
+        if slot in self.preview_windows:
+            # If the window is already open, bring it to the front
+            existing_window = self.preview_windows[slot]
+            existing_window.raise_()
+            existing_window.activateWindow()
+            print(f"Preview window for Slot {slot} is already open.")
+            return
+
+        # Create a new ImagePreview window with a copy of the image data
+        image_copy = image.copy()
+        preview = ImagePreview(image_data=image_copy, slot=slot, parent=self)  # Pass parent=self
+        preview.setWindowTitle(f"Preview - Slot {slot}")
+
+        # Store the reference to prevent garbage collection
+        self.preview_windows[slot] = preview
+        print(f"Stored preview window for Slot {slot} in preview_windows.")
+
+        # Connect the custom closed signal to the on_preview_closed method
+        preview.closed.connect(self.on_preview_closed)
+
+        # Show the preview window
+        preview.show()
+        print(f"Opened preview window for Slot {slot}.")
+
+    def on_preview_closed(self, slot):
+        """Handles the cleanup when a preview window is closed."""
+        if slot in self.preview_windows:
+            del self.preview_windows[slot]
+            print(f"Preview window for Slot {slot} has been closed and removed from tracking.")
+        else:
+            print(f"No preview window found for Slot {slot} to remove.")
+
+
+    def on_image_changed(self, slot, image, metadata):
+        """Update the file name in the status bar and refresh preview if open."""
+        file_path = metadata.get('file_path', None)
+        if file_path:
+            self.file_name_label.setText(os.path.basename(file_path))  # Update the label with file name
+        else:
+            self.file_name_label.setText("No file selected")
+
+        # If a preview window for this slot is open, update its image
+        if slot in self.preview_windows:
+            preview_window = self.preview_windows[slot]
+            preview_window.update_image_data(image.copy())
+            print(f"Preview window for Slot {slot} updated with new image.")
 
     def add_stars(self):
         """
@@ -1241,6 +1666,7 @@ class ImageManager(QObject):
         self._undo_stacks = {i: [] for i in range(max_slots)}
         self._redo_stacks = {i: [] for i in range(max_slots)}
         self.current_slot = 0  # Default to the first slot
+        self.active_previews = {}  # Track active preview windows by slot
 
     def set_current_slot(self, slot):
         """
@@ -1345,38 +1771,17 @@ class ImageManager(QObject):
         print(f"ImageManager: Metadata set for slot {slot}.")
 
     def update_image(self, updated_image, metadata=None, slot=None):
-        """
-        Updates the image in the specified slot with an existing image, optionally updating metadata.
-        Adds the previous state to the undo stack.
-        
-        :param updated_image: The updated image data (numpy array).
-        :param metadata: (Optional) A dictionary containing metadata for the image.
-        :param slot: (Optional) The slot number to update. If None, uses current_slot.
-        """
         if slot is None:
             slot = self.current_slot
 
-        if 0 <= slot < self.max_slots:
-            if self._images[slot] is not None:
-                # Save current state to undo stack
-                self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-                # Clear redo stack since new action invalidates the redo history
-                self._redo_stacks[slot].clear()
-                print(f"ImageManager: Previous image and metadata in slot {slot} pushed to undo stack via update_image.")
-            else:
-                print(f"ImageManager: No existing image in slot {slot} to push to undo stack via update_image.")
-            
-            self._images[slot] = updated_image
-            if metadata is not None:
-                self._metadata[slot] = metadata
-                print(f"ImageManager: Metadata updated for slot {slot} via update_image.")
-            else:
-                print(f"ImageManager: Metadata not provided; retaining existing metadata for slot {slot}.")
-            
-            self.image_changed.emit(slot, updated_image, self._metadata[slot])
-            print(f"ImageManager: Image updated for slot {slot} via update_image.")
-        else:
-            print(f"ImageManager: Slot {slot} is out of range. Max slots: {self.max_slots}")
+        if slot == 1:
+            print("Warning: Attempting to update reserved slot 1.")
+            return  # Prevent overwriting slot 1 unless explicitly allowed
+
+        self._images[slot] = updated_image
+        if metadata:
+            self._metadata[slot] = metadata
+        self.image_changed.emit(slot, updated_image, metadata)
 
     def can_undo(self, slot=None):
         """
@@ -1449,6 +1854,429 @@ class ImageManager(QObject):
                 print(f"ImageManager: No actions to redo in slot {slot}.")
         else:
             print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
+
+class ImagePreview(QWidget):
+    # Define a custom signal that emits the slot number
+    closed = pyqtSignal(int)
+    
+    def __init__(self, image_data, slot, parent=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle(f"Preview - Slot {slot}")
+        self.image_data = image_data  # Numpy array containing the image
+        self.zoom_factor = 1.0
+        self.slot = slot
+        # Debug: Print parent information
+        print(f"ImagePreview Initialized. Parent: {self.parent()}, Type: {type(self.parent())}")
+        if hasattr(self.parent(), 'swap_slots'):
+            print("Parent has 'swap_slots' method.")
+        else:
+            print("Parent does NOT have 'swap_slots' method.")
+
+        # Ensure the window is deleted on close to emit the destroyed signal
+        self.setAttribute(Qt.WA_DeleteOnClose)
+
+        # Create UI components
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setWidgetResizable(True)
+        
+        # Install event filter on the scroll area’s viewport
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # Convert numpy image data to QImage and display it
+        self.update_image_display()
+
+        # Create Zoom controls
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setRange(1, 400)  # Zoom range from 1% to 400%
+        self.zoom_slider.setValue(100)  # Default zoom (100%)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(lambda: self.adjust_zoom(10))
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(lambda: self.adjust_zoom(-10))
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self.fit_to_preview)
+
+        # Create Swap Button (visible for all slots except Slot 0)
+        if self.slot != 0:
+            self.swap_button = QPushButton(f"Swap with Slot 0")
+            self.swap_button.clicked.connect(self.swap_with_slot_zero)
+            swap_layout = QHBoxLayout()
+            swap_layout.addStretch()
+            swap_layout.addWidget(self.swap_button)
+        else:
+            # For Slot 0, optionally, you can add a button to swap with any other slot
+            # For simplicity, we'll omit it here
+            swap_layout = QHBoxLayout()  # Empty layout
+
+        # Layout for zoom controls
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(self.zoom_out_button)
+        zoom_layout.addWidget(self.zoom_slider)
+        zoom_layout.addWidget(self.zoom_in_button)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        # Main layout
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.scroll_area)
+        layout.addLayout(zoom_layout)
+        layout.addLayout(swap_layout)  # Add swap button layout
+        self.setLayout(layout)
+
+        # Variables to handle panning
+        self._panning = False
+        self._pan_start_x = 0
+        self._pan_start_y = 0
+
+    def eventFilter(self, source, event):
+        """
+        Intercept mouse events on the scroll area's viewport to implement panning.
+        """
+        if source == self.scroll_area.viewport():
+            if event.type() == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self._panning = True
+                    self._pan_start_x = event.x()
+                    self._pan_start_y = event.y()
+                    self.scroll_area.viewport().setCursor(Qt.ClosedHandCursor)
+                    return True  # Event handled
+            elif event.type() == QEvent.MouseMove:
+                if self._panning and (event.buttons() & Qt.LeftButton):
+                    delta_x = event.x() - self._pan_start_x
+                    delta_y = event.y() - self._pan_start_y
+                    # Adjust scroll bars
+                    new_h = self.scroll_area.horizontalScrollBar().value() - delta_x
+                    new_v = self.scroll_area.verticalScrollBar().value() - delta_y
+                    self.scroll_area.horizontalScrollBar().setValue(new_h)
+                    self.scroll_area.verticalScrollBar().setValue(new_v)
+                    # Update the start position
+                    self._pan_start_x = event.x()
+                    self._pan_start_y = event.y()
+                    return True  # Event handled
+            elif event.type() == QEvent.MouseButtonRelease:
+                if event.button() == Qt.LeftButton:
+                    self._panning = False
+                    self.scroll_area.viewport().setCursor(Qt.ArrowCursor)
+                    return True  # Event handled
+        return super().eventFilter(source, event)
+
+    def update_image_display(self):
+        """Update the QLabel with the current image."""
+        # Convert the image data to QImage
+        if self.image_data is not None:
+            # Normalize image data to [0, 255] and convert to uint8
+            if self.image_data.dtype != np.uint8:
+                image_data_normalized = np.clip(self.image_data * 255, 0, 255).astype('uint8')
+            else:
+                image_data_normalized = self.image_data
+
+            if len(image_data_normalized.shape) == 2:  # Grayscale image
+                height, width = image_data_normalized.shape
+                bytes_per_line = width
+                qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+            elif len(image_data_normalized.shape) == 3 and image_data_normalized.shape[2] == 3:  # RGB image
+                height, width, channels = image_data_normalized.shape
+                bytes_per_line = 3 * width
+                qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            else:
+                QMessageBox.warning(self, "Invalid Image", "Unsupported image format for display.")
+                return
+
+            pixmap = QPixmap.fromImage(qimage)
+            scaled_pixmap = pixmap.scaled(
+                self.image_label.size() * self.zoom_factor,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled_pixmap)
+
+    def resizeEvent(self, event):
+        """Ensure the image scales appropriately when the window is resized."""
+        self.update_image_display()
+        super().resizeEvent(event)
+
+    def on_zoom_changed(self, value):
+        """Handle changes in zoom slider."""
+        self.zoom_factor = value / 100.0  # Convert slider value to zoom factor
+        self.update_image_display()
+
+    def adjust_zoom(self, delta):
+        """Adjust zoom by a specified delta."""
+        new_value = self.zoom_slider.value() + delta
+        self.zoom_slider.setValue(max(1, min(400, new_value)))
+
+    def fit_to_preview(self):
+        """Fit the image to the preview window."""
+        self.zoom_factor = 1.0
+        self.zoom_slider.setValue(100)
+        self.update_image_display()
+
+    def swap_with_slot_zero(self):
+        """Swap images between the current slot and Slot 0."""
+        confirmation = QMessageBox.question(
+            self,
+            "Confirm Swap",
+            f"Are you sure you want to swap Slot {self.slot} with Slot 0?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if confirmation == QMessageBox.Yes:
+            # Debug: Print parent details
+            print(f"Attempting to swap Slot {self.slot} with Slot 0.")
+            print(f"Parent: {self.parent()}, Type: {type(self.parent())}")
+            print(f"Does parent have 'swap_slots'? {'Yes' if hasattr(self.parent(), 'swap_slots') else 'No'}")
+            
+            # Call the swap_slots method in the parent (AstroEditingSuite)
+            if self.parent() and hasattr(self.parent(), 'swap_slots'):
+                self.parent().swap_slots(self.slot, 0)
+
+                # Optionally, close the preview window after swapping
+                self.close()
+            else:
+                QMessageBox.critical(self, "Error", "Parent does not have a swap_slots method.")
+                print("Error: Parent does not have a swap_slots method.")
+
+    def closeEvent(self, event):
+        """Override the close event to emit the custom closed signal."""
+        self.closed.emit(self.slot)  # Emit the slot number
+        event.accept()  # Proceed with the standard close event
+
+class RGBCombinationDialog(QDialog):
+    def __init__(self, parent=None, image_manager=None):
+        super().__init__(parent)
+        self.setWindowTitle("RGB Combination")
+        self.setModal(True)
+        self.image_manager = image_manager  # Reference to ImageManager
+        
+        self.r_image_path = None
+        self.g_image_path = None
+        self.b_image_path = None
+        self.use_existing_slots = False
+        
+        # Create UI components
+        self.mode_label = QLabel("Select RGB Combination Mode:")
+        
+        # Radio buttons for mode selection
+        self.load_files_radio = QRadioButton("Load Individual Files")
+        self.use_slots_radio = QRadioButton("Use Existing Slots (2, 3, 4)")
+        self.load_files_radio.setChecked(True)  # Default mode
+        
+        # Button group to ensure only one radio button is selected
+        self.mode_group = QButtonGroup()
+        self.mode_group.addButton(self.load_files_radio)
+        self.mode_group.addButton(self.use_slots_radio)
+        self.mode_group.buttonClicked.connect(self.update_mode)
+        
+        # GroupBox for mode selection
+        self.mode_groupbox = QGroupBox()
+        mode_layout = QVBoxLayout()
+        mode_layout.addWidget(self.load_files_radio)
+        mode_layout.addWidget(self.use_slots_radio)
+        self.mode_groupbox.setLayout(mode_layout)
+        
+        # Load File Mode Widgets
+        self.load_r_button = QPushButton("Load Red Image")
+        self.load_r_button.clicked.connect(self.load_r_image)
+        
+        self.load_g_button = QPushButton("Load Green Image")
+        self.load_g_button.clicked.connect(self.load_g_image)
+        
+        self.load_b_button = QPushButton("Load Blue Image")
+        self.load_b_button.clicked.connect(self.load_b_image)
+        
+        self.r_label = QLabel("Red Image: Not Selected")
+        self.g_label = QLabel("Green Image: Not Selected")
+        self.b_label = QLabel("Blue Image: Not Selected")
+        
+        # Layout for Load Files Mode
+        self.load_files_layout = QVBoxLayout()
+        self.load_files_layout.addWidget(self.r_label)
+        self.load_files_layout.addWidget(self.load_r_button)
+        self.load_files_layout.addWidget(self.g_label)
+        self.load_files_layout.addWidget(self.load_g_button)
+        self.load_files_layout.addWidget(self.b_label)
+        self.load_files_layout.addWidget(self.load_b_button)
+        
+        # Use Existing Slots Mode Widgets
+        self.use_slots_label = QLabel("Ensure Slots 2, 3, and 4 contain R, G, B channels respectively.")
+        self.use_slots_button = QPushButton("Use Slots 2, 3, 4")
+        self.use_slots_button.clicked.connect(self.use_existing_slots_method)
+        
+        # Layout for Use Slots Mode
+        self.use_slots_layout = QVBoxLayout()
+        self.use_slots_layout.addWidget(self.use_slots_label)
+        self.use_slots_layout.addWidget(self.use_slots_button)
+        
+        # Combine and Cancel buttons
+        self.combine_button = QPushButton("Combine")
+        self.combine_button.clicked.connect(self.combine_images)
+        self.combine_button.setEnabled(False)  # Disabled until required inputs are available
+        
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        
+        # Layout for buttons
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(self.combine_button)
+        buttons_layout.addWidget(self.cancel_button)
+        
+        # Main Layout
+        self.main_layout = QVBoxLayout()
+        self.main_layout.addWidget(self.mode_label)
+        self.main_layout.addWidget(self.mode_groupbox)
+        self.main_layout.addLayout(self.load_files_layout)
+        self.main_layout.addLayout(self.use_slots_layout)
+        self.main_layout.addLayout(buttons_layout)
+        
+        self.setLayout(self.main_layout)
+    
+    def update_mode(self):
+        """Update the UI based on the selected mode."""
+        if self.load_files_radio.isChecked():
+            self.use_existing_slots = False
+            self.load_r_button.setEnabled(True)
+            self.load_g_button.setEnabled(True)
+            self.load_b_button.setEnabled(True)
+            self.r_label.setEnabled(True)
+            self.g_label.setEnabled(True)
+            self.b_label.setEnabled(True)
+            self.use_slots_button.setEnabled(False)
+        else:
+            self.use_existing_slots = True
+            self.load_r_button.setEnabled(False)
+            self.load_g_button.setEnabled(False)
+            self.load_b_button.setEnabled(False)
+            self.r_label.setEnabled(False)
+            self.g_label.setEnabled(False)
+            self.b_label.setEnabled(False)
+            self.use_slots_button.setEnabled(True)
+        
+        self.check_inputs()
+    
+    def load_r_image(self):
+        """Load the Red channel image."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Red Image", "", 
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
+        )
+        if file_path:
+            self.r_image_path = file_path
+            self.r_label.setText(f"Red Image: {os.path.basename(file_path)}")
+            self.check_inputs()
+    
+    def load_g_image(self):
+        """Load the Green channel image."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Green Image", "", 
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
+        )
+        if file_path:
+            self.g_image_path = file_path
+            self.g_label.setText(f"Green Image: {os.path.basename(file_path)}")
+            self.check_inputs()
+    
+    def load_b_image(self):
+        """Load the Blue channel image."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Blue Image", "", 
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
+        )
+        if file_path:
+            self.b_image_path = file_path
+            self.b_label.setText(f"Blue Image: {os.path.basename(file_path)}")
+            self.check_inputs()
+    
+    def use_existing_slots_method(self):
+        """Use existing images from slots 2, 3, and 4."""
+        # Check if slots 2, 3, and 4 have images
+        slots = [2, 3, 4]
+        images = []
+        for slot in slots:
+            img = self.image_manager._images.get(slot, None)
+            if img is None:
+                QMessageBox.warning(
+                    self, 
+                    "Missing Image", 
+                    f"Slot {slot} does not contain an image. Please extract RGB channels first."
+                )
+                print(f"Slot {slot} is empty. Cannot use existing slots for RGB Combination.")
+                return
+            images.append(img)
+        
+        self.r_image_path = None  # Indicate that we're using existing slots
+        self.g_image_path = None
+        self.b_image_path = None
+        self.combine_button.setEnabled(True)  # Enable Combine button as inputs are ready
+    
+    def check_inputs(self):
+        """Enable the Combine button if all required inputs are available."""
+        if self.use_existing_slots:
+            # Check if slots 2,3,4 have images
+            slots = [2, 3, 4]
+            for slot in slots:
+                if self.image_manager._images.get(slot, None) is None:
+                    self.combine_button.setEnabled(False)
+                    return
+            self.combine_button.setEnabled(True)
+        else:
+            # Check if all three images are loaded
+            if self.r_image_path and self.g_image_path and self.b_image_path:
+                self.combine_button.setEnabled(True)
+            else:
+                self.combine_button.setEnabled(False)
+    
+    def combine_images(self):
+        """Combine the loaded R, G, B images into a single RGB image."""
+        try:
+            if self.use_existing_slots:
+                # Use images from slots 2, 3, 4
+                r = self.image_manager._images.get(2).copy()
+                g = self.image_manager._images.get(3).copy()
+                b = self.image_manager._images.get(4).copy()
+                
+                # Ensure all images have the same dimensions
+                if not (r.shape == g.shape == b.shape):
+                    raise ValueError("All images must have the same dimensions.")
+            else:
+                # Load images from file paths
+                r = cv2.imread(self.r_image_path, cv2.IMREAD_GRAYSCALE)
+                g = cv2.imread(self.g_image_path, cv2.IMREAD_GRAYSCALE)
+                b = cv2.imread(self.b_image_path, cv2.IMREAD_GRAYSCALE)
+                
+                if r is None or g is None or b is None:
+                    raise ValueError("One or more images failed to load.")
+                
+                # Ensure all images have the same dimensions
+                if not (r.shape == g.shape == b.shape):
+                    raise ValueError("All images must have the same dimensions.")
+                
+                # Normalize images to [0,1]
+                r = r.astype('float32') / 255.0
+                g = g.astype('float32') / 255.0
+                b = b.astype('float32') / 255.0
+            
+            # Stack channels to form RGB image
+            rgb_image = np.stack([r, g, b], axis=2)
+            
+            # Check for grayscale images stored as RGB (all channels same)
+            if np.array_equal(r, g) and np.array_equal(r, b):
+                print("Detected grayscale image stored as RGB. Using only the red channel.")
+                rgb_image = np.stack([r, np.zeros_like(r), np.zeros_like(r)], axis=2)
+            
+            self.rgb_image = rgb_image  # Store the combined image
+            self.accept()  # Close the dialog with success
+            print("RGB Combination successful.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to combine images: {e}")
+            print(f"Error in RGB Combination: {e}")
 
 class StarNetThread(QThread):
     # Define signals to communicate with the main thread
@@ -7828,12 +8656,6 @@ class FullCurvesTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_widget.setFixedWidth(400)
 
-        # Load button
-        self.fileButton = QPushButton('Load Image', self)
-        self.fileButton.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
-        self.fileButton.clicked.connect(self.openFileDialog)
-        left_layout.addWidget(self.fileButton)
-
         # File label
         self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
@@ -7879,20 +8701,7 @@ class FullCurvesTab(QWidget):
         self.statusLabel = QLabel('X:0 Y:0', self)
         left_layout.addWidget(self.statusLabel)
 
-        self.applySourceGroup = QButtonGroup(self)
 
-        self.applyOriginalRadio = QRadioButton("Original", self)
-        self.applyOriginalRadio.setChecked(True)
-        self.applySourceGroup.addButton(self.applyOriginalRadio)
-
-        self.applyCurrentRadio = QRadioButton("Current", self)
-        self.applySourceGroup.addButton(self.applyCurrentRadio)
-
-        source_layout = QHBoxLayout()
-        source_layout.addWidget(QLabel("Apply to:", self))
-        source_layout.addWidget(self.applyOriginalRadio)
-        source_layout.addWidget(self.applyCurrentRadio)
-        left_layout.addLayout(source_layout)
 
         # Horizontal layout for Apply, Undo, and Reset buttons
         button_layout = QHBoxLayout()
@@ -8053,340 +8862,328 @@ class FullCurvesTab(QWidget):
 
 
     def updatePreviewLUT(self, lut, curve_mode):
-        """Apply the 8-bit LUT to the preview image for real-time updates."""
-        if self.original_image is None:
+        """Apply the 8-bit LUT to the preview image for real-time updates on slot 0."""
+        print(f"updatePreviewLUT called with curve_mode: {curve_mode}")
+        # Access slot0 (recombined image) from ImageManager
+        slot0_image = self.image_manager._images[0]
+        if slot0_image is None:
+            print("Slot0 image is not loaded.")
+            QMessageBox.warning(self, "No Image", "Slot0 image is not loaded.")
             return
 
-        # Determine the visible region
-        x, y, w, h = self.get_visible_region()
-
-        # Ensure the region is within image bounds
-        x_end = min(x + w, self.original_image.shape[1])
-        y_end = min(y + h, self.original_image.shape[0])
-
-        # Determine the base image based on apply mode
-        if self.applyOriginalRadio.isChecked():
-            base_image = self.original_image
-        else:
-            base_image = self.image
-
-        # Extract the visible region from the base image
-        visible_region = base_image[y:y_end, x:x_end]
-
-        # Create an 8-bit version of the visible region for faster processing
-        image_8bit = (visible_region * 255).astype(np.uint8)
-
-        if image_8bit.ndim == 3:  # RGB image
-            adjusted_image = image_8bit.copy()
-
-            if curve_mode == "K (Brightness)":
-                # Apply LUT to all channels equally (Brightness)
-                for channel in range(3):
-                    adjusted_image[:, :, channel] = np.take(lut, image_8bit[:, :, channel])
-
-            elif curve_mode in ["R", "G", "B"]:
-                # Apply LUT to a single channel
-                channel_index = {"R": 0, "G": 1, "B": 2}[curve_mode]
-                adjusted_image[:, :, channel_index] = np.take(lut, image_8bit[:, :, channel_index])
-
-            elif curve_mode in ["L*", "a*", "b*"]:
-                # Manual RGB to Lab Conversion
-                # Use precomputed transformation matrices
-                M = self.M
-                M_inv = self.M_inv
-
-                # Normalize RGB to [0,1]
-                rgb = image_8bit.astype(np.float32) / 255.0
-
-                # Convert RGB to XYZ
-                xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
-
-                # Reference white point (D65)
-                Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
-
-                # Normalize XYZ
-                X = xyz[:, :, 0] / Xn
-                Y = xyz[:, :, 1] / Yn
-                Z = xyz[:, :, 2] / Zn
-
-                # Define the f(t) function
-                delta = 6 / 29
-                def f(t):
-                    return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
-
-                fx = f(X)
-                fy = f(Y)
-                fz = f(Z)
-
-                # Compute L*, a*, b*
-                L = 116 * fy - 16
-                a = 500 * (fx - fy)
-                b = 200 * (fy - fz)
-
-                # Apply LUT to the respective channel
-                if curve_mode == "L*":
-                    # L* typically ranges from 0 to 100
-                    L_normalized = np.clip(L / 100.0, 0, 1)  # Normalize to [0,1]
-                    L_lut_indices = (L_normalized * 255).astype(np.uint8)
-                    L_adjusted = lut[L_lut_indices].astype(np.float32) * 100.0 / 255.0  # Scale back to [0,100]
-                    L = L_adjusted
-
-                elif curve_mode == "a*":
-                    # a* typically ranges from -128 to +127
-                    a_normalized = np.clip((a + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
-                    a_lut_indices = (a_normalized * 255).astype(np.uint8)
-                    a_adjusted = lut[a_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
-                    a = a_adjusted
-
-                elif curve_mode == "b*":
-                    # b* typically ranges from -128 to +127
-                    b_normalized = np.clip((b + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
-                    b_lut_indices = (b_normalized * 255).astype(np.uint8)
-                    b_adjusted = lut[b_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
-                    b = b_adjusted
-
-                # Update Lab channels
-                lab_new = np.stack([L, a, b], axis=2)
-
-                # Convert Lab back to XYZ
-                fy_new = (lab_new[:, :, 0] + 16) / 116
-                fx_new = fy_new + lab_new[:, :, 1] / 500
-                fz_new = fy_new - lab_new[:, :, 2] / 200
-
-                def f_inv(ft):
-                    return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
-
-                X_new = f_inv(fx_new) * Xn
-                Y_new = f_inv(fy_new) * Yn
-                Z_new = f_inv(fz_new) * Zn
+        try:
+            # Determine the visible region (implement this method as per your UI logic)
+            x, y, w, h = self.get_visible_region()
+
+            # Ensure the region is within image bounds
+            x_end = min(x + w, slot0_image.shape[1])
+            y_end = min(y + h, slot0_image.shape[0])
+
+            # Base image is slot0
+            base_image = slot0_image.copy()
+
+            # Extract the visible region from the base image
+            visible_region = base_image[y:y_end, x:x_end]
+
+            # Create an 8-bit version of the visible region for faster processing
+            image_8bit = (visible_region * 255).astype(np.uint8)
+
+            if image_8bit.ndim == 3:  # RGB image
+                adjusted_image = image_8bit.copy()
+
+                if curve_mode == "K (Brightness)":
+                    # Apply LUT to all channels equally (Brightness)
+                    for channel in range(3):
+                        adjusted_image[:, :, channel] = lut[image_8bit[:, :, channel]]
+
+                elif curve_mode in ["R", "G", "B"]:
+                    # Apply LUT to a single channel
+                    channel_index = {"R": 0, "G": 1, "B": 2}[curve_mode]
+                    adjusted_image[:, :, channel_index] = lut[image_8bit[:, :, channel_index]]
+
+                elif curve_mode in ["L*", "a*", "b*"]:
+                    # Manual RGB to Lab Conversion
+                    M = self.M
+                    M_inv = self.M_inv
+
+                    # Normalize RGB to [0,1]
+                    rgb = image_8bit.astype(np.float32) / 255.0
+
+                    # Convert RGB to XYZ
+                    xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+
+                    # Reference white point (D65)
+                    Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+
+                    # Normalize XYZ
+                    X = xyz[:, :, 0] / Xn
+                    Y = xyz[:, :, 1] / Yn
+                    Z = xyz[:, :, 2] / Zn
+
+                    # Define the f(t) function
+                    delta = 6 / 29
+                    def f(t):
+                        return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+                    fx = f(X)
+                    fy = f(Y)
+                    fz = f(Z)
+
+                    # Compute L*, a*, b*
+                    L = 116 * fy - 16
+                    a = 500 * (fx - fy)
+                    b = 200 * (fy - fz)
+
+                    # Apply LUT to the respective channel
+                    if curve_mode == "L*":
+                        # L* typically ranges from 0 to 100
+                        L_normalized = np.clip(L / 100.0, 0, 1)  # Normalize to [0,1]
+                        L_lut_indices = (L_normalized * 255).astype(np.uint8)
+                        L_adjusted = lut[L_lut_indices].astype(np.float32) * 100.0 / 255.0  # Scale back to [0,100]
+                        L = L_adjusted
+
+                    elif curve_mode == "a*":
+                        # a* typically ranges from -128 to +127
+                        a_normalized = np.clip((a + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
+                        a_lut_indices = (a_normalized * 255).astype(np.uint8)
+                        a_adjusted = lut[a_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
+                        a = a_adjusted
+
+                    elif curve_mode == "b*":
+                        # b* typically ranges from -128 to +127
+                        b_normalized = np.clip((b + 128.0) / 255.0, 0, 1)  # Normalize to [0,1]
+                        b_lut_indices = (b_normalized * 255).astype(np.uint8)
+                        b_adjusted = lut[b_lut_indices].astype(np.float32) - 128.0  # Scale back to [-128,127]
+                        b = b_adjusted
+
+                    # Update Lab channels
+                    lab_new = np.stack([L, a, b], axis=2)
+
+                    # Convert Lab back to XYZ
+                    fy_new = (lab_new[:, :, 0] + 16) / 116
+                    fx_new = fy_new + lab_new[:, :, 1] / 500
+                    fz_new = fy_new - lab_new[:, :, 2] / 200
 
-                # Stack XYZ channels
-                xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
+                    def f_inv(ft):
+                        return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
 
-                # Convert XYZ back to RGB
-                rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
+                    X_new = f_inv(fx_new) * Xn
+                    Y_new = f_inv(fy_new) * Yn
+                    Z_new = f_inv(fz_new) * Zn
 
-                # Clip RGB to [0,1]
-                rgb_new = np.clip(rgb_new, 0, 1)
+                    # Stack XYZ channels
+                    xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
 
-                # Convert back to 8-bit
-                adjusted_image = (rgb_new * 255).astype(np.uint8)
+                    # Convert XYZ back to RGB
+                    rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
 
-            elif curve_mode == "Chroma":
-                # === Manual RGB to Lab Conversion ===
-                # Use precomputed transformation matrices
-                M = self.M
-                M_inv = self.M_inv
+                    # Clip RGB to [0,1]
+                    rgb_new = np.clip(rgb_new, 0, 1)
 
-                # Normalize RGB to [0,1]
-                rgb = image_8bit.astype(np.float32) / 255.0
+                    # Convert back to 8-bit
+                    adjusted_image = (rgb_new * 255).astype(np.uint8)
 
-                # Convert RGB to XYZ
-                xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+                elif curve_mode == "Chroma":
+                    # === Manual RGB to Lab Conversion ===
+                    M = self.M
+                    M_inv = self.M_inv
 
-                # Reference white point (D65)
-                Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
+                    # Normalize RGB to [0,1]
+                    rgb = image_8bit.astype(np.float32) / 255.0
 
-                # Normalize XYZ
-                X = xyz[:, :, 0] / Xn
-                Y = xyz[:, :, 1] / Yn
-                Z = xyz[:, :, 2] / Zn
+                    # Convert RGB to XYZ
+                    xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
 
-                # Define the f(t) function
-                delta = 6 / 29
-                def f(t):
-                    return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+                    # Reference white point (D65)
+                    Xn, Yn, Zn = 0.95047, 1.00000, 1.08883
 
-                fx = f(X)
-                fy = f(Y)
-                fz = f(Z)
+                    # Normalize XYZ
+                    X = xyz[:, :, 0] / Xn
+                    Y = xyz[:, :, 1] / Yn
+                    Z = xyz[:, :, 2] / Zn
 
-                # Compute L*, a*, b*
-                L = 116 * fy - 16
-                a = 500 * (fx - fy)
-                b = 200 * (fy - fz)
-
-                # Compute Chroma
-                chroma = np.sqrt(a**2 + b**2)
-
-                # Define a fixed maximum Chroma for normalization to prevent over-scaling
-                fixed_max_chroma = 200.0  # Adjust this value as needed
-
-                # Normalize Chroma to [0,1] using fixed_max_chroma
-                chroma_norm = np.clip(chroma / fixed_max_chroma, 0, 1)
-
-                # Apply LUT to Chroma
-                chroma_lut_indices = (chroma_norm * 255).astype(np.uint8)
-                chroma_adjusted = lut[chroma_lut_indices].astype(np.float32)  # Ensure float32
-
-                # Compute scaling factor, avoiding division by zero
-                scale = np.ones_like(chroma_adjusted, dtype=np.float32)
-                mask = chroma > 0
-                scale[mask] = chroma_adjusted[mask] / chroma[mask]
-
-                # Scale a* and b* channels
-                a_new = a * scale
-                b_new = b * scale
-
-                # Update Lab channels
-                lab_new = np.stack([L, a_new, b_new], axis=2)
-
-                # Convert Lab back to XYZ
-                fy_new = (lab_new[:, :, 0] + 16) / 116
-                fx_new = fy_new + lab_new[:, :, 1] / 500
-                fz_new = fy_new - lab_new[:, :, 2] / 200
-
-                def f_inv(ft):
-                    return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
-
-                X_new = f_inv(fx_new) * Xn
-                Y_new = f_inv(fy_new) * Yn
-                Z_new = f_inv(fz_new) * Zn
-
-                # Stack XYZ channels
-                xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
-
-                # Convert XYZ back to RGB
-                rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
-
-                # Clip RGB to [0,1]
-                rgb_new = np.clip(rgb_new, 0, 1)
-
-                # Convert back to 8-bit
-                adjusted_image = (rgb_new * 255).astype(np.uint8)
-
-            elif curve_mode == "Saturation":
-                # === Manual RGB to HSV Conversion ===
-                # Normalize RGB to [0,1]
-                rgb = image_8bit.astype(np.float32) / 255.0
-
-                # Split channels
-                R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-
-                # Compute Cmax, Cmin, Delta
-                Cmax = np.maximum(np.maximum(R, G), B)
-                Cmin = np.minimum(np.minimum(R, G), B)
-                Delta = Cmax - Cmin
-
-                # Initialize Hue (H), Saturation (S), and Value (V)
-                H = np.zeros_like(Cmax)
-                S = np.zeros_like(Cmax)
-                V = Cmax.copy()
-
-                # Compute Hue (H)
-                mask = Delta != 0
-                # Avoid division by zero
-                H[mask & (Cmax == R)] = ((G[mask & (Cmax == R)] - B[mask & (Cmax == R)]) / Delta[mask & (Cmax == R)]) % 6
-                H[mask & (Cmax == G)] = ((B[mask & (Cmax == G)] - R[mask & (Cmax == G)]) / Delta[mask & (Cmax == G)]) + 2
-                H[mask & (Cmax == B)] = ((R[mask & (Cmax == B)] - G[mask & (Cmax == B)]) / Delta[mask & (Cmax == B)]) + 4
-                H = H / 6.0  # Normalize Hue to [0,1]
-
-                # Compute Saturation (S)
-                S[Cmax != 0] = Delta[Cmax != 0] / Cmax[Cmax != 0]
-
-                # Apply LUT to Saturation (S) channel
-                S_normalized = np.clip(S, 0, 1)  # Ensure S is within [0,1]
-                S_lut_indices = (S_normalized * 255).astype(np.uint8)
-                S_adjusted = lut[S_lut_indices].astype(np.float32) / 255.0  # Normalize back to [0,1]
-                S = S_adjusted
-
-                # Convert HSV back to RGB
-                C = V * S
-                X = C * (1 - np.abs((H * 6) % 2 - 1))
-                m = V - C
-
-                # Initialize RGB channels
-                R_new = np.zeros_like(R)
-                G_new = np.zeros_like(G)
-                B_new = np.zeros_like(B)
-
-                # Define masks for different sectors of Hue
-                mask0 = (H >= 0) & (H < 1/6)
-                mask1 = (H >= 1/6) & (H < 2/6)
-                mask2 = (H >= 2/6) & (H < 3/6)
-                mask3 = (H >= 3/6) & (H < 4/6)
-                mask4 = (H >= 4/6) & (H < 5/6)
-                mask5 = (H >= 5/6) & (H < 1)
-
-                # Assign RGB values based on the sector of Hue
-                R_new[mask0] = C[mask0]
-                G_new[mask0] = X[mask0]
-                B_new[mask0] = 0
-
-                R_new[mask1] = X[mask1]
-                G_new[mask1] = C[mask1]
-                B_new[mask1] = 0
-
-                R_new[mask2] = 0
-                G_new[mask2] = C[mask2]
-                B_new[mask2] = X[mask2]
-
-                R_new[mask3] = 0
-                G_new[mask3] = X[mask3]
-                B_new[mask3] = C[mask3]
-
-                R_new[mask4] = X[mask4]
-                G_new[mask4] = 0
-                B_new[mask4] = C[mask4]
-
-                R_new[mask5] = C[mask5]
-                G_new[mask5] = 0
-                B_new[mask5] = X[mask5]
-
-                # Add m to match the Value (V)
-                R_new += m
-                G_new += m
-                B_new += m
-
-                # Stack the channels back together
-                rgb_new = np.stack([R_new, G_new, B_new], axis=2)
-
-                # Clip RGB to [0,1] to maintain valid color ranges
-                rgb_new = np.clip(rgb_new, 0, 1)
-
-                # Convert back to 8-bit
-                adjusted_image = (rgb_new * 255).astype(np.uint8)
+                    # Define the f(t) function
+                    delta = 6 / 29
+                    def f(t):
+                        return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
 
+                    fx = f(X)
+                    fy = f(Y)
+                    fz = f(Z)
+
+                    # Compute L*, a*, b*
+                    L = 116 * fy - 16
+                    a = 500 * (fx - fy)
+                    b = 200 * (fy - fz)
+
+                    # Compute Chroma
+                    chroma = np.sqrt(a**2 + b**2)
+
+                    # Define a fixed maximum Chroma for normalization to prevent over-scaling
+                    fixed_max_chroma = 200.0  # Adjust this value as needed
+
+                    # Normalize Chroma to [0,1] using fixed_max_chroma
+                    chroma_norm = np.clip(chroma / fixed_max_chroma, 0, 1)
+
+                    # Apply LUT to Chroma
+                    chroma_lut_indices = (chroma_norm * 255).astype(np.uint8)
+                    chroma_adjusted = lut[chroma_lut_indices].astype(np.float32)  # Ensure float32
+
+                    # Compute scaling factor, avoiding division by zero
+                    scale = np.ones_like(chroma_adjusted, dtype=np.float32)
+                    mask = chroma > 0
+                    scale[mask] = chroma_adjusted[mask] / chroma[mask]
+
+                    # Scale a* and b* channels
+                    a_new = a * scale
+                    b_new = b * scale
+
+                    # Update Lab channels
+                    lab_new = np.stack([L, a_new, b_new], axis=2)
+
+                    # Convert Lab back to XYZ
+                    fy_new = (lab_new[:, :, 0] + 16) / 116
+                    fx_new = fy_new + lab_new[:, :, 1] / 500
+                    fz_new = fy_new - lab_new[:, :, 2] / 200
+
+                    def f_inv(ft):
+                        return np.where(ft > delta, ft**3, 3 * delta**2 * (ft - 4 / 29))
+
+                    X_new = f_inv(fx_new) * Xn
+                    Y_new = f_inv(fy_new) * Yn
+                    Z_new = f_inv(fz_new) * Zn
+
+                    # Stack XYZ channels
+                    xyz_new = np.stack([X_new, Y_new, Z_new], axis=2)
+
+                    # Convert XYZ back to RGB
+                    rgb_new = np.dot(xyz_new.reshape(-1, 3), M_inv.T).reshape(xyz_new.shape)
+
+                    # Clip RGB to [0,1]
+                    rgb_new = np.clip(rgb_new, 0, 1)
+
+                    # Convert back to 8-bit
+                    adjusted_image = (rgb_new * 255).astype(np.uint8)
+
+                elif curve_mode == "Saturation":
+                    # === Manual RGB to HSV Conversion ===
+                    rgb = image_8bit.astype(np.float32) / 255.0
+
+                    # Split channels
+                    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+
+                    # Compute Cmax, Cmin, Delta
+                    Cmax = np.maximum.reduce([R, G, B])
+                    Cmin = np.minimum.reduce([R, G, B])
+                    Delta = Cmax - Cmin
+
+                    # Initialize Hue (H), Saturation (S), and Value (V)
+                    H = np.zeros_like(Cmax)
+                    S = np.zeros_like(Cmax)
+                    V = Cmax.copy()
+
+                    # Compute Hue (H)
+                    mask = Delta != 0
+                    H[mask & (Cmax == R)] = ((G[mask & (Cmax == R)] - B[mask & (Cmax == R)]) / Delta[mask & (Cmax == R)]) % 6
+                    H[mask & (Cmax == G)] = ((B[mask & (Cmax == G)] - R[mask & (Cmax == G)]) / Delta[mask & (Cmax == G)]) + 2
+                    H[mask & (Cmax == B)] = ((R[mask & (Cmax == B)] - G[mask & (Cmax == B)]) / Delta[mask & (Cmax == B)]) + 4
+                    H = H / 6.0  # Normalize Hue to [0,1]
+
+                    # Compute Saturation (S)
+                    S[Cmax != 0] = Delta[Cmax != 0] / Cmax[Cmax != 0]
+
+                    # Apply LUT to Saturation (S) channel
+                    S_normalized = np.clip(S, 0, 1)  # Ensure S is within [0,1]
+                    S_lut_indices = (S_normalized * 255).astype(np.uint8)
+                    S_adjusted = lut[S_lut_indices].astype(np.float32) / 255.0  # Normalize back to [0,1]
+                    S = S_adjusted
+
+                    # Convert HSV back to RGB
+                    C = V * S
+                    X = C * (1 - np.abs((H * 6) % 2 - 1))
+                    m = V - C
+
+                    # Initialize RGB channels
+                    R_new = np.zeros_like(R)
+                    G_new = np.zeros_like(G)
+                    B_new = np.zeros_like(B)
+
+                    # Define masks for different sectors of Hue
+                    mask0 = (H >= 0) & (H < 1/6)
+                    mask1 = (H >= 1/6) & (H < 2/6)
+                    mask2 = (H >= 2/6) & (H < 3/6)
+                    mask3 = (H >= 3/6) & (H < 4/6)
+                    mask4 = (H >= 4/6) & (H < 5/6)
+                    mask5 = (H >= 5/6) & (H < 1)
+
+                    # Assign RGB values based on the sector of Hue
+                    R_new[mask0] = C[mask0]
+                    G_new[mask0] = X[mask0]
+                    B_new[mask0] = 0
+
+                    R_new[mask1] = X[mask1]
+                    G_new[mask1] = C[mask1]
+                    B_new[mask1] = 0
+
+                    R_new[mask2] = 0
+                    G_new[mask2] = C[mask2]
+                    B_new[mask2] = X[mask2]
+
+                    R_new[mask3] = 0
+                    G_new[mask3] = X[mask3]
+                    B_new[mask3] = C[mask3]
+
+                    R_new[mask4] = X[mask4]
+                    G_new[mask4] = 0
+                    B_new[mask4] = C[mask4]
+
+                    R_new[mask5] = C[mask5]
+                    G_new[mask5] = 0
+                    B_new[mask5] = X[mask5]
+
+                    # Add m to match the Value (V)
+                    R_new += m
+                    G_new += m
+                    B_new += m
+
+                    # Stack the channels back together
+                    rgb_new = np.stack([R_new, G_new, B_new], axis=2)
+
+                    # Clip RGB to [0,1] to maintain valid color ranges
+                    rgb_new = np.clip(rgb_new, 0, 1)
+
+                    # Convert back to 8-bit
+                    adjusted_image = (rgb_new * 255).astype(np.uint8)
+
+                else:
+                    # Unsupported curve mode
+                    print(f"Unsupported curve mode: {curve_mode}")
+                    QMessageBox.warning(self, "Unsupported Mode", f"Unsupported curve mode: {curve_mode}")
+                    return
+
+            else:  # Grayscale image
+                # For grayscale images, apply LUT directly
+                adjusted_image = lut[image_8bit]
+
+            # Create a copy of the base image for preview
+            preview_image = base_image.copy()
+
+            # Assign adjusted_image back to the visible region
+            if image_8bit.ndim == 3:
+                # Normalize back to [0,1] for consistency
+                preview_image[y:y_end, x:x_end] = adjusted_image.astype(np.float32) / 255.0
             else:
-                # Unsupported curve mode
-                print(f"Unsupported curve mode: {curve_mode}")
-                return
+                preview_image[y:y_end, x:x_end] = adjusted_image.astype(np.float32) / 255.0
 
-        else:  # Grayscale image
-            # For grayscale images, apply LUT directly
-            adjusted_image = np.take(lut, image_8bit)
+            # Update the preview display with the preview_image
+            self.updatePreview(preview_image)
+            print("Curves preview updated successfully.")
 
-        # Copy the adjusted region back to the full image
-        full_adjusted_image = self.image.copy()
-        full_adjusted_image[y:y_end, x:x_end] = adjusted_image / 255.0  # Assuming self.image is float [0,1]
+        except Exception as e:
+            # Handle exceptions gracefully
+            print(f"Error in updatePreviewLUT: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to update preview: {e}")
 
-        # Convert the full adjusted image to 8-bit for display
-        full_adjusted_8bit = (full_adjusted_image * 255).astype(np.uint8)
-
-        # Convert to QImage
-        if full_adjusted_8bit.ndim == 3:
-            bytes_per_line = 3 * full_adjusted_8bit.shape[1]
-            q_image_full = QImage(full_adjusted_8bit.tobytes(), full_adjusted_8bit.shape[1], full_adjusted_8bit.shape[0], bytes_per_line, QImage.Format_RGB888)
-        else:
-            bytes_per_line = full_adjusted_8bit.shape[1]
-            q_image_full = QImage(full_adjusted_8bit.tobytes(), full_adjusted_8bit.shape[1], full_adjusted_8bit.shape[0], bytes_per_line, QImage.Format_Grayscale8)
-
-        # Create QPixmap from QImage
-        pixmap_full = QPixmap.fromImage(q_image_full)
-
-        # Correctly scale the pixmap based on zoom_factor
-        scaled_width = int(pixmap_full.width() * self.zoom_factor)
-        scaled_height = int(pixmap_full.height() * self.zoom_factor)
-        scaled_pixmap = pixmap_full.scaled(
-            scaled_width,
-            scaled_height,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-
-        # Set the scaled pixmap to the imageLabel
-        self.imageLabel.setPixmap(scaled_pixmap)
-        self.imageLabel.resize(scaled_pixmap.size())
 
 
     def handleImageMouseMove(self, x, y):
@@ -8426,11 +9223,8 @@ class FullCurvesTab(QWidget):
         curve_mode = self.curveModeGroup.checkedButton().text()
         curve_func = self.curveEditor.getCurveFunction()
 
-        # Determine source image based on user choice
-        if self.applyOriginalRadio.isChecked():
-            source_image = self.original_image.copy()
-        else:
-            source_image = self.image.copy()
+
+        source_image = self.image.copy()
 
         # Push the current image to the undo stack before modifying
         self.pushUndo(self.image.copy())
@@ -8561,11 +9355,14 @@ class FullCurvesTab(QWidget):
             print(f"Failed to load image: {e}")
 
     def updatePreview(self, preview_image=None):
-        """Display the preview_image on the imageLabel."""
+        print("updatePreview called.")
         if preview_image is None:
-            preview_image = self.preview_image
+            self.imageLabel.clear()
+            self.imageLabel.setText('No preview available.')
+            print("Preview image is None. Cleared curves preview.")
+            return
 
-        if preview_image is not None:
+        try:
             img = (preview_image * 255).astype(np.uint8)
             h, w = img.shape[:2]
 
@@ -8577,17 +9374,20 @@ class FullCurvesTab(QWidget):
                 q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
 
             pixmap = QPixmap.fromImage(q_image)
-            # Correctly scale the pixmap based on zoom_factor
-            scaled_width = int(pixmap.width() * self.zoom_factor)
-            scaled_height = int(pixmap.height() * self.zoom_factor)
             scaled_pixmap = pixmap.scaled(
-                scaled_width,
-                scaled_height,
+                pixmap.size() * self.zoom_factor,
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
             self.imageLabel.setPixmap(scaled_pixmap)
             self.imageLabel.resize(scaled_pixmap.size())
+            print("Curves preview updated successfully.")
+
+        except Exception as e:
+            print(f"Error in updatePreview: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to update preview display: {e}")
+
+
 
     def on_image_changed(self, slot, image, metadata):
         """
@@ -8699,50 +9499,6 @@ class FullCurvesTab(QWidget):
             # If no image is available, clear the label and show a message
             self.imageLabel.clear()
             self.imageLabel.setText('No image loaded.')
-
-    def updatePreview(self, preview_image=None):
-        # Store the stretched image for saving
-        self.preview_image = preview_image
-        # Update the ImageManager with the new stretched image
-        metadata = {
-            'file_path': self.filename if self.filename else "Stretched Image",
-            'original_header': self.original_header if self.original_header else {},
-            'bit_depth': "Unknown",  # Update if bit_depth is available
-            'is_mono': self.is_mono,
-            'processing_timestamp': datetime.now().isoformat(),
-            'source_images': {
-                'Original': self.filename if self.filename else "Not Provided"
-            }
-        }
-
-        # Update ImageManager with the new processed image
-        if self.image_manager:
-            try:
-                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
-                print("StarStretchTab: Processed image stored in ImageManager.")
-            except Exception as e:
-                print(f"Error updating ImageManager: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
-        else:
-            print("ImageManager is not initialized.")
-            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
-
-        # Update the preview once the processing thread emits the result
-        preview_image = (preview_image * 255).astype(np.uint8)
-        h, w = preview_image.shape[:2]
-        if preview_image.ndim == 3:
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
-        else:
-            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
-
-        pixmap = QPixmap.fromImage(q_image)
-        self.current_pixmap = pixmap  # **Store the original pixmap**
-        scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.imageLabel.setPixmap(scaled_pixmap)
-        self.imageLabel.resize(scaled_pixmap.size())
-
-        # Hide the spinner after processing is done
-        self.hideSpinner()
 
     def zoom_in(self):
         """
@@ -8904,8 +9660,6 @@ class FullCurvesTab(QWidget):
                     print(f"Image saved successfully to {save_filename}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
-
-
 
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, curve_editor, x, y, color=Qt.green, lock_axis=None, position_type=None):
@@ -10413,9 +11167,10 @@ class CombinedPreviewWindow(QWidget):
         self.fit_btn.clicked.connect(self.fit_to_preview)
         top_btn_layout.addWidget(self.fit_btn)
 
-        self.save_btn = QPushButton("Save Combined", self)
-        self.save_btn.clicked.connect(self.save_combined_image)
-        top_btn_layout.addWidget(self.save_btn)
+        # New "Apply Changes" button
+        self.apply_btn = QPushButton("Apply Changes/Push for Processing", self)
+        self.apply_btn.clicked.connect(self.apply_changes)
+        top_btn_layout.addWidget(self.apply_btn)
 
         main_layout.addLayout(top_btn_layout)
 
@@ -10524,83 +11279,28 @@ class CombinedPreviewWindow(QWidget):
         self.zoom_factor = new_zoom
         self.updatePreview()
 
-    # -----------------------------
-    # Save
-    # -----------------------------
-    def save_combined_image(self):
+    def apply_changes(self):
         """
-        Let the user save the combined image (float32 [0,1]) with a typical "Save As" dialog.
-        - TIF/TIFF, FIT/FITS, XISF: prompt for 16-bit or 32-bit.
-        - PNG/JPG/JPEG: automatically save as 8-bit (no prompt).
-        - Otherwise, default to 8-bit.
+        Push the combined image to ImageManager's slot 0 for further processing.
         """
         if self.combined_image is None:
+            QMessageBox.warning(self, "No Image", "There is no combined image to apply.")
             return
 
-        options = "Images (*.tif *.tiff *.fits *.fit *.png *.xisf);;All Files (*)"
-        default_filename = "combined_image.tif"
-        save_filename, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Save Combined Image", 
-            default_filename, 
-            options
-        )
-        if not save_filename:
-            return  # user canceled
-
-        file_ext = os.path.splitext(save_filename)[1].lower().strip('.')  # e.g., 'tif', 'fits', 'png', etc.
-        
-        # Decide bit depth
-        if file_ext in ['tif', 'tiff', 'fit', 'fits', 'xisf']:
-            # Prompt user for bit depth
-            bit_depth_options = ["16-bit", "32-bit floating point"]
-            bit_depth, ok = QInputDialog.getItem(
-                self,
-                "Select Bit Depth",
-                "Choose bit depth for saving:",
-                bit_depth_options,
-                1,  # default index = "32-bit floating point"
-                False
-            )
-            if not ok:
-                return  # user canceled the bit-depth dialog
-        elif file_ext in ['png']:
-            # Force 8-bit
-            bit_depth = "8-bit"
-        else:
-            # Some other extension: default to "8-bit" (or you can ask user, or raise an error)
-            bit_depth = "8-bit"
-
-        # Now call your global save_image
-        save_image(
-            self.combined_image,         # float32 in [0,1]
-            save_filename,
-            original_format=file_ext,    # 'tif', 'fits', 'png', etc.
-            bit_depth=bit_depth,
-            original_header=self.original_header,
-            is_mono=self.is_mono
-        )
-
-        QMessageBox.information(
-            self,
-            "Save Complete",
-            f"Saved {bit_depth} {file_ext.upper()} image to:\n{os.path.basename(save_filename)}"
-        )
-
-        # Update ImageManager with the new combined image
+        # Metadata for the combined image
         metadata = {
-            'file_path': save_filename,
+            'file_path': "Combined HF+LF Applied",
             'original_header': self.original_header,
-            'bit_depth': bit_depth,
-            'is_mono': self.is_mono
+            'is_mono': self.is_mono,
+            'bit_depth': "32-bit floating point"
         }
 
-        # Set the combined image in ImageManager's current slot
+        # Push the combined image to slot 0
         self.image_manager.set_image(self.combined_image, metadata)
+        QMessageBox.information(self, "Changes Applied", "The combined image has been pushed to slot 0 for processing.")
 
-        # Optionally, update any labels or statuses if needed
-        # For example, you might want to update the title or notify the user
-        self.close()  # Close the preview window after saving, if desired        
+        # Close the preview window (optional)
+        self.close()       
 
 class HFEnhancementThread(QThread):
     """
