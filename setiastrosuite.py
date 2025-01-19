@@ -469,6 +469,12 @@ class AstroEditingSuite(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
+        
+        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
+            print("Converting single-channel image to 3-channel RGB...")
+            processing_image = np.stack([self.image_manager.image] * 3, axis=-1)
+        else:
+            processing_image = self.image_manager.image
 
         if reply == QMessageBox.Yes:
             print("Image is linear. Applying stretch.")
@@ -479,14 +485,14 @@ class AstroEditingSuite(QMainWindow):
             dialog_msg.exec_()
 
             # Apply stretch
-            stretched_image = self.stretch_image(self.image_manager.image)
+            stretched_image = self.stretch_image(processing_image)
             # Use stretched_image for processing
             processing_image = stretched_image
             print("Image stretched successfully.")
             self.image_was_stretched = True
         else:
             print("Image is not linear. Proceeding without stretching.")
-            processing_image = self.image_manager.image
+            processing_image = processing_image
             self.image_was_stretched = False
 
         # Step 4: Set Command Parameters Based on OS
@@ -600,6 +606,8 @@ class AstroEditingSuite(QMainWindow):
         # Convert back to RGB and normalize to [0,1]
         starless_rgb = cv2.cvtColor(starless_bgr, cv2.COLOR_BGR2RGB).astype('float32') / 65535.0
 
+
+
         # Check and apply unstretch if necessary
         if getattr(self, 'image_was_stretched', False):
             print("Unstretching the starless image...")
@@ -610,12 +618,25 @@ class AstroEditingSuite(QMainWindow):
             print("Image was not stretched. Proceeding without unstretching.")
             dialog.append_text("Image was not stretched. Proceeding without unstretching.\n")
 
+        # Convert image_manager.image to 3-channel if needed
+        if starless_rgb.ndim == 2 or (starless_rgb.ndim == 3 and starless_rgb.shape[2] == 1):
+            print("Converting single-channel original image to 3-channel RGB...")
+            starless_rgb = np.stack([starless_rgb] * 3, axis=-1)
+        else:
+            starless_rgb = starless_rgb
+
+        # Convert image_manager.image to 3-channel if needed
+        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
+            print("Converting single-channel original image to 3-channel RGB...")
+            original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
+        else:
+            original_image_rgb = self.image_manager.image            
 
         # Step 9: Generate Stars Only Image
         print("Generating stars-only image...")
         dialog.append_text("Generating stars-only image...\n")
         with np.errstate(divide='ignore', invalid='ignore'):
-            stars_only = (self.image_manager.image - starless_rgb) / (1.0 - starless_rgb)
+            stars_only = (original_image_rgb - starless_rgb) / (1.0 - starless_rgb)
             stars_only = np.nan_to_num(stars_only, nan=0.0, posinf=0.0, neginf=0.0)
         stars_only = np.clip(stars_only, 0.0, 1.0)
         print("Stars-only image generated.")
