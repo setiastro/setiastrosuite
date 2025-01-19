@@ -12754,6 +12754,11 @@ class NBtoRGBProcessingThread(QThread):
         self.stretch_factor = stretch_factor
 
     def run(self):
+        # Preprocess input images to ensure mono images are single-channel
+        self.ha_image = preprocess_narrowband_image(self.ha_image)
+        self.oiii_image = preprocess_narrowband_image(self.oiii_image)
+        self.sii_image = preprocess_narrowband_image(self.sii_image)
+
         # Normalize input images to [0, 1]
         if self.ha_image is not None:
             self.ha_image = np.clip(self.ha_image, 0, 1)
@@ -12766,21 +12771,23 @@ class NBtoRGBProcessingThread(QThread):
 
         # Combined RGB logic
         if self.osc_image is not None:
-            # Extract OSC channels
             r_channel = self.osc_image[..., 0]
             g_channel = self.osc_image[..., 1]
             b_channel = self.osc_image[..., 2]
 
-            # Fallbacks for missing Ha, OIII, or SII images
             r_combined = 0.5 * r_channel + 0.5 * (self.sii_image if self.sii_image is not None else r_channel)
             g_combined = self.ha_to_oii_ratio * (self.ha_image if self.ha_image is not None else r_channel) + \
-                         (1 - self.ha_to_oii_ratio) * g_channel
+                        (1 - self.ha_to_oii_ratio) * g_channel
             b_combined = b_channel if self.oiii_image is None else self.oiii_image
         else:
-            # Use narrowband images directly (default logic)
             r_combined = 0.5 * self.ha_image + 0.5 * (self.sii_image if self.sii_image is not None else self.ha_image)
             g_combined = self.ha_to_oii_ratio * self.ha_image + (1 - self.ha_to_oii_ratio) * self.oiii_image
             b_combined = self.oiii_image
+
+        # Debugging: Check shapes
+        print(f"R combined shape: {r_combined.shape}")
+        print(f"G combined shape: {g_combined.shape}")
+        print(f"B combined shape: {b_combined.shape}")
 
         # Normalize combined channels to [0, 1]
         r_combined = np.clip(r_combined, 0, 1)
@@ -12788,17 +12795,29 @@ class NBtoRGBProcessingThread(QThread):
         b_combined = np.clip(b_combined, 0, 1)
 
         # Stack the channels to create an RGB image
-        combined_image = np.stack((r_combined, g_combined, b_combined), axis=-1)
+        try:
+            combined_image = np.stack((r_combined, g_combined, b_combined), axis=-1)
+        except ValueError as e:
+            print(f"Error while stacking channels: {e}")
+            print(f"R: {r_combined.shape}, G: {g_combined.shape}, B: {b_combined.shape}")
+            return
+
+        print(f"Combined image shape: {combined_image.shape}")
 
         # Apply star stretch if enabled
         if self.enable_star_stretch:
             combined_image = self.apply_star_stretch(combined_image)
+
+        # Ensure combined_image is 3-channel
+        if combined_image.ndim != 3 or combined_image.shape[2] != 3:
+            raise ValueError("Combined image must have three channels (RGB).")
 
         # Apply SCNR (remove green cast)
         apply_average_neutral_scnr(combined_image)
 
         # Emit the processed image for preview
         self.preview_generated.emit(combined_image)
+
 
     def apply_star_stretch(self, image):
         # Ensure input image is in the range [0, 1]
@@ -14027,6 +14046,27 @@ class ContinuumProcessingThread(QThread):
         
         return np.clip(result_image, 0, 1)  # Ensure values stay within [0, 1]
 
+def preprocess_narrowband_image(image):
+    """
+    Preprocess narrowband images to ensure they are single-channel.
+    If the image is detected as a mono image stored in 3-channel format, the red channel is used.
+    """
+    if image is not None:
+        if image.ndim == 3:
+            if image.shape[2] == 3:
+                # Use the red channel if the image is multi-channel
+                print("Detected multi-channel RGB data. Using the red channel as mono.")
+                image = image[..., 0]
+            elif image.shape[2] == 1:
+                # Squeeze single redundant channel
+                print("Detected 1-channel image with extra dimension. Squeezing to single channel.")
+                image = np.squeeze(image, axis=-1)
+        elif image.ndim != 2:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+    return image
+
+
+
 def apply_standard_white_balance(image: np.ndarray, r_gain: float = 1.0, g_gain: float = 1.0, b_gain: float = 1.0) -> np.ndarray:
     """
     Applies standard white balance by adjusting the gain of each color channel.
@@ -14238,6 +14278,10 @@ def apply_average_neutral_scnr(image: np.ndarray, amount: float = 1.0) -> np.nda
     """
     if not isinstance(image, np.ndarray):
         raise TypeError("Input image must be a NumPy array.")
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        print(f"apply_average_neutral_scnr received invalid image shape: {image.shape}")
+        raise ValueError("Input image must have three channels (RGB).")
 
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("Input image must have three channels (RGB).")
