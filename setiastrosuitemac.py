@@ -1,10 +1,10 @@
 # Standard library imports
 import os
-import sys
 import tempfile
+import sys
 import time
 import json
-import csv
+
 import math
 from datetime import datetime
 from decimal import getcontext
@@ -26,6 +26,8 @@ import time
 from datetime import datetime
 import pywt
 from io import BytesIO
+
+
 
 
 
@@ -60,37 +62,58 @@ from PyQt5.QtWidgets import (
     QFileDialog, QGraphicsView, QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, 
     QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, 
-    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QAbstractItemView,
+    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QAbstractItemView, QToolBar,QGraphicsPixmapItem,QRubberBand,QVBoxLayout,QGroupBox,
     QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton, QStatusBar
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor, QBrush
 )
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize, QObject
+from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize, QObject,QSettings
 
 # Math functions
 from math import sqrt
 
 
+
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
     icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+    windowslogo_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+    green_path = os.path.join(sys._MEIPASS, 'green.png')
+    neutral_path = os.path.join(sys._MEIPASS, 'neutral.png')
+    whitebalance_path = os.path.join(sys._MEIPASS, 'whitebalance.png')
+    morpho_path = os.path.join(sys._MEIPASS, 'morpho.png')
+    clahe_path = os.path.join(sys._MEIPASS, 'clahe.png')
+    starnet_path = os.path.join(sys._MEIPASS, 'starnet.png')
+    staradd_path = os.path.join(sys._MEIPASS, 'staradd.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
+    windowslogo_path = 'astrosuite.ipng'
+    green_path = 'green.png'
+    neutral_path = 'neutral.png'
+    whitebalance_path = 'whitebalance.png'
+    morpho_path = 'morpho.png'
+    clahe_path = 'clahe.png'
+    starnet_path = 'starnet.png'
+    staradd_path = 'staradd.png'
 
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(QIcon(icon_path))
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
         self.image_manager.image_changed.connect(self.update_file_name)
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "YourCompany" with your actual organization name
+        self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
+
         self.initUI()
 
     def initUI(self):
+        # Set the window icon
         self.setWindowIcon(QIcon(icon_path))
-        layout = QVBoxLayout()
 
         # Enable drag and drop
         self.setAcceptDrops(True)
@@ -98,30 +121,49 @@ class AstroEditingSuite(QMainWindow):
         # Create a menu bar
         menubar = self.menuBar()  # Use the menu bar directly from QMainWindow
 
+        # --------------------
         # File Menu
+        # --------------------
         file_menu = menubar.addMenu("File")
         
-        # Add actions for File menu
+        # Create File Menu Actions
         open_action = QAction("Open Image", self)
-        save_action = QAction("Save As", self)
-        undo_action = QAction("Undo", self)
-        redo_action = QAction("Redo", self)
-        exit_action = QAction("Exit", self)
-        
+        open_action.setShortcut('Ctrl+O')
+        open_action.setStatusTip('Open an image file')
         open_action.triggered.connect(self.open_image)
+        
+        save_action = QAction("Save As", self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.setStatusTip('Save the image to disk')
         save_action.triggered.connect(self.save_image)
+        
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut('Ctrl+Z')
+        undo_action.setStatusTip('Undo the last action')
         undo_action.triggered.connect(self.undo_image)
+        
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut('Ctrl+Y')
+        redo_action.setStatusTip('Redo the last undone action')
         redo_action.triggered.connect(self.redo_image)
+        
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut('Ctrl+Q')  # Common shortcut for Exit
+        exit_action.setStatusTip('Exit the application')
         exit_action.triggered.connect(self.close)  # Close the application
 
-        # Add actions to the file menu
+        # Add actions to the File menu
         file_menu.addAction(open_action)
         file_menu.addAction(save_action)
+        file_menu.addSeparator()
         file_menu.addAction(undo_action)
         file_menu.addAction(redo_action)
+        file_menu.addSeparator()
         file_menu.addAction(exit_action)
 
+        # --------------------
         # Themes Menu
+        # --------------------
         theme_menu = menubar.addMenu("Themes")
         light_theme_action = QAction("Light Theme", self)
         dark_theme_action = QAction("Dark Theme", self)
@@ -132,7 +174,122 @@ class AstroEditingSuite(QMainWindow):
         theme_menu.addAction(light_theme_action)
         theme_menu.addAction(dark_theme_action)
 
-        # Create the status bar
+        # --------------------
+        # Functions Menu
+        # --------------------
+        functions_menu = menubar.addMenu("Functions")
+        
+        # Create Remove Green QAction
+        remove_green_action = QAction("Remove Green", self)
+        remove_green_action.setShortcut('Ctrl+G')  # Assign a keyboard shortcut
+        remove_green_action.setStatusTip('Remove green noise from the image')
+        remove_green_action.triggered.connect(self.open_remove_green_dialog)
+        
+        # Add Remove Green to Functions menu
+        functions_menu.addAction(remove_green_action)
+
+        background_neutralization_action = QAction("Background Neutralization", self)
+        background_neutralization_action.setShortcut('Ctrl+N')  # Assign a keyboard shortcut
+        background_neutralization_action.setStatusTip('Neutralize background colors based on a sample region')
+        background_neutralization_action.triggered.connect(self.open_background_neutralization_dialog)
+        
+        # Add to Functions menu
+        functions_menu.addAction(background_neutralization_action)        
+
+        # White Balance Action
+        whitebalance_action = QAction("White Balance", self)
+        whitebalance_action.setShortcut('Ctrl+Shift+W')  # Assign a keyboard shortcut
+        whitebalance_action.setStatusTip('Adjust white balance of the image')
+        whitebalance_action.triggered.connect(self.open_whitebalance_dialog)
+        
+        # Add White Balance to Functions menu
+        functions_menu.addAction(whitebalance_action)   
+
+        clahe_action = QAction("CLAHE", self)
+        clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
+        clahe_action.setStatusTip('Apply Contrast Limited Adaptive Histogram Equalization')
+        clahe_action.triggered.connect(self.open_clahe_dialog)
+        
+        # Add CLAHE to Functions menu
+        functions_menu.addAction(clahe_action)
+
+        # Morphological Operations Action
+        morpho_action = QAction("Morphological Operations", self)
+        morpho_action.setShortcut('Ctrl+Shift+M')  # Assign a keyboard shortcut
+        morpho_action.setStatusTip('Apply morphological operations to the image')
+        morpho_action.triggered.connect(self.open_morpho_dialog)
+        
+        # Add Morphological Operations to Functions menu
+        functions_menu.addAction(morpho_action)        
+
+        remove_stars_action = QAction("Remove Stars", self)
+        remove_stars_action.setShortcut('Ctrl+R')  # Assign a keyboard shortcut
+        remove_stars_action.setStatusTip('Remove stars from the image using StarNet')
+        remove_stars_action.triggered.connect(self.remove_stars)
+
+        # Add Remove Stars to Functions menu
+        functions_menu.addAction(remove_stars_action)
+
+        add_stars_action = QAction("Add Stars", self)
+        add_stars_action.setShortcut('Ctrl+A')  # Assign a keyboard shortcut
+        add_stars_action.setStatusTip('Add stars back to the current image')
+        add_stars_action.triggered.connect(self.add_stars)
+
+        # Add Add Stars to Functions menu
+        functions_menu.addAction(add_stars_action)        
+
+        # --------------------
+        # Toolbar
+        # --------------------
+        toolbar = QToolBar("Main Toolbar")
+        self.addToolBar(toolbar)
+
+        # Add Remove Stars Button to Toolbar with Icon
+        remove_stars_icon = QIcon(starnet_path)
+        remove_stars_action.setIcon(remove_stars_icon)  # Set the icon to the QAction
+        remove_stars_action.setToolTip("Remove Stars using StarNet")
+        toolbar.addAction(remove_stars_action)  # Add the same QAction to the toolbar
+
+        # Add Add Stars Button to Toolbar with Icon
+        add_stars_icon = QIcon(staradd_path)
+        add_stars_action.setIcon(add_stars_icon)  # Set the icon to the QAction
+        add_stars_action.setToolTip("Add Stars back to the image")
+        toolbar.addAction(add_stars_action)  # Add the same QAction to the toolbar
+
+        # Add "Remove Green" Button to Toolbar with Icon
+        remove_green_icon = QIcon(green_path)
+        remove_green_action.setIcon(remove_green_icon)  # Set the icon to the QAction
+        toolbar.addAction(remove_green_action)  # Add the same QAction to the toolbar
+
+        # Add "Background Neutralization" Button to Toolbar with Icon
+        background_neutralization_icon = QIcon(neutral_path)
+        background_neutralization_action.setIcon(background_neutralization_icon)  # Set the icon
+        background_neutralization_action.setToolTip("Neutralize background colors based on a sample region.")
+        toolbar.addAction(background_neutralization_action)  # Add the QAction to the toolbar
+
+        # Add White Balance Button to Toolbar with Icon
+        whitebalance_icon = QIcon(whitebalance_path)
+        whitebalance_action.setIcon(whitebalance_icon)
+        whitebalance_action.setToolTip("Adjust white balance of the image.")
+        toolbar.addAction(whitebalance_action)
+
+        # Add CLAHE Button to Toolbar with Icon
+        clahe_icon = QIcon(clahe_path)
+        clahe_action.setIcon(clahe_icon)
+        clahe_action.setToolTip("Apply Contrast Limited Adaptive Histogram Equalization.")
+        toolbar.addAction(clahe_action)      
+
+        # Add Morphological Operations Button to Toolbar with Icon
+        morpho_icon = QIcon(morpho_path)
+        morpho_action.setIcon(morpho_icon)
+        morpho_action.setToolTip("Apply morphological operations to the image.")
+        toolbar.addAction(morpho_action)    
+
+
+
+        # --------------------
+        # Status Bar
+        # --------------------
         self.statusBar = QStatusBar(self)
         self.setStatusBar(self.statusBar)
 
@@ -140,7 +297,9 @@ class AstroEditingSuite(QMainWindow):
         self.file_name_label = QLabel("No file selected")
         self.statusBar.addWidget(self.file_name_label, 1)  # Add label to status bar
 
-        # Create the tab widget
+        # --------------------
+        # Tab Widget
+        # --------------------
         self.tabs = QTabWidget()
         # Add individual tabs for each tool
         self.tabs.addTab(XISFViewer(image_manager=self.image_manager), "XISF Liberator")
@@ -166,20 +325,594 @@ class AstroEditingSuite(QMainWindow):
         # Set the central widget of the main window
         self.setCentralWidget(central_widget)
 
-        # Set the layout for the main window
-
-        self.setWindowTitle('Seti Astro\'s Suite V2.4.1')
-
-        # Populate the Quick Navigation menu with each tab name
+        # --------------------
+        # Quick Navigation Menu
+        # --------------------
         quicknav_menu = menubar.addMenu("Quick Navigation")
         for i in range(self.tabs.count()):
             tab_title = self.tabs.tabText(i)
             action = QAction(tab_title, self)
+            # Use lambda with default argument to capture the current value of i
             action.triggered.connect(lambda checked, index=i: self.tabs.setCurrentIndex(index))
             quicknav_menu.addAction(action)
 
-        # Apply the default theme
+        # --------------------
+        # Apply Default Theme
+        # --------------------
         self.apply_theme(self.current_theme)
+
+        # --------------------
+        # Window Properties
+        # --------------------
+        self.setWindowTitle('Seti Astro\'s Suite V2.5')
+        self.setGeometry(100, 100, 1200, 800)  # Set window size as needed
+
+    def add_stars(self):
+        """
+        Add stars back to the current image using the chosen stars-only image and method.
+        """
+        try:
+            print("Starting star addition process...")
+
+            # Prompt the user to select the stars-only image
+            stars_only_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select Stars-Only Image",
+                "",
+                "Image Files (*.tif *.tiff *.png)"
+            )
+
+            if not stars_only_path:
+                QMessageBox.warning(self, "No Image Selected", "No stars-only image selected. Operation cancelled.")
+                print("No stars-only image selected. Exiting star addition process.")
+                return
+
+            print(f"Stars-only image selected: {stars_only_path}")
+
+            # Load the stars-only image
+            stars_only_image = cv2.imread(stars_only_path, cv2.IMREAD_UNCHANGED).astype('float32') / 65535.0
+            if stars_only_image is None:
+                QMessageBox.critical(self, "Error", "Failed to load stars-only image. Please try again.")
+                print(f"Failed to load stars-only image from {stars_only_path}.")
+                return
+
+            # Normalize stars-only image to [0, 1] range
+            stars_only_image = np.clip(stars_only_image, 0.0, 1.0)
+
+            # Check if current image exists
+            if self.image_manager.image is None:
+                QMessageBox.warning(self, "No Image", "Please load an image before adding stars.")
+                print("No image loaded. Exiting star addition process.")
+                return
+
+            # Prompt the user to choose the addition method
+            addition_method, ok = QInputDialog.getItem(
+                self,
+                "Choose Addition Method",
+                "Select how to add stars back to the image:",
+                ["Screen", "Add"],
+                editable=False
+            )
+
+            if not ok or not addition_method:
+                QMessageBox.warning(self, "Cancelled", "Star addition process cancelled.")
+                print("Star addition process cancelled by the user.")
+                return
+
+            print(f"Addition method selected: {addition_method}")
+
+            # Retrieve the current image
+            current_image = self.image_manager.image
+
+            # Perform the star addition
+            print("Performing star addition...")
+            if addition_method == "Screen":
+                combined_image = current_image + stars_only_image - current_image * stars_only_image
+            elif addition_method == "Add":
+                combined_image = current_image + stars_only_image
+
+            # Clip the combined image to [0, 1]
+            combined_image = np.clip(combined_image, 0.0, 1.0)
+            print("Star addition completed successfully.")
+
+            # Update the image in the ImageManager
+            self.image_manager.update_image(updated_image=combined_image)
+            QMessageBox.information(self, "Success", "Stars added successfully.")
+            print("Stars added successfully.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred:\n{e}")
+            print(f"An unexpected error occurred: {e}")
+
+
+    def remove_stars(self):
+        """
+        Removes stars from the current image using StarNet and generates a stars-only image.
+        Supports Windows, macOS, and Linux platforms.
+        """
+
+        print("Starting star removal process...")
+
+        # Step 1: Verify StarNet Executable Path
+        if not self.starnet_exe_path:
+            print("StarNet executable path not set. Prompting user to select executable.")
+            self.select_starnet_exe()
+            if not self.starnet_exe_path:
+                print("User cancelled StarNet executable selection.")
+                return  # User cancelled the selection
+            else:
+                print(f"StarNet executable selected: {self.starnet_exe_path}")
+        else:
+            print(f"Using existing StarNet executable path: {self.starnet_exe_path}")
+
+        # Step 2: Ensure current image is loaded
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before removing stars.")
+            print("No image loaded. Exiting star removal process.")
+            return
+
+        print("Image is loaded. Proceeding with star removal.")
+
+        # Step 3: Determine the Operating System
+        current_os = platform.system()
+        print(f"Operating System detected: {current_os}")
+        if current_os not in ["Windows", "Darwin", "Linux"]:
+            QMessageBox.critical(self, "Unsupported OS", f"The current operating system '{current_os}' is not supported.")
+            print(f"Unsupported operating system: {current_os}")
+            return
+
+        # Step 4: Ask if the image is linear
+        reply = QMessageBox.question(
+            self,
+            "Image Linearity",
+            "Is the current image linear?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
+            print("Converting single-channel image to 3-channel RGB...")
+            processing_image = np.stack([self.image_manager.image] * 3, axis=-1)
+        else:
+            processing_image = self.image_manager.image
+
+        if reply == QMessageBox.Yes:
+            print("Image is linear. Applying stretch.")
+            dialog_msg = QMessageBox(self)
+            dialog_msg.setWindowTitle("Stretching Image")
+            dialog_msg.setText("Stretching the image for StarNet processing...")
+            dialog_msg.setStandardButtons(QMessageBox.Ok)
+            dialog_msg.exec_()
+
+            # Apply stretch
+            stretched_image = self.stretch_image(processing_image)
+            # Use stretched_image for processing
+            processing_image = stretched_image
+            print("Image stretched successfully.")
+            self.image_was_stretched = True
+        else:
+            print("Image is not linear. Proceeding without stretching.")
+            processing_image = processing_image
+            self.image_was_stretched = False
+
+        # Step 4: Set Command Parameters Based on OS
+        self.starnet_dir = os.path.dirname(self.starnet_exe_path)
+        self.input_image_path = os.path.join(self.starnet_dir, "imagetoremovestars.tif")
+        self.output_image_path = os.path.join(self.starnet_dir, "starless.tif")
+        original_image = processing_image
+
+        print(f"StarNet directory: {self.starnet_dir}")
+        print(f"Input image path: {self.input_image_path}")
+        print(f"Output image path: {self.output_image_path}")
+
+        # Convert image from [0,1] to [0, 65535] for 16-bit TIFF
+        image_16bit = (original_image * 65535).astype(np.uint16)
+        # Convert RGB to BGR for OpenCV
+        image_bgr_16bit = cv2.cvtColor(image_16bit, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(self.input_image_path, image_bgr_16bit)
+        print(f"Input image saved at {self.input_image_path}")
+
+        # Prepare the command based on the OS
+        if current_os == "Windows":
+            # Windows requires the stride parameter
+            stride = 256
+            command = [
+                self.starnet_exe_path,
+                self.input_image_path,
+                self.output_image_path,
+                str(stride)
+            ]
+            print("Preparing command for Windows.")
+        elif current_os == "Linux":
+            # Linux requires the stride parameter
+            stride = 256
+            command = [
+                self.starnet_exe_path,
+                self.input_image_path,
+                self.output_image_path,
+                str(stride)
+            ]
+            print("Preparing command for Linux.")
+        elif current_os == "Darwin":
+            # macOS does NOT require the stride parameter
+            stride = None
+            command = [
+                self.starnet_exe_path,
+                self.input_image_path,
+                self.output_image_path
+            ]
+            print("Preparing command for macOS.")
+
+        print(f"StarNet command: {' '.join(command)}")
+
+        # Step 5: Ensure the StarNet Executable has Execute Permissions (for macOS and Linux)
+        if current_os in ["Darwin", "Linux"]:
+            if not os.access(self.starnet_exe_path, os.X_OK):
+                print(f"StarNet executable not executable. Setting execute permissions for {self.starnet_exe_path}")
+                os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
+                print("Execute permissions set.")
+            else:
+                print("StarNet executable already has execute permissions.")
+        else:
+            print("No need to set execute permissions for Windows.")
+
+        # Step 6: Initialize and Show StarNetDialog
+        starnet_dialog = StarNetDialog()
+        starnet_dialog.show()
+
+        # Step 7: Initialize StarNetThread
+        self.starnet_thread = StarNetThread(command, self.starnet_dir)
+        self.starnet_thread.stdout_signal.connect(starnet_dialog.append_text)
+        self.starnet_thread.stderr_signal.connect(starnet_dialog.append_text)
+        self.starnet_thread.finished_signal.connect(lambda return_code: self.on_starnet_finished(return_code, starnet_dialog, self.output_image_path))
+
+        # Handle cancellation
+        starnet_dialog.cancel_button.clicked.connect(self.starnet_thread.stop)
+
+        # Start the thread
+        self.starnet_thread.start()
+
+    def on_starnet_finished(self, return_code, dialog, output_image_path):
+        """
+        Handles the completion of the StarNet process.
+        """
+        dialog.append_text(f"\nProcess finished with return code {return_code}.\n")
+        if return_code != 0:
+            QMessageBox.critical(self, "StarNet Error", f"StarNet failed with return code {return_code}.")
+            print(f"StarNet failed with return code {return_code}.")
+            dialog.close()
+            return
+
+        # Step 8: Load the starless image
+        if not os.path.exists(output_image_path):
+            QMessageBox.critical(self, "StarNet Error", "Starless image was not created.")
+            print(f"Starless image was not created at {output_image_path}.")
+            dialog.close()
+            return
+
+        print(f"Starless image found at {output_image_path}. Loading image...")
+        dialog.append_text(f"Starless image found at {output_image_path}. Loading image...\n")
+
+        starless_bgr = cv2.imread(output_image_path, cv2.IMREAD_UNCHANGED)
+        if starless_bgr is None:
+            QMessageBox.critical(self, "StarNet Error", "Failed to load starless image.")
+            print(f"Failed to load starless image from {output_image_path}.")
+            dialog.close()
+            return
+
+        print("Starless image loaded successfully.")
+        dialog.append_text("Starless image loaded successfully.\n")
+
+        # Convert back to RGB and normalize to [0,1]
+        starless_rgb = cv2.cvtColor(starless_bgr, cv2.COLOR_BGR2RGB).astype('float32') / 65535.0
+
+
+
+        # Check and apply unstretch if necessary
+        if getattr(self, 'image_was_stretched', False):
+            print("Unstretching the starless image...")
+            starless_rgb = self.unstretch_image(starless_rgb)
+            print("Starless image unstretched successfully.")
+            dialog.append_text("Starless image unstretched successfully.\n")
+        else:
+            print("Image was not stretched. Proceeding without unstretching.")
+            dialog.append_text("Image was not stretched. Proceeding without unstretching.\n")
+
+        # Convert image_manager.image to 3-channel if needed
+        if starless_rgb.ndim == 2 or (starless_rgb.ndim == 3 and starless_rgb.shape[2] == 1):
+            print("Converting single-channel original image to 3-channel RGB...")
+            starless_rgb = np.stack([starless_rgb] * 3, axis=-1)
+        else:
+            starless_rgb = starless_rgb
+
+        # Convert image_manager.image to 3-channel if needed
+        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
+            print("Converting single-channel original image to 3-channel RGB...")
+            original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
+        else:
+            original_image_rgb = self.image_manager.image            
+
+        # Step 9: Generate Stars Only Image
+        print("Generating stars-only image...")
+        dialog.append_text("Generating stars-only image...\n")
+        with np.errstate(divide='ignore', invalid='ignore'):
+            stars_only = (original_image_rgb - starless_rgb) / (1.0 - starless_rgb)
+            stars_only = np.nan_to_num(stars_only, nan=0.0, posinf=0.0, neginf=0.0)
+        stars_only = np.clip(stars_only, 0.0, 1.0)
+        print("Stars-only image generated.")
+        dialog.append_text("Stars-only image generated.\n")
+
+        # Step 10: Prompt user to save Stars Only Image
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Stars Only Image",
+            self.starnet_dir,  # Updated to use instance attribute
+            "TIFF Files (*.tif *.tiff);;PNG Files (*.png)"
+        )
+
+        if save_path:
+            print(f"Saving stars-only image to {save_path}...")
+            dialog.append_text(f"Saving stars-only image to {save_path}...\n")
+            try:
+                # Determine the format and bit depth based on the file extension
+                _, ext = os.path.splitext(save_path)
+                ext = ext.lower()
+                if ext in ['.tif', '.tiff']:
+                    original_format = 'tiff'
+                    bit_depth = '16-bit'
+                elif ext == '.png':
+                    original_format = 'png'
+                    bit_depth = '8-bit'
+                else:
+                    QMessageBox.warning(self, "Unsupported Format", f"The selected format '{ext}' is not supported.")
+                    print(f"Unsupported file extension: {ext}")
+                    dialog.append_text(f"Unsupported file extension: {ext}\n")
+                    dialog.close()
+                    return
+
+                # Call the global save_image function
+                save_image(
+                    img_array=stars_only,
+                    filename=save_path,
+                    original_format=original_format,
+                    bit_depth=bit_depth,
+                    original_header=None,  # Pass actual header if available
+                    is_mono=False,        # Set to True if image is monochrome
+                    image_meta=None,      # Pass image metadata if needed
+                    file_meta=None        # Pass file metadata if needed
+                )
+                QMessageBox.information(self, "Success", "Stars only image saved successfully.")
+                print("Stars-only image saved successfully.")
+                dialog.append_text("Stars-only image saved successfully.\n")
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", f"Failed to save stars only image:\n{e}")
+                print(f"Failed to save stars only image: {e}")
+                dialog.append_text(f"Failed to save stars only image: {e}\n")
+        else:
+            QMessageBox.warning(self, "Save Cancelled", "Stars only image was not saved.")
+            print("User cancelled saving the stars-only image.")
+            dialog.append_text("User cancelled saving the stars-only image.\n")
+
+        # Step 11: Update ImageManager with Starless Image
+        print("Updating ImageManager with the starless image.")
+        dialog.append_text("Updating ImageManager with the starless image.\n")
+        self.image_manager.update_image(
+            updated_image=starless_rgb,
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+        )
+        QMessageBox.information(self, "Success", "Starless image updated successfully.")
+        print("ImageManager updated with starless image.")
+        dialog.append_text("ImageManager updated with starless image.\n")
+
+        # Optional: Clean up temporary files
+        try:
+            print("Cleaning up temporary files...")
+            dialog.append_text("Cleaning up temporary files...\n")
+            if os.path.exists(self.input_image_path):
+                os.remove(self.input_image_path)
+                print(f"Deleted temporary input image at {self.input_image_path}.")
+                dialog.append_text(f"Deleted temporary input image at {self.input_image_path}.\n")
+            if os.path.exists(self.output_image_path):
+                os.remove(self.output_image_path)
+                print(f"Deleted temporary output image at {self.output_image_path}.")
+                dialog.append_text(f"Deleted temporary output image at {self.output_image_path}.\n")
+        except Exception as e:
+            QMessageBox.warning(self, "Cleanup Warning", f"Failed to delete temporary files:\n{e}")
+            print(f"Failed to delete temporary files: {e}")
+            dialog.append_text(f"Failed to delete temporary files: {e}\n")
+
+        dialog.close()
+ 
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image.
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # Check if the image is single-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # Initialize lists to store per-channel minima and medians
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+
+        # Initialize stretched_image as a copy of the input image
+        stretched_image = image.copy()
+
+        # Define the target median for stretching
+        target_median = 0.25
+
+        # Apply the stretch for each channel independently
+        for c in range(3):
+            # Record the minimum of the current channel
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+
+            # Subtract the channel's minimum to shift the image
+            stretched_image[..., c] -= channel_min
+
+            # Record the median of the shifted channel
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        # Clip stretched image to [0, 1] range
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+
+        # Store stretch parameters
+        self.was_single_channel = was_single_channel
+
+        return stretched_image
+
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch to return the image to its original state.
+        Each channel is unstretched independently by reverting the stretch formula
+        using the stored medians and adding back the individual channel minima.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # Apply the unstretch for each channel independently
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+
+            # Add back the channel's original minimum
+            image[..., c] += original_min
+
+        # Clip to [0, 1] range
+        image = np.clip(image, 0, 1)
+
+        # If the image was originally single-channel, convert back to single-channel
+        if was_single_channel:
+            image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+        return image
+
+
+
+    def select_starnet_exe(self):
+        """
+        Prompts the user to select the StarNet executable based on the operating system.
+        Saves the path using QSettings for future use.
+        """
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        current_os = platform.system()
+
+        if current_os == "Windows":
+            filter_str = "Executable Files (*.exe)"
+        elif current_os in ["Linux", "Darwin"]:
+            # For Unix-based systems, executables may not have extensions
+            filter_str = "All Executable Files (*)"
+        else:
+            QMessageBox.critical(self, "Unsupported OS", f"The current operating system '{current_os}' is not supported.")
+            return
+
+        exe_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select StarNet Executable",
+            "",
+            filter_str,
+            options=options
+        )
+        if exe_path:
+            # For Windows, ensure the file has .exe extension
+            if current_os == "Windows" and not exe_path.lower().endswith('.exe'):
+                QMessageBox.warning(self, "Invalid File", "Please select a valid .exe file for StarNet.")
+                return
+            # For Unix-based systems, optionally check if it's executable
+            elif current_os in ["Linux", "Darwin"]:
+                if not os.access(exe_path, os.X_OK):
+                    reply = QMessageBox.question(
+                        self,
+                        "Set Execute Permissions",
+                        "The selected file does not have execute permissions. Would you like to add them?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes
+                    )
+                    if reply == QMessageBox.Yes:
+                        try:
+                            os.chmod(exe_path, 0o755)
+                        except Exception as e:
+                            QMessageBox.critical(self, "Permission Error", f"Failed to set execute permissions:\n{e}")
+                            return
+                    else:
+                        QMessageBox.information(self, "Cancelled", "Execute permissions not set. Cannot proceed.")
+                        return
+            self.starnet_exe_path = exe_path
+            # Save the path using QSettings
+            self.settings.setValue("starnet/exe_path", self.starnet_exe_path)
+            QMessageBox.information(self, "StarNet Executable Set", f"StarNet executable set to:\n{exe_path}")
+        else:
+            QMessageBox.information(self, "Cancelled", "StarNet executable selection was cancelled.")
+
+
+
+    def open_clahe_dialog(self):
+        """Opens the CLAHE dialog window."""
+        dialog = CLAHEDialog(self.image_manager, self)
+        dialog.exec_()
+
+    def open_morpho_dialog(self):
+        """Opens the Morphological Operations dialog window."""
+        dialog = MorphologyDialog(self.image_manager, self)
+        dialog.exec_()
+
+    def open_whitebalance_dialog(self):
+        """Opens the White Balance dialog window."""
+        dialog = WhiteBalanceDialog(self.image_manager, self)
+        dialog.exec_()
+
+    def open_background_neutralization_dialog(self):
+        """Opens the Background Neutralization dialog window."""
+        dialog = BackgroundNeutralizationDialog(self.image_manager, self)
+        dialog.exec_()
+
+    def open_remove_green_dialog(self):
+        """Opens the Remove Green dialog window."""
+        dialog = RemoveGreenDialog(self.image_manager, self)
+        dialog.exec_()
+
 
     def dragEnterEvent(self, event):
         """Handle the drag enter event."""
@@ -355,13 +1088,13 @@ class AstroEditingSuite(QMainWindow):
                 background-color: #3a75c4;  /* Blue background for selected items */
                 color: #ffffff;  /* White text color */
             }       
-            """          
+            """
             self.setStyleSheet(dark_stylesheet)
 
     def open_image(self):
         """Open an image and load it into the ImageManager."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
-                                            "Images (*.png *.tif *.tiff *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+                                            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
         if file_path:
             try:
@@ -461,7 +1194,11 @@ class AstroEditingSuite(QMainWindow):
         header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
 
         return header
-    
+
+
+
+
+
     def undo_image(self):
         """Undo the last action."""
         if self.image_manager.can_undo():
@@ -713,6 +1450,1071 @@ class ImageManager(QObject):
         else:
             print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
 
+class StarNetThread(QThread):
+    # Define signals to communicate with the main thread
+    stdout_signal = pyqtSignal(str)
+    stderr_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(int)  # Emit return code
+
+    def __init__(self, command, cwd):
+        super().__init__()
+        self.command = command
+        self.cwd = cwd
+        self._process = None  # To handle process termination
+
+    def run(self):
+        try:
+            # Start the StarNet process
+            self._process = subprocess.Popen(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.cwd,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            # Read stdout and stderr in real-time
+            while True:
+                output = self._process.stdout.readline()
+                if output:
+                    self.stdout_signal.emit(output.strip())
+                elif self._process.poll() is not None:
+                    break
+
+            # Capture remaining stdout
+            remaining_stdout, remaining_stderr = self._process.communicate()
+            if remaining_stdout:
+                self.stdout_signal.emit(remaining_stdout.strip())
+            if remaining_stderr:
+                self.stderr_signal.emit(remaining_stderr.strip())
+
+            # Emit the return code
+            self.finished_signal.emit(self._process.returncode)
+
+        except Exception as e:
+            self.stderr_signal.emit(str(e))
+            self.finished_signal.emit(-1)
+
+    def stop(self):
+        if self._process and self._process.poll() is None:
+            self._process.terminate()
+            self.wait()
+
+class StarNetDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("StarNet Progress")
+        self.setMinimumSize(600, 400)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        layout.addWidget(self.text_edit)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_process)
+        layout.addWidget(self.cancel_button)
+
+        self.setLayout(layout)
+
+    def append_text(self, text):
+        self.text_edit.append(text)
+        # Auto-scroll to the bottom
+        self.text_edit.verticalScrollBar().setValue(self.text_edit.verticalScrollBar().maximum())
+
+    def cancel_process(self):
+        self.reject()  # Close the dialog
+
+class BackgroundNeutralizationDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("Background Neutralization")
+        self.setGeometry(150, 150, 800, 600)  # Set appropriate size
+        self.initUI()
+        self.selection_rect_item = None  # To store the QGraphicsRectItem
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        # Instruction Label
+        instruction_label = QLabel("Draw a sample box on the image to define the neutralization region.")
+        layout.addWidget(instruction_label)
+
+        # Graphics View for Image Display
+        self.graphics_view = QGraphicsView()
+        self.scene = QGraphicsScene()
+        self.graphics_view.setScene(self.scene)
+        layout.addWidget(self.graphics_view)
+
+        # Load and Display Image
+        self.load_image()
+
+        # Initialize Variables for Drawing
+        self.origin = QPointF()
+        self.current_rect = QRectF()
+        self.drawing = False
+
+        # Connect Mouse Events
+        self.graphics_view.viewport().installEventFilter(self)
+
+        # Apply and Cancel Buttons
+        button_layout = QVBoxLayout()
+        apply_button = QPushButton("Apply Neutralization")
+        apply_button.clicked.connect(self.apply_neutralization)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def load_image(self):
+        """Loads the current image from the ImageManager and displays it."""
+        image = self.image_manager.image
+        if image is not None:
+            # Assuming image is a NumPy array normalized to [0,1]
+            height, width, channels = image.shape
+            if channels == 3:
+                q_image = QImage(
+                    (image * 255).astype(np.uint8).tobytes(),
+                    width,
+                    height,
+                    3 * width,
+                    QImage.Format_RGB888
+                )
+            else:
+                # Handle other channel numbers if necessary
+                q_image = QImage(
+                    (image * 255).astype(np.uint8).tobytes(),
+                    width,
+                    height,
+                    QImage.Format_Grayscale8
+                )
+            pixmap = QPixmap.fromImage(q_image)
+            self.pixmap_item = QGraphicsPixmapItem(pixmap)
+            self.scene.addItem(self.pixmap_item)
+            self.graphics_view.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+        else:
+            QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
+            self.reject()
+
+    def eventFilter(self, source, event):
+        """Handles mouse events for drawing the sample box."""
+        if source is self.graphics_view.viewport():
+            if event.type() == event.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self.drawing = True
+                    self.origin = self.graphics_view.mapToScene(event.pos())
+                    # Remove existing selection rectangle if any
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                        self.selection_rect_item = None
+            elif event.type() == event.MouseMove:
+                if self.drawing:
+                    current_pos = self.graphics_view.mapToScene(event.pos())
+                    self.current_rect = QRectF(self.origin, current_pos).normalized()
+                    # Remove existing rectangle item if any
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                        self.selection_rect_item = None
+                    # Draw the new rectangle
+                    pen = QPen(QColor(0, 255, 0), 2, Qt.DashLine)
+                    self.selection_rect_item = QGraphicsRectItem(self.current_rect)
+                    self.selection_rect_item.setPen(pen)
+                    self.scene.addItem(self.selection_rect_item)
+            elif event.type() == event.MouseButtonRelease:
+                if event.button() == Qt.LeftButton and self.drawing:
+                    self.drawing = False
+                    # Finalize the rectangle
+                    current_pos = self.graphics_view.mapToScene(event.pos())
+                    self.current_rect = QRectF(self.origin, current_pos).normalized()
+                    # Ensure minimum size to avoid accidental small selections
+                    min_size = 10  # pixels
+                    if self.current_rect.width() < min_size or self.current_rect.height() < min_size:
+                        QMessageBox.warning(self, "Selection Too Small", "Please draw a larger selection box.")
+                        if self.selection_rect_item:
+                            self.scene.removeItem(self.selection_rect_item)
+                            self.selection_rect_item = None
+                        self.current_rect = QRectF()
+                    else:
+                        # Redraw the rectangle to ensure it's persistent
+                        if self.selection_rect_item:
+                            self.scene.removeItem(self.selection_rect_item)
+                        pen = QPen(QColor(255, 0, 0), 2, Qt.SolidLine)
+                        self.selection_rect_item = QGraphicsRectItem(self.current_rect)
+                        self.selection_rect_item.setPen(pen)
+                        self.scene.addItem(self.selection_rect_item)
+        return super().eventFilter(source, event)
+
+    def apply_neutralization(self):
+        """Applies background neutralization based on the selected sample region."""
+        if self.current_rect.isNull():
+            QMessageBox.warning(self, "No Selection", "Please draw a sample box on the image.")
+            return
+
+        # Map the selection rectangle to image coordinates
+        image = self.image_manager.image
+        if image is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
+            return
+
+        # Get the image dimensions
+        height, width, channels = image.shape
+
+        # Calculate scaling factors
+        scene_rect = self.scene.sceneRect()
+        scale_x = width / scene_rect.width()
+        scale_y = height / scene_rect.height()
+
+        # Convert scene coordinates to image coordinates
+        x = int(self.current_rect.left() * scale_x)
+        y = int(self.current_rect.top() * scale_y)
+        w = int(self.current_rect.width() * scale_x)
+        h = int(self.current_rect.height() * scale_y)
+
+        # Ensure the rectangle is within image bounds
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+
+        sample_region = image[y:y + h, x:x + w, :]  # Extract the sample region
+
+        # Calculate medians for each channel
+        medians = np.median(sample_region, axis=(0, 1))  # Shape: (3,)
+        average_median = np.mean(medians)
+
+        # Calculate adjustments: average_median - channel_median
+        adjustments = average_median - medians  # Shape: (3,)
+
+        # Apply adjustments to the entire image
+        adjusted_image = image.copy()
+        for channel in range(3):
+            delta = adjustments[channel]
+            if delta > 0:
+                # Need to subtract delta from the channel
+                adjusted_image[:, :, channel] -= delta
+                # Prevent division by zero or negative values
+                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
+                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
+            elif delta < 0:
+                # Need to add delta (since delta is negative, this is subtraction)
+                adjusted_image[:, :, channel] += delta
+                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
+                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
+            # If delta == 0, no change
+
+        # Update the image in ImageManager
+        self.image_manager.update_image(
+            updated_image=adjusted_image,
+            metadata=self.image_manager._metadata[self.image_manager.current_slot]
+        )
+
+        # Inform the user
+        QMessageBox.information(self, "Success", "Background neutralization applied successfully.")
+
+        # Close the dialog
+        self.accept()
+        
+class RemoveGreenDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("Remove Green")
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        # Instruction Label
+        instruction_label = QLabel("Select the amount to remove green noise:")
+        layout.addWidget(instruction_label)
+
+        # Slider Configuration
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(100)  # Represents 0.0 to 1.0
+        self.slider.setValue(100)     # Default to 1.0
+        self.slider.setTickPosition(QSlider.TicksBelow)
+        self.slider.setTickInterval(10)
+        self.slider.valueChanged.connect(self.update_label)
+        layout.addWidget(self.slider)
+
+        # Current Value Display
+        self.value_label = QLabel("Amount: 1.00")
+        layout.addWidget(self.value_label)
+
+        # Buttons Layout
+        button_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def update_label(self, value):
+        amount = value / 100.0
+        self.value_label.setText(f"Amount: {amount:.2f}")
+
+    def apply(self):
+        amount = self.slider.value() / 100.0
+
+        if self.image_manager.image is not None:
+            try:
+                # Apply the global SCNR function
+                new_image = apply_average_neutral_scnr(self.image_manager.image, amount=amount)
+
+                # Update the ImageManager's current image with the processed image
+                self.image_manager.update_image(updated_image=new_image, metadata=self.image_manager._metadata[self.image_manager.current_slot])
+
+                # Inform the user of the successful operation
+                QMessageBox.information(self, "Success", f"Remove Green applied with amount {amount:.2f}")
+
+                # Close the dialog
+                self.accept()
+            except Exception as e:
+                # Handle any errors during processing
+                QMessageBox.critical(self, "Error", f"Failed to apply Remove Green:\n{e}")
+        else:
+            # Inform the user if no image is loaded
+            QMessageBox.warning(self, "No Image", "No image loaded to apply Remove Green.")
+            self.reject()
+
+class CLAHEDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("CLAHE")
+        self.setGeometry(200, 200, 800, 500)  # Increased size for better layout
+        self.initUI()
+        self.current_zoom = 1.0  # Initial zoom level
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+
+        # CLAHE Parameters Group
+        parameters_group = QGroupBox("CLAHE Parameters")
+        parameters_layout = QGridLayout()
+
+        # Clip Limit Slider and Label
+        clip_label = QLabel("Clip Limit:")
+        self.clip_slider = QSlider(Qt.Horizontal)
+        self.clip_slider.setMinimum(1)
+        self.clip_slider.setMaximum(40)  # Represents 0.1 to 4.0
+        self.clip_slider.setValue(20)     # Default 2.0
+        self.clip_slider.setTickInterval(1)
+        self.clip_slider.setTickPosition(QSlider.TicksBelow)
+        self.clip_value_label = QLabel("2.0")  # Initial value
+        self.clip_slider.setToolTip("Adjust the clip limit for contrast enhancement. Higher values increase contrast.")
+
+        self.clip_slider.valueChanged.connect(self.update_clip_value)
+        self.clip_slider.valueChanged.connect(self.debounce_preview)
+
+        parameters_layout.addWidget(clip_label, 0, 0)
+        parameters_layout.addWidget(self.clip_slider, 0, 1)
+        parameters_layout.addWidget(self.clip_value_label, 0, 2)
+
+        # Tile Grid Size Slider and Label
+        tile_label = QLabel("Tile Grid Size:")
+        self.tile_slider = QSlider(Qt.Horizontal)
+        self.tile_slider.setMinimum(1)
+        self.tile_slider.setMaximum(32)
+        self.tile_slider.setValue(8)        # Default (8,8)
+        self.tile_slider.setTickInterval(1)
+        self.tile_slider.setTickPosition(QSlider.TicksBelow)
+        self.tile_value_label = QLabel("8")  # Initial value
+        self.tile_slider.setToolTip("Adjust the size of grid for histogram equalization. Larger values affect broader areas.")
+
+        self.tile_slider.valueChanged.connect(self.update_tile_value)
+        self.tile_slider.valueChanged.connect(self.debounce_preview)
+
+        parameters_layout.addWidget(tile_label, 1, 0)
+        parameters_layout.addWidget(self.tile_slider, 1, 1)
+        parameters_layout.addWidget(self.tile_value_label, 1, 2)
+
+        parameters_group.setLayout(parameters_layout)
+        main_layout.addWidget(parameters_group)
+
+        # Preview Area
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout()
+
+        # QGraphicsView and QGraphicsScene
+        self.preview_view = QGraphicsView()
+        self.preview_scene = QGraphicsScene()
+        self.preview_view.setScene(self.preview_scene)
+
+        self.preview_view.setDragMode(QGraphicsView.ScrollHandDrag)  # Enable panning
+        self.preview_view.setFixedSize(800, 500)  # Fixed size to prevent resizing
+
+        # Initialize QGraphicsPixmapItem
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.preview_scene.addItem(self.pixmap_item)
+
+        preview_layout.addWidget(self.preview_view)
+        preview_group.setLayout(preview_layout)
+        main_layout.addWidget(preview_group)
+
+        # Zoom and Fit Buttons
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In (+)")
+        zoom_in_button.setToolTip("Zoom in the preview image.")
+        zoom_in_button.clicked.connect(self.zoom_in)
+
+        zoom_out_button = QPushButton("Zoom Out (-)")
+        zoom_out_button.setToolTip("Zoom out the preview image.")
+        zoom_out_button.clicked.connect(self.zoom_out)
+
+        fit_button = QPushButton("Fit to Preview")
+        fit_button.setToolTip("Fit the image to the preview area.")
+        fit_button.clicked.connect(self.fit_to_preview)
+
+        zoom_layout.addStretch()
+        zoom_layout.addWidget(zoom_in_button)
+        zoom_layout.addWidget(zoom_out_button)
+        zoom_layout.addWidget(fit_button)
+
+        main_layout.addLayout(zoom_layout)
+
+        # Apply, Reset, and Cancel Buttons
+        button_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.apply_clahe)
+        reset_button = QPushButton("Reset")
+        reset_button.clicked.connect(self.reset_parameters)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(reset_button)
+        button_layout.addWidget(cancel_button)
+        main_layout.addLayout(button_layout)
+
+        self.setLayout(main_layout)
+
+        # Initialize Debounce Timer
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.timeout.connect(self.update_preview)
+
+        # Store Original Image
+        if self.image_manager.image is not None:
+            self.original_image = self.image_manager.image.copy()
+        else:
+            self.original_image = None
+
+        # Initialize Preview
+        self.update_preview()
+
+    def update_clip_value(self, value):
+        clip_limit = value / 10.0  # 0.1 to 4.0
+        self.clip_value_label.setText(f"{clip_limit:.1f}")
+
+    def update_tile_value(self, value):
+        self.tile_value_label.setText(str(value))
+
+    def debounce_preview(self):
+        """
+        Starts or restarts the debounce timer.
+        """
+        self.debounce_timer.start(300)  # 300 milliseconds delay
+
+    def update_preview(self):
+        """
+        Updates the preview image based on current slider values.
+        """
+        if self.original_image is None:
+            self.pixmap_item.setPixmap(QPixmap())
+            self.preview_scene.addText("No image loaded.")
+            return
+
+        clip_limit = self.clip_slider.value() / 10.0  # 0.1 to 4.0
+        tile_grid_size = self.tile_slider.value()
+
+        try:
+            preview_image = apply_clahe(self.original_image, clip_limit=clip_limit, tile_grid_size=(tile_grid_size, tile_grid_size))
+            self.display_image(preview_image)
+        except Exception as e:
+            self.preview_scene.clear()
+            self.preview_scene.addText("Failed to generate preview.")
+            QMessageBox.critical(self, "Error", f"Failed to generate CLAHE preview:\n{e}")
+
+    def display_image(self, image):
+        """
+        Converts a NumPy image array to QPixmap and displays it in the QGraphicsView.
+        Maintains the current zoom and pan settings.
+        """
+        # Convert image from [0,1] to [0,255] and to uint8
+        image_uint8 = (image * 255).astype('uint8')
+        # Convert RGB to BGR for OpenCV
+        image_bgr = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2BGR)
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        height, width, channel = image_rgb.shape
+        bytes_per_line = 3 * width
+        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+
+        # Update the existing pixmap item
+        self.pixmap_item.setPixmap(pixmap)
+
+
+
+    def zoom_in(self):
+        """
+        Zooms in the preview image by 25%.
+        """
+        self.current_zoom *= 1.25
+        self.preview_view.scale(1.25, 1.25)
+
+    def zoom_out(self):
+        """
+        Zooms out the preview image by 20%.
+        """
+        self.current_zoom *= 0.8
+        self.preview_view.scale(0.8, 0.8)
+
+    def fit_to_preview(self):
+        """
+        Fits the image to the preview area.
+        """
+        self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+        self.current_zoom = 1.0  # Reset zoom level
+
+
+    def apply_clahe(self):
+        """
+        Applies CLAHE with current parameters to the main image.
+        """
+        if self.original_image is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to apply CLAHE.")
+            self.reject()
+            return
+
+        clip_limit = self.clip_slider.value() / 10.0  # 0.1 to 4.0
+        tile_grid_size = self.tile_slider.value()
+
+        try:
+            enhanced_image = apply_clahe(self.original_image, clip_limit=clip_limit, tile_grid_size=(tile_grid_size, tile_grid_size))
+            self.image_manager.update_image(
+                updated_image=enhanced_image,
+                metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+            )
+            QMessageBox.information(self, "Success", "CLAHE applied successfully.")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply CLAHE:\n{e}")
+            self.reject()
+
+    def reset_parameters(self):
+        """
+        Resets sliders to their default values and updates the preview.
+        """
+        self.clip_slider.setValue(20)  # Default 2.0
+        self.tile_slider.setValue(8)   # Default (8,8)
+
+class MorphologyDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("Morphological Operations")
+        self.setGeometry(200, 200, 800, 500)  # Increased size for better layout
+        self.initUI()
+        self.current_zoom = 1.0  # Initial zoom level
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+
+        # Morphological Parameters Group
+        parameters_group = QGroupBox("Morphological Parameters")
+        parameters_layout = QGridLayout()
+
+        # Operation Type Selection
+        operation_label = QLabel("Operation Type:")
+        self.operation_combo = QComboBox()
+        self.operation_combo.addItems(["Erosion", "Dilation", "Opening", "Closing"])
+        self.operation_combo.setToolTip("Select the type of morphological operation to apply.")
+        self.operation_combo.currentTextChanged.connect(self.debounce_preview)
+        self.operation_combo.currentTextChanged.connect(self.update_preview)
+
+        parameters_layout.addWidget(operation_label, 0, 0)
+        parameters_layout.addWidget(self.operation_combo, 0, 1, 1, 2)
+
+        # Kernel Size Slider and Label
+        kernel_label = QLabel("Kernel Size:")
+        self.kernel_slider = QSlider(Qt.Horizontal)
+        self.kernel_slider.setMinimum(1)
+        self.kernel_slider.setMaximum(31)
+        self.kernel_slider.setValue(3)        # Default kernel size
+        self.kernel_slider.setTickInterval(2)
+        self.kernel_slider.setTickPosition(QSlider.TicksBelow)
+        self.kernel_value_label = QLabel("3")  # Initial value
+        self.kernel_slider.setToolTip("Adjust the size of the structuring element. Must be an odd number.")
+
+        self.kernel_slider.valueChanged.connect(self.update_kernel_value)
+        self.kernel_slider.valueChanged.connect(self.debounce_preview)
+
+        parameters_layout.addWidget(kernel_label, 1, 0)
+        parameters_layout.addWidget(self.kernel_slider, 1, 1)
+        parameters_layout.addWidget(self.kernel_value_label, 1, 2)
+
+        # Iterations Slider and Label
+        iterations_label = QLabel("Iterations:")
+        self.iterations_slider = QSlider(Qt.Horizontal)
+        self.iterations_slider.setMinimum(1)
+        self.iterations_slider.setMaximum(10)
+        self.iterations_slider.setValue(1)        # Default iterations
+        self.iterations_slider.setTickInterval(1)
+        self.iterations_slider.setTickPosition(QSlider.TicksBelow)
+        self.iterations_value_label = QLabel("1")  # Initial value
+        self.iterations_slider.setToolTip("Adjust the number of times the operation is applied.")
+
+        self.iterations_slider.valueChanged.connect(self.update_iterations_value)
+        self.iterations_slider.valueChanged.connect(self.debounce_preview)
+
+        parameters_layout.addWidget(iterations_label, 2, 0)
+        parameters_layout.addWidget(self.iterations_slider, 2, 1)
+        parameters_layout.addWidget(self.iterations_value_label, 2, 2)
+
+        parameters_group.setLayout(parameters_layout)
+        main_layout.addWidget(parameters_group)
+
+        # Preview Area
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout()
+
+        # QGraphicsView and QGraphicsScene
+        self.preview_view = QGraphicsView()
+        self.preview_scene = QGraphicsScene()
+        self.preview_view.setScene(self.preview_scene)
+
+        self.preview_view.setDragMode(QGraphicsView.ScrollHandDrag)  # Enable panning
+        self.preview_view.setFixedSize(800, 500)  # Fixed size to prevent resizing
+
+        # Initialize QGraphicsPixmapItem
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.preview_scene.addItem(self.pixmap_item)
+
+        preview_layout.addWidget(self.preview_view)
+        preview_group.setLayout(preview_layout)
+        main_layout.addWidget(preview_group)
+
+        # Zoom and Fit Buttons
+        zoom_layout = QHBoxLayout()
+        zoom_in_button = QPushButton("Zoom In (+)")
+        zoom_in_button.setToolTip("Zoom in the preview image.")
+        zoom_in_button.clicked.connect(self.zoom_in)
+
+        zoom_out_button = QPushButton("Zoom Out (-)")
+        zoom_out_button.setToolTip("Zoom out the preview image.")
+        zoom_out_button.clicked.connect(self.zoom_out)
+
+        fit_button = QPushButton("Fit to Preview")
+        fit_button.setToolTip("Fit the image to the preview area.")
+        fit_button.clicked.connect(self.fit_to_preview)
+
+        zoom_layout.addStretch()
+        zoom_layout.addWidget(zoom_in_button)
+        zoom_layout.addWidget(zoom_out_button)
+        zoom_layout.addWidget(fit_button)
+
+        main_layout.addLayout(zoom_layout)
+
+        # Apply, Reset, and Cancel Buttons
+        button_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.apply_morphology)
+        reset_button = QPushButton("Reset")
+        reset_button.clicked.connect(self.reset_parameters)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(reset_button)
+        button_layout.addWidget(cancel_button)
+        main_layout.addLayout(button_layout)
+
+        self.setLayout(main_layout)
+
+        # Initialize Debounce Timer
+        self.debounce_timer = QTimer()
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.timeout.connect(self.update_preview)
+
+        # Store Original Image
+        if self.image_manager.image is not None:
+            self.original_image = self.image_manager.image.copy()
+        else:
+            self.original_image = None
+
+        # Initialize Preview
+        self.update_preview()
+
+    def update_kernel_value(self, value):
+        if value % 2 == 0:
+            value += 1  # Ensure kernel size is odd
+            if value > self.kernel_slider.maximum():
+                value = self.kernel_slider.maximum() - 1 if self.kernel_slider.maximum() % 2 == 0 else self.kernel_slider.maximum()
+            self.kernel_slider.setValue(value)
+        self.kernel_value_label.setText(str(value))
+
+    def update_iterations_value(self, value):
+        self.iterations_value_label.setText(str(value))
+
+    def debounce_preview(self):
+        """
+        Starts or restarts the debounce timer.
+        """
+        self.debounce_timer.start(300)  # 300 milliseconds delay
+
+    def update_preview(self):
+        """
+        Updates the preview image based on current parameters.
+        """
+        if self.original_image is None:
+            self.pixmap_item.setPixmap(QPixmap())
+            self.preview_scene.addText("No image loaded.")
+            return
+
+        operation = self.operation_combo.currentText().lower()  # e.g., 'erosion'
+        kernel_size = self.kernel_slider.value()
+        iterations = self.iterations_slider.value()
+
+        # Ensure kernel size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+            self.kernel_slider.setValue(kernel_size)
+
+        try:
+            preview_image = apply_morphology(
+                self.original_image,
+                operation=operation,
+                kernel_size=kernel_size,
+                iterations=iterations
+            )
+            self.display_image(preview_image)
+        except Exception as e:
+            self.preview_scene.clear()
+            self.preview_scene.addText("Failed to generate preview.")
+            QMessageBox.critical(self, "Error", f"Failed to generate Morphological preview:\n{e}")
+
+    def display_image(self, image):
+        """
+        Converts a NumPy image array to QPixmap and displays it in the QGraphicsView.
+        Maintains the current zoom and pan settings.
+        """
+        # Convert image from [0,1] to [0,255] and to uint8
+        image_uint8 = (image * 255).astype('uint8')
+        # Convert RGB to BGR for OpenCV
+        image_bgr = cv2.cvtColor(image_uint8, cv2.COLOR_RGB2BGR)
+        # Convert BGR to RGB
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        height, width, channel = image_rgb.shape
+        bytes_per_line = 3 * width
+        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+
+        # Update the existing pixmap item
+        self.pixmap_item.setPixmap(pixmap)
+
+
+    def zoom_in(self):
+        """
+        Zooms in the preview image by 25%.
+        """
+        self.current_zoom *= 1.25
+        self.preview_view.scale(1.25, 1.25)
+
+    def zoom_out(self):
+        """
+        Zooms out the preview image by 20%.
+        """
+        self.current_zoom *= 0.8
+        self.preview_view.scale(0.8, 0.8)
+
+    def fit_to_preview(self):
+        """
+        Fits the image to the preview area.
+        """
+        self.preview_view.fitInView(self.preview_scene.sceneRect(), Qt.KeepAspectRatio)
+        self.current_zoom = 1.0  # Reset zoom level
+
+
+    def apply_morphology(self):
+        """
+        Applies the selected morphological operation with current parameters to the main image.
+        """
+        if self.original_image is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to apply morphological operations.")
+            self.reject()
+            return
+
+        operation = self.operation_combo.currentText().lower()  # e.g., 'erosion'
+        kernel_size = self.kernel_slider.value()
+        iterations = self.iterations_slider.value()
+
+        # Ensure kernel size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        try:
+            processed_image = apply_morphology(
+                self.original_image,
+                operation=operation,
+                kernel_size=kernel_size,
+                iterations=iterations
+            )
+            self.image_manager.update_image(
+                updated_image=processed_image,
+                metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+            )
+            QMessageBox.information(self, "Success", f"{self.operation_combo.currentText()} applied successfully.")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply morphological operations:\n{e}")
+            self.reject()
+
+    def reset_parameters(self):
+        """
+        Resets sliders and operation type to default values and updates the preview.
+        """
+        self.operation_combo.setCurrentIndex(0)  # 'Erosion'
+        self.kernel_slider.setValue(3)           # Default kernel size
+        self.iterations_slider.setValue(1)       # Default iterations
+
+class WhiteBalanceDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("White Balance")
+        self.setGeometry(200, 200, 800, 500)  # Adjusted size to remove preview area
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout()
+
+        # White Balance Type Selection
+        type_label = QLabel("White Balance Type:")
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["Star-Based", "Manual", "Auto"])
+        self.type_combo.currentTextChanged.connect(self.update_options)
+
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(self.type_combo)
+        type_layout.addStretch()
+
+        main_layout.addLayout(type_layout)
+
+        # Standard White Balance Options
+        self.standard_widget = QWidget()
+        self.standard_layout = QVBoxLayout()
+
+        # Gain Sliders for R, G, B
+        gain_group = QGroupBox("Adjust Gain for Each Channel")
+        gain_layout = QGridLayout()
+
+        self.r_slider = QSlider(Qt.Horizontal)
+        self.r_slider.setMinimum(50)
+        self.r_slider.setMaximum(150)
+        self.r_slider.setValue(100)  # Represents 0.5 to 1.5
+        self.r_slider.setTickInterval(10)
+        self.r_slider.setTickPosition(QSlider.TicksBelow)
+        self.r_label = QLabel("100")
+
+        self.g_slider = QSlider(Qt.Horizontal)
+        self.g_slider.setMinimum(50)
+        self.g_slider.setMaximum(150)
+        self.g_slider.setValue(100)
+        self.g_slider.setTickInterval(10)
+        self.g_slider.setTickPosition(QSlider.TicksBelow)
+        self.g_label = QLabel("100")
+
+        self.b_slider = QSlider(Qt.Horizontal)
+        self.b_slider.setMinimum(50)
+        self.b_slider.setMaximum(150)
+        self.b_slider.setValue(100)
+        self.b_slider.setTickInterval(10)
+        self.b_slider.setTickPosition(QSlider.TicksBelow)
+        self.b_label = QLabel("100")
+
+        # Connect sliders to update labels
+        self.r_slider.valueChanged.connect(lambda val: self.r_label.setText(str(val)))
+        self.g_slider.valueChanged.connect(lambda val: self.g_label.setText(str(val)))
+        self.b_slider.valueChanged.connect(lambda val: self.b_label.setText(str(val)))
+
+        # Arrange sliders and labels in grid
+        gain_layout.addWidget(QLabel("Red Gain:"), 0, 0)
+        gain_layout.addWidget(self.r_slider, 0, 1)
+        gain_layout.addWidget(self.r_label, 0, 2)
+
+        gain_layout.addWidget(QLabel("Green Gain:"), 1, 0)
+        gain_layout.addWidget(self.g_slider, 1, 1)
+        gain_layout.addWidget(self.g_label, 1, 2)
+
+        gain_layout.addWidget(QLabel("Blue Gain:"), 2, 0)
+        gain_layout.addWidget(self.b_slider, 2, 1)
+        gain_layout.addWidget(self.b_label, 2, 2)
+
+        gain_group.setLayout(gain_layout)
+        self.standard_layout.addWidget(gain_group)
+        self.standard_widget.setLayout(self.standard_layout)
+        main_layout.addWidget(self.standard_widget)
+
+        # Star-Based White Balance Options
+        self.star_widget = QWidget()
+        self.star_layout = QVBoxLayout()
+        self.star_widget.setLayout(self.star_layout)
+        self.star_widget.hide()  # Hidden initially
+
+        star_info = QLabel("Star-Based White Balance automatically detects stars to adjust colors.")
+        self.star_layout.addWidget(star_info)
+
+        # Sensitivity Slider for Star Detection Threshold
+        sensitivity_group = QGroupBox("Detection Sensitivity")
+        sensitivity_layout = QHBoxLayout()
+
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setMinimum(100)
+        self.sensitivity_slider.setMaximum(255)
+        self.sensitivity_slider.setValue(180)  # Default threshold
+        self.sensitivity_slider.setTickInterval(5)
+        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_label = QLabel("Threshold: 180")
+
+        # Connect slider to update label and re-run detection
+        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity_label)
+        self.sensitivity_slider.valueChanged.connect(self.detect_and_display_stars)
+
+        sensitivity_layout.addWidget(QLabel("Threshold:"))
+        sensitivity_layout.addWidget(self.sensitivity_slider)
+        sensitivity_layout.addWidget(self.sensitivity_label)
+        sensitivity_group.setLayout(sensitivity_layout)
+        self.star_layout.addWidget(sensitivity_group)
+
+        # Label to show number of detected stars
+        self.star_count_label = QLabel("Detecting stars...")
+        self.star_layout.addWidget(self.star_count_label)
+
+        # Image display for detected stars
+        self.star_image_label = QLabel()
+        self.star_image_label.setFixedSize(800, 500)  # Reduced size as no preview is needed
+        self.star_image_label.setStyleSheet("border: 1px solid black;")
+        self.star_layout.addWidget(self.star_image_label)
+
+        main_layout.addWidget(self.star_widget)
+
+        # Apply and Cancel Buttons
+        button_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.apply_white_balance)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addStretch()
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(cancel_button)
+
+        main_layout.addLayout(button_layout)
+
+        self.setLayout(main_layout)
+
+        # **Set initial selection to "Star-Based" and display relevant widgets**
+        self.type_combo.setCurrentText("Star-Based")
+        self.update_options("Star-Based")
+
+    def update_sensitivity_label(self, value):
+        self.sensitivity_label.setText(f"Threshold: {value}")
+
+    def update_options(self, text):
+        if text == "Manual":
+            self.star_widget.hide()
+            self.standard_widget.show()
+        elif text == "Auto":
+            self.standard_widget.hide()
+            self.star_widget.hide()
+        elif text == "Star-Based":
+            self.standard_widget.hide()
+            self.star_widget.show()
+            self.star_count_label.setText("Detecting stars...")
+            # Trigger star detection and display
+            self.detect_and_display_stars()
+
+    def detect_and_display_stars(self):
+        try:
+            image = self.image_manager.image
+            if image is not None:
+                threshold = self.sensitivity_slider.value()
+                balanced_image, star_count, image_with_stars = apply_star_based_white_balance(image, threshold)
+                
+                # Convert the image with stars to QImage and then to QPixmap
+                height, width, channel = image_with_stars.shape
+                bytes_per_line = 3 * width
+                q_image = QImage(image_with_stars.data, width, height, bytes_per_line, QImage.Format_BGR888)
+                pixmap = QPixmap.fromImage(q_image).scaled(
+                    self.star_image_label.width(),
+                    self.star_image_label.height(),
+                    Qt.KeepAspectRatio
+                )
+                self.star_image_label.setPixmap(pixmap)
+                self.star_count_label.setText(f"Detected {star_count} stars.")
+            else:
+                self.star_count_label.setText("No image loaded.")
+        except Exception as e:
+            self.star_count_label.setText("Detection failed.")
+            self.star_image_label.clear()
+            QMessageBox.critical(self, "Error", f"Failed to detect stars:\n{e}")
+
+    def apply_white_balance(self):
+        wb_type = self.type_combo.currentText()
+
+        try:
+            image = self.image_manager.image
+            if image is not None:
+                if wb_type == "Manual":
+                    r_gain = self.r_slider.value() / 100.0  # 0.5 to 1.5
+                    g_gain = self.g_slider.value() / 100.0
+                    b_gain = self.b_slider.value() / 100.0
+                    balanced_image = apply_standard_white_balance(image, r_gain, g_gain, b_gain)
+                    self.image_manager.update_image(
+                        updated_image=balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    )
+                    QMessageBox.information(self, "Success", "Manual White Balance applied successfully.")
+                    self.accept()
+                elif wb_type == "Auto":
+                    balanced_image = apply_auto_white_balance(image)
+                    self.image_manager.update_image(
+                        updated_image=balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    )
+                    QMessageBox.information(self, "Success", "Auto White Balance applied successfully.")
+                    self.accept()
+                elif wb_type == "Star-Based":
+                    threshold = self.sensitivity_slider.value()
+                    balanced_image, star_count, _ = apply_star_based_white_balance(image, threshold)
+                    self.image_manager.update_image(
+                        updated_image=balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    )
+                    QMessageBox.information(self, "Success", f"Star-Based White Balance applied successfully.\nDetected {star_count} stars.")
+                    self.accept()
+                else:
+                    raise ValueError("Invalid White Balance Type.")
+            else:
+                QMessageBox.warning(self, "No Image", "No image loaded to apply White Balance.")
+                self.reject()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply White Balance:\n{e}")
+            self.reject()
 
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
@@ -2624,6 +4426,7 @@ class CosmicClarityTab(QWidget):
         self.preview_end_position = None
         self.preview_rect = None  # Stores the preview selection rectangle
         self.autostretch_enabled = False  # Track autostretch status
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
 
         self.initUI()
 
@@ -2990,24 +4793,19 @@ class CosmicClarityTab(QWidget):
 
 
     def save_cosmic_clarity_folder(self, folder):
-        """Save the Cosmic Clarity folder path to a text file."""
-        with open(self.settings_file, 'w') as file:
-            file.write(folder)
-        print(f"Saved Cosmic Clarity folder to {self.settings_file}")
+        """Save the Cosmic Clarity folder path using QSettings."""
+        self.settings.setValue("cosmic_clarity_folder", folder)  # Save to QSettings
+        print(f"Saved Cosmic Clarity folder to QSettings: {folder}")
 
     def load_cosmic_clarity_folder(self):
-        """Load the saved Cosmic Clarity folder path from a text file."""
-        if os.path.exists(self.settings_file):
-            with open(self.settings_file, 'r') as file:
-                folder = file.read().strip()
-                if folder:
-                    self.cosmic_clarity_folder = folder
-                    self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
-                    print(f"Loaded Cosmic Clarity folder from {self.settings_file}: {folder}")
-                else:
-                    print("Cosmic Clarity folder path in file is empty.")
+        """Load the saved Cosmic Clarity folder path from QSettings."""
+        folder = self.settings.value("cosmic_clarity_folder", "")  # Load from QSettings
+        if folder:
+            self.cosmic_clarity_folder = folder
+            self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
+            print(f"Loaded Cosmic Clarity folder from QSettings: {folder}")
         else:
-            print("No saved Cosmic Clarity folder found.")
+            print("No saved Cosmic Clarity folder found in QSettings.")
 
     def on_image_changed(self, slot, image, metadata):
         """
@@ -4231,6 +6029,7 @@ class CosmicClaritySatelliteTab(QWidget):
         self.file_watcher = QFileSystemWatcher()  # Watcher for input and output folders
         self.file_watcher.directoryChanged.connect(self.on_folder_changed)  # Connect signal
         self.sensitivity = 0.1
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
         self.initUI()
         self.load_cosmic_clarity_folder()
 
@@ -4482,17 +6281,18 @@ class CosmicClaritySatelliteTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Select Cosmic Clarity Folder")
         if folder:
             self.cosmic_clarity_folder = folder
+            self.settings.setValue("cosmic_clarity_folder", folder)  # Save to QSettings
             self.folder_label.setText(f"Folder: {folder}")
-            with open(self.settings_file, 'w') as f:
-                f.write(folder)
+            print(f"Selected Cosmic Clarity folder: {folder}")
 
     def load_cosmic_clarity_folder(self):
-        if os.path.exists(self.settings_file):
-            with open(self.settings_file, 'r') as f:
-                folder = f.read().strip()
-                if folder:
-                    self.cosmic_clarity_folder = folder
-                    self.folder_label.setText(f"Folder: {folder}")
+        folder = self.settings.value("cosmic_clarity_folder", "")  # Load from QSettings
+        if folder:
+            self.cosmic_clarity_folder = folder
+            self.folder_label.setText(f"Folder: {folder}")
+            print(f"Loaded Cosmic Clarity folder: {folder}")
+        else:
+            print("No saved Cosmic Clarity folder found.")
 
     def process_single_image(self):
         # Step 1: Open File Dialog to Select Image
@@ -4711,7 +6511,7 @@ class CosmicClaritySatelliteTab(QWidget):
                 return matching_files
             time.sleep(1)
         return None
-
+    
 class ImagePreviewDialog(QDialog):
     def __init__(self, np_image, is_mono=False):
         super().__init__()
@@ -10956,6 +12756,11 @@ class NBtoRGBProcessingThread(QThread):
         self.stretch_factor = stretch_factor
 
     def run(self):
+        # Preprocess input images to ensure mono images are single-channel
+        self.ha_image = preprocess_narrowband_image(self.ha_image)
+        self.oiii_image = preprocess_narrowband_image(self.oiii_image)
+        self.sii_image = preprocess_narrowband_image(self.sii_image)
+
         # Normalize input images to [0, 1]
         if self.ha_image is not None:
             self.ha_image = np.clip(self.ha_image, 0, 1)
@@ -10968,21 +12773,23 @@ class NBtoRGBProcessingThread(QThread):
 
         # Combined RGB logic
         if self.osc_image is not None:
-            # Extract OSC channels
             r_channel = self.osc_image[..., 0]
             g_channel = self.osc_image[..., 1]
             b_channel = self.osc_image[..., 2]
 
-            # Fallbacks for missing Ha, OIII, or SII images
             r_combined = 0.5 * r_channel + 0.5 * (self.sii_image if self.sii_image is not None else r_channel)
             g_combined = self.ha_to_oii_ratio * (self.ha_image if self.ha_image is not None else r_channel) + \
-                         (1 - self.ha_to_oii_ratio) * g_channel
+                        (1 - self.ha_to_oii_ratio) * g_channel
             b_combined = b_channel if self.oiii_image is None else self.oiii_image
         else:
-            # Use narrowband images directly (default logic)
             r_combined = 0.5 * self.ha_image + 0.5 * (self.sii_image if self.sii_image is not None else self.ha_image)
             g_combined = self.ha_to_oii_ratio * self.ha_image + (1 - self.ha_to_oii_ratio) * self.oiii_image
             b_combined = self.oiii_image
+
+        # Debugging: Check shapes
+        print(f"R combined shape: {r_combined.shape}")
+        print(f"G combined shape: {g_combined.shape}")
+        print(f"B combined shape: {b_combined.shape}")
 
         # Normalize combined channels to [0, 1]
         r_combined = np.clip(r_combined, 0, 1)
@@ -10990,17 +12797,29 @@ class NBtoRGBProcessingThread(QThread):
         b_combined = np.clip(b_combined, 0, 1)
 
         # Stack the channels to create an RGB image
-        combined_image = np.stack((r_combined, g_combined, b_combined), axis=-1)
+        try:
+            combined_image = np.stack((r_combined, g_combined, b_combined), axis=-1)
+        except ValueError as e:
+            print(f"Error while stacking channels: {e}")
+            print(f"R: {r_combined.shape}, G: {g_combined.shape}, B: {b_combined.shape}")
+            return
+
+        print(f"Combined image shape: {combined_image.shape}")
 
         # Apply star stretch if enabled
         if self.enable_star_stretch:
             combined_image = self.apply_star_stretch(combined_image)
 
+        # Ensure combined_image is 3-channel
+        if combined_image.ndim != 3 or combined_image.shape[2] != 3:
+            raise ValueError("Combined image must have three channels (RGB).")
+
         # Apply SCNR (remove green cast)
-        combined_image = self.apply_scnr(combined_image)
+        apply_average_neutral_scnr(combined_image)
 
         # Emit the processed image for preview
         self.preview_generated.emit(combined_image)
+
 
     def apply_star_stretch(self, image):
         # Ensure input image is in the range [0, 1]
@@ -12229,8 +14048,267 @@ class ContinuumProcessingThread(QThread):
         
         return np.clip(result_image, 0, 1)  # Ensure values stay within [0, 1]
 
+def preprocess_narrowband_image(image):
+    """
+    Preprocess narrowband images to ensure they are single-channel.
+    If the image is detected as a mono image stored in 3-channel format, the red channel is used.
+    """
+    if image is not None:
+        if image.ndim == 3:
+            if image.shape[2] == 3:
+                # Use the red channel if the image is multi-channel
+                print("Detected multi-channel RGB data. Using the red channel as mono.")
+                image = image[..., 0]
+            elif image.shape[2] == 1:
+                # Squeeze single redundant channel
+                print("Detected 1-channel image with extra dimension. Squeezing to single channel.")
+                image = np.squeeze(image, axis=-1)
+        elif image.ndim != 2:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+    return image
 
 
+
+def apply_standard_white_balance(image: np.ndarray, r_gain: float = 1.0, g_gain: float = 1.0, b_gain: float = 1.0) -> np.ndarray:
+    """
+    Applies standard white balance by adjusting the gain of each color channel.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
+        r_gain (float): Gain for the Red channel.
+        g_gain (float): Gain for the Green channel.
+        b_gain (float): Gain for the Blue channel.
+
+    Returns:
+        np.ndarray: White-balanced RGB image.
+    """
+    balanced = image.copy()
+    balanced[:, :, 0] *= r_gain
+    balanced[:, :, 1] *= g_gain
+    balanced[:, :, 2] *= b_gain
+    balanced = np.clip(balanced, 0.0, 1.0)
+    return balanced
+
+
+
+def apply_auto_white_balance(image: np.ndarray) -> np.ndarray:
+    """
+    Applies automatic white balance using the Gray World Assumption.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
+
+    Returns:
+        np.ndarray: White-balanced RGB image.
+    """
+    # Calculate the mean of each channel
+    mean_r = np.mean(image[:, :, 0])
+    mean_g = np.mean(image[:, :, 1])
+    mean_b = np.mean(image[:, :, 2])
+    
+    # Calculate the overall mean
+    mean_all = (mean_r + mean_g + mean_b) / 3
+    
+    # Calculate gains
+    gain_r = mean_all / mean_r if mean_r != 0 else 1.0
+    gain_g = mean_all / mean_g if mean_g != 0 else 1.0
+    gain_b = mean_all / mean_b if mean_b != 0 else 1.0
+    
+    # Apply gains
+    balanced = image.copy()
+    balanced[:, :, 0] *= gain_r
+    balanced[:, :, 1] *= gain_g
+    balanced[:, :, 2] *= gain_b
+    balanced = np.clip(balanced, 0.0, 1.0)
+    return balanced
+
+def apply_star_based_white_balance(image: np.ndarray, threshold: int = 180) -> tuple:
+    """
+    Applies white balance based on detected stars in the image using thresholding and contour detection.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
+        threshold (int): Threshold value for binary segmentation to detect stars.
+
+    Returns:
+        tuple: (White-balanced RGB image, Number of detected stars, Image with detected stars marked)
+    """
+    # Convert to grayscale
+    gray = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+    # Apply Gaussian Blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+
+    # Apply Contrast Limited Adaptive Histogram Equalization (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(blurred)
+
+    # Apply binary thresholding to isolate bright regions (stars)
+    # Lower the threshold to detect fainter stars
+    _, thresh = cv2.threshold(enhanced, threshold, 255, cv2.THRESH_BINARY)
+
+    # Perform morphological operations to enhance star features
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel, iterations=1)
+
+    # Find contours in the thresholded image
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    star_pixels = []
+    image_with_stars = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if 2 < area < 300:  # Adjusted area thresholds for more sensitivity
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * (area / (perimeter * perimeter))
+            if circularity > 0.5:  # Lowered circularity to detect less perfect circles
+                # Compute the centroid
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    star_pixels.append(image[cY, cX, :])
+                    # Draw a circle around the detected star
+                    cv2.circle(image_with_stars, (cX, cY), 10, (0, 255, 0), 3)
+
+    star_count = len(star_pixels)
+
+    if star_count == 0:
+        raise ValueError("No stars detected for Star-Based White Balance.")
+
+    # Calculate average color of stars
+    star_pixels = np.array(star_pixels)
+    avg_color = np.mean(star_pixels, axis=0)  # [R, G, B]
+
+    # Calculate scaling factors to normalize average color to neutral gray (average of R, G, B)
+    avg = np.mean(avg_color)
+    if avg == 0:
+        raise ValueError("Average star color is zero, cannot apply White Balance.")
+    scaling_factors = avg / avg_color
+
+    # Apply scaling factors
+    balanced = image.copy()
+    balanced[:, :, 0] *= scaling_factors[0]  # Red channel
+    balanced[:, :, 1] *= scaling_factors[1]  # Green channel
+    balanced[:, :, 2] *= scaling_factors[2]  # Blue channel
+    balanced = np.clip(balanced, 0.0, 1.0)
+
+    return balanced, star_count, image_with_stars
+
+def apply_morphology(image: np.ndarray, operation: str = 'erosion', kernel_size: int = 3, iterations: int = 1) -> np.ndarray:
+    """
+    Applies a morphological operation to the image.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
+        operation (str): Morphological operation ('erosion', 'dilation', 'opening', 'closing').
+        kernel_size (int): Size of the structuring element.
+        iterations (int): Number of times the operation is applied.
+
+    Returns:
+        np.ndarray: Morphologically processed RGB image.
+    """
+    # Define the structuring element
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+
+    # Convert image to uint8
+    image_uint8 = (image * 255).astype(np.uint8)
+
+    # Apply the selected operation
+    if operation == 'erosion':
+        processed = cv2.erode(image_uint8, kernel, iterations=iterations)
+    elif operation == 'dilation':
+        processed = cv2.dilate(image_uint8, kernel, iterations=iterations)
+    elif operation == 'opening':
+        processed = cv2.morphologyEx(image_uint8, cv2.MORPH_OPEN, kernel, iterations=iterations)
+    elif operation == 'closing':
+        processed = cv2.morphologyEx(image_uint8, cv2.MORPH_CLOSE, kernel, iterations=iterations)
+    else:
+        raise ValueError("Unsupported morphological operation.")
+
+    # Convert back to float [0,1]
+    processed_image = processed.astype(np.float32) / 255.0
+    return processed_image
+
+def apply_clahe(image: np.ndarray, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)) -> np.ndarray:
+    """
+    Applies CLAHE to the image for adaptive contrast enhancement.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
+        clip_limit (float): Threshold for contrast limiting.
+        tile_grid_size (tuple): Size of grid for histogram equalization.
+
+    Returns:
+        np.ndarray: Contrast-enhanced RGB image.
+    """
+    if image.ndim == 2:
+        # Grayscale image
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        enhanced = clahe.apply((image * 255).astype(np.uint8))
+        return enhanced / 255.0
+    elif image.ndim == 3 and image.shape[2] == 3:
+        # Convert to LAB color space
+        lab = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+        # Split the channels
+        l, a, b = cv2.split(lab)
+        # Apply CLAHE to the L-channel
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        cl = clahe.apply(l)
+        # Merge the channels back
+        limg = cv2.merge((cl, a, b))
+        # Convert back to RGB
+        enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2RGB) / 255.0
+        return enhanced
+    else:
+        raise ValueError("Input image must be either grayscale or RGB.")
+
+def apply_average_neutral_scnr(image: np.ndarray, amount: float = 1.0) -> np.ndarray:
+    """
+    Applies the Average Neutral SCNR method to remove green noise from an RGB image.
+
+    Parameters:
+        image (np.ndarray): Input RGB image as a NumPy array with shape (H, W, 3).
+                            The image should be normalized to the [0, 1] range.
+        amount (float): Blending factor between the original and SCNR-processed image.
+                        0.0 returns the original image, 1.0 returns the fully SCNR-processed image.
+
+    Returns:
+        np.ndarray: The SCNR-processed RGB image.
+    """
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Input image must be a NumPy array.")
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("Input image must have three channels (RGB).")
+
+    if not (0.0 <= amount <= 1.0):
+        raise ValueError("Amount parameter must be between 0.0 and 1.0.")
+
+    # Ensure the image is in float format
+    image = image.astype(np.float32)
+
+    # Separate the channels
+    R, G, B = image[..., 0], image[..., 1], image[..., 2]
+
+    # Apply the Average Neutral SCNR formula: G' = min(G, 0.5*(R + B))
+    G_scnr = np.minimum(G, 0.5 * (R + B))
+
+    # Create the SCNR image
+    scnr_image = image.copy()
+    scnr_image[..., 1] = G_scnr  # Replace the green channel
+
+    # Blend the original and SCNR images based on the amount parameter
+    final_image = (1.0 - amount) * image + amount * scnr_image
+
+    # Ensure the final image is still within [0, 1]
+    final_image = np.clip(final_image, 0.0, 1.0)
+
+    return final_image
 
 
 def load_image(filename, max_retries=3, wait_seconds=3):
@@ -13106,17 +15184,18 @@ ASTROMETRY_API_URL = "http://nova.astrometry.net/api/"
 ASTROMETRY_API_KEY_FILE = "astrometry_api_key.txt"
 
 
-def load_api_key():
-    """Load the API key from a file, if it exists."""
-    if os.path.exists(ASTROMETRY_API_KEY_FILE):
-        with open(ASTROMETRY_API_KEY_FILE, 'r') as file:
-            return file.read().strip()
-    return None  # Return None if the file doesn't exist
+settings = QSettings("Seti Astro", "Seti Astro Suite")
 
 def save_api_key(api_key):
-    """Save the API key to a file."""
-    with open(ASTROMETRY_API_KEY_FILE, 'w') as file:
-        file.write(api_key)
+    settings.setValue("astrometry_api_key", api_key)  # Save to QSettings
+    print("API key saved.")
+
+def load_api_key():
+    api_key = settings.value("astrometry_api_key", "")  # Load from QSettings
+    if api_key:
+        print("API key loaded.")
+    return api_key
+
 
 
 
@@ -16733,10 +18812,10 @@ class WhatsInMySky(QWidget):
     def __init__(self):
         super().__init__()
         self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
-        self.settings = {}  # Initialize empty settings dictionary
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
         self.initUI()  # Build the UI
         self.load_settings()  # Load settings after UI is built
-        self.object_limit = self.settings.get("object_limit", 100)
+        self.object_limit = self.settings.value("object_limit", 100, type=int)
 
     def initUI(self):
         layout = QGridLayout()
@@ -16971,41 +19050,34 @@ class WhatsInMySky(QWidget):
 
 
     def save_settings(self, latitude, longitude, date, time, timezone, min_altitude):
-        """Save the user-provided settings to a JSON file."""
-        settings = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "date": date,
-            "time": time,
-            "timezone": timezone,
-            "min_altitude": min_altitude,
-            "object_limit": self.object_limit
-        }
-        with open(self.settings_file, 'w') as f:
-            json.dump(settings, f)
-        print("Settings saved:", settings)
+        self.settings.setValue("latitude", latitude)
+        self.settings.setValue("longitude", longitude)
+        self.settings.setValue("date", date)
+        self.settings.setValue("time", time)
+        self.settings.setValue("timezone", timezone)
+        self.settings.setValue("min_altitude", min_altitude)
+        print("Settings saved.")
 
     def load_settings(self):
-        """Load settings from the JSON file if it exists."""
-        if os.path.exists(self.settings_file):
-            with open(self.settings_file, 'r') as f:
-                self.settings = json.load(f)
-            # Populate fields with loaded settings
-            self.latitude_entry.setText(str(self.settings.get("latitude", "")))
-            self.longitude_entry.setText(str(self.settings.get("longitude", "")))
+        """Load settings from QSettings."""
+        self.latitude = self.settings.value("latitude", 0.0, type=float)
+        self.longitude = self.settings.value("longitude", 0.0, type=float)
+        self.date = self.settings.value("date", datetime.now().strftime("%Y-%m-%d"))
+        self.time = self.settings.value("time", "00:00:00")
+        self.timezone = self.settings.value("timezone", "UTC")
+        self.min_altitude = self.settings.value("min_altitude", 0.0, type=float)
+        self.object_limit = self.settings.value("object_limit", 100, type=int)
 
-            # Use today's date for the date entry instead of the saved date
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            self.date_entry.setText(today_date)
-
-            self.time_entry.setText(self.settings.get("time", ""))
-            self.timezone_combo.setCurrentText(self.settings.get("timezone", "UTC"))
-            self.min_altitude_entry.setText(str(self.settings.get("min_altitude", "0")))
-            self.object_limit = self.settings.get("object_limit", 100)
-        else:
-            self.settings = {}
-            # Default to today's date
-            self.date_entry.setText(datetime.now().strftime("%Y-%m-%d"))
+        # Populate fields in the UI, if applicable
+        print("Settings loaded:", {
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "date": self.date,
+            "time": self.time,
+            "timezone": self.timezone,
+            "min_altitude": self.min_altitude,
+            "object_limit": self.object_limit,
+        })
 
 
     def open_settings(self):
