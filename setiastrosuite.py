@@ -98,6 +98,7 @@ if hasattr(sys, '_MEIPASS'):
     copyslot_path = os.path.join(sys._MEIPASS, 'copyslot.png')
     graxperticon_path = os.path.join(sys._MEIPASS, 'graxpert.png')
     cropicon_path = os.path.join(sys._MEIPASS, 'cropicon.png')
+    openfile_path = os.path.join(sys._MEIPASS, 'openfile.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -121,6 +122,7 @@ else:
     copyslot_path = 'copyslot.png'
     graxperticon_path = 'graxpert.png'
     cropicon_path = 'cropicon.png'
+    openfile_path = 'openfile.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -340,6 +342,25 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Toolbar
         # --------------------
+        filebar = QToolBar("File Toolbar")
+        self.addToolBar(filebar)
+
+        # Add Open File icon and action
+        open_icon = QIcon(openfile_path)  # Replace with the actual path to your "Open File" icon
+        open_action = QAction(open_icon, "Open File", self)
+        open_action.setStatusTip("Open an image file")
+        open_action.triggered.connect(self.open_image)  # Connect to the existing open_image method
+        filebar.addAction(open_action)
+
+        # Add Save As disk icon and action
+        save_as_icon = QIcon(disk_icon_path)  # Replace with the actual path to your "Save As" icon
+        save_as_action = QAction(save_as_icon, "Save As", self)
+        save_as_action.setStatusTip("Save the current image")
+        save_as_action.triggered.connect(self.save_image)  # Connect to the existing save_image method
+        filebar.addAction(save_as_action)
+
+
+
         toolbar = QToolBar("Main Toolbar")
         self.addToolBar(toolbar)
 
@@ -475,7 +496,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.5')
+        self.setWindowTitle('Seti Astro\'s Suite V2.5.1')
         self.setGeometry(100, 100, 1200, 800)  # Set window size as needed
 
     def open_crop_tool(self):
@@ -5949,7 +5970,7 @@ class CosmicClarityTab(QWidget):
         # Save button to save the processed image
         self.save_button = QPushButton("Save Image")
         self.save_button.clicked.connect(self.save_processed_image_to_disk)
-        left_layout.addWidget(self.save_button)  
+        #left_layout.addWidget(self.save_button)  
 
         # Spacer to push the wrench button to the bottom
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
@@ -14330,10 +14351,6 @@ class HaloBGonTab(QWidget):
         # Add the horizontal layout to the left layout
         left_layout.addLayout(action_buttons_layout)
 
-        self.saveButton = QPushButton("Save Image", self)
-        self.saveButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveButton)
-
         # **Remove Zoom Buttons from Left Panel**
         # Comment out or remove the existing zoom buttons in the left panel
         # zoom_layout = QHBoxLayout()
@@ -14574,14 +14591,14 @@ class HaloBGonTab(QWidget):
         self.processing_thread.start()
 
     def updatePreview(self, stretched_image):
-        # Store the stretched image for saving
-        self.preview_image = stretched_image
-
-        # Update the ImageManager with the new stretched image
+        """
+        Updates the preview with the stretched image and ensures it is undoable by using set_image.
+        """
+        # Create metadata for the new image
         metadata = {
             'file_path': self.filename if self.filename else "Stretched Image",
             'original_header': self.original_header if self.original_header else {},
-            'bit_depth': "Unknown",  # Update if bit_depth is available
+            'bit_depth': "Unknown",  # Update dynamically if available
             'is_mono': self.is_mono,
             'processing_timestamp': datetime.now().isoformat(),
             'source_images': {
@@ -14589,19 +14606,22 @@ class HaloBGonTab(QWidget):
             }
         }
 
-        # Update ImageManager with the new processed image
+        # Ensure ImageManager is initialized
         if self.image_manager:
             try:
-                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
-                print("StarStretchTab: Processed image stored in ImageManager.")
+                # Set the new image and metadata using the ImageManager
+                self.image_manager.set_image(stretched_image, metadata)
+                print("StarStretchTab: Processed image stored in ImageManager (undoable).")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+                return
         else:
             print("ImageManager is not initialized.")
             QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
+            return
 
-        # Update the preview once the processing thread emits the result
+        # Convert the stretched image to 8-bit for display in the preview
         preview_image = (stretched_image * 255).astype(np.uint8)
         h, w = preview_image.shape[:2]
         if preview_image.ndim == 3:
@@ -14609,14 +14629,16 @@ class HaloBGonTab(QWidget):
         else:
             q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
 
+        # Update the pixmap and scale it for the preview label
         pixmap = QPixmap.fromImage(q_image)
-        self.current_pixmap = pixmap  # **Store the original pixmap**
+        self.current_pixmap = pixmap  # Store the original pixmap
         scaled_pixmap = pixmap.scaled(pixmap.size() * self.zoom_factor, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.imageLabel.setPixmap(scaled_pixmap)
         self.imageLabel.resize(scaled_pixmap.size())
 
-        # Hide the spinner after processing is done
+        # Hide the spinner after processing is complete
         self.hideSpinner()
+
 
 
     def saveImage(self):
@@ -15614,7 +15636,7 @@ def apply_morphology(image: np.ndarray, operation: str = 'erosion', kernel_size:
         np.ndarray: Morphologically processed RGB image.
     """
     # Define the structuring element
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
 
     # Convert image to uint8
     image_uint8 = (image * 255).astype(np.uint8)
@@ -20333,7 +20355,10 @@ class WhatsInMySky(QWidget):
             "Degrees from Moon", "Alt Name", "Type", "Magnitude", "Size (arcmin)"
         ])
         self.tree.setSortingEnabled(True)
-        self.tree.header().setSectionResizeMode(QHeaderView.Stretch)
+        header = self.tree.header()
+        header.setSectionResizeMode(QHeaderView.Interactive)  # Allow users to resize columns
+        header.setStretchLastSection(False)  # Ensure last column is not stretched automatically
+
         self.tree.sortByColumn(5, Qt.AscendingOrder)
         layout.addWidget(self.tree, 11, 0, 1, 3)
         self.tree.itemDoubleClicked.connect(self.on_row_double_click)
@@ -20368,6 +20393,20 @@ class WhatsInMySky(QWidget):
         time_str = self.time_entry.text()
         timezone_str = self.timezone_combo.currentText()
         min_altitude = float(self.min_altitude_entry.text())
+
+        # Validate inputs
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+            min_altitude = float(min_altitude)
+        except ValueError:
+            self.update_status("Invalid input: Latitude, Longitude, and Min Altitude must be numeric.")
+            return
+
+        # Save the settings
+        self.save_settings(latitude, longitude, date_str, time_str, timezone_str, min_altitude)
+
+
         catalog_filters = [catalog for catalog, var in self.catalog_vars.items() if var.isChecked()]
         object_limit = self.object_limit
 
@@ -20461,7 +20500,7 @@ class WhatsInMySky(QWidget):
         print("Settings saved.")
 
     def load_settings(self):
-        """Load settings from QSettings."""
+        """Load settings from QSettings and populate UI fields."""
         self.latitude = self.settings.value("latitude", 0.0, type=float)
         self.longitude = self.settings.value("longitude", 0.0, type=float)
         self.date = self.settings.value("date", datetime.now().strftime("%Y-%m-%d"))
@@ -20470,7 +20509,14 @@ class WhatsInMySky(QWidget):
         self.min_altitude = self.settings.value("min_altitude", 0.0, type=float)
         self.object_limit = self.settings.value("object_limit", 100, type=int)
 
-        # Populate fields in the UI, if applicable
+        # Populate fields in the UI
+        self.latitude_entry.setText(str(self.latitude))
+        self.longitude_entry.setText(str(self.longitude))
+        self.date_entry.setText(self.date)
+        self.time_entry.setText(self.time)
+        self.timezone_combo.setCurrentText(self.timezone)
+        self.min_altitude_entry.setText(str(self.min_altitude))
+
         print("Settings loaded:", {
             "latitude": self.latitude,
             "longitude": self.longitude,
@@ -20480,6 +20526,7 @@ class WhatsInMySky(QWidget):
             "min_altitude": self.min_altitude,
             "object_limit": self.object_limit,
         })
+
 
 
     def open_settings(self):
