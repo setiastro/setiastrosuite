@@ -96,6 +96,7 @@ if hasattr(sys, '_MEIPASS'):
     rgbcombo_path = os.path.join(sys._MEIPASS, 'rgbcombo.png')
     rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')
     copyslot_path = os.path.join(sys._MEIPASS, 'copyslot.png')
+    graxperticon_path = os.path.join(sys._MEIPASS, 'graxpert.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -117,6 +118,7 @@ else:
     rgbcombo_path = 'rgbcombo.png'
     rgbextract_path = 'rgbextract.png'
     copyslot_path = 'copyslot.png'
+    graxperticon_path = 'graxpert.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -199,6 +201,11 @@ class AstroEditingSuite(QMainWindow):
         # Functions Menu
         # --------------------
         functions_menu = menubar.addMenu("Functions")
+
+
+        remove_gradient_action = QAction(QIcon(graxperticon_path), "Remove Gradient with GraXpert", self)
+        remove_gradient_action.triggered.connect(self.remove_gradient_with_graxpert)
+        functions_menu.addAction(remove_gradient_action)        
         
         # Create Remove Green QAction
         remove_green_action = QAction("Remove Green", self)
@@ -333,6 +340,11 @@ class AstroEditingSuite(QMainWindow):
         copy_slot_action.setStatusTip("Copy the current image in Slot 0 to another slot")
         copy_slot_action.triggered.connect(self.copy_slot0_to_target)
         toolbar.addAction(copy_slot_action)
+
+        remove_gradient_icon = QIcon(graxperticon_path)
+        remove_gradient_action.setIcon(remove_gradient_icon)
+        remove_gradient_action.setStatusTip("Remove Gradient with GraXpert AI")
+        toolbar.addAction(remove_gradient_action)
 
         # Add Remove Stars Button to Toolbar with Icon
         remove_stars_icon = QIcon(starnet_path)
@@ -573,7 +585,103 @@ class AstroEditingSuite(QMainWindow):
         # Open a preview for the original RGB image in slot 1
         self.open_preview_window(slot=1)
 
+    def remove_gradient_with_graxpert(self):
+        """Integrate GraXpert for gradient removal."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before removing the gradient.")
+            return
 
+        # Prompt user for smoothing value
+        smoothing, ok = QInputDialog.getDouble(
+            self,
+            "GraXpert Smoothing Amount",
+            "Enter smoothing amount (0.0 to 1.0):",
+            decimals=2,
+            min=0.0,
+            max=1.0,
+            value=0.1
+        )
+        if not ok:
+            return  # User cancelled
+
+        # Save the current image as a TIFF file
+        input_basename = "input_image"
+        input_path = os.path.join(os.getcwd(), f"{input_basename}.tif")
+        save_image(self.image_manager.image, input_path, "tiff", "16-bit", None, is_mono=False)
+
+        # Output will have the same base name with `_GraXpert` suffix
+        output_basename = f"{input_basename}_GraXpert"
+        output_directory = os.getcwd()
+
+        # Determine the platform-specific GraXpert command
+        current_os = platform.system()
+        if current_os == "Windows":
+            graxpert_cmd = "GraXpert.exe"
+        elif current_os == "Linux":
+            graxpert_cmd = "GraXpert-linux"
+        elif current_os == "Darwin":  # macOS
+            graxpert_cmd = "GraXpert.app/Contents/MacOS/GraXpert"
+        else:
+            QMessageBox.critical(self, "Unsupported OS", f"Unsupported operating system: {current_os}")
+            return
+
+        # Build the command
+        command = [
+            graxpert_cmd,
+            "-cmd", "background-extraction",
+            input_path,
+            "-cli",
+            "-smoothing", str(smoothing),
+            "-gpu", "true"
+        ]
+
+        # Run the command
+        self.run_graxpert_command(command, output_basename, output_directory)
+
+    def run_graxpert_command(self, command, output_basename, output_directory):
+        """Execute GraXpert asynchronously."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("GraXpert Progress")
+        dialog.setMinimumSize(600, 400)
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+        cancel_button = QPushButton("Cancel")
+        layout.addWidget(cancel_button)
+
+        thread = GraXpertThread(command)
+        thread.stdout_signal.connect(text_edit.append)
+        thread.stderr_signal.connect(text_edit.append)
+        thread.finished_signal.connect(lambda code: self.on_graxpert_finished(code, output_basename, output_directory, dialog))
+        cancel_button.clicked.connect(thread.terminate)
+
+        thread.start()
+        dialog.exec_()
+
+    def on_graxpert_finished(self, return_code, output_basename, output_directory, dialog):
+        """Handle GraXpert process completion."""
+        dialog.close()
+        if return_code != 0:
+            QMessageBox.critical(self, "Error", "GraXpert process failed.")
+            return
+
+        # Locate the output file with any extension
+        output_file = None
+        for ext in ["fits", "tif", "tiff", "png"]:
+            candidate = os.path.join(output_directory, f"{output_basename}.{ext}")
+            if os.path.exists(candidate):
+                output_file = candidate
+                break
+
+        if not output_file:
+            QMessageBox.critical(self, "Error", "GraXpert output file not found.")
+            return
+
+        # Load the processed image back
+        processed_image, _, _, _ = load_image(output_file)
+        self.image_manager.set_image(processed_image, {'file_path': "GraXpert Gradient Removed"})
+        QMessageBox.information(self, "Success", "Gradient removed successfully.")
 
 
 
@@ -2266,6 +2374,30 @@ class ImagePreview(QWidget):
         """Override the close event to emit the custom closed signal."""
         self.closed.emit(self.slot)  # Emit the slot number
         event.accept()  # Proceed with the standard close event
+
+class GraXpertThread(QThread):
+    """Thread to execute GraXpert commands."""
+    stdout_signal = pyqtSignal(str)
+    stderr_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(int)
+
+    def __init__(self, command):
+        super().__init__()
+        self.command = command
+
+    def run(self):
+        """Run the GraXpert command and capture output."""
+        process = subprocess.Popen(
+            self.command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        for line in process.stdout:
+            self.stdout_signal.emit(line.strip())
+        for line in process.stderr:
+            self.stderr_signal.emit(line.strip())
+        self.finished_signal.emit(process.wait())
 
 class RGBCombinationDialog(QDialog):
     def __init__(self, parent=None, image_manager=None):
