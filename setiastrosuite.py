@@ -328,7 +328,7 @@ class AstroEditingSuite(QMainWindow):
         self.addToolBar(toolbar)
 
         # Add "Copy Slot" Button to Toolbar with Icon
-        copy_slot_icon = QIcon('copyslot.png')  # Ensure 'copyslot.png' is the correct path
+        copy_slot_icon = QIcon(copyslot_path)  # Ensure 'copyslot.png' is the correct path
         copy_slot_action = QAction(copy_slot_icon, "Copy Slot", self)
         copy_slot_action.setStatusTip("Copy the current image in Slot 0 to another slot")
         copy_slot_action.triggered.connect(self.copy_slot0_to_target)
@@ -12131,59 +12131,86 @@ class PerfectPalettePickerTab(QWidget):
 
     def load_image(self, image_type):
         """
-        Opens a file dialog to load an image based on the image type.
+        Opens a dialog to load an image either from a file or from a slot based on user choice.
+        
+        Parameters:
+            image_type (str): The type of image to load ('Ha', 'OIII', 'SII', 'OSC1', 'OSC2').
         """
-        options = QFileDialog.Options()
-        options |= QFileDialog.ReadOnly
-        file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Select {image_type} Image",
-            "",
-            file_filter,
-            options=options
-        )
-        if file_path:
-            image, original_header, bit_depth, is_mono = load_image(file_path)
-            if image is None:
-                QMessageBox.critical(self, "Error", f"Failed to load {image_type} image.")
+        try:
+            print(f"Initiating load process for {image_type} image.")
+            
+            # Step 1: Prompt user to choose the source
+            source_choice, ok = QInputDialog.getItem(
+                self,
+                f"Select {image_type} Image Source",
+                "Choose the source of the image:",
+                ["From File", "From Slot"],
+                editable=False
+            )
+            
+            if not ok or not source_choice:
+                QMessageBox.warning(self, "Cancelled", f"{image_type} image loading cancelled.")
+                print(f"{image_type} image loading cancelled by the user.")
                 return
+            
+            print(f"{image_type} image source selected: {source_choice}")
+            
+            if source_choice == "From File":
+                result = self.load_image_from_file(image_type)
+            elif source_choice == "From Slot":
+                result = self.load_image_from_slot(image_type)
+            else:
+                QMessageBox.warning(self, "Invalid Choice", "Invalid source choice. Operation cancelled.")
+                print("Invalid source choice. Exiting load process.")
+                return
+            
+            if result is None:
+                # Loading was unsuccessful or cancelled
+                return
+            
+            image, original_header, bit_depth, is_mono, file_path = result
+            
+            # Assign the loaded image to the appropriate attribute and update the label
             if image_type == 'Ha':
                 self.ha_image = image
                 self.ha_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.ha_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                self.ha_label.setText(f"Loaded: {os.path.basename(file_path) if file_path else 'From Slot'}")
             elif image_type == 'OIII':
                 self.oiii_image = image
                 self.oiii_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.oiii_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                self.oiii_label.setText(f"Loaded: {os.path.basename(file_path) if file_path else 'From Slot'}")
             elif image_type == 'SII':
                 self.sii_image = image
                 self.sii_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.sii_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                self.sii_label.setText(f"Loaded: {os.path.basename(file_path) if file_path else 'From Slot'}")
             elif image_type == 'OSC1':
                 self.osc1_image = image
                 self.osc1_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.osc1_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                self.osc1_label.setText(f"Loaded: {os.path.basename(file_path) if file_path else 'From Slot'}")
             elif image_type == 'OSC2':
                 self.osc2_image = image
                 self.osc2_filename = file_path
                 self.original_header = original_header
                 self.bit_depth = bit_depth
                 self.is_mono = is_mono
-                self.osc2_label.setText(f"Loaded: {os.path.basename(file_path)}")
-
+                self.osc2_label.setText(f"Loaded: {os.path.basename(file_path) if file_path else 'From Slot'}")
+            else:
+                QMessageBox.warning(self, "Unknown Image Type", f"Image type '{image_type}' is not recognized.")
+                print(f"Unknown image type: {image_type}")
+                return
+            
             # Apply stretching if linear input is checked and image is mono
             if self.linear_checkbox.isChecked() and is_mono:
                 if image_type == 'Ha':
@@ -12195,10 +12222,115 @@ class PerfectPalettePickerTab(QWidget):
                 elif image_type in ['OSC1', 'OSC2']:
                     # Assuming OSC has multiple channels; stretching would be handled during processing
                     pass
-
+            
             self.status_label.setText(f"{image_type} image loaded successfully.")
-        else:
-            self.status_label.setText(f"{image_type} image loading canceled.")
+            print(f"{image_type} image loaded successfully.")
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred while loading {image_type} image:\n{e}")
+            print(f"An unexpected error occurred while loading {image_type} image: {e}")
+
+    def load_image_from_slot(self, image_type):
+        """
+        Handles loading an image from a slot.
+        
+        Parameters:
+            image_type (str): The type of image to load.
+        
+        Returns:
+            tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
+        """
+        if not self.image_manager:
+            QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
+            print("ImageManager is not initialized. Cannot load image from slot.")
+            return None
+        
+        # Retrieve available slots
+        available_slots = [
+            f"Slot {i}" for i in range(1, self.image_manager.max_slots + 1)
+            if self.image_manager._images.get(i, None) is not None
+        ]
+        
+        if not available_slots:
+            QMessageBox.warning(self, "No Available Slots", "No slots contain images. Please add images to slots first.")
+            print("No available slots contain images.")
+            return None
+        
+        slot_choice, ok = QInputDialog.getItem(
+            self,
+            f"Select Slot for {image_type} Image",
+            "Choose a slot containing the image:",
+            available_slots,
+            editable=False
+        )
+        
+        if not ok or not slot_choice:
+            QMessageBox.warning(self, "Cancelled", f"{image_type} image loading cancelled.")
+            print(f"{image_type} image loading cancelled by the user.")
+            return None
+        
+        # Extract slot number
+        target_slot_num = int(slot_choice.split()[-1])
+        image = self.image_manager._images.get(target_slot_num, None)
+        
+        if image is None:
+            QMessageBox.warning(self, "Empty Slot", f"{slot_choice} does not contain an image.")
+            print(f"{slot_choice} is empty. Cannot load {image_type} image.")
+            return None
+        
+        print(f"{image_type} image selected from {slot_choice}.")
+        
+        # Retrieve metadata from ImageManager._metadata
+        metadata = self.image_manager._metadata.get(target_slot_num, {})
+        original_header = metadata.get('header', None)
+        bit_depth = metadata.get('bit_depth', "Unknown")
+        is_mono = metadata.get('is_mono', False)
+        file_path = metadata.get('file_path', None)
+        
+        if image is None:
+            QMessageBox.critical(self, "Error", f"Failed to load {image_type} image from {slot_choice}.")
+            print(f"Failed to load {image_type} image from slot {slot_choice}.")
+            return None
+        
+        return image, original_header, bit_depth, is_mono, file_path
+
+    def load_image_from_file(self, image_type):
+        """
+        Handles loading an image from a file.
+        
+        Parameters:
+            image_type (str): The type of image to load.
+        
+        Returns:
+            tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
+        """
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Select {image_type} Image File",
+            "",
+            file_filter,
+            options=options
+        )
+        
+        if not file_path:
+            QMessageBox.warning(self, "No File Selected", f"No {image_type} image file selected. Operation cancelled.")
+            print(f"No {image_type} image file selected.")
+            return None
+        
+        print(f"{image_type} image file selected: {file_path}")
+        
+        # Load the image using your existing load_image function
+        image, original_header, bit_depth, is_mono = load_image(file_path)
+        if image is None:
+            QMessageBox.critical(self, "Error", f"Failed to load {image_type} image from file.")
+            print(f"Failed to load {image_type} image from file: {file_path}")
+            return None
+        
+        return image, original_header, bit_depth, is_mono, file_path
+
 
     def prepare_preview_palettes(self):
         """
@@ -12874,7 +13006,7 @@ class PerfectPalettePickerTab(QWidget):
                     # Check if any loaded image file paths have the `.xisf` extension
                     loaded_file_paths = [
                         self.ha_filename, self.oiii_filename,
-                        self.sii_filename, self.osc_filename
+                        self.sii_filename, self.osc1_filename, self.osc2_filename
                     ]
                     contains_xisf = any(
                         file_path.lower().endswith('.xisf') for file_path in loaded_file_paths if file_path
