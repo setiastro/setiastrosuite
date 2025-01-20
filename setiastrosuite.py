@@ -4,7 +4,7 @@ import tempfile
 import sys
 import time
 import json
-
+import logging
 import math
 from datetime import datetime
 from decimal import getcontext
@@ -585,58 +585,92 @@ class AstroEditingSuite(QMainWindow):
         # Open a preview for the original RGB image in slot 1
         self.open_preview_window(slot=1)
 
-    def remove_gradient_with_graxpert(self):
-        """Integrate GraXpert for gradient removal."""
-        if self.image_manager.image is None:
-            QMessageBox.warning(self, "No Image", "Please load an image before removing the gradient.")
-            return
+        def remove_gradient_with_graxpert(self):
+            """Integrate GraXpert for gradient removal."""
+            if self.image_manager.image is None:
+                QMessageBox.warning(self, "No Image", "Please load an image before removing the gradient.")
+                return
 
-        # Prompt user for smoothing value
-        smoothing, ok = QInputDialog.getDouble(
-            self,
-            "GraXpert Smoothing Amount",
-            "Enter smoothing amount (0.0 to 1.0):",
-            decimals=2,
-            min=0.0,
-            max=1.0,
-            value=0.1
-        )
-        if not ok:
-            return  # User cancelled
+            # Prompt user for smoothing value
+            smoothing, ok = QInputDialog.getDouble(
+                self,
+                "GraXpert Smoothing Amount",
+                "Enter smoothing amount (0.0 to 1.0):",
+                decimals=2,
+                min=0.0,
+                max=1.0,
+                value=0.1
+            )
+            if not ok:
+                return  # User cancelled
 
-        # Save the current image as a TIFF file
-        input_basename = "input_image"
-        input_path = os.path.join(os.getcwd(), f"{input_basename}.tif")
-        save_image(self.image_manager.image, input_path, "tiff", "16-bit", None, is_mono=False)
+            # Save the current image as a TIFF file
+            input_basename = "input_image"
+            input_path = os.path.join(os.getcwd(), f"{input_basename}.tif")
+            save_image(self.image_manager.image, input_path, "tiff", "16-bit", None, is_mono=False)
 
-        # Output will have the same base name with `_GraXpert` suffix
-        output_basename = f"{input_basename}_GraXpert"
-        output_directory = os.getcwd()
+            # Output will have the same base name with `_GraXpert` suffix
+            output_basename = f"{input_basename}_GraXpert"
+            output_directory = os.getcwd()
 
-        # Determine the platform-specific GraXpert command
-        current_os = platform.system()
-        if current_os == "Windows":
-            graxpert_cmd = "GraXpert.exe"
-        elif current_os == "Linux":
-            graxpert_cmd = "GraXpert-linux"
-        elif current_os == "Darwin":  # macOS
-            graxpert_cmd = "GraXpert.app/Contents/MacOS/GraXpert"
-        else:
-            QMessageBox.critical(self, "Unsupported OS", f"Unsupported operating system: {current_os}")
-            return
+            # Determine the platform-specific GraXpert command
+            current_os = platform.system()
+            if current_os == "Windows":
+                graxpert_cmd = "GraXpert.exe"
+            elif current_os == "Darwin":  # macOS
+                graxpert_cmd = "/Applications/GraXpert.app/Contents/MacOS/GraXpert"
+            elif current_os == "Linux":
+                graxpert_cmd = self.get_graxpert_path()
+                if not graxpert_cmd:
+                    return  # User cancelled
+            else:
+                QMessageBox.critical(self, "Unsupported OS", f"Unsupported operating system: {current_os}")
+                return
 
-        # Build the command
-        command = [
-            graxpert_cmd,
-            "-cmd", "background-extraction",
-            input_path,
-            "-cli",
-            "-smoothing", str(smoothing),
-            "-gpu", "true"
-        ]
+            # Build the command
+            command = [
+                graxpert_cmd,
+                "-cmd", "background-extraction",
+                input_path,
+                "-cli",
+                "-smoothing", str(smoothing),
+                "-gpu", "true"
+            ]
 
-        # Run the command
-        self.run_graxpert_command(command, output_basename, output_directory)
+            # Run the command
+            self.run_graxpert_command(command, output_basename, output_directory)
+
+    def get_graxpert_path(self):
+        """Prompt user to select the GraXpert path on Linux and save it."""
+        graxpert_path = self.settings.value("graxpert/path", type=str)
+
+        if not graxpert_path or not os.path.exists(graxpert_path):
+            QMessageBox.information(self, "GraXpert Path", "Please select the GraXpert executable.")
+            options = QFileDialog.Options()
+            options |= QFileDialog.ReadOnly
+            graxpert_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select GraXpert Executable",
+                "",
+                "Executable Files (*)",
+                options=options
+            )
+            if not graxpert_path:
+                QMessageBox.warning(self, "Cancelled", "GraXpert path selection was cancelled.")
+                return None  # User cancelled
+            if not os.access(graxpert_path, os.X_OK):
+                try:
+                    os.chmod(graxpert_path, 0o755)  # Add execute permissions
+                except Exception as e:
+                    QMessageBox.critical(self, "Permission Error", f"Failed to set execute permissions:\n{e}")
+                    return None
+
+            # Save the path for future use
+            self.settings.setValue("graxpert/path", graxpert_path)
+
+        return graxpert_path
+
+
 
     def run_graxpert_command(self, command, output_basename, output_directory):
         """Execute GraXpert asynchronously."""
@@ -680,8 +714,20 @@ class AstroEditingSuite(QMainWindow):
 
         # Load the processed image back
         processed_image, _, _, _ = load_image(output_file)
-        self.image_manager.set_image(processed_image, {'file_path': "GraXpert Gradient Removed"})
+
+        # Check the number of dimensions to determine if the image is mono
+        if processed_image.ndim == 2:
+            print("GraXpert output is a mono image. Converting to RGB...")
+            processed_image = np.stack([processed_image] * 3, axis=-1)
+
+        # Set the processed image in the image manager
+        self.image_manager.set_image(
+            processed_image,
+            {'file_path': output_file, 'description': "GraXpert Gradient Removed"}
+        )
+
         QMessageBox.information(self, "Success", "Gradient removed successfully.")
+
 
 
 
@@ -4091,34 +4137,16 @@ class XISFViewer(QWidget):
 
         im_data = self.stretched_image if self.autostretch_enabled else self.image_data
 
-        if self.is_mono:
-            # For mono images, we expect either (height, width) or (height, width, 1) shapes.
-            # If the image has 3 channels but is mono, collapse it to one channel
-            if len(im_data.shape) == 3 and im_data.shape[2] == 3:
-                im_data = np.mean(im_data, axis=-1)  # Convert to grayscale by averaging the channels
-                print(f"Mono image with 3 channels collapsed to 1 channel: {im_data.shape}")
+        # Handle mono images
+        if im_data.ndim == 2:
+            print(f"Mono image detected with 2D shape: {im_data.shape}. Converting to 3-channel RGB for display.")
+            im_data = np.stack([im_data] * 3, axis=-1)  # Convert to 3-channel RGB
+        elif im_data.ndim == 3 and im_data.shape[2] == 1:
+            print(f"Mono image with a single channel detected: {im_data.shape}. Converting to 3-channel RGB for display.")
+            im_data = np.repeat(im_data, 3, axis=-1)  # Expand single channel to 3 channels
 
-            elif len(im_data.shape) != 2:
-                print(f"Unexpected mono image shape: {im_data.shape}")
-                return  # Exit if the shape is not 2D or (height, width, 1)
-
-            # Now im_data should be 2D (height, width) for mono images
-            height, width = im_data.shape  # Unpacking 2D shape
-            bytes_per_line = width
-
-            if im_data.dtype == np.uint8:
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
-            elif im_data.dtype == np.uint16:
-                im_data = (im_data / 256).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
-            elif im_data.dtype in [np.float32, np.float64]:
-                im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
-            else:
-                print(f"Unsupported mono image format: {im_data.dtype}")
-                return
-        else:
-            # For color images, we expect (height, width, channels) shape
+        if im_data.ndim == 3 and im_data.shape[2] == 3:
+            # For color images (or converted mono images)
             height, width, channels = im_data.shape
             bytes_per_line = channels * width
 
@@ -4133,6 +4161,9 @@ class XISFViewer(QWidget):
             else:
                 print(f"Unsupported color image format: {im_data.dtype}")
                 return
+        else:
+            print(f"Unexpected image shape: {im_data.shape}")
+            return
 
         # Calculate scaled dimensions
         scaled_width = int(q_image.width() * self.scale_factor)
@@ -4147,7 +4178,7 @@ class XISFViewer(QWidget):
         )
 
         pixmap = QPixmap.fromImage(scaled_image)
-        self.current_pixmap = pixmap  # **Store the current pixmap**
+        self.current_pixmap = pixmap  # Store the current pixmap
         self.image_label.setPixmap(pixmap)
         self.image_label.resize(scaled_image.size())
 
@@ -20405,9 +20436,30 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
 
 
 if __name__ == '__main__':
+    # Configure logging to capture errors for debugging
+    logging.basicConfig(
+        filename="astro_editing_suite.log",
+        level=logging.ERROR,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
     app = QApplication(sys.argv)
-    
     app.setWindowIcon(QIcon(icon_path))
-    window = AstroEditingSuite()
-    window.show()
-    sys.exit(app.exec_())
+    
+    try:
+        # Create and show the main window
+        window = AstroEditingSuite()
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        # Log the error
+        logging.error("Unhandled exception occurred", exc_info=True)
+        
+        # Display a critical error message to the user
+        QMessageBox.critical(
+            None,
+            "Application Error",
+            f"An unexpected error occurred:\n{str(e)}\n\n"
+            "Please check the log file for more details."
+        )
+        sys.exit(1)
