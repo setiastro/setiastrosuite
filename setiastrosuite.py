@@ -97,6 +97,7 @@ if hasattr(sys, '_MEIPASS'):
     rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')
     copyslot_path = os.path.join(sys._MEIPASS, 'copyslot.png')
     graxperticon_path = os.path.join(sys._MEIPASS, 'graxpert.png')
+    cropicon_path = os.path.join(sys._MEIPASS, 'cropicon.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -119,6 +120,7 @@ else:
     rgbextract_path = 'rgbextract.png'
     copyslot_path = 'copyslot.png'
     graxperticon_path = 'graxpert.png'
+    cropicon_path = 'cropicon.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -207,6 +209,13 @@ class AstroEditingSuite(QMainWindow):
         remove_gradient_action.triggered.connect(self.remove_gradient_with_graxpert)
         functions_menu.addAction(remove_gradient_action)        
         
+        # Add Crop to Functions menu
+        crop_action = QAction(QIcon(cropicon_path), "Crop Image", self)
+        crop_action.setShortcut('Ctrl+K')
+        crop_action.setStatusTip('Crop the current image')
+        crop_action.triggered.connect(self.open_crop_tool)
+        functions_menu.addAction(crop_action)
+
         # Create Remove Green QAction
         remove_green_action = QAction("Remove Green", self)
         remove_green_action.setShortcut('Ctrl+G')  # Assign a keyboard shortcut
@@ -341,6 +350,10 @@ class AstroEditingSuite(QMainWindow):
         copy_slot_action.triggered.connect(self.copy_slot0_to_target)
         toolbar.addAction(copy_slot_action)
 
+        crop_icon = QIcon(cropicon_path)
+        crop_action.setIcon(crop_icon)
+        toolbar.addAction(crop_action)
+
         remove_gradient_icon = QIcon(graxperticon_path)
         remove_gradient_action.setIcon(remove_gradient_icon)
         remove_gradient_action.setStatusTip("Remove Gradient with GraXpert AI")
@@ -465,6 +478,39 @@ class AstroEditingSuite(QMainWindow):
         self.setWindowTitle('Seti Astro\'s Suite V2.5')
         self.setGeometry(100, 100, 1200, 800)  # Set window size as needed
 
+    def open_crop_tool(self):
+        """Open the crop tool to crop the current image."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before cropping.")
+            return
+
+        # Open the Crop Tool
+        crop_tool = CropTool(self.image_manager.image, self)
+        crop_tool.crop_applied.connect(self.apply_cropped_image)
+        crop_tool.exec_()
+
+    def apply_cropped_image(self, cropped_image):
+        """Apply the cropped image to the current slot."""
+        # Update the current slot with the cropped image
+        current_slot = self.image_manager.current_slot
+        metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+        metadata['file_path'] = "Cropped Image"
+
+        # Save current state to undo stack
+        self.image_manager._undo_stacks[current_slot].append(
+            (self.image_manager._images[current_slot].copy(), metadata.copy())
+        )
+        print(f"ImageManager: Current state of Slot {current_slot} pushed to undo stack.")
+
+        # Update with the cropped image
+        self.image_manager._images[current_slot] = cropped_image
+        self.image_manager._metadata[current_slot] = metadata
+
+        # Emit signal to update UI
+        self.image_manager.image_changed.emit(current_slot, cropped_image, metadata)
+        QMessageBox.information(self, "Success", "Cropped image applied.")
+
+
     def rgb_combination(self):
         """Handle the RGB Combination action."""
         dialog = RGBCombinationDialog(self, image_manager=self.image_manager)
@@ -585,60 +631,60 @@ class AstroEditingSuite(QMainWindow):
         # Open a preview for the original RGB image in slot 1
         self.open_preview_window(slot=1)
 
-        def remove_gradient_with_graxpert(self):
-            """Integrate GraXpert for gradient removal."""
-            if self.image_manager.image is None:
-                QMessageBox.warning(self, "No Image", "Please load an image before removing the gradient.")
-                return
+    def remove_gradient_with_graxpert(self):
+        """Integrate GraXpert for gradient removal."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before removing the gradient.")
+            return
 
-            # Prompt user for smoothing value
-            smoothing, ok = QInputDialog.getDouble(
-                self,
-                "GraXpert Smoothing Amount",
-                "Enter smoothing amount (0.0 to 1.0):",
-                decimals=2,
-                min=0.0,
-                max=1.0,
-                value=0.1
-            )
-            if not ok:
+        # Prompt user for smoothing value
+        smoothing, ok = QInputDialog.getDouble(
+            self,
+            "GraXpert Smoothing Amount",
+            "Enter smoothing amount (0.0 to 1.0):",
+            decimals=2,
+            min=0.0,
+            max=1.0,
+            value=0.1
+        )
+        if not ok:
+            return  # User cancelled
+
+        # Save the current image as a TIFF file
+        input_basename = "input_image"
+        input_path = os.path.join(os.getcwd(), f"{input_basename}.tif")
+        save_image(self.image_manager.image, input_path, "tiff", "16-bit", None, is_mono=False)
+
+        # Output will have the same base name with `_GraXpert` suffix
+        output_basename = f"{input_basename}_GraXpert"
+        output_directory = os.getcwd()
+
+        # Determine the platform-specific GraXpert command
+        current_os = platform.system()
+        if current_os == "Windows":
+            graxpert_cmd = "GraXpert.exe"
+        elif current_os == "Darwin":  # macOS
+            graxpert_cmd = "/Applications/GraXpert.app/Contents/MacOS/GraXpert"
+        elif current_os == "Linux":
+            graxpert_cmd = self.get_graxpert_path()
+            if not graxpert_cmd:
                 return  # User cancelled
+        else:
+            QMessageBox.critical(self, "Unsupported OS", f"Unsupported operating system: {current_os}")
+            return
 
-            # Save the current image as a TIFF file
-            input_basename = "input_image"
-            input_path = os.path.join(os.getcwd(), f"{input_basename}.tif")
-            save_image(self.image_manager.image, input_path, "tiff", "16-bit", None, is_mono=False)
+        # Build the command
+        command = [
+            graxpert_cmd,
+            "-cmd", "background-extraction",
+            input_path,
+            "-cli",
+            "-smoothing", str(smoothing),
+            "-gpu", "true"
+        ]
 
-            # Output will have the same base name with `_GraXpert` suffix
-            output_basename = f"{input_basename}_GraXpert"
-            output_directory = os.getcwd()
-
-            # Determine the platform-specific GraXpert command
-            current_os = platform.system()
-            if current_os == "Windows":
-                graxpert_cmd = "GraXpert.exe"
-            elif current_os == "Darwin":  # macOS
-                graxpert_cmd = "/Applications/GraXpert.app/Contents/MacOS/GraXpert"
-            elif current_os == "Linux":
-                graxpert_cmd = self.get_graxpert_path()
-                if not graxpert_cmd:
-                    return  # User cancelled
-            else:
-                QMessageBox.critical(self, "Unsupported OS", f"Unsupported operating system: {current_os}")
-                return
-
-            # Build the command
-            command = [
-                graxpert_cmd,
-                "-cmd", "background-extraction",
-                input_path,
-                "-cli",
-                "-smoothing", str(smoothing),
-                "-gpu", "true"
-            ]
-
-            # Run the command
-            self.run_graxpert_command(command, output_basename, output_directory)
+        # Run the command
+        self.run_graxpert_command(command, output_basename, output_directory)
 
     def get_graxpert_path(self):
         """Prompt user to select the GraXpert path on Linux and save it."""
@@ -2011,6 +2057,151 @@ class CopySlotDialog(QDialog):
     def get_selected_slot(self):
         """Return the selected slot."""
         return self.selected_slot
+
+class CropTool(QDialog):
+    """A cropping tool using QGraphicsView for better rectangle handling."""
+    crop_applied = pyqtSignal(object)
+
+    def __init__(self, image_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Crop Tool")
+        self.setGeometry(150, 150, 800, 600)  # Initial size
+
+        self.original_image_data = image_data.copy()  # Keep a copy of the original image
+        self.image_data = image_data  # Displayed image (can be autostretched)
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView(self.scene)
+        self.pixmap_item = None
+
+        self.origin = QPointF()
+        self.current_rect = QRectF()
+        self.selection_rect_item = None
+        self.drawing = False
+
+        # Set up the layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.graphics_view)
+
+        # Buttons
+        self.autostretch_button = QPushButton("Toggle Autostretch")
+        self.autostretch_button.clicked.connect(self.toggle_autostretch)
+        layout.addWidget(self.autostretch_button)
+
+        self.crop_button = QPushButton("Apply Crop")
+        self.crop_button.clicked.connect(self.apply_crop)
+        layout.addWidget(self.crop_button)
+
+        self.setLayout(layout)
+
+        # Load and display the image
+        self.load_image()
+        self.graphics_view.viewport().installEventFilter(self)
+
+    def load_image(self):
+        """Load and display the image in the QGraphicsView."""
+        height, width, channels = self.image_data.shape
+        if channels == 3:
+            q_image = QImage(
+                (self.image_data * 255).astype(np.uint8).tobytes(),
+                width,
+                height,
+                3 * width,
+                QImage.Format_RGB888
+            )
+        else:
+            q_image = QImage(
+                (self.image_data * 255).astype(np.uint8).tobytes(),
+                width,
+                height,
+                width,
+                QImage.Format_Grayscale8
+            )
+        pixmap = QPixmap.fromImage(q_image)
+        self.pixmap_item = QGraphicsPixmapItem(pixmap)
+        self.scene.addItem(self.pixmap_item)
+        self.graphics_view.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
+
+    def eventFilter(self, source, event):
+        """Handle mouse events for drawing the cropping rectangle."""
+        if source is self.graphics_view.viewport():
+            if event.type() == event.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self.drawing = True
+                    self.origin = self.graphics_view.mapToScene(event.pos())
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                        self.selection_rect_item = None
+            elif event.type() == event.MouseMove:
+                if self.drawing:
+                    current_pos = self.graphics_view.mapToScene(event.pos())
+                    self.current_rect = QRectF(self.origin, current_pos).normalized()
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                    pen = QPen(QColor(255, 0, 0), 5, Qt.DashLine)
+                    self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
+            elif event.type() == event.MouseButtonRelease:
+                if event.button() == Qt.LeftButton and self.drawing:
+                    self.drawing = False
+                    current_pos = self.graphics_view.mapToScene(event.pos())
+                    self.current_rect = QRectF(self.origin, current_pos).normalized()
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                    pen = QPen(QColor(0, 255, 0), 5, Qt.SolidLine)
+                    self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
+        return super().eventFilter(source, event)
+
+    def toggle_autostretch(self):
+        """Apply autostretch for visualization purposes only."""
+        stretched_image = None
+        if len(self.original_image_data.shape) == 2:  # Mono image
+            stretched_image = stretch_mono_image(self.original_image_data, target_median=0.5)
+        elif len(self.original_image_data.shape) == 3:  # Color image
+            stretched_image = stretch_color_image(self.original_image_data, target_median=0.5, linked=False)
+        
+        if stretched_image is not None:
+            self.image_data = stretched_image
+            # Save rectangle data before clearing the scene
+            saved_rect = self.current_rect if not self.current_rect.isNull() else None
+
+            self.scene.clear()
+            self.load_image()
+
+            # Redraw the rectangle if it exists
+            if saved_rect:
+                pen = QPen(QColor(0, 255, 0), 5, Qt.SolidLine)
+                self.selection_rect_item = self.scene.addRect(saved_rect, pen)
+
+    def apply_crop(self):
+        """Crop the original image based on the selected rectangle."""
+        if not self.current_rect.isNull():
+            # Get the scene dimensions and scale accordingly
+            scene_rect = self.scene.sceneRect()
+            scale_x = self.original_image_data.shape[1] / scene_rect.width()
+            scale_y = self.original_image_data.shape[0] / scene_rect.height()
+
+            # Convert scene rectangle to image coordinates
+            x = int(self.current_rect.left() * scale_x)
+            y = int(self.current_rect.top() * scale_y)
+            w = int(self.current_rect.width() * scale_x)
+            h = int(self.current_rect.height() * scale_y)
+
+            # Ensure bounds are valid
+            x = max(0, min(x, self.original_image_data.shape[1] - 1))
+            y = max(0, min(y, self.original_image_data.shape[0] - 1))
+            w = max(1, min(w, self.original_image_data.shape[1] - x))
+            h = max(1, min(h, self.original_image_data.shape[0] - y))
+
+            # Crop the original image
+            cropped_image = self.original_image_data[y:y + h, x:x + w]
+
+            # Emit the cropped image to the parent
+            self.crop_applied.emit(cropped_image)
+
+            # Close the dialog
+            self.accept()
+        else:
+            QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying.")
+
 
 
 class ImageManager(QObject):
