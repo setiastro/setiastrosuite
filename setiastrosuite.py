@@ -6277,16 +6277,37 @@ class CosmicClarityTab(QWidget):
     
 
     def undo(self):
-        """Undo to the original image without changing zoom and scroll position."""
-        self.image_manager.undo()
-        self.redo_button.setEnabled(True)
-        self.undo_button.setEnabled(False)
+        """Undo to the previous image using ImageManager."""
+        if self.image_manager.can_undo():
+            # Perform undo operation
+            self.image_manager.undo()
+            
+            # Update the undo/redo button states
+            self.undo_button.setEnabled(self.image_manager.can_undo())
+            self.redo_button.setEnabled(self.image_manager.can_redo())
+            
+            # Optionally refresh the UI (e.g., display the updated image)
+            self.refresh_preview()
+            print("CosmicClarityTab: Undo operation performed.")
+        else:
+            print("CosmicClarityTab: No actions to undo.")
 
     def redo(self):
-        """Redo to the processed image without changing zoom and scroll position."""
-        self.image_manager.redo()
-        self.redo_button.setEnabled(False)
-        self.undo_button.setEnabled(True)
+        """Redo to the next image using ImageManager."""
+        if self.image_manager.can_redo():
+            # Perform redo operation
+            self.image_manager.redo()
+            
+            # Update the undo/redo button states
+            self.undo_button.setEnabled(self.image_manager.can_undo())
+            self.redo_button.setEnabled(self.image_manager.can_redo())
+            
+            # Optionally refresh the UI (e.g., display the updated image)
+            self.refresh_preview()
+            print("CosmicClarityTab: Redo operation performed.")
+        else:
+            print("CosmicClarityTab: No actions to redo.")
+
 
 
     def restore_image(self, image_array):
@@ -6628,13 +6649,6 @@ class CosmicClarityTab(QWidget):
     def store_processed_image(self, processed_image):
         """Store the processed image and update the ImageManager."""
         if processed_image is not None:
-            # Store a copy of the processed image
-            self.processed_image = processed_image.copy()
-            
-            # Enable the undo button and reset the redo button
-            self.undo_button.setEnabled(True)
-            self.redo_button.setEnabled(False)  # Reset redo button for new process
-            
             # Prepare metadata for the ImageManager
             metadata = {
                 'file_path': self.loaded_image_path,      # Ensure this is correctly set elsewhere
@@ -6642,16 +6656,16 @@ class CosmicClarityTab(QWidget):
                 'bit_depth': self.bit_depth,              # Ensure this is correctly set elsewhere
                 'is_mono': self.is_mono                   # Ensure this is correctly set elsewhere
             }
-            
-            # Update the ImageManager with the new image and metadata
+
+            # Use ImageManager's set_image method to manage undo/redo stack
             if self.image_manager:
                 try:
-                    self.image_manager.update_image(updated_image=self.processed_image, metadata=metadata)
-                    print("FullCurvesTab: Processed image stored in ImageManager.")
+                    self.image_manager.set_image(processed_image, metadata)
+                    print("CosmicClarityTab: Processed image stored in ImageManager with undo/redo support.")
                 except Exception as e:
                     # Handle potential errors during the update
-                    QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
-                    print(f"Error updating ImageManager: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to store processed image in ImageManager:\n{e}")
+                    print(f"Error storing processed image in ImageManager: {e}")
             else:
                 print("ImageManager is not initialized.")
                 QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the processed image.")
@@ -9983,7 +9997,7 @@ class FullCurvesTab(QWidget):
                 'bit_depth': self.bit_depth,
                 'is_mono': self.is_mono
             }
-            self.image_manager.update_image(updated_image=last_state)
+            self.image_manager.update_image(updated_image=last_state, metadata=metadata)
             print("Undo: Image reverted in ImageManager.")
 
         # Update the Undo button state
