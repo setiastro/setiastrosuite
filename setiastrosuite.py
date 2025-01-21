@@ -214,7 +214,7 @@ class AstroEditingSuite(QMainWindow):
         functions_menu = menubar.addMenu("Functions")
 
         gradient_removal_icon = QIcon(abeicon_path)  # Replace with the actual path variable
-        gradient_removal_action = QAction(gradient_removal_icon, "Remove Gradient", self)
+        gradient_removal_action = QAction(gradient_removal_icon, "Remove Gradient with SetiAstro ABE", self)
         gradient_removal_action.setShortcut('Ctrl+Shift+G')  # Assign a keyboard shortcut
         gradient_removal_action.setStatusTip('Remove gradient from the current image')
         gradient_removal_action.triggered.connect(self.remove_gradient)
@@ -536,7 +536,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.6')
+        self.setWindowTitle('Seti Astro\'s Suite V2.6.1')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
     def remove_gradient(self):
@@ -3028,7 +3028,16 @@ class GradientRemovalDialog(QDialog):
         total_background = poly_background + rbf_background
         gradient_background = self.unstretch_image(total_background)
 
+                # Ensure both images are 3-channel RGB
+        # Ensure both images are 3-channel RGB
+        corrected_image = self.ensure_rgb(corrected_image)
+        gradient_background = self.ensure_rgb(gradient_background)
+
+
+        print("[DEBUG] Step 2 Completed.")
+
         # ------------------ Emit Results ------------------
+        print("[DEBUG] Emitting results...")
         self.status_label.setText("Processing Complete")
         self.process_button.setEnabled(True)
         QApplication.processEvents()
@@ -3040,6 +3049,26 @@ class GradientRemovalDialog(QDialog):
         self.accept()
 
     # ------------------ Helper Functions ------------------
+    # Ensure corrected_image and gradient_background are strictly 3-channel RGB
+    def ensure_rgb(self,image):
+        """
+        Ensures the given image is 3-channel RGB.
+        Args:
+            image: The input NumPy array (can be 2D or 3D with a single channel).
+        Returns:
+            A 3D NumPy array with shape (height, width, 3).
+        """
+        if image.ndim == 2:  # Grayscale image
+            return np.repeat(image[:, :, np.newaxis], 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 1:  # Single-channel image with an extra dimension
+            return np.repeat(image, 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 3:  # Already RGB
+            return image
+        else:
+            raise ValueError(f"Unexpected image shape: {image.shape}")
+
+
+
 
     def stretch_image(self, image):
         """
@@ -7453,35 +7482,42 @@ class CosmicClarityTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if slot == self.image_manager.current_slot:
-            self.loaded_image_path = metadata.get('file_path', None)  # Assuming metadata contains file path
+            self.loaded_image_path = metadata.get('file_path', None)
             self.original_header = metadata.get('original_header', None)
             self.bit_depth = metadata.get('bit_depth', None)
             self.is_mono = metadata.get('is_mono', False)
 
             # Ensure image is in numpy array format
             if not isinstance(image, np.ndarray):
-                image = np.array(image)  # Convert to numpy array if not already
+                image = np.array(image)
+
+            # Handle mono and color images
+            if self.is_mono:
+                # Squeeze the singleton dimension for grayscale images if it exists
+                if len(image.shape) == 3 and image.shape[2] == 1:
+                    print(f"Mono image detected with shape: {image.shape}. Squeezing singleton dimension.")
+                    image = np.squeeze(image, axis=2)  # Convert (H, W, 1) to (H, W)
+
+                # Convert 2D grayscale to RGB by stacking it
+                if len(image.shape) == 2:
+                    print(f"Converting mono image with shape: {image.shape} to 3-channel RGB.")
+                    image = np.stack([image] * 3, axis=-1)
+
+            elif len(image.shape) == 3 and image.shape[2] not in [1, 3]:
+                # Catch unexpected formats like (H, W, C) where C is not 1 or 3
+                raise ValueError(f"Unexpected image format with shape {image.shape}. Must be RGB or Grayscale.")
 
             self.image = image
-
-            # Handle mono images by checking the dimensions before passing to display functions
-            if self.is_mono:
-                # For mono images, ensure the image is 2D (height, width) rather than (height, width, 1)
-                if len(image.shape) == 3 and image.shape[2] == 1:
-                    image = np.squeeze(image, axis=2)  # Remove singleton channel
-                # If already 2D (height, width), we keep it as is
-            else:
-                # For color images, ensure the image has 3 channels (RGB)
-                if len(image.shape) == 2:
-                    raise ValueError("Unexpected image format! Image must be either RGB or Grayscale.")
 
             # Show the image using the show_image method
             self.show_image(image)
 
             # Update the image display (it will account for zoom and other parameters)
             self.update_image_display()
-            
+
             print(f"CosmicClarityTab: Image updated from ImageManager slot {slot}.")
+
+
 
 
 
@@ -7570,29 +7606,19 @@ class CosmicClarityTab(QWidget):
 
     def show_image(self, image=None):
         """Display the loaded image or a specified image, preserving zoom and scroll position."""
-
         if image is None:
-            image = self.image  # Use the current image from ImageManager
-
+            image = self.image
 
         if image is None:
             print("[ERROR] No image to display.")
             QMessageBox.warning(self, "No Image", "No image data available to display.")
-            return False  # Indicate failure
-
-        if not isinstance(image, np.ndarray):
-            print(f"[ERROR] Invalid image data. Expected a NumPy array, got {type(image)}.")
-            QMessageBox.critical(self, "Error", "Invalid image data. Cannot display the image.")
-            return False  # Indicate failure
-
-
+            return False
 
         # Save the current scroll position if it exists
         current_scroll_position = (
             self.scroll_area.horizontalScrollBar().value(),
             self.scroll_area.verticalScrollBar().value()
         )
-
 
         # Stretch and display the image
         display_image = image.copy()
@@ -7601,85 +7627,64 @@ class CosmicClarityTab(QWidget):
         # Determine if the image is mono based on dimensions
         is_mono = display_image.ndim == 2 or (display_image.ndim == 3 and display_image.shape[2] == 1)
 
-
         if self.auto_stretch_button.isChecked():
-
-            if is_mono:
-                if display_image.ndim == 2:
-                    stretched_mono = stretch_mono_image(display_image, target_median=0.25)
-
+            try:
+                if is_mono:
+                    print("Processing mono image for display...")
+                    # Stretch mono image and convert to RGB
+                    stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
+                    display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert mono to RGB for display
                 else:
-                    stretched_mono = stretch_mono_image(display_image[:, :, 0], target_median=0.25)
-
-                # Convert to RGB by stacking
-                display_image = np.stack([stretched_mono] * 3, axis=-1)
-
-            else:
-                display_image = stretch_color_image(display_image, target_median=0.25, linked=False)
-
+                    print("Processing color image for display...")
+                    display_image = stretch_color_image(display_image, target_median, linked=False)
+            except Exception as e:
+                print(f"[ERROR] Error during image stretching: {e}")
+                QMessageBox.critical(self, "Error", f"Error stretching image for display:\n{e}")
+                return False
         else:
             print("AutoStretch is disabled.")
 
         # Convert to QImage for display
         try:
             display_image_uint8 = (display_image * 255).astype(np.uint8)
-
         except Exception as e:
             print(f"[ERROR] Error converting image to uint8: {e}")
             QMessageBox.critical(self, "Error", f"Error processing image for display:\n{e}")
-            return False  # Indicate failure
+            return False
 
-        if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
-            height, width, _ = display_image_uint8.shape
-            bytes_per_line = 3 * width
-            qimage = QImage(
-                display_image_uint8.data, 
-                width, 
-                height, 
-                bytes_per_line, 
-                QImage.Format_RGB888
-            )
+        print(f"Image shape after conversion to uint8: {display_image_uint8.shape}")
 
-        elif display_image_uint8.ndim == 2:  # Grayscale image
-            height, width = display_image_uint8.shape
-            bytes_per_line = width
-            qimage = QImage(
-                display_image_uint8.data, 
-                width, 
-                height, 
-                bytes_per_line, 
-                QImage.Format_Grayscale8
-            )
-
-        else:
-            print("[ERROR] Unexpected image format! Image must be either RGB or Grayscale.")
-            QMessageBox.critical(self, "Error", "Unexpected image format! Image must be either RGB or Grayscale.")
-            return False  # Indicate failure
+        try:
+            if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
+                height, width, _ = display_image_uint8.shape
+                bytes_per_line = 3 * width
+                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            elif display_image_uint8.ndim == 2:  # Grayscale image
+                height, width = display_image_uint8.shape
+                bytes_per_line = width
+                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+            else:
+                print("[ERROR] Unexpected image format!")
+                return False
+        except Exception as e:
+            print(f"[ERROR] Error creating QImage: {e}")
+            return False
 
         # Create QPixmap from QImage
         pixmap = QPixmap.fromImage(qimage)
-
-
         if pixmap.isNull():
             print("[ERROR] Failed to convert QImage to QPixmap.")
-            QMessageBox.critical(self, "Error", "Failed to display the image.")
-            return False  # Indicate failure
+            return False
 
-        # Set pixmap without applying additional scaling (keep the original zoom level)
         self.image_label.setPixmap(pixmap)
-
-
-        # Force the label to update
         self.image_label.repaint()
         self.image_label.update()
-
 
         # Restore the previous scroll position
         self.scroll_area.horizontalScrollBar().setValue(current_scroll_position[0])
         self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
 
-        return True  # Indicate success
-
+        return True
 
 
 
