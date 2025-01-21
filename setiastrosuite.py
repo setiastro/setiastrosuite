@@ -489,6 +489,16 @@ class AstroEditingSuite(QMainWindow):
             quicknav_menu.addAction(action)
 
         # --------------------
+        # Preferences Menu
+        # --------------------
+        preferences_menu = menubar.addMenu("Preferences")
+        preferences_action = QAction("Open Preferences", self)
+        preferences_action.setStatusTip('Modify application settings')
+        preferences_action.triggered.connect(self.open_preferences_dialog)
+        preferences_menu.addAction(preferences_action)
+
+
+        # --------------------
         # Apply Default Theme
         # --------------------
         self.apply_theme(self.current_theme)
@@ -496,8 +506,97 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.5.1')
-        self.setGeometry(100, 100, 1200, 800)  # Set window size as needed
+        self.setWindowTitle('Seti Astro\'s Suite V2.5.2')
+        self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
+
+    def open_preferences_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Preferences")
+        layout = QVBoxLayout(dialog)
+        
+        # Display stored settings
+        settings_form = QFormLayout()
+        
+        # Add settings fields dynamically
+        settings_fields = {
+            "GraXpert Path": ("graxpert/path", self.settings.value("graxpert/path", "")),
+            "StarNet Executable Path": ("starnet/exe_path", self.settings.value("starnet/exe_path", "")),
+            "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", ""))
+        }
+        
+        # Create fields for each setting with folder selection icons
+        input_fields = {}
+        for label, (key, value) in settings_fields.items():
+            field_widget = QWidget()
+            field_layout = QHBoxLayout(field_widget)
+            field_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Text field
+            field = QLineEdit(value)
+            input_fields[key] = field
+            field_layout.addWidget(field)
+            
+            # Folder selection button
+            select_button = QPushButton("...")
+            select_button.setFixedWidth(30)
+            select_button.setToolTip(f"Select folder for {label}")
+            select_button.clicked.connect(lambda _, f=field: self.select_folder(f))
+            field_layout.addWidget(select_button)
+            
+            settings_form.addRow(label, field_widget)
+        
+        # Add the other fields without folder selection (e.g., Astrometry API Key, Latitude, etc.)
+        additional_fields = {
+            "Astrometry API Key": ("astrometry_api_key", self.settings.value("astrometry_api_key", "")),
+            "Latitude": ("latitude", self.settings.value("latitude", "")),
+            "Longitude": ("longitude", self.settings.value("longitude", "")),
+            "Date": ("date", self.settings.value("date", "")),
+            "Time": ("time", self.settings.value("time", "")),
+            "Timezone": ("timezone", self.settings.value("timezone", "")),
+            "Minimum Altitude": ("min_altitude", self.settings.value("min_altitude", ""))
+        }
+        for label, (key, value) in additional_fields.items():
+            field = QLineEdit(value)
+            settings_form.addRow(label, field)
+            input_fields[key] = field
+        
+        layout.addLayout(settings_form)
+        
+        # Add Clear and Save buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Reset | QDialogButtonBox.Cancel)
+        
+        # Save button logic
+        buttons.accepted.connect(lambda: self.save_preferences(input_fields, dialog))
+        
+        # Clear button logic
+        buttons.button(QDialogButtonBox.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
+        
+        # Close dialog on cancel
+        buttons.rejected.connect(dialog.reject)
+        
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def select_folder(self, field):
+        folder_path = QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder_path:
+            field.setText(folder_path)
+
+    def save_preferences(self, input_fields, dialog):
+        for key, field in input_fields.items():
+            self.settings.setValue(key, field.text())
+        dialog.accept()
+        QMessageBox.information(self, "Preferences Saved", "Settings have been updated successfully.")
+
+    def clear_preferences(self, input_fields):
+        reply = QMessageBox.question(self, "Clear Preferences", "Are you sure you want to clear all preferences?", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            for key in input_fields.keys():
+                self.settings.remove(key)
+                input_fields[key].clear()
+            QMessageBox.information(self, "Preferences Cleared", "All settings have been reset.")
+
+
 
     def open_crop_tool(self):
         """Open the crop tool to crop the current image."""
