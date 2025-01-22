@@ -222,6 +222,7 @@ class AstroEditingSuite(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowIcon(QIcon(icon_path))
+        self.setDockNestingEnabled(True)
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
         self.image_manager.image_changed.connect(self.update_file_name)
@@ -444,6 +445,7 @@ class AstroEditingSuite(QMainWindow):
         # Toolbar
         # --------------------
         filebar = QToolBar("File Toolbar")
+        filebar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(filebar)
 
         # Add Open File icon and action
@@ -476,6 +478,7 @@ class AstroEditingSuite(QMainWindow):
 
 
         toolbar = QToolBar("Main Toolbar")
+        toolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(toolbar)
 
         # Add "Copy Slot" Button to Toolbar with Icon
@@ -638,7 +641,7 @@ class AstroEditingSuite(QMainWindow):
         # Initialize the GradientRemovalDialog with the current image
         gradient_dialog = GradientRemovalDialog(image=self.image_manager.image.copy(), parent=self)
         gradient_dialog.processing_completed.connect(self.handle_gradient_removal)
-        gradient_dialog.exec_()
+        gradient_dialog.exec()
 
 
     def handle_gradient_removal(self, corrected_image, gradient_background):
@@ -744,13 +747,13 @@ class AstroEditingSuite(QMainWindow):
         layout.addLayout(settings_form)
         
         # Add Clear and Save buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Reset | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Reset | QDialogButtonBox.StandardButton.Cancel)
         
         # Save button logic
         buttons.accepted.connect(lambda: self.save_preferences(input_fields, dialog))
         
         # Clear button logic
-        buttons.button(QDialogButtonBox.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
+        buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
         
         # Close dialog on cancel
         buttons.rejected.connect(dialog.reject)
@@ -793,7 +796,7 @@ class AstroEditingSuite(QMainWindow):
         # Open the Crop Tool
         crop_tool = CropTool(self.image_manager.image, self)
         crop_tool.crop_applied.connect(self.apply_cropped_image)
-        crop_tool.exec_()
+        crop_tool.exec()
 
     def apply_cropped_image(self, cropped_image):
         """Apply the cropped image to the current slot."""
@@ -820,7 +823,7 @@ class AstroEditingSuite(QMainWindow):
     def rgb_combination(self):
         """Handle the RGB Combination action."""
         dialog = RGBCombinationDialog(self, image_manager=self.image_manager)
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             combined_rgb = dialog.rgb_image  # Numpy array with shape (H, W, 3) normalized to [0,1]
             metadata = {
                 'file_path': "RGB Combination",
@@ -998,14 +1001,13 @@ class AstroEditingSuite(QMainWindow):
 
         if not graxpert_path or not os.path.exists(graxpert_path):
             QMessageBox.information(self, "GraXpert Path", "Please select the GraXpert executable.")
-            options = QFileDialog.Options()
-            options |= QFileDialog.ReadOnly
+
             graxpert_path, _ = QFileDialog.getOpenFileName(
                 self,
                 "Select GraXpert Executable",
                 "",
-                "Executable Files (*)",
-                options=options
+                "Executable Files (*)"
+
             )
             if not graxpert_path:
                 QMessageBox.warning(self, "Cancelled", "GraXpert path selection was cancelled.")
@@ -1043,7 +1045,7 @@ class AstroEditingSuite(QMainWindow):
         cancel_button.clicked.connect(thread.terminate)
 
         thread.start()
-        dialog.exec_()
+        dialog.exec()
 
     def on_graxpert_finished(self, return_code, output_basename, output_directory, dialog):
         """Handle GraXpert process completion."""
@@ -1227,9 +1229,9 @@ class AstroEditingSuite(QMainWindow):
 
         # Open the CopySlotDialog
         dialog = CopySlotDialog(self, available_slots)
-        result = dialog.exec_()
+        result = dialog.exec()
 
-        if result == QDialog.Accepted:
+        if result == QDialog.DialogCode.Accepted:
             target_slot_str = dialog.get_selected_slot()
             target_slot_num = int(target_slot_str.split()[-1])  # Extract slot number
             print(f"User selected to copy to {target_slot_str}.")
@@ -1592,7 +1594,7 @@ class AstroEditingSuite(QMainWindow):
             dialog_msg.setWindowTitle("Stretching Image")
             dialog_msg.setText("Stretching the image for StarNet processing...")
             dialog_msg.setStandardButtons(QMessageBox.Ok)
-            dialog_msg.exec_()
+            dialog_msg.exec()
 
             # Apply stretch
             stretched_image = self.stretch_image(processing_image)
@@ -1945,8 +1947,8 @@ class AstroEditingSuite(QMainWindow):
         Prompts the user to select the StarNet executable based on the operating system.
         Saves the path using QSettings for future use.
         """
-        options = QFileDialog.Options()
-        options |= QFileDialog.ReadOnly
+
+
         current_os = platform.system()
 
         if current_os == "Windows":
@@ -1962,8 +1964,8 @@ class AstroEditingSuite(QMainWindow):
             self,
             "Select StarNet Executable",
             "",
-            filter_str,
-            options=options
+            filter_str
+
         )
         if exe_path:
             # For Windows, ensure the file has .exe extension
@@ -2001,27 +2003,27 @@ class AstroEditingSuite(QMainWindow):
     def open_clahe_dialog(self):
         """Opens the CLAHE dialog window."""
         dialog = CLAHEDialog(self.image_manager, self)
-        dialog.exec_()
+        dialog.exec()
 
     def open_morpho_dialog(self):
         """Opens the Morphological Operations dialog window."""
         dialog = MorphologyDialog(self.image_manager, self)
-        dialog.exec_()
+        dialog.exec()
 
     def open_whitebalance_dialog(self):
         """Opens the White Balance dialog window."""
         dialog = WhiteBalanceDialog(self.image_manager, self)
-        dialog.exec_()
+        dialog.exec()
 
     def open_background_neutralization_dialog(self):
         """Opens the Background Neutralization dialog window."""
         dialog = BackgroundNeutralizationDialog(self.image_manager, self)
-        dialog.exec_()
+        dialog.exec()
 
     def open_remove_green_dialog(self):
         """Opens the Remove Green dialog window."""
         dialog = RemoveGreenDialog(self.image_manager, self)
-        dialog.exec_()
+        dialog.exec()
 
 
     def dragEnterEvent(self, event):
@@ -2424,7 +2426,7 @@ class CropTool(QDialog):
                 width,
                 height,
                 3 * width,
-                QImage.Format_RGB888
+                QImage.Format.Format_RGB888
             )
         else:
             q_image = QImage(
@@ -2432,7 +2434,7 @@ class CropTool(QDialog):
                 width,
                 height,
                 width,
-                QImage.Format_Grayscale8
+                QImage.Format.Format_Grayscale8
             )
         pixmap = QPixmap.fromImage(q_image)
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
@@ -2464,7 +2466,7 @@ class CropTool(QDialog):
                     self.current_rect = QRectF(self.origin, current_pos).normalized()
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
-                    pen = QPen(QColor(0, 255, 0), 5, Qt.SolidLine)
+                    pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
                     self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
         return super().eventFilter(source, event)
 
@@ -2486,7 +2488,7 @@ class CropTool(QDialog):
 
             # Redraw the rectangle if it exists
             if saved_rect:
-                pen = QPen(QColor(0, 255, 0), 5, Qt.SolidLine)
+                pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
                 self.selection_rect_item = self.scene.addRect(saved_rect, pen)
 
     def apply_crop(self):
@@ -2803,7 +2805,7 @@ class GradientRemovalDialog(QDialog):
                 scaled_width,
                 scaled_height,
                 display_image.strides[0],
-                QImage.Format_Grayscale8,
+                QImage.Format.Format_Grayscale8,
             )
         else:
             # Color
@@ -2812,7 +2814,7 @@ class GradientRemovalDialog(QDialog):
                 scaled_width,
                 scaled_height,
                 display_image.strides[0],
-                QImage.Format_RGB888,
+                QImage.Format.Format_RGB888,
             )
 
         self.base_pixmap = QPixmap.fromImage(q_img)
@@ -2937,7 +2939,7 @@ class GradientRemovalDialog(QDialog):
                 scaled_width,
                 scaled_height,
                 display_image.strides[0],
-                QImage.Format_Grayscale8,
+                QImage.Format.Format_Grayscale8,
             )
         else:
             # Color
@@ -2946,7 +2948,7 @@ class GradientRemovalDialog(QDialog):
                 scaled_width,
                 scaled_height,
                 display_image.strides[0],
-                QImage.Format_RGB888,
+                QImage.Format.Format_RGB888,
             )
 
         # Update the pixmap with the stretched image
@@ -2966,7 +2968,7 @@ class GradientRemovalDialog(QDialog):
         painter = QPainter(self.pixmap)
 
         # Draw all finalized exclusion polygons in semi-transparent green
-        pen = QPen(QColor(0, 255, 0), 2, Qt.SolidLine)
+        pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine)
         brush = QColor(0, 255, 0, 50)  # Semi-transparent
         painter.setPen(pen)
         painter.setBrush(brush)
@@ -3768,7 +3770,7 @@ class ImagePreview(QWidget):
     closed = pyqtSignal(int)
     
     def __init__(self, image_data, slot, parent=None):
-        super().__init__(parent, Qt.Window)
+        super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle(f"Preview - Slot {slot}")
         self.image_data = image_data  # Numpy array containing the image
         self.zoom_factor = 1.0
@@ -3847,22 +3849,22 @@ class ImagePreview(QWidget):
             if event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._panning = True
-                    self._pan_start_x = event.x()
-                    self._pan_start_y = event.y()
-                    self.scroll_area.viewport().setCursor(Qt.ClosedHandCursor)
+                    self._pan_start_x = event.position().x()
+                    self._pan_start_y = event.position().y()
+                    self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                     return True  # Event handled
             elif event.type() == QEvent.Type.MouseMove:
                 if self._panning and (event.buttons() & Qt.MouseButton.LeftButton):
-                    delta_x = event.x() - self._pan_start_x
-                    delta_y = event.y() - self._pan_start_y
+                    delta_x = event.position().x() - self._pan_start_x
+                    delta_y = event.position().y() - self._pan_start_y
                     # Adjust scroll bars
-                    new_h = self.scroll_area.horizontalScrollBar().value() - delta_x
-                    new_v = self.scroll_area.verticalScrollBar().value() - delta_y
+                    new_h = self.scroll_area.horizontalScrollBar().value() - int(delta_x)
+                    new_v = self.scroll_area.verticalScrollBar().value() - int(delta_y)
                     self.scroll_area.horizontalScrollBar().setValue(new_h)
                     self.scroll_area.verticalScrollBar().setValue(new_v)
                     # Update the start position
-                    self._pan_start_x = event.x()
-                    self._pan_start_y = event.y()
+                    self._pan_start_x = event.position().x()
+                    self._pan_start_y = event.position().y()
                     return True  # Event handled
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -3919,11 +3921,11 @@ class ImagePreview(QWidget):
         if len(image_data_normalized.shape) == 2:  # Grayscale image
             height, width = image_data_normalized.shape
             bytes_per_line = width
-            qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+            qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
         elif len(image_data_normalized.shape) == 3 and image_data_normalized.shape[2] == 3:  # RGB image
             height, width, channels = image_data_normalized.shape
             bytes_per_line = 3 * width
-            qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage = QImage(image_data_normalized.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         else:
             QMessageBox.warning(self, "Invalid Image", "Unsupported image format for display.")
             return
@@ -4376,7 +4378,7 @@ class BackgroundNeutralizationDialog(QDialog):
                     width,
                     height,
                     3 * width,
-                    QImage.Format_RGB888
+                    QImage.Format.Format_RGB888
                 )
             else:
                 # Handle other channel numbers if necessary
@@ -4384,7 +4386,7 @@ class BackgroundNeutralizationDialog(QDialog):
                     (image * 255).astype(np.uint8).tobytes(),
                     width,
                     height,
-                    QImage.Format_Grayscale8
+                    QImage.Format.Format_Grayscale8
                 )
             pixmap = QPixmap.fromImage(q_image)
             self.pixmap_item = QGraphicsPixmapItem(pixmap)
@@ -4436,7 +4438,7 @@ class BackgroundNeutralizationDialog(QDialog):
                         # Redraw the rectangle to ensure it's persistent
                         if self.selection_rect_item:
                             self.scene.removeItem(self.selection_rect_item)
-                        pen = QPen(QColor(255, 0, 0), 2, Qt.SolidLine)
+                        pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.SolidLine)
                         self.selection_rect_item = QGraphicsRectItem(self.current_rect)
                         self.selection_rect_item.setPen(pen)
                         self.scene.addItem(self.selection_rect_item)
@@ -4752,7 +4754,7 @@ class CLAHEDialog(QDialog):
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         height, width, channel = image_rgb.shape
         bytes_per_line = 3 * width
-        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(q_image)
 
         # Update the existing pixmap item
@@ -5011,7 +5013,7 @@ class MorphologyDialog(QDialog):
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         height, width, channel = image_rgb.shape
         bytes_per_line = 3 * width
-        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        q_image = QImage(image_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         pixmap = QPixmap.fromImage(q_image)
 
         # Update the existing pixmap item
@@ -5249,7 +5251,7 @@ class WhiteBalanceDialog(QDialog):
                 # Convert the image with stars to QImage and then to QPixmap
                 height, width, channel = image_with_stars.shape
                 bytes_per_line = 3 * width
-                q_image = QImage(image_with_stars.data, width, height, bytes_per_line, QImage.Format_BGR888)
+                q_image = QImage(image_with_stars.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
                 pixmap = QPixmap.fromImage(q_image).scaled(
                     self.star_image_label.width(),
                     self.star_image_label.height(),
@@ -5717,13 +5719,13 @@ class XISFViewer(QWidget):
             bytes_per_line = channels * width
 
             if im_data.dtype == np.uint8:
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
             elif im_data.dtype == np.uint16:
                 im_data = (im_data / 256).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
             elif im_data.dtype in [np.float32, np.float64]:
                 im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
             else:
                 print(f"Unsupported color image format: {im_data.dtype}")
                 return
@@ -6226,9 +6228,7 @@ class XISFViewer(QWidget):
         if not self.file_meta and not self.image_meta:
             QMessageBox.warning(self, "Warning", "No metadata to save.")
             return
-
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", "", "CSV Files (*.csv);;All Files (*)", options=options)
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", "", "CSV Files (*.csv);;All Files (*)")
         if file_path:
             try:
                 # Flatten metadata function
@@ -6495,7 +6495,7 @@ class BlinkTab(QWidget):
     def on_current_item_changed(self, current, previous):
         """Ensure the selected item is visible by scrolling to it."""
         if current:
-            self.fileTree.scrollToItem(current, QAbstractItemView.SelectionMode.PositionAtCenter)
+            self.fileTree.scrollToItem(current, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def previous_item(self):
         """Select the previous item in the TreeWidget."""
@@ -6876,7 +6876,7 @@ class BlinkTab(QWidget):
             delete_action.triggered.connect(lambda: self.delete_items())
             menu.addAction(delete_action)
 
-            menu.exec_(self.fileTree.mapToGlobal(pos))
+            menu.exec(self.fileTree.mapToGlobal(pos))
 
     def rename_item(self, item):
         """Allow the user to rename the selected image."""
@@ -6945,7 +6945,7 @@ class BlinkTab(QWidget):
         dialog_layout.addLayout(button_layout)
 
         # Show the dialog and handle user input
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             prefix = prefix_field.text().strip()
             suffix = suffix_field.text().strip()
 
@@ -7172,9 +7172,9 @@ class BlinkTab(QWidget):
         img_data = img_array.tobytes()  # This converts the image to a byte buffer
 
         if img_array.ndim == 3:  # RGB Image
-            return QImage(img_data, w, h, 3 * w, QImage.Format_RGB888)
+            return QImage(img_data, w, h, 3 * w, QImage.Format.Format_RGB888)
         else:  # Grayscale Image
-            return QImage(img_data, w, h, w, QImage.Format_Grayscale8)
+            return QImage(img_data, w, h, w, QImage.Format.Format_Grayscale8)
 
 
 
@@ -7451,12 +7451,12 @@ class CosmicClarityTab(QWidget):
                 # Grayscale image
                 height, width = np_img.shape
                 bytes_per_line = width
-                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
             elif len(np_img.shape) == 3 and np_img.shape[2] == 3:
                 # RGB image
                 height, width, channels = np_img.shape
                 bytes_per_line = 3 * width
-                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                return QImage(np_img.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         else:
             print("Image format not supported for conversion to QImage.")
             return None
@@ -7736,11 +7736,11 @@ class CosmicClarityTab(QWidget):
             if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
                 height, width, _ = display_image_uint8.shape
                 bytes_per_line = 3 * width
-                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
             elif display_image_uint8.ndim == 2:  # Grayscale image
                 height, width = display_image_uint8.shape
                 bytes_per_line = width
-                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
             else:
                 print("[ERROR] Unexpected image format!")
                 return False
@@ -7801,12 +7801,12 @@ class CosmicClarityTab(QWidget):
             # RGB image
             height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
         elif display_image_uint8.ndim == 2:  # Grayscale image
             print("Detected Grayscale image.")
             height, width = display_image_uint8.shape
             bytes_per_line = width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
         else:
             print("Unexpected image format!")
             print(f"Image dimensions: {display_image_uint8.ndim}")
@@ -8000,7 +8000,7 @@ class CosmicClarityTab(QWidget):
 
         # Use QProcess instead of subprocess
         self.process_q = QProcess(self)
-        self.process_q.setProcessChannelMode(QProcess.MergedChannels)  # Combine stdout/stderr
+        self.process_q.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)  # Combine stdout/stderr
 
         # Connect signals
         self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
@@ -8023,7 +8023,7 @@ class CosmicClarityTab(QWidget):
 
         self.wait_dialog = WaitDialog(self)
         self.wait_dialog.cancelled.connect(self.on_wait_cancelled)
-        self.wait_dialog.setWindowModality(Qt.NonModal)
+        self.wait_dialog.setWindowModality(Qt.WindowModality.NonModal)
         self.wait_dialog.show()
 
         self.wait_thread.start()
@@ -8271,7 +8271,7 @@ class CosmicClarityTab(QWidget):
 
         # Use QProcess (already defined in run_cosmic_clarity)
         self.process_q = QProcess(self)
-        self.process_q.setProcessChannelMode(QProcess.MergedChannels)
+        self.process_q.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
         self.process_q.finished.connect(self.qprocess_finished)
 
@@ -8295,7 +8295,7 @@ class CosmicClarityTab(QWidget):
         # Use the same WaitDialog
         self.wait_dialog = WaitDialog(self)
         self.wait_dialog.cancelled.connect(self.on_wait_cancelled)
-        self.wait_dialog.setWindowModality(Qt.NonModal)
+        self.wait_dialog.setWindowModality(Qt.WindowModality.NonModal)
         self.wait_dialog.show()
 
         self.wait_thread.start()
@@ -8341,11 +8341,11 @@ class CosmicClarityTab(QWidget):
             return
 
         # Prompt user for the file path and format
-        options = QFileDialog.Options()
+
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Save Processed Image", "", 
-            "TIFF Files (*.tif *.tiff);;PNG Files (*.png);;FITS Files (*.fits *.fit)", 
-            options=options
+            "TIFF Files (*.tif *.tiff);;PNG Files (*.png);;FITS Files (*.fits *.fit)"
+
         )
         
         if not save_path:
@@ -8450,7 +8450,7 @@ class PreviewDialog(QDialog):
     def __init__(self, np_image, parent_tab=None, is_mono=False):
         super().__init__(parent=parent_tab)
         self.setWindowTitle("Select Preview Area")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowContextHelpButtonHint | Qt.MSWindowsFixedSizeDialogHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowContextHelpButtonHint | Qt.WindowType.MSWindowsFixedSizeDialogHint)
         self.setFixedSize(640, 480)  # Fix the size to 640x480
         self.autostretch_enabled = False  # Autostretch toggle for preview
         self.is_mono = is_mono  # Store is_mono flag
@@ -8520,12 +8520,12 @@ class PreviewDialog(QDialog):
             # RGB image
             height, width, channels = display_image_uint8.shape
             bytes_per_line = 3 * width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
         elif len(display_image_uint8.shape) == 2:
             # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
         else:
             raise ValueError(f"Unexpected image shape: {display_image_uint8.shape}")
 
@@ -8661,7 +8661,7 @@ class PreviewDialog(QDialog):
 
     def convert_qimage_to_numpy(self, qimage):
         """Convert QImage to a 32-bit float numpy array, preserving the 32-bit precision."""
-        qimage = qimage.convertToFormat(QImage.Format_RGB888)
+        qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
         
         width = qimage.width()
         height = qimage.height()
@@ -8895,7 +8895,7 @@ class CosmicClaritySatelliteTab(QWidget):
                     image, _, _, is_mono = load_image(file_path)
                     if image is not None:
                         self.current_preview_dialog = ImagePreviewDialog(image, is_mono=is_mono)  # Store reference
-                        self.current_preview_dialog.setAttribute(Qt.WA_DeleteOnClose)  # Ensure cleanup on close
+                        self.current_preview_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # Ensure cleanup on close
                         self.current_preview_dialog.show()  # Open non-blocking dialog
                     else:
                         QMessageBox.critical(self, "Error", "Failed to load image for preview.")
@@ -8906,7 +8906,7 @@ class CosmicClaritySatelliteTab(QWidget):
     def open_preview_dialog(self, image, is_mono):
         """Open the preview dialog."""
         preview_dialog = ImagePreviewDialog(image, is_mono=is_mono)
-        preview_dialog.setAttribute(Qt.WA_DeleteOnClose)  # Ensure proper cleanup when closed
+        preview_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # Ensure proper cleanup when closed
         preview_dialog.show()  # Open the dialog without blocking the main UI
 
 
@@ -8922,7 +8922,7 @@ class CosmicClaritySatelliteTab(QWidget):
         rename_action.triggered.connect(lambda: self.rename_file(treebox))
         menu.addAction(delete_action)
         menu.addAction(rename_action)
-        menu.exec_(treebox.viewport().mapToGlobal(pos))
+        menu.exec(treebox.viewport().mapToGlobal(pos))
 
     def delete_file(self, treebox):
         """Delete the selected file."""
@@ -9288,12 +9288,12 @@ class ImagePreviewDialog(QDialog):
             # RGB image
             height, width, channels = display_image_uint8.shape
             bytes_per_line = 3 * width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
         elif len(display_image_uint8.shape) == 2:
             # Grayscale image
             height, width = display_image_uint8.shape
             bytes_per_line = width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
         else:
             raise ValueError(f"Unexpected image shape: {display_image_uint8.shape}")
 
@@ -9628,9 +9628,9 @@ class StatisticalStretchTab(QWidget):
 
             if display_image.ndim == 3:  # RGB Image
                 # Convert the image to QImage format
-                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
             else:  # Grayscale Image
-                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
 
             # Create a QPixmap from QImage
             pixmap = QPixmap.fromImage(q_image)
@@ -9679,9 +9679,9 @@ class StatisticalStretchTab(QWidget):
         preview_image = (stretched_image * 255).astype(np.uint8)
         h, w = preview_image.shape[:2]
         if preview_image.ndim == 3:
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         else:
-            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
+            q_image = QImage(preview_image.data, w, h, w, QImage.Format.Format_Grayscale8)
 
         pixmap = QPixmap.fromImage(q_image)
         self.current_pixmap = pixmap  # **Store the original pixmap**
@@ -9784,10 +9784,10 @@ class StatisticalStretchTab(QWidget):
 
         if img.ndim == 3:
             bytes_per_line = 3 * w
-            q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+            q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
         else:
             bytes_per_line = w
-            q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
+            q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
 
         # Create QPixmap from QImage
         pixmap = QPixmap.fromImage(q_image)
@@ -10307,9 +10307,9 @@ class StarStretchTab(QWidget):
 
             if display_image.ndim == 3:  # RGB Image
                 # Convert the image to QImage format
-                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
             else:  # Grayscale Image
-                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
 
             # Create a QPixmap from QImage
             pixmap = QPixmap.fromImage(q_image)
@@ -10408,9 +10408,9 @@ class StarStretchTab(QWidget):
         preview_image = (stretched_image * 255).astype(np.uint8)
         h, w = preview_image.shape[:2]
         if preview_image.ndim == 3:
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         else:
-            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
+            q_image = QImage(preview_image.data, w, h, w, QImage.Format.Format_Grayscale8)
 
         pixmap = QPixmap.fromImage(q_image)
         self.current_pixmap = pixmap  # **Store the original pixmap**
@@ -11295,12 +11295,12 @@ class FullCurvesTab(QWidget):
                 # RGB Image
                 height, width, channels = display_image.shape
                 bytes_per_line = 3 * width
-                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
             elif display_image.ndim == 2:
                 # Grayscale Image
                 height, width = display_image.shape
                 bytes_per_line = width
-                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format_Grayscale8)
+                q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
             else:
                 print("Unsupported image format for display.")
                 QMessageBox.critical(self, "Error", "Unsupported image format for display.")
@@ -11327,9 +11327,9 @@ class FullCurvesTab(QWidget):
 
             if display_image.ndim == 3:  # RGB Image
                 # Convert the image to QImage format
-                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
             else:  # Grayscale Image
-                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
 
             # Create a QPixmap from QImage
             pixmap = QPixmap.fromImage(q_image)
@@ -11416,10 +11416,10 @@ class FullCurvesTab(QWidget):
 
             if img.ndim == 3 and img.shape[2] == 3:
                 bytes_per_line = 3 * w
-                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
             elif img.ndim == 2:
                 bytes_per_line = w
-                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
+                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
             else:
                 raise ValueError("Unsupported image format for display.")
 
@@ -11592,7 +11592,7 @@ class ImageLabel(QLabel):
         super().__init__(parent)
         self.setMouseTracking(True)
     def mouseMoveEvent(self, event):
-        self.mouseMoved.emit(event.x(), event.y())
+        self.mouseMoved.emit(event.position().x(), event.position().y())
         super().mouseMoveEvent(event)
 
 class CurveEditor(QGraphicsView):
@@ -12966,7 +12966,7 @@ class FrequencySeperationTab(QWidget):
         img_ubyte = (img_float32 * 255).astype(np.uint8)
         h, w, ch = img_ubyte.shape
         bytes_per_line = ch * w
-        q_img = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        q_img = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(q_img)
 
 class CombinedPreviewWindow(QWidget):
@@ -13087,7 +13087,7 @@ class CombinedPreviewWindow(QWidget):
         img_ubyte = (np.clip(img_float32, 0, 1) * 255).astype(np.uint8)
         h, w, ch = img_ubyte.shape
         bytes_per_line = ch * w
-        q_image = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        q_image = QImage(img_ubyte.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         return QPixmap.fromImage(q_image)
 
     # -----------------------------
@@ -13931,15 +13931,15 @@ class PerfectPalettePickerTab(QWidget):
         Returns:
             tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
         """
-        options = QFileDialog.Options()
-        options |= QFileDialog.ReadOnly
+
+
         file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             f"Select {image_type} Image File",
             "",
-            file_filter,
-            options=options
+            file_filter
+
         )
         
         if not file_path:
@@ -14096,7 +14096,7 @@ class PerfectPalettePickerTab(QWidget):
                 if pixmap.isNull():
                     print(f"Failed to retrieve pixmap for palette '{palette}'. Skipping.")
                     continue
-                text_color = Qt.green if self.selected_palette == palette else Qt.GlobalColor.white
+                text_color = Qt.GlobalColor.green if self.selected_palette == palette else Qt.GlobalColor.white
                 painter = QPainter(pixmap)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 painter.setPen(QPen(text_color))
@@ -14132,7 +14132,7 @@ class PerfectPalettePickerTab(QWidget):
             return preferred if preferred is not None else substitute
 
         for i, palette in enumerate(self.palette_names):
-            text_color = Qt.green if self.selected_palette == palette else Qt.GlobalColor.white
+            text_color = Qt.GlobalColor.green if self.selected_palette == palette else Qt.GlobalColor.white
 
             # Determine availability
             ha_available = self.ha_image is not None
@@ -14555,7 +14555,7 @@ class PerfectPalettePickerTab(QWidget):
                 image_uint8 = (np.clip(image_array, 0, 1) * 255).astype(np.uint8)
                 height, width = image_uint8.shape
                 bytes_per_line = width
-                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
                 return q_image.copy()
             elif image_array.ndim == 3 and image_array.shape[2] == 3:
                 # RGB image
@@ -14565,7 +14565,7 @@ class PerfectPalettePickerTab(QWidget):
                 if channels != 3:
                     raise ValueError(f"Expected 3 channels for RGB, got {channels}")
                 bytes_per_line = 3 * width
-                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
                 return q_image.copy()
             else:
                 # Invalid shape
@@ -14870,7 +14870,7 @@ class PerfectPalettePickerTab(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
             self.last_mouse_position = event.pos()
-            self.image_label.setCursor(Qt.ClosedHandCursor)
+            self.image_label.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
         """
@@ -15234,7 +15234,7 @@ class NBtoRGBstarsTab(QWidget):
         try:
             preview_image = (combined_image * 255).astype(np.uint8)
             h, w = preview_image.shape[:2]
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         except Exception as e:
             print(f"Error converting combined image for display: {e}")
             QMessageBox.critical(self, "Error", f"Failed to prepare image for display:\n{e}")
@@ -15707,9 +15707,9 @@ class HaloBGonTab(QWidget):
 
             if display_image.ndim == 3:  # RGB Image
                 # Convert the image to QImage format
-                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+                q_image = QImage(display_image.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
             else:  # Grayscale Image
-                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format_Grayscale8)
+                q_image = QImage(display_image.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
 
             # Create a QPixmap from QImage
             pixmap = QPixmap.fromImage(q_image)
@@ -15877,9 +15877,9 @@ class HaloBGonTab(QWidget):
         preview_image = (stretched_image * 255).astype(np.uint8)
         h, w = preview_image.shape[:2]
         if preview_image.ndim == 3:
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
         else:
-            q_image = QImage(preview_image.data, w, h, w, QImage.Format_Grayscale8)
+            q_image = QImage(preview_image.data, w, h, w, QImage.Format.Format_Grayscale8)
 
         # Update the pixmap and scale it for the preview label
         pixmap = QPixmap.fromImage(q_image)
@@ -16495,7 +16495,7 @@ class ContinuumSubtractTab(QWidget):
             preview_image = np.ascontiguousarray(preview_image)
 
             # Change the format to RGB888 for displaying an RGB image
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format_RGB888)
+            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
 
             pixmap = QPixmap.fromImage(q_image)
 
@@ -17989,7 +17989,7 @@ class CustomGraphicsView(QGraphicsView):
                 else:
                     # Start manual dragging if no modifier is held
                     self.dragging = True
-                    self.setCursor(Qt.ClosedHandCursor)  # Use closed hand cursor to indicate dragging
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)  # Use closed hand cursor to indicate dragging
                     self.drag_start_pos = event.pos()  # Store starting position
 
         super().mousePressEvent(event)
@@ -18044,7 +18044,7 @@ class CustomGraphicsView(QGraphicsView):
             if self.drawing_item:
                 self.parent.main_scene.removeItem(self.drawing_item)  # Remove previous line if exists
             self.drawing_item = QGraphicsLineItem(QLineF(self.measurement_start, scene_pos))
-            self.drawing_item.setPen(QPen(Qt.green, 2, Qt.PenStyle.DashLine))  # Use green dashed line for measurement
+            self.drawing_item.setPen(QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.DashLine))  # Use green dashed line for measurement
             self.parent.main_scene.addItem(self.drawing_item)
 
         elif self.drawing_item:
@@ -18126,7 +18126,7 @@ class CustomGraphicsView(QGraphicsView):
 
                 # Create and add the line item for display
                 measurement_line_item = QGraphicsLineItem(QLineF(self.measurement_start, measurement_end))
-                measurement_line_item.setPen(QPen(Qt.green, 2, Qt.PenStyle.DashLine))
+                measurement_line_item.setPen(QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.DashLine))
                 self.parent.main_scene.addItem(measurement_line_item)
 
                 # Create a midpoint position for the distance text
@@ -18145,7 +18145,7 @@ class CustomGraphicsView(QGraphicsView):
                 # Store the line and text in annotation items for future reference
                 measurement_line = QLineF(self.measurement_start, measurement_end)
                 self.annotation_items.append(('line', measurement_line))  # Store QLineF, not QGraphicsLineItem
-                self.annotation_items.append(('text', distance_text, midpoint, Qt.green))
+                self.annotation_items.append(('text', distance_text, midpoint, Qt.GlobalColor.green))
 
             # Clear the temporary measurement line item without removing the final line
             self.drawing_item = None
@@ -19411,7 +19411,7 @@ class MainWindow(QMainWindow):
         menu.addAction(copy_info_action)
 
         # Display the context menu at the cursor position
-        menu.exec_(self.results_tree.viewport().mapToGlobal(position))
+        menu.exec(self.results_tree.viewport().mapToGlobal(position))
 
     def toggle_autostretch(self):
         if not hasattr(self, 'original_image'):
@@ -19455,7 +19455,7 @@ class MainWindow(QMainWindow):
 
 
 
-        qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
         if qimg.isNull():
             print("Failed to create QImage")
             return
@@ -19611,7 +19611,7 @@ class MainWindow(QMainWindow):
         msg_box.addButton(QMessageBox.Cancel)
 
         # Show the message box and get the user's response
-        msg_box.exec_()
+        msg_box.exec()
 
         # Determine the save type based on the selected button
         if msg_box.clickedButton() == full_image_button:
@@ -19693,13 +19693,13 @@ class MainWindow(QMainWindow):
             checkboxes[option] = checkbox
 
         # Add OK and Cancel buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(button_box)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
 
         # Show the dialog and get the user's response
-        if dialog.exec_() == QDialog.Rejected:
+        if dialog.exec() == QDialog.DialogCode.Rejected:
             return  # User cancelled
 
         # Determine which fields to display based on user selection
@@ -19760,7 +19760,7 @@ class MainWindow(QMainWindow):
                 # Crop the relevant area for the object
                 rect = QRectF(x - patch_size // 2, y - patch_size // 2, patch_size, patch_size)
                 cropped_patch = patch.copy(rect.toRect())
-                cropped_image = cropped_patch.toImage().scaled(patch_size, patch_size).convertToFormat(QImage.Format_RGB888)
+                cropped_image = cropped_patch.toImage().scaled(patch_size, patch_size).convertToFormat(QImage.Format.Format_RGB888)
 
                 # Convert QImage to PIL format for adding to the collage
                 bytes_img = cropped_image.bits().asstring(cropped_image.width() * cropped_image.height() * 3)
@@ -20126,7 +20126,7 @@ class MainWindow(QMainWindow):
                 img = (img_array * 255).astype(np.uint8)
                 height, width, _ = img.shape
                 bytes_per_line = 3 * width
-                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(qimg)
 
                 self.main_image = pixmap
@@ -21214,13 +21214,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(force_blind_solve_button)
         
         # OK and Cancel buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
 
     def update_settings(self, max_results, marker_style, dialog):
         """Update settings based on dialog input."""
