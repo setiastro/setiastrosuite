@@ -623,11 +623,15 @@ class AstroEditingSuite(QMainWindow):
             input_fields[key] = field
             field_layout.addWidget(field)
             
-            # Folder selection button
+            # Selection button
             select_button = QPushButton("...")
             select_button.setFixedWidth(30)
-            select_button.setToolTip(f"Select folder for {label}")
-            select_button.clicked.connect(lambda _, f=field: self.select_folder(f))
+            if label == "StarNet Executable Path":
+                select_button.setToolTip(f"Select file for {label}")
+                select_button.clicked.connect(lambda _, f=field: self.select_file(f))  # File selection for StarNet
+            else:
+                select_button.setToolTip(f"Select folder for {label}")
+                select_button.clicked.connect(lambda _, f=field: self.select_folder(f))  # Folder selection for others
             field_layout.addWidget(select_button)
             
             settings_form.addRow(label, field_widget)
@@ -663,6 +667,11 @@ class AstroEditingSuite(QMainWindow):
         
         layout.addWidget(buttons)
         dialog.exec()
+        
+    def select_file(self, field):
+        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*.exe);;All Files (*)")[0]
+        if file_path:
+            field.setText(file_path)
 
     def select_folder(self, field):
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder")
