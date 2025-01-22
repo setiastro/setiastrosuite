@@ -214,7 +214,7 @@ class AstroEditingSuite(QMainWindow):
         functions_menu = menubar.addMenu("Functions")
 
         gradient_removal_icon = QIcon(abeicon_path)  # Replace with the actual path variable
-        gradient_removal_action = QAction(gradient_removal_icon, "Remove Gradient", self)
+        gradient_removal_action = QAction(gradient_removal_icon, "Remove Gradient with SetiAstro ABE", self)
         gradient_removal_action.setShortcut('Ctrl+Shift+G')  # Assign a keyboard shortcut
         gradient_removal_action.setStatusTip('Remove gradient from the current image')
         gradient_removal_action.triggered.connect(self.remove_gradient)
@@ -479,6 +479,10 @@ class AstroEditingSuite(QMainWindow):
         self.file_name_label = QLabel("No file selected")
         self.statusBar.addWidget(self.file_name_label, 1)  # Add label to status bar
 
+        # Dimension label in the status bar
+        self.dim_label = QLabel("0 x 0")
+        self.statusBar.addWidget(self.dim_label)
+
         # --------------------
         # Tab Widget
         # --------------------
@@ -536,7 +540,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.6.2')
+        self.setWindowTitle('Seti Astro\'s Suite V2.6.3')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
     def remove_gradient(self):
@@ -667,7 +671,7 @@ class AstroEditingSuite(QMainWindow):
         
         layout.addWidget(buttons)
         dialog.exec()
-        
+
     def select_file(self, field):
         file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*.exe);;All Files (*)")[0]
         if file_path:
@@ -1264,6 +1268,8 @@ class AstroEditingSuite(QMainWindow):
             preview_window = self.preview_windows[slot]
             preview_window.update_image_data(image.copy())
             print(f"Preview window for Slot {slot} updated with new image.")
+
+     
 
     def add_stars(self):
         """
@@ -1971,6 +1977,16 @@ class AstroEditingSuite(QMainWindow):
         else:
             self.file_name_label.setText("No file selected")
 
+        # If slot == 0 and we have a valid image, update dimensions
+        if slot == 0 and image is not None:
+            # image should be a numpy array with shape (height, width[, channels])
+            h, w = image.shape[:2]
+            self.dim_label.setText(f"{w} x {h}")
+        else:
+            # If another slot changed or no image, you might want to blank it
+            # or just leave it as-is. Example: set to "—"
+            self.dim_label.setText("—")            
+
     def apply_theme(self, theme):
         """Apply the selected theme to the application."""
         if theme == "light":
@@ -2231,7 +2247,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.redo()
             print("Redo performed.")
         else:
-            QMessageBox.information(self, "Redo", "No actions to redo.")            
+            QMessageBox.information(self, "Redo", "No actions to redo.")  
 
 class CopySlotDialog(QDialog):
     def __init__(self, parent=None, available_slots=None):
@@ -10737,43 +10753,38 @@ class FullCurvesTab(QWidget):
 
     def updatePreviewLUT(self, lut, curve_mode):
         """Apply the 8-bit LUT to the preview image for real-time updates on slot 0."""
-        print(f"updatePreviewLUT called with curve_mode: {curve_mode}")
+
         # Access slot0 (recombined image) from ImageManager
-        slot0_image = self.image_manager._images[0]
-        if slot0_image is None:
-            print("Slot0 image is not loaded.")
-            QMessageBox.warning(self, "No Image", "Slot0 image is not loaded.")
+        if self.image is None:
+            print("No preview image loaded.")
+            QMessageBox.warning(self, "No Image", "Preview image is not loaded.")
             return
 
         try:
-            # Determine the visible region (implement this method as per your UI logic)
-            x, y, w, h = self.get_visible_region()
+            current_scroll_x = self.scrollArea.horizontalScrollBar().value()
+            current_scroll_y = self.scrollArea.verticalScrollBar().value()
 
-            # Ensure the region is within image bounds
-            x_end = min(x + w, slot0_image.shape[1])
-            y_end = min(y + h, slot0_image.shape[0])
+            # 1) Copy the entire preview in float [0..1]
+            base_image = self.image.copy()  # shape: (H, W, 3 or 2)
 
-            # Base image is slot0
-            base_image = slot0_image.copy()
+            # 2) Convert the entire base_image to 8-bit
+            image_8bit = (base_image * 255).astype(np.uint8)
 
-            # Extract the visible region from the base image
-            visible_region = base_image[y:y_end, x:x_end]
+            # 3) Make a working copy for transformation
+            adjusted_8bit = image_8bit.copy()
 
-            # Create an 8-bit version of the visible region for faster processing
-            image_8bit = (visible_region * 255).astype(np.uint8)
-
-            if image_8bit.ndim == 3:  # RGB image
-                adjusted_image = image_8bit.copy()
+            if adjusted_8bit.ndim == 3:  # RGB image
+                adjusted_image = adjusted_8bit.copy()
 
                 if curve_mode == "K (Brightness)":
                     # Apply LUT to all channels equally (Brightness)
                     for channel in range(3):
-                        adjusted_image[:, :, channel] = lut[image_8bit[:, :, channel]]
+                        adjusted_image[:, :, channel] = lut[adjusted_8bit[:, :, channel]]
 
                 elif curve_mode in ["R", "G", "B"]:
                     # Apply LUT to a single channel
                     channel_index = {"R": 0, "G": 1, "B": 2}[curve_mode]
-                    adjusted_image[:, :, channel_index] = lut[image_8bit[:, :, channel_index]]
+                    adjusted_image[:, :, channel_index] = lut[adjusted_8bit[:, :, channel_index]]
 
                 elif curve_mode in ["L*", "a*", "b*"]:
                     # Manual RGB to Lab Conversion
@@ -10781,7 +10792,7 @@ class FullCurvesTab(QWidget):
                     M_inv = self.M_inv
 
                     # Normalize RGB to [0,1]
-                    rgb = image_8bit.astype(np.float32) / 255.0
+                    rgb = adjusted_8bit.astype(np.float32) / 255.0
 
                     # Convert RGB to XYZ
                     xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
@@ -10863,7 +10874,7 @@ class FullCurvesTab(QWidget):
                     M_inv = self.M_inv
 
                     # Normalize RGB to [0,1]
-                    rgb = image_8bit.astype(np.float32) / 255.0
+                    rgb = adjusted_8bit.astype(np.float32) / 255.0
 
                     # Convert RGB to XYZ
                     xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
@@ -10941,7 +10952,7 @@ class FullCurvesTab(QWidget):
 
                 elif curve_mode == "Saturation":
                     # === Manual RGB to HSV Conversion ===
-                    rgb = image_8bit.astype(np.float32) / 255.0
+                    rgb = adjusted_8bit.astype(np.float32) / 255.0
 
                     # Split channels
                     R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
@@ -11037,24 +11048,17 @@ class FullCurvesTab(QWidget):
 
             else:  # Grayscale image
                 # For grayscale images, apply LUT directly
-                adjusted_image = lut[image_8bit]
+                adjusted_image = lut[adjusted_8bit]
 
-            # Create a copy of the base image for preview
-            preview_image = base_image.copy()
+            # Convert adjusted_image back to float [0..1]
+            preview_image = adjusted_image.astype(np.float32) / 255.0
 
-            # Assign adjusted_image back to the visible region
-            if image_8bit.ndim == 3:
-                # Normalize back to [0,1] for consistency
-                preview_image[y:y_end, x:x_end] = adjusted_image.astype(np.float32) / 255.0
-            else:
-                preview_image[y:y_end, x:x_end] = adjusted_image.astype(np.float32) / 255.0
-
-            # Update the preview display with the preview_image
-            self.updatePreview(preview_image)
-            print("Curves preview updated successfully.")
+            # Finally, show it
+            self.show_image(preview_image)
+            self.scrollArea.horizontalScrollBar().setValue(current_scroll_x)
+            self.scrollArea.verticalScrollBar().setValue(current_scroll_y)            
 
         except Exception as e:
-            # Handle exceptions gracefully
             print(f"Error in updatePreviewLUT: {e}")
             QMessageBox.critical(self, "Error", f"Failed to update preview: {e}")
 
@@ -11098,10 +11102,10 @@ class FullCurvesTab(QWidget):
         curve_func = self.curveEditor.getCurveFunction()
 
 
-        source_image = self.image.copy()
+        source_image = self.original_image.copy()
 
         # Push the current image to the undo stack before modifying
-        self.pushUndo(self.image.copy())
+        self.pushUndo(self.original_image.copy())
 
         # Show the spinner before starting processing
         self.showSpinner()
@@ -11113,26 +11117,34 @@ class FullCurvesTab(QWidget):
         print("Started FullCurvesProcessingThread.")
 
     def finishProcessing(self, adjusted_image):
-        # Hide the spinner after processing is done
         self.hideSpinner()
 
-        # Update the image state based on apply mode without modifying original_image
-        self.image = adjusted_image.copy()
+        # This is the new full-res float image
+        self.original_image = adjusted_image.copy()
 
-        # Update the preview to reflect the applied changes
-        self.preview_image = self.image.copy()
-        self.updatePreview(self.preview_image)
+        # Also create a new preview_image
+        self.preview_image = self.downsample_for_preview(adjusted_image, max_width=1080)
 
-        # Optionally, emit a signal to ImageManager if needed
+        # For display in the tab
+        self.image = self.preview_image.copy()
+
+        # Show it
+        self.show_image(self.image)
+
+        # Clear the draggable points on the curve editor
+        self.curveEditor.initCurve()
+
+        # Optionally update the ImageManager
         if self.image_manager:
             metadata = {
-                'file_path': self.loaded_image_path,  # Update as needed
+                'file_path': self.loaded_image_path,
                 'original_header': self.original_header,
                 'bit_depth': self.bit_depth,
                 'is_mono': self.is_mono
             }
-            self.image_manager.update_image(updated_image=self.image, metadata=metadata)
-            print("FullCurvesTab: Image updated in ImageManager after processing.")
+            self.image_manager.update_image(updated_image=self.original_image, metadata=metadata)
+            print("FullCurvesTab: Full-resolution image updated in ImageManager.")
+
 
     def pushUndo(self, image_state):
         """Push the current image state onto the undo stack."""
@@ -11172,27 +11184,20 @@ class FullCurvesTab(QWidget):
 
 
     def resetCurve(self):
-        # Reset the curve in the curve editor
-        self.curveEditor.initCurve()
+        """
+        Resets the draggable points in the curve editor without affecting other settings.
+        """
+        try:
+            # Reset the draggable points in the curve editor
+            self.curveEditor.initCurve()
 
-        # Reset the image to the original image
-        if self.original_image is not None:
-            # Push the current image to the undo stack before resetting
-            self.pushUndo(self.image.copy())
+            # Clear the preview LUT to match the reset state of draggable points
+            self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)
+            self.updatePreviewLUT(self.current_lut, self.curve_mode)
 
-            # Update ImageManager with the original image
-            if self.image_manager:
-                metadata = {
-                    'file_path': self.loaded_image_path,  # Update as needed
-                    'original_header': self.original_header,
-                    'bit_depth': self.bit_depth,
-                    'is_mono': self.is_mono
-                }
-                self.image_manager.update_image(updated_image=self.original_image.copy())
-                print("Curve reset: Original image restored in ImageManager.")
-        else:
-            QMessageBox.warning(self, "Warning", "Original image not loaded.")
-            print("Reset Curve called, but original image not loaded.")
+        except Exception as e:
+            print(f"Error during curve reset: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to reset draggable points: {e}")
 
     def eventFilter(self, source, event):
         if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -11207,60 +11212,6 @@ class FullCurvesTab(QWidget):
             self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
-
-
-    def openFileDialog(self):
-        try:
-            self.loaded_image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
-                                            "Images (*.png *.tif *.tiff *.fit *.fits *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
-            if self.loaded_image_path:
-                self.fileLabel.setText(self.loaded_image_path)
-                self.image, self.original_header, self.bit_depth, self.is_mono = load_image(self.loaded_image_path)
-                # Keep a copy of the original image
-                self.original_image = self.image.copy()
-                # Initialize the preview image as a copy of the original
-                self.stretched_image = self.original_image.copy()
-                self.updatePreview(self.stretched_image)
-                self.applyButton.setEnabled(True)
-                self.saveButton.setEnabled(True)
-                print(f"Image loaded successfully from {self.loaded_image_path}.")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
-            print(f"Failed to load image: {e}")
-
-    def updatePreview(self, preview_image=None):
-        print("updatePreview called.")
-        if preview_image is None:
-            self.imageLabel.clear()
-            self.imageLabel.setText('No preview available.')
-            print("Preview image is None. Cleared curves preview.")
-            return
-
-        try:
-            img = (preview_image * 255).astype(np.uint8)
-            h, w = img.shape[:2]
-
-            if img.ndim == 3:
-                bytes_per_line = 3 * w
-                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
-            else:
-                bytes_per_line = w
-                q_image = QImage(img.tobytes(), w, h, bytes_per_line, QImage.Format_Grayscale8)
-
-            pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(
-                pixmap.size() * self.zoom_factor,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            self.imageLabel.setPixmap(scaled_pixmap)
-            self.imageLabel.resize(scaled_pixmap.size())
-            print("Curves preview updated successfully.")
-
-        except Exception as e:
-            print(f"Error in updatePreview: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to update preview display: {e}")
-
 
 
     def on_image_changed(self, slot, image, metadata):
@@ -11280,6 +11231,9 @@ class FullCurvesTab(QWidget):
             self.original_header = metadata.get('original_header', None)
             self.bit_depth = metadata.get('bit_depth', None)
             self.is_mono = metadata.get('is_mono', False)
+
+            self.preview_image = self.downsample_for_preview(image, max_width=1080)
+            self.image = self.preview_image.copy()
             
             # Save the previous scroll position
             self.previous_scroll_pos = (
@@ -11287,9 +11241,8 @@ class FullCurvesTab(QWidget):
                 self.scrollArea.verticalScrollBar().value()
             )
             
-            # Make a copy of the image for stretching
-            self.stretched_image = image.copy()
-
+            self.fileLabel.setText(self.loaded_image_path if self.loaded_image_path else "")
+            
             # Update the UI elements (buttons, etc.)
             self.show_image(image)
             self.update_image_display()
@@ -11301,6 +11254,31 @@ class FullCurvesTab(QWidget):
 
             print(f"FullCurvesTab: Image updated from ImageManager slot {slot}.")
 
+    def downsample_for_preview(self, image_float32, max_width=1080):
+        """
+        If image width > max_width, scale it down proportionally.
+        Returns a new float32 image in [0..1].
+        """
+
+
+        h, w = image_float32.shape[:2]
+
+        if w <= max_width:
+            # No need to downsample
+            return image_float32.copy()
+
+        scale_factor = max_width / float(w)
+        new_w = max_width
+        new_h = int(h * scale_factor)
+
+        # Convert [0..1] float to [0..255] uint8 for OpenCV resizing
+        temp_8u = (image_float32 * 255).clip(0,255).astype(np.uint8)
+
+        # Resize with INTER_AREA for best downsampling
+        resized_8u = cv2.resize(temp_8u, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        # Convert back to float32 in [0..1]
+        return resized_8u.astype(np.float32) / 255.0
 
 
 
@@ -11334,14 +11312,7 @@ class FullCurvesTab(QWidget):
                 Qt.SmoothTransformation
             )
             self.imageLabel.setPixmap(scaled_pixmap)
-            self.imageLabel.resize(scaled_pixmap.size())
 
-            # Restore the previous scroll position
-            if hasattr(self, 'previous_scroll_pos'):
-                self.scrollArea.horizontalScrollBar().setValue(self.previous_scroll_pos[0])
-                self.scrollArea.verticalScrollBar().setValue(self.previous_scroll_pos[1])
-
-            print("Image displayed successfully.")
         except Exception as e:
             print(f"Error displaying image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
@@ -11378,9 +11349,9 @@ class FullCurvesTab(QWidget):
         """
         Zoom into the image by increasing the zoom factor.
         """
-        if self.stretched_image is not None:
+        if self.image is not None:
             self.zoom_factor *= 1.2
-            self.refresh_display()
+            self.show_image(self.image)
             print(f"Zoomed in. New zoom factor: {self.zoom_factor:.2f}")
         else:
             print("No stretched image to zoom in.")
@@ -11390,9 +11361,9 @@ class FullCurvesTab(QWidget):
         """
         Zoom out of the image by decreasing the zoom factor.
         """
-        if self.stretched_image is not None:
+        if self.image is not None:
             self.zoom_factor /= 1.2
-            self.refresh_display()
+            self.show_image(self.image)
             print(f"Zoomed out. New zoom factor: {self.zoom_factor:.2f}")
         else:
             print("No stretched image to zoom out.")
@@ -11534,7 +11505,7 @@ class FullCurvesTab(QWidget):
                     print(f"Image saved successfully to {save_filename}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to save image: {e}")
-
+                    
 class DraggablePoint(QGraphicsEllipseItem):
     def __init__(self, curve_editor, x, y, color=Qt.green, lock_axis=None, position_type=None):
         super().__init__(-5, -5, 10, 10)
