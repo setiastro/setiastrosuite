@@ -536,7 +536,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.6.1')
+        self.setWindowTitle('Seti Astro\'s Suite V2.6.2')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
     def remove_gradient(self):
@@ -667,7 +667,7 @@ class AstroEditingSuite(QMainWindow):
         
         layout.addWidget(buttons)
         dialog.exec()
-        
+
     def select_file(self, field):
         file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*.exe);;All Files (*)")[0]
         if file_path:
@@ -16049,6 +16049,9 @@ class HaloProcessingThread(QThread):
             enhanced_mask = np.expand_dims(enhanced_mask, axis=-1)  # Add a channel dimension
             enhanced_mask = np.repeat(enhanced_mask, 3, axis=-1)  # Repeat for all 3 channels
 
+        # Ensure the mask matches the data type of the image
+        enhanced_mask = enhanced_mask.astype(image.dtype)
+
         # Verify that the image and mask dimensions match
         if image.shape != enhanced_mask.shape:
             raise ValueError(
@@ -16065,20 +16068,25 @@ class HaloProcessingThread(QThread):
         return np.clip(final_image, 0, 1)
 
 
+
     def createLightnessMask(self, image):
+        # Ensure the image is in a supported format (float32)
+        image = image.astype(np.float32)
+
         # Check if the image is already grayscale
         if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
             # Image is already grayscale; normalize it
-            lightness_mask = image.astype(np.float32) / 255.0
+            lightness_mask = image / 255.0
         else:
             # Convert RGB image to grayscale
-            lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+            lightness_mask = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY) / 255.0
 
         # Apply Gaussian blur to smooth the mask
         blurred = cv2.GaussianBlur(lightness_mask, (0, 0), sigmaX=2)
 
         # Apply an unsharp mask for enhancement
         return cv2.addWeighted(lightness_mask, 1.66, blurred, -0.66, 0)
+
 
 
     def createDuplicateMask(self, mask):
