@@ -5,5 +5,5 @@
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_linux"
   },
-  "notes": "Numerous bug fixes, curves boost slider now showing in statistical stretch, undo function mapped correctly"
+  "notes": "Numerous Bug Fixes: Statistical Stretch, Curves, Undo functionality, CLAHE and Morpho dialogs, ABE extracted background always going to slot 1 vs checking user selection"
 }
