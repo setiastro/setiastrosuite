@@ -1,7 +1,7 @@
 {
   "version": "2.7.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.2/setiastrosuite_windows.exe",
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.1/setiastrosuite_windows.exe",
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.2/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.2/setiastrosuite_linux"
   },
