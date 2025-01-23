@@ -693,7 +693,7 @@ class AstroEditingSuite(QMainWindow):
             # Notify the user
             QMessageBox.information(self, "Success", "Gradient removal completed successfully.")
             print(f"Gradient removal completed and image updated in Slot {current_slot}.")
-            print(f"Gradient background stored in Slot {slot_1}.")
+
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply gradient removal:\n{e}")
@@ -2820,7 +2820,7 @@ class ImageManager(QObject):
 
 class GradientRemovalDialog(QDialog):
     # Define signals to communicate with AstroEditingSuite
-    processing_completed = pyqtSignal(np.ndarray, np.ndarray)  # Corrected Image, Gradient Background
+    processing_completed = pyqtSignal(np.ndarray, np.ndarray, bool)  # Corrected Image, Gradient Background
 
     def __init__(self, image, parent=None):
         """
