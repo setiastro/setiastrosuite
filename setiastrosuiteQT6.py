@@ -157,9 +157,11 @@ from PyQt6.QtCore import (
     QSettings
 )
 
+
 # Math functions
 from math import sqrt
 
+VERSION = "2.7.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -620,6 +622,10 @@ class AstroEditingSuite(QMainWindow):
         preferences_action.triggered.connect(self.open_preferences_dialog)
         preferences_menu.addAction(preferences_action)
 
+        update_menu = menubar.addMenu("Update")
+        check_update_action = QAction("Check for Updates", self)
+        check_update_action.triggered.connect(self.check_for_updates)
+        update_menu.addAction(check_update_action)
 
         # --------------------
         # Apply Default Theme
@@ -629,8 +635,11 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.7 QT6')
+        self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
+
+        self.check_for_updates()  # Call this in your app's init
+
 
     def remove_gradient(self):
         """Handle the Remove Gradient action."""
@@ -686,7 +695,54 @@ class AstroEditingSuite(QMainWindow):
             print(f"Error in handle_gradient_removal: {e}")
 
 
+    def check_for_updates(self):
+        try:
+            # URL to the JSON file on GitHub
+            update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/refs/heads/main/updates.json"
 
+            # Fetch the JSON data
+            response = requests.get(update_url, timeout=5)
+            response.raise_for_status()
+            update_data = response.json()
+
+            # Parse the current version and latest version
+            current_version = VERSION  # Replace with your app's current version
+            latest_version = update_data.get("version", "")
+
+            # Compare versions
+            if latest_version > current_version:
+                notes = update_data.get("notes", "No details provided.")
+                downloads = update_data.get("downloads", {})
+
+                # Show a dialog to notify the user about the new version
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("Update Available")
+                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setInformativeText(f"Release Notes:\n{notes}")
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+                # Add download links to the message box
+                msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
+
+                if msg_box.exec() == QMessageBox.StandardButton.Yes:
+                    import webbrowser
+                    # Open the appropriate link based on the user's OS
+                    platform = sys.platform
+                    if platform.startswith("win"):
+                        webbrowser.open(downloads.get("Windows", ""))
+                    elif platform.startswith("darwin"):
+                        webbrowser.open(downloads.get("macOS", ""))
+                    elif platform.startswith("linux"):
+                        webbrowser.open(downloads.get("Linux", ""))
+                    else:
+                        QMessageBox.warning(self, "Error", "Unsupported platform.")
+            else:
+                QMessageBox.information(self, "No Updates", "You are already running the latest version.")
+
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
 
 
     def open_preferences_dialog(self):
@@ -2979,7 +3035,7 @@ class GradientRemovalDialog(QDialog):
         if self.drawing and len(self.current_polygon) > 1:
             pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             temp_polygon = QPolygon(self.current_polygon)
             painter.drawPolyline(temp_polygon)
 
@@ -6514,14 +6570,31 @@ class BlinkTab(QWidget):
         """Select the next item in the TreeWidget, looping back to the first item if at the end."""
         current_item = self.fileTree.currentItem()
         if current_item:
+            # Get all leaf items
             all_items = self.get_all_leaf_items()
-            current_index = all_items.index(current_item)
+
+            # Check if the current item is in the leaf items
+            try:
+                current_index = all_items.index(current_item)
+            except ValueError:
+                # If the current item is not a leaf, move to the first leaf item
+                print("Current item is not a leaf. Selecting the first leaf item.")
+                if all_items:
+                    next_item = all_items[0]
+                    self.fileTree.setCurrentItem(next_item)
+                    self.on_item_clicked(next_item, 0)
+                return
+
+            # Select the next leaf item or loop back to the first
             if current_index < len(all_items) - 1:
                 next_item = all_items[current_index + 1]
             else:
                 next_item = all_items[0]  # Loop back to the first item
+
             self.fileTree.setCurrentItem(next_item)
             self.on_item_clicked(next_item, 0)  # Update the preview
+        else:
+            print("No current item selected.")
 
     def get_all_leaf_items(self):
         """Get a flat list of all leaf items (actual files) in the TreeWidget."""
@@ -6587,10 +6660,10 @@ class BlinkTab(QWidget):
                     'is_mono': is_mono
                 })
 
-                # Extract filter and exposure time from FITS header
-                object_name = header.get('OBJECT', 'Unknown')
-                filter_name = header.get('FILTER', 'Unknown')
-                exposure_time = header.get('EXPOSURE', 'Unknown')
+                # Safely extract filter and exposure time from FITS header if available
+                object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
+                filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
+                exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
 
                 # Group images by filter and exposure time
                 group_key = (object_name, filter_name, exposure_time)
@@ -6640,6 +6713,7 @@ class BlinkTab(QWidget):
                             file_name = os.path.basename(file_path)
                             item = QTreeWidgetItem([file_name])
                             exposure_item.addChild(item)
+
 
 
     def debayer_image(self, image, file_path, header):
@@ -7461,6 +7535,35 @@ class CosmicClarityTab(QWidget):
             print("Image format not supported for conversion to QImage.")
             return None
 
+    def validate_cosmic_clarity_folder(self):
+        """Check if the Cosmic Clarity folder is set and valid."""
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(
+                self, 
+                "Missing Folder", 
+                "The Cosmic Clarity folder is not set. Please use the wrench icon to select the correct folder."
+            )
+            return False
+
+        # Check if the expected executables exist in the folder
+        expected_executables = [
+            "SetiAstroCosmicClarity.exe",
+            "SetiAstroCosmicClarity_denoise.exe" if os.name == 'nt' else (
+                "SetiAstroCosmicClaritymac" if sys.platform == "darwin" else "SetiAstroCosmicClarity"
+            )
+        ]
+        missing_files = [exe for exe in expected_executables if not os.path.exists(os.path.join(self.cosmic_clarity_folder, exe))]
+
+        if missing_files:
+            QMessageBox.warning(
+                self, 
+                "Invalid Folder", 
+                f"The selected Cosmic Clarity folder is invalid. The following files are missing:\n\n{', '.join(missing_files)}\n\n"
+                "Please use the wrench icon to select the correct folder."
+            )
+            return False
+
+        return True
 
 
     def select_cosmic_clarity_folder(self):
@@ -7925,6 +8028,9 @@ class CosmicClarityTab(QWidget):
     
     def run_cosmic_clarity(self, input_file_path=None):
         """Run Cosmic Clarity with the current parameters."""
+
+        if not self.validate_cosmic_clarity_folder():
+            return  # Stop execution if the folder is not valid        
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
@@ -8212,6 +8318,10 @@ class CosmicClarityTab(QWidget):
 
     def run_cosmic_clarity_on_cropped(self, cropped_image, apply_autostretch=False):
         """Run Cosmic Clarity on a cropped image, with an option to autostretch upon receipt."""
+
+        if not self.validate_cosmic_clarity_folder():
+            return  # Stop execution if the folder is not valid
+                
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
@@ -10110,22 +10220,6 @@ class StarStretchTab(QWidget):
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)
 
-        # **Remove Zoom Buttons from Left Panel**
-        # Comment out or remove the existing zoom buttons in the left panel
-        # zoom_layout = QHBoxLayout()
-        # self.zoomInButton = QPushButton('Zoom In', self)
-        # self.zoomInButton.clicked.connect(self.zoom_in)
-        # zoom_layout.addWidget(self.zoomInButton)
-        #
-        # self.zoomOutButton = QPushButton('Zoom Out', self)
-        # self.zoomOutButton.clicked.connect(self.zoom_out)
-        # zoom_layout.addWidget(self.zoomOutButton)
-        # left_layout.addLayout(zoom_layout)
-
-        # Save As button (replaces Execute button)
-        self.saveAsButton = QPushButton("Save As", self)
-        self.saveAsButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveAsButton)
 
         # Footer
         footer_label = QLabel("""
