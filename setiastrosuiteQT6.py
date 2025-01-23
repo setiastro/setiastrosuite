@@ -161,7 +161,7 @@ from PyQt6.QtCore import (
 # Math functions
 from math import sqrt
 
-VERSION = "2.7.2"
+VERSION = "2.7.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -818,7 +818,7 @@ class AstroEditingSuite(QMainWindow):
         dialog.exec()
 
     def select_file(self, field):
-        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*.exe);;All Files (*)")[0]
+        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*);;All Files (*)")[0]
         if file_path:
             field.setText(file_path)
 
@@ -2438,6 +2438,9 @@ class CropTool(QDialog):
     """A cropping tool using QGraphicsView for better rectangle handling."""
     crop_applied = pyqtSignal(object)
 
+    # Class-level variable to store the previous crop rectangle
+    previous_crop_rect = None
+
     def __init__(self, image_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
@@ -2463,6 +2466,10 @@ class CropTool(QDialog):
         self.autostretch_button.clicked.connect(self.toggle_autostretch)
         layout.addWidget(self.autostretch_button)
 
+        self.load_previous_button = QPushButton("Load Previous Crop")
+        self.load_previous_button.clicked.connect(self.load_previous_crop)
+        layout.addWidget(self.load_previous_button)
+
         self.crop_button = QPushButton("Apply Crop")
         self.crop_button.clicked.connect(self.apply_crop)
         layout.addWidget(self.crop_button)
@@ -2475,8 +2482,8 @@ class CropTool(QDialog):
 
     def load_image(self):
         """Load and display the image in the QGraphicsView."""
-        height, width, channels = self.image_data.shape
-        if channels == 3:
+        if len(self.image_data.shape) == 3:  # Color image
+            height, width, channels = self.image_data.shape
             q_image = QImage(
                 (self.image_data * 255).astype(np.uint8).tobytes(),
                 width,
@@ -2484,7 +2491,8 @@ class CropTool(QDialog):
                 3 * width,
                 QImage.Format.Format_RGB888
             )
-        else:
+        elif len(self.image_data.shape) == 2:  # Mono image
+            height, width = self.image_data.shape
             q_image = QImage(
                 (self.image_data * 255).astype(np.uint8).tobytes(),
                 width,
@@ -2492,10 +2500,14 @@ class CropTool(QDialog):
                 width,
                 QImage.Format.Format_Grayscale8
             )
+        else:
+            raise ValueError("Unsupported image format")
+
         pixmap = QPixmap.fromImage(q_image)
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.pixmap_item)
         self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
 
     def eventFilter(self, source, event):
         """Handle mouse events for drawing the cropping rectangle."""
@@ -2536,20 +2548,31 @@ class CropTool(QDialog):
         
         if stretched_image is not None:
             self.image_data = stretched_image
-            # Save rectangle data before clearing the scene
             saved_rect = self.current_rect if not self.current_rect.isNull() else None
-
             self.scene.clear()
             self.load_image()
 
-            # Redraw the rectangle if it exists
             if saved_rect:
                 pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
                 self.selection_rect_item = self.scene.addRect(saved_rect, pen)
 
+    def load_previous_crop(self):
+        """Load the previous crop rectangle."""
+        if CropTool.previous_crop_rect:
+            self.current_rect = CropTool.previous_crop_rect
+            if self.selection_rect_item:
+                self.scene.removeItem(self.selection_rect_item)
+            pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
+            self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
+        else:
+            QMessageBox.information(self, "No Previous Crop", "No previous crop rectangle is available.")
+
     def apply_crop(self):
         """Crop the original image based on the selected rectangle."""
         if not self.current_rect.isNull():
+            # Save the current crop rectangle globally
+            CropTool.previous_crop_rect = self.current_rect
+
             # Get the scene dimensions and scale accordingly
             scene_rect = self.scene.sceneRect()
             scale_x = self.original_image_data.shape[1] / scene_rect.width()
@@ -2561,19 +2584,14 @@ class CropTool(QDialog):
             w = int(self.current_rect.width() * scale_x)
             h = int(self.current_rect.height() * scale_y)
 
-            # Ensure bounds are valid
             x = max(0, min(x, self.original_image_data.shape[1] - 1))
             y = max(0, min(y, self.original_image_data.shape[0] - 1))
             w = max(1, min(w, self.original_image_data.shape[1] - x))
             h = max(1, min(h, self.original_image_data.shape[0] - y))
 
-            # Crop the original image
             cropped_image = self.original_image_data[y:y + h, x:x + w]
 
-            # Emit the cropped image to the parent
             self.crop_applied.emit(cropped_image)
-
-            # Close the dialog
             self.accept()
         else:
             QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying.")
