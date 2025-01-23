@@ -161,7 +161,7 @@ from PyQt6.QtCore import (
 # Math functions
 from math import sqrt
 
-VERSION = "2.7.4"
+VERSION = "2.7.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9617,7 +9617,8 @@ class StatisticalStretchTab(QWidget):
 
         # Curves adjustment checkbox
         self.curvesCheckBox = QCheckBox('Apply Curves Adjustment', self)
-        self.curvesCheckBox.stateChanged.connect(self.toggleCurvesSlider)
+        self.curvesCheckBox.setCheckState(Qt.CheckState.Unchecked)  # Explicitly set the initial state
+
         left_layout.addWidget(self.curvesCheckBox)
 
         # Curves Boost slider (initially hidden)
@@ -9627,8 +9628,8 @@ class StatisticalStretchTab(QWidget):
         self.curvesBoostSlider.setMaximum(50)
         self.curvesBoostSlider.setValue(0)
         self.curvesBoostSlider.valueChanged.connect(self.updateCurvesBoostLabel)
-        self.curvesBoostLabel.hide()
-        self.curvesBoostSlider.hide()
+        self.curvesBoostLabel.show()
+        self.curvesBoostSlider.show()
 
         left_layout.addWidget(self.curvesBoostLabel)
         left_layout.addWidget(self.curvesBoostSlider)
@@ -9888,14 +9889,6 @@ class StatisticalStretchTab(QWidget):
     def updateCurvesBoostLabel(self, value):
         self.curvesBoostLabel.setText(f'Curves Boost: {value / 100:.2f}')
 
-    def toggleCurvesSlider(self, state):
-        if state == Qt.CheckState.Checked:
-            self.curvesBoostLabel.show()
-            self.curvesBoostSlider.show()
-        else:
-            self.curvesBoostLabel.hide()
-            self.curvesBoostSlider.hide()
-
     def previewStretch(self):
         if self.image is not None:
             # Show spinner before starting processing
@@ -9958,7 +9951,7 @@ class StatisticalStretchTab(QWidget):
         # Update ImageManager with the new processed image
         if self.image_manager:
             try:
-                self.image_manager.update_image(updated_image=self.stretched_image, metadata=metadata)
+                self.image_manager.set_image(self.stretched_image, metadata=metadata)
                 print("StatisticalStretchTab: Processed image stored in ImageManager.")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -11516,7 +11509,7 @@ class FullCurvesTab(QWidget):
             self.zoom_factor = new_zoom_factor
             
             # Apply the new zoom factor to update the display
-            self.refresh_display()
+            self.show_image(self.image)
             
             print(f"Fit to preview applied. New zoom factor: {self.zoom_factor:.2f}")
         else:
