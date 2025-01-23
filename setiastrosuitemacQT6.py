@@ -160,7 +160,7 @@ from PyQt6.QtCore import (
 # Math functions
 from math import sqrt
 
-
+VERSION = "2.7.3"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -222,6 +222,7 @@ class AstroEditingSuite(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowIcon(QIcon(icon_path))
+        self.setDockNestingEnabled(True)
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
         self.image_manager.image_changed.connect(self.update_file_name)
@@ -619,6 +620,10 @@ class AstroEditingSuite(QMainWindow):
         preferences_action.triggered.connect(self.open_preferences_dialog)
         preferences_menu.addAction(preferences_action)
 
+        update_menu = menubar.addMenu("Update")
+        check_update_action = QAction("Check for Updates", self)
+        check_update_action.triggered.connect(self.check_for_updates)
+        update_menu.addAction(check_update_action)
 
         # --------------------
         # Apply Default Theme
@@ -628,8 +633,11 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle('Seti Astro\'s Suite V2.7 QT6')
+        self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
+
+        self.check_for_updates()  # Call this in your app's init
+
 
     def remove_gradient(self):
         """Handle the Remove Gradient action."""
@@ -685,7 +693,54 @@ class AstroEditingSuite(QMainWindow):
             print(f"Error in handle_gradient_removal: {e}")
 
 
+    def check_for_updates(self):
+        try:
+            # URL to the JSON file on GitHub
+            update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/refs/heads/main/updates.json"
 
+            # Fetch the JSON data
+            response = requests.get(update_url, timeout=5)
+            response.raise_for_status()
+            update_data = response.json()
+
+            # Parse the current version and latest version
+            current_version = VERSION  # Replace with your app's current version
+            latest_version = update_data.get("version", "")
+
+            # Compare versions
+            if latest_version > current_version:
+                notes = update_data.get("notes", "No details provided.")
+                downloads = update_data.get("downloads", {})
+
+                # Show a dialog to notify the user about the new version
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("Update Available")
+                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setInformativeText(f"Release Notes:\n{notes}")
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+                # Add download links to the message box
+                msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
+
+                if msg_box.exec() == QMessageBox.StandardButton.Yes:
+                    import webbrowser
+                    # Open the appropriate link based on the user's OS
+                    platform = sys.platform
+                    if platform.startswith("win"):
+                        webbrowser.open(downloads.get("Windows", ""))
+                    elif platform.startswith("darwin"):
+                        webbrowser.open(downloads.get("macOS", ""))
+                    elif platform.startswith("linux"):
+                        webbrowser.open(downloads.get("Linux", ""))
+                    else:
+                        QMessageBox.warning(self, "Error", "Unsupported platform.")
+            else:
+                QMessageBox.information(self, "No Updates", "You are already running the latest version.")
+
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
 
 
     def open_preferences_dialog(self):
@@ -746,13 +801,13 @@ class AstroEditingSuite(QMainWindow):
         layout.addLayout(settings_form)
         
         # Add Clear and Save buttons
-        buttons = QDialogButtonBox(QdialogButtonBox.StandardButton.Save | QdialogButtonBox.StandardButton.Reset | QdialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Reset | QDialogButtonBox.StandardButton.Cancel)
         
         # Save button logic
         buttons.accepted.connect(lambda: self.save_preferences(input_fields, dialog))
         
         # Clear button logic
-        buttons.button(QdialogButtonBox.StandardButton.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
+        buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
         
         # Close dialog on cancel
         buttons.rejected.connect(dialog.reject)
@@ -761,7 +816,7 @@ class AstroEditingSuite(QMainWindow):
         dialog.exec()
 
     def select_file(self, field):
-        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*.exe);;All Files (*)")[0]
+        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*);;All Files (*)")[0]
         if file_path:
             field.setText(file_path)
 
@@ -1000,7 +1055,6 @@ class AstroEditingSuite(QMainWindow):
 
         if not graxpert_path or not os.path.exists(graxpert_path):
             QMessageBox.information(self, "GraXpert Path", "Please select the GraXpert executable.")
-
 
             graxpert_path, _ = QFileDialog.getOpenFileName(
                 self,
@@ -2335,7 +2389,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.redo()
             print("Redo performed.")
         else:
-            QMessageBox.information(self, "Redo", "No actions to redo.")            
+            QMessageBox.information(self, "Redo", "No actions to redo.")     
 
 class CopySlotDialog(QDialog):
     def __init__(self, parent=None, available_slots=None):
@@ -2382,6 +2436,9 @@ class CropTool(QDialog):
     """A cropping tool using QGraphicsView for better rectangle handling."""
     crop_applied = pyqtSignal(object)
 
+    # Class-level variable to store the previous crop rectangle
+    previous_crop_rect = None
+
     def __init__(self, image_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
@@ -2407,6 +2464,10 @@ class CropTool(QDialog):
         self.autostretch_button.clicked.connect(self.toggle_autostretch)
         layout.addWidget(self.autostretch_button)
 
+        self.load_previous_button = QPushButton("Load Previous Crop")
+        self.load_previous_button.clicked.connect(self.load_previous_crop)
+        layout.addWidget(self.load_previous_button)
+
         self.crop_button = QPushButton("Apply Crop")
         self.crop_button.clicked.connect(self.apply_crop)
         layout.addWidget(self.crop_button)
@@ -2419,8 +2480,8 @@ class CropTool(QDialog):
 
     def load_image(self):
         """Load and display the image in the QGraphicsView."""
-        height, width, channels = self.image_data.shape
-        if channels == 3:
+        if len(self.image_data.shape) == 3:  # Color image
+            height, width, channels = self.image_data.shape
             q_image = QImage(
                 (self.image_data * 255).astype(np.uint8).tobytes(),
                 width,
@@ -2428,7 +2489,8 @@ class CropTool(QDialog):
                 3 * width,
                 QImage.Format.Format_RGB888
             )
-        else:
+        elif len(self.image_data.shape) == 2:  # Mono image
+            height, width = self.image_data.shape
             q_image = QImage(
                 (self.image_data * 255).astype(np.uint8).tobytes(),
                 width,
@@ -2436,10 +2498,14 @@ class CropTool(QDialog):
                 width,
                 QImage.Format.Format_Grayscale8
             )
+        else:
+            raise ValueError("Unsupported image format")
+
         pixmap = QPixmap.fromImage(q_image)
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.pixmap_item)
         self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
 
     def eventFilter(self, source, event):
         """Handle mouse events for drawing the cropping rectangle."""
@@ -2480,20 +2546,31 @@ class CropTool(QDialog):
         
         if stretched_image is not None:
             self.image_data = stretched_image
-            # Save rectangle data before clearing the scene
             saved_rect = self.current_rect if not self.current_rect.isNull() else None
-
             self.scene.clear()
             self.load_image()
 
-            # Redraw the rectangle if it exists
             if saved_rect:
                 pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
                 self.selection_rect_item = self.scene.addRect(saved_rect, pen)
 
+    def load_previous_crop(self):
+        """Load the previous crop rectangle."""
+        if CropTool.previous_crop_rect:
+            self.current_rect = CropTool.previous_crop_rect
+            if self.selection_rect_item:
+                self.scene.removeItem(self.selection_rect_item)
+            pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
+            self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
+        else:
+            QMessageBox.information(self, "No Previous Crop", "No previous crop rectangle is available.")
+
     def apply_crop(self):
         """Crop the original image based on the selected rectangle."""
         if not self.current_rect.isNull():
+            # Save the current crop rectangle globally
+            CropTool.previous_crop_rect = self.current_rect
+
             # Get the scene dimensions and scale accordingly
             scene_rect = self.scene.sceneRect()
             scale_x = self.original_image_data.shape[1] / scene_rect.width()
@@ -2505,23 +2582,18 @@ class CropTool(QDialog):
             w = int(self.current_rect.width() * scale_x)
             h = int(self.current_rect.height() * scale_y)
 
-            # Ensure bounds are valid
             x = max(0, min(x, self.original_image_data.shape[1] - 1))
             y = max(0, min(y, self.original_image_data.shape[0] - 1))
             w = max(1, min(w, self.original_image_data.shape[1] - x))
             h = max(1, min(h, self.original_image_data.shape[0] - y))
 
-            # Crop the original image
             cropped_image = self.original_image_data[y:y + h, x:x + w]
 
-            # Emit the cropped image to the parent
             self.crop_applied.emit(cropped_image)
-
-            # Close the dialog
             self.accept()
         else:
             QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying.")
-
+            
 class ImageManager(QObject):
     """
     Manages multiple image slots with associated metadata and supports undo/redo operations for each slot.
@@ -2979,7 +3051,7 @@ class GradientRemovalDialog(QDialog):
         if self.drawing and len(self.current_polygon) > 1:
             pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             temp_polygon = QPolygon(self.current_polygon)
             painter.drawPolyline(temp_polygon)
 
@@ -6516,14 +6588,31 @@ class BlinkTab(QWidget):
         """Select the next item in the TreeWidget, looping back to the first item if at the end."""
         current_item = self.fileTree.currentItem()
         if current_item:
+            # Get all leaf items
             all_items = self.get_all_leaf_items()
-            current_index = all_items.index(current_item)
+
+            # Check if the current item is in the leaf items
+            try:
+                current_index = all_items.index(current_item)
+            except ValueError:
+                # If the current item is not a leaf, move to the first leaf item
+                print("Current item is not a leaf. Selecting the first leaf item.")
+                if all_items:
+                    next_item = all_items[0]
+                    self.fileTree.setCurrentItem(next_item)
+                    self.on_item_clicked(next_item, 0)
+                return
+
+            # Select the next leaf item or loop back to the first
             if current_index < len(all_items) - 1:
                 next_item = all_items[current_index + 1]
             else:
                 next_item = all_items[0]  # Loop back to the first item
+
             self.fileTree.setCurrentItem(next_item)
             self.on_item_clicked(next_item, 0)  # Update the preview
+        else:
+            print("No current item selected.")
 
     def get_all_leaf_items(self):
         """Get a flat list of all leaf items (actual files) in the TreeWidget."""
@@ -6589,10 +6678,10 @@ class BlinkTab(QWidget):
                     'is_mono': is_mono
                 })
 
-                # Extract filter and exposure time from FITS header
-                object_name = header.get('OBJECT', 'Unknown')
-                filter_name = header.get('FILTER', 'Unknown')
-                exposure_time = header.get('EXPOSURE', 'Unknown')
+                # Safely extract filter and exposure time from FITS header if available
+                object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
+                filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
+                exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
 
                 # Group images by filter and exposure time
                 group_key = (object_name, filter_name, exposure_time)
@@ -6642,6 +6731,7 @@ class BlinkTab(QWidget):
                             file_name = os.path.basename(file_path)
                             item = QTreeWidgetItem([file_name])
                             exposure_item.addChild(item)
+
 
 
     def debayer_image(self, image, file_path, header):
@@ -7179,7 +7269,6 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, w, QImage.Format.Format_Grayscale8)
 
 
-
 class CosmicClarityTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -7201,6 +7290,7 @@ class CosmicClarityTab(QWidget):
         self.preview_rect = None  # Stores the preview selection rectangle
         self.autostretch_enabled = False  # Track autostretch status
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.cosmic_clarity_folder = None
 
         self.initUI()
 
@@ -7925,8 +8015,42 @@ class CosmicClarityTab(QWidget):
         """Convert the slider value to a float in the range 1.0 - 8.0."""
         return self.psf_slider.value() / 10.0
     
+    def validate_cosmic_clarity_folder(self):
+        """Check if the Cosmic Clarity folder is set and valid."""
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(
+                self,
+                "Missing Folder",
+                "The Cosmic Clarity folder is not set. Please use the wrench icon to select the correct folder."
+            )
+            return False
+
+        # Determine the expected executable based on the platform
+        if os.name == "nt":  # Windows
+            expected_executable = "SetiAstroCosmicClarity.exe"
+        elif sys.platform == "darwin":  # macOS
+            expected_executable = "SetiAstroCosmicClaritymac"
+        else:  # Linux
+            expected_executable = "SetiAstroCosmicClarity"  # Case-sensitive, no extension
+
+        # Check if the expected executable exists in the folder
+        executable_path = os.path.join(self.cosmic_clarity_folder, expected_executable)
+        if not os.path.exists(executable_path):
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                f"Incorrect Cosmic Clarity folder. Please choose the parent folder containing the Cosmic Clarity executable:\n\n"
+                f"Expected file: {expected_executable}"
+            )
+            return False
+
+        return True
+
+
     def run_cosmic_clarity(self, input_file_path=None):
         """Run Cosmic Clarity with the current parameters."""
+        if not self.validate_cosmic_clarity_folder():
+            return  # Stop execution if the folder is not valid        
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
@@ -8214,6 +8338,8 @@ class CosmicClarityTab(QWidget):
 
     def run_cosmic_clarity_on_cropped(self, cropped_image, apply_autostretch=False):
         """Run Cosmic Clarity on a cropped image, with an option to autostretch upon receipt."""
+        if not self.validate_cosmic_clarity_folder():
+            return  # Stop execution if the folder is not valid        
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
@@ -10112,22 +10238,6 @@ class StarStretchTab(QWidget):
         self.spinnerLabel.hide()  # Hide spinner by default
         left_layout.addWidget(self.spinnerLabel)
 
-        # **Remove Zoom Buttons from Left Panel**
-        # Comment out or remove the existing zoom buttons in the left panel
-        # zoom_layout = QHBoxLayout()
-        # self.zoomInButton = QPushButton('Zoom In', self)
-        # self.zoomInButton.clicked.connect(self.zoom_in)
-        # zoom_layout.addWidget(self.zoomInButton)
-        #
-        # self.zoomOutButton = QPushButton('Zoom Out', self)
-        # self.zoomOutButton.clicked.connect(self.zoom_out)
-        # zoom_layout.addWidget(self.zoomOutButton)
-        # left_layout.addLayout(zoom_layout)
-
-        # Save As button (replaces Execute button)
-        self.saveAsButton = QPushButton("Save As", self)
-        self.saveAsButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveAsButton)
 
         # Footer
         footer_label = QLabel("""
@@ -19695,7 +19805,7 @@ class MainWindow(QMainWindow):
             checkboxes[option] = checkbox
 
         # Add OK and Cancel buttons
-        button_box = QDialogButtonBox(QdialogButtonBox.StandardButton.Ok | QdialogButtonBox.StandardButton.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(button_box)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
@@ -21216,7 +21326,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(force_blind_solve_button)
         
         # OK and Cancel buttons
-        buttons = QDialogButtonBox(QdialogButtonBox.StandardButton.Ok | QdialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
