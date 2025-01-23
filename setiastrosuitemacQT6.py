@@ -160,7 +160,7 @@ from PyQt6.QtCore import (
 # Math functions
 from math import sqrt
 
-VERSION = "2.7.3"
+VERSION = "2.7.5"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -651,7 +651,7 @@ class AstroEditingSuite(QMainWindow):
         gradient_dialog.exec()
 
 
-    def handle_gradient_removal(self, corrected_image, gradient_background):
+    def handle_gradient_removal(self, corrected_image, gradient_background, save_to_slot_1):
         """
         Handle the processed image after gradient removal.
 
@@ -669,24 +669,29 @@ class AstroEditingSuite(QMainWindow):
             # Call set_image with corrected_image and metadata only
             self.image_manager.set_image(new_image=corrected_image, metadata=metadata)
 
-            # Assign gradient_background to Slot 1 directly
-            slot_1 = 1  # Slot 1 is typically reserved
-            metadata_slot1 = {
-                'file_path': "Gradient Background",
-                'description': "Gradient background extracted",
-                'bit_depth': "32-bit floating point",
-                'is_mono': len(gradient_background.shape) < 3,
-                'gradient_background': gradient_background
-            }
+            if save_to_slot_1:
+                # Assign gradient_background to Slot 1
+                slot_1 = 1  # Slot 1 is typically reserved
+                metadata_slot1 = {
+                    'file_path': "Gradient Background",
+                    'description': "Gradient background extracted",
+                    'bit_depth': "32-bit floating point",
+                    'is_mono': len(gradient_background.shape) < 3,
+                    'gradient_background': gradient_background
+                }
 
-            # Directly assign to Slot 1
-            self.image_manager._images[slot_1] = gradient_background
-            self.image_manager._metadata[slot_1] = metadata_slot1
+                # Store the gradient background in Slot 1
+                self.image_manager._images[slot_1] = gradient_background
+                self.image_manager._metadata[slot_1] = metadata_slot1
+
+                print(f"Gradient background stored in Slot {slot_1}.")
+            else:
+                print("Gradient background was not saved to Slot 1 as per user choice.")
 
             # Notify the user
             QMessageBox.information(self, "Success", "Gradient removal completed successfully.")
             print(f"Gradient removal completed and image updated in Slot {current_slot}.")
-            print(f"Gradient background stored in Slot {slot_1}.")
+            
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply gradient removal:\n{e}")
@@ -832,8 +837,8 @@ class AstroEditingSuite(QMainWindow):
         QMessageBox.information(self, "Preferences Saved", "Settings have been updated successfully.")
 
     def clear_preferences(self, input_fields):
-        reply = QMessageBox.question(self, "Clear Preferences", "Are you sure you want to clear all preferences?", QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        reply = QMessageBox.question(self, "Clear Preferences", "Are you sure you want to clear all preferences?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             for key in input_fields.keys():
                 self.settings.remove(key)
                 input_fields[key].clear()
@@ -1296,10 +1301,10 @@ class AstroEditingSuite(QMainWindow):
                     self,
                     "Overwrite Confirmation",
                     f"{target_slot_str} already contains an image. Do you want to overwrite it?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
                 )
-                if overwrite != QMessageBox.Yes:
+                if overwrite != QMessageBox.StandardButton.Yes:
                     QMessageBox.information(self, "Operation Cancelled", "Copy operation cancelled.")
                     print("User chose not to overwrite the target slot.")
                     return
@@ -1632,8 +1637,8 @@ class AstroEditingSuite(QMainWindow):
             self,
             "Image Linearity",
             "Is the current image linear?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
         
         if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
@@ -1642,12 +1647,12 @@ class AstroEditingSuite(QMainWindow):
         else:
             processing_image = self.image_manager.image
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             print("Image is linear. Applying stretch.")
             dialog_msg = QMessageBox(self)
             dialog_msg.setWindowTitle("Stretching Image")
             dialog_msg.setText("Stretching the image for StarNet processing...")
-            dialog_msg.setStandardButtons(QMessageBox.Ok)
+            dialog_msg.setStandardButtons(QMessageBox.StandardButton.Ok)
             dialog_msg.exec()
 
             # Apply stretch
@@ -2033,10 +2038,10 @@ class AstroEditingSuite(QMainWindow):
                         self,
                         "Set Execute Permissions",
                         "The selected file does not have execute permissions. Would you like to add them?",
-                        QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.Yes
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
                     )
-                    if reply == QMessageBox.Yes:
+                    if reply == QMessageBox.StandardButton.Yes:
                         try:
                             os.chmod(exe_path, 0o755)
                         except Exception as e:
@@ -2593,7 +2598,7 @@ class CropTool(QDialog):
             self.accept()
         else:
             QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying.")
-            
+
 class ImageManager(QObject):
     """
     Manages multiple image slots with associated metadata and supports undo/redo operations for each slot.
@@ -2813,7 +2818,7 @@ class ImageManager(QObject):
 
 class GradientRemovalDialog(QDialog):
     # Define signals to communicate with AstroEditingSuite
-    processing_completed = pyqtSignal(np.ndarray, np.ndarray)  # Corrected Image, Gradient Background
+    processing_completed = pyqtSignal(np.ndarray, np.ndarray, bool)  # Corrected Image, Gradient Background
 
     def __init__(self, image, parent=None):
         """
@@ -2838,6 +2843,7 @@ class GradientRemovalDialog(QDialog):
 
         # Downsample scale factor (can be made user-definable if needed)
         self.downsample_scale = 4
+        self.save_to_slot_1 = False
 
         # Calculate scale factor to fit image within max_display_size
         original_height, original_width = self.image.shape[:2]
@@ -3114,6 +3120,7 @@ class GradientRemovalDialog(QDialog):
         2. RBF gradient removal.
         """
         # Disable the process button to prevent multiple clicks
+        self.save_to_slot_1 = self.show_gradient_checkbox.isChecked()
         self.process_button.setEnabled(False)
 
         # Stretch the image before processing
@@ -3228,7 +3235,7 @@ class GradientRemovalDialog(QDialog):
         QApplication.processEvents()
 
         # Emit the processed images back to AstroEditingSuite
-        self.processing_completed.emit(corrected_image, gradient_background)
+        self.processing_completed.emit(corrected_image, gradient_background, self.save_to_slot_1)
 
         # Close the dialog
         self.accept()
@@ -3835,7 +3842,7 @@ class GradientRemovalDialog(QDialog):
         median_diff = target_median - current_median
         normalized_image = image + median_diff
         return normalized_image
-
+    
 
 class ImagePreview(QWidget):
     # Define a custom signal that emits the slot number
@@ -4037,10 +4044,10 @@ class ImagePreview(QWidget):
             self,
             "Confirm Swap",
             f"Are you sure you want to swap Slot {self.slot} with Slot 0?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
-        if confirmation == QMessageBox.Yes:
+        if confirmation == QMessageBox.StandardButton.Yes:
             # Debug: Print parent details
             print(f"Attempting to swap Slot {self.slot} with Slot 0.")
             print(f"Parent: {self.parent()}, Type: {type(self.parent())}")
@@ -4718,7 +4725,7 @@ class CLAHEDialog(QDialog):
         self.preview_scene = QGraphicsScene()
         self.preview_view.setScene(self.preview_scene)
 
-        self.preview_view.setDragMode(QGraphicsView.ScrollHandDrag)  # Enable panning
+        self.preview_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Enable panning
         self.preview_view.setFixedSize(800, 500)  # Fixed size to prevent resizing
 
         # Initialize QGraphicsPixmapItem
@@ -4962,7 +4969,7 @@ class MorphologyDialog(QDialog):
         self.preview_scene = QGraphicsScene()
         self.preview_view.setScene(self.preview_scene)
 
-        self.preview_view.setDragMode(QGraphicsView.ScrollHandDrag)  # Enable panning
+        self.preview_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Enable panning
         self.preview_view.setFixedSize(800, 500)  # Fixed size to prevent resizing
 
         # Initialize QGraphicsPixmapItem
@@ -7170,11 +7177,11 @@ class BlinkTab(QWidget):
             self,
             'Confirm Deletion',
             f"Are you sure you want to permanently delete {len(selected_items)} selected images? This action is irreversible.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
         )
 
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             for item in selected_items:
                 file_name = item.text(0)
                 file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
@@ -9060,8 +9067,8 @@ class CosmicClaritySatelliteTab(QWidget):
             file_path = os.path.join(folder, selected_item.text(0))
             if os.path.exists(file_path):
                 reply = QMessageBox.question(self, "Confirm Delete", f"Are you sure you want to delete {selected_item.text(0)}?",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
                     os.remove(file_path)
                     self.refresh_input_files() if treebox == self.input_files_tree else self.refresh_output_files()
 
@@ -9607,7 +9614,8 @@ class StatisticalStretchTab(QWidget):
 
         # Curves adjustment checkbox
         self.curvesCheckBox = QCheckBox('Apply Curves Adjustment', self)
-        self.curvesCheckBox.stateChanged.connect(self.toggleCurvesSlider)
+        self.curvesCheckBox.setCheckState(Qt.CheckState.Unchecked)  # Explicitly set the initial state
+
         left_layout.addWidget(self.curvesCheckBox)
 
         # Curves Boost slider (initially hidden)
@@ -9617,8 +9625,8 @@ class StatisticalStretchTab(QWidget):
         self.curvesBoostSlider.setMaximum(50)
         self.curvesBoostSlider.setValue(0)
         self.curvesBoostSlider.valueChanged.connect(self.updateCurvesBoostLabel)
-        self.curvesBoostLabel.hide()
-        self.curvesBoostSlider.hide()
+        self.curvesBoostLabel.show()
+        self.curvesBoostSlider.show()
 
         left_layout.addWidget(self.curvesBoostLabel)
         left_layout.addWidget(self.curvesBoostSlider)
@@ -9878,14 +9886,6 @@ class StatisticalStretchTab(QWidget):
     def updateCurvesBoostLabel(self, value):
         self.curvesBoostLabel.setText(f'Curves Boost: {value / 100:.2f}')
 
-    def toggleCurvesSlider(self, state):
-        if state == Qt.CheckState.Checked:
-            self.curvesBoostLabel.show()
-            self.curvesBoostSlider.show()
-        else:
-            self.curvesBoostLabel.hide()
-            self.curvesBoostSlider.hide()
-
     def previewStretch(self):
         if self.image is not None:
             # Show spinner before starting processing
@@ -9948,7 +9948,7 @@ class StatisticalStretchTab(QWidget):
         # Update ImageManager with the new processed image
         if self.image_manager:
             try:
-                self.image_manager.update_image(updated_image=self.stretched_image, metadata=metadata)
+                self.image_manager.set_image(self.stretched_image, metadata=metadata)
                 print("StatisticalStretchTab: Processed image stored in ImageManager.")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -10054,7 +10054,6 @@ class StatisticalStretchTab(QWidget):
                 self.fileLabel.setText('Save canceled.')
         else:
             self.fileLabel.setText('No stretched image to save. Please generate a preview first.')
-
 
 
 # Thread for Stat Stretch background processing
@@ -11506,7 +11505,7 @@ class FullCurvesTab(QWidget):
             self.zoom_factor = new_zoom_factor
             
             # Apply the new zoom factor to update the display
-            self.refresh_display()
+            self.show_image(self.image)
             
             print(f"Fit to preview applied. New zoom factor: {self.zoom_factor:.2f}")
         else:
@@ -20523,9 +20522,9 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self, "Astrometry Data Missing",
             "No astrometry data found in the image. Would you like to perform a blind solve?",
-            QMessageBox.Yes | QMessageBox.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.StandardButton.Yes:
             self.perform_blind_solve()
 
     def perform_blind_solve(self):
