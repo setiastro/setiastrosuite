@@ -1,9 +1,9 @@
 {
-  "version": "2.7.4",
+  "version": "2.7.5",
   "downloads": {
     "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_windows.exe",
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_linux"
   },
-  "notes": Numerous bug fixes, curves boost slider now showing in statistical stretch, undo function mapped correctly"
+  "notes": "Numerous bug fixes, curves boost slider now showing in statistical stretch, undo function mapped correctly"
 }
