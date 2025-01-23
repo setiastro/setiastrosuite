@@ -161,7 +161,7 @@ from PyQt6.QtCore import (
 # Math functions
 from math import sqrt
 
-VERSION = "2.7.1"
+VERSION = "2.7.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -7273,6 +7273,7 @@ class CosmicClarityTab(QWidget):
         self.preview_rect = None  # Stores the preview selection rectangle
         self.autostretch_enabled = False  # Track autostretch status
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.cosmic_clarity_folder = None
 
         self.initUI()
 
@@ -7539,31 +7540,33 @@ class CosmicClarityTab(QWidget):
         """Check if the Cosmic Clarity folder is set and valid."""
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(
-                self, 
-                "Missing Folder", 
+                self,
+                "Missing Folder",
                 "The Cosmic Clarity folder is not set. Please use the wrench icon to select the correct folder."
             )
             return False
 
-        # Check if the expected executables exist in the folder
-        expected_executables = [
-            "SetiAstroCosmicClarity.exe",
-            "SetiAstroCosmicClarity_denoise.exe" if os.name == 'nt' else (
-                "SetiAstroCosmicClaritymac" if sys.platform == "darwin" else "SetiAstroCosmicClarity"
-            )
-        ]
-        missing_files = [exe for exe in expected_executables if not os.path.exists(os.path.join(self.cosmic_clarity_folder, exe))]
+        # Determine the expected executable based on the platform
+        if os.name == "nt":  # Windows
+            expected_executable = "SetiAstroCosmicClarity.exe"
+        elif sys.platform == "darwin":  # macOS
+            expected_executable = "SetiAstroCosmicClaritymac"
+        else:  # Linux
+            expected_executable = "SetiAstroCosmicClarity"  # Case-sensitive, no extension
 
-        if missing_files:
+        # Check if the expected executable exists in the folder
+        executable_path = os.path.join(self.cosmic_clarity_folder, expected_executable)
+        if not os.path.exists(executable_path):
             QMessageBox.warning(
-                self, 
-                "Invalid Folder", 
-                f"The selected Cosmic Clarity folder is invalid. The following files are missing:\n\n{', '.join(missing_files)}\n\n"
-                "Please use the wrench icon to select the correct folder."
+                self,
+                "Invalid Folder",
+                f"Incorrect Cosmic Clarity folder. Please choose the parent folder containing the Cosmic Clarity executable:\n\n"
+                f"Expected file: {expected_executable}"
             )
             return False
 
         return True
+
 
 
     def select_cosmic_clarity_folder(self):
