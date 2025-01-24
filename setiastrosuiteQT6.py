@@ -128,6 +128,7 @@ from PyQt6.QtGui import (
     QTransform,
     QIcon,
     QPainterPath,
+    QKeySequence,
     QFont,
     QMovie,
     QCursor,
@@ -154,14 +155,18 @@ from PyQt6.QtCore import (
     QProcess,
     QSize,
     QObject,
-    QSettings
+    QSettings,
+    QRunnable,
+    QThreadPool
 )
 
 
 # Math functions
 from math import sqrt
+import math
+from copy import deepcopy
 
-VERSION = "2.7.5"
+VERSION = "2.8.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -191,6 +196,7 @@ if hasattr(sys, '_MEIPASS'):
     abeicon_path = os.path.join(sys._MEIPASS, 'abeicon.png')    
     undoicon_path = os.path.join(sys._MEIPASS, 'undoicon.png')  
     redoicon_path = os.path.join(sys._MEIPASS, 'redoicon.png')  
+    blastericon_path = os.path.join(sys._MEIPASS, 'blaster.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -218,6 +224,7 @@ else:
     abeicon_path = 'abeicon.png'
     undoicon_path = 'undoicon.png'
     redoicon_path = 'redoicon.png'
+    blastericon_path = 'blaster.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -386,6 +393,15 @@ class AstroEditingSuite(QMainWindow):
         # Add RGB Extract to Functions menu
         functions_menu.addAction(rgb_extract_action)
 
+        blemish_blaster_icon = QIcon(blastericon_path)  # Ensure 'blastericon_path' is correctly defined
+        blemish_blaster_action = QAction(blemish_blaster_icon, "Blemish Blaster", self)
+        blemish_blaster_action.setShortcut('Ctrl+B')  # Assign a keyboard shortcut (e.g., Ctrl+B)
+        blemish_blaster_action.setStatusTip('Remove blemishes from the current image')
+        blemish_blaster_action.triggered.connect(self.open_blemish_blaster)  # Connect to handler method
+
+        # Add the Blemish Blaster action to the Functions menu
+        functions_menu.addAction(blemish_blaster_action)
+
         clahe_action = QAction("CLAHE", self)
         clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
         clahe_action.setStatusTip('Apply Contrast Limited Adaptive Histogram Equalization')
@@ -546,6 +562,8 @@ class AstroEditingSuite(QMainWindow):
         # Add RGB Extract Button to Toolbar
         toolbar.addAction(rgb_extract_action)
 
+        toolbar.addAction(blemish_blaster_action)
+
         # Add CLAHE Button to Toolbar with Icon
         clahe_icon = QIcon(clahe_path)
         clahe_action.setIcon(clahe_icon)
@@ -638,7 +656,19 @@ class AstroEditingSuite(QMainWindow):
         self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
-        self.check_for_updates()  # Call this in your app's init
+        self.check_for_updatesstartup()  # Call this in your app's init
+
+
+    def open_blemish_blaster(self):
+        """Handler method to open the Blemish Blaster tool."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image Loaded", "Please load an image before using Blemish Blaster.")
+            return
+
+        # Initialize and show the Blemish Blaster dialog, passing the ImageManager
+        self.blemish_dialog = BlemishBlasterDialog(self.image_manager, self)
+
+        self.blemish_dialog.exec()
 
 
     def remove_gradient(self):
@@ -745,6 +775,53 @@ class AstroEditingSuite(QMainWindow):
                         QMessageBox.warning(self, "Error", "Unsupported platform.")
             else:
                 QMessageBox.information(self, "No Updates", "You are already running the latest version.")
+
+        except requests.RequestException as e:
+            QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
+
+    def check_for_updatesstartup(self):
+        try:
+            # URL to the JSON file on GitHub
+            update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/refs/heads/main/updates.json"
+
+            # Fetch the JSON data
+            response = requests.get(update_url, timeout=5)
+            response.raise_for_status()
+            update_data = response.json()
+
+            # Parse the current version and latest version
+            current_version = VERSION  # Replace with your app's current version
+            latest_version = update_data.get("version", "")
+
+            # Compare versions
+            if latest_version > current_version:
+                notes = update_data.get("notes", "No details provided.")
+                downloads = update_data.get("downloads", {})
+
+                # Show a dialog to notify the user about the new version
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("Update Available")
+                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setInformativeText(f"Release Notes:\n{notes}")
+                msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+                # Add download links to the message box
+                msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
+
+                if msg_box.exec() == QMessageBox.StandardButton.Yes:
+                    import webbrowser
+                    # Open the appropriate link based on the user's OS
+                    platform = sys.platform
+                    if platform.startswith("win"):
+                        webbrowser.open(downloads.get("Windows", ""))
+                    elif platform.startswith("darwin"):
+                        webbrowser.open(downloads.get("macOS", ""))
+                    elif platform.startswith("linux"):
+                        webbrowser.open(downloads.get("Linux", ""))
+                    else:
+                        QMessageBox.warning(self, "Error", "Unsupported platform.")
 
         except requests.RequestException as e:
             QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
@@ -2121,20 +2198,57 @@ class AstroEditingSuite(QMainWindow):
     def update_file_name(self, slot, image, metadata):
         """Update the file name in the status bar."""
         file_path = metadata.get('file_path', None)
+        
         if file_path:
-            self.file_name_label.setText(os.path.basename(file_path))  # Update the label with file name
+            # Debugging: Print type and value of file_path
+            print(f"DEBUG: file_path type: {type(file_path)}, value: {file_path}")
+            
+            # Check if file_path is a QLabel
+            if isinstance(file_path, QLabel):
+                # Extract text from QLabel
+                file_path_str = file_path.text()
+                print("WARNING: 'file_path' was a QLabel. Extracted text.")
+            elif isinstance(file_path, (str, bytes, os.PathLike)):
+                # Correct type
+                file_path_str = file_path
+            else:
+                # Unsupported type
+                file_path_str = "Invalid file path"
+                QMessageBox.warning(
+                    self,
+                    "Invalid File Path",
+                    f"The provided file path is invalid (type: {type(file_path)})."
+                )
+                print(f"WARNING: 'file_path' is of unsupported type: {type(file_path)}")
+                self.file_name_label.setText(file_path_str)
+                return  # Exit early since the path is invalid
+            
+            # Safely set the file name label
+            try:
+                base_name = os.path.basename(file_path_str)
+                self.file_name_label.setText(base_name)
+                print(f"File name updated to: {base_name}")
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error Updating File Name",
+                    f"An error occurred while updating the file name:\n{str(e)}"
+                )
+                print(f"ERROR: Failed to set file name label: {e}")
         else:
             self.file_name_label.setText("No file selected")
-
+            print("No file path provided in metadata.")
+        
         # If slot == 0 and we have a valid image, update dimensions
         if slot == 0 and image is not None:
             # image should be a numpy array with shape (height, width[, channels])
             h, w = image.shape[:2]
             self.dim_label.setText(f"{w} x {h}")
+            print(f"Image dimensions updated to: {w} x {h}")
         else:
-            # If another slot changed or no image, you might want to blank it
-            # or just leave it as-is. Example: set to "—"
-            self.dim_label.setText("—")            
+            # If another slot changed or no image, set to "—"
+            self.dim_label.setText("—")
+            print("Image dimensions not updated.")       
 
     def apply_theme(self, theme):
         """Apply the selected theme to the application."""
@@ -2712,6 +2826,8 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, self._metadata[slot])
         print(f"ImageManager: Image set for slot {slot} via property setter.")
 
+
+
     def set_metadata(self, metadata):
         """
         Sets new metadata for the current slot, adding the previous state to the undo stack.
@@ -2816,6 +2932,871 @@ class ImageManager(QObject):
         else:
             print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
 
+class BlemishBlasterWorkerSignals(QObject):
+    finished = pyqtSignal(np.ndarray)  # Emitted when processing is done
+
+class BlemishBlasterWorker(QRunnable):
+    def __init__(self, image, x, y, radius, feather, opacity, channels_to_process=[0,1,2]):
+        super().__init__()
+        self.image = image.copy()
+        self.x = x
+        self.y = y
+        self.radius = radius
+        self.feather = feather
+        self.opacity = opacity
+        self.channels_to_process = channels_to_process
+        self.signals = BlemishBlasterWorkerSignals()
+
+    @pyqtSlot()
+    def run(self):
+        # Perform blemish removal
+        corrected_image = self.remove_blemish(
+            self.image, self.x, self.y, self.radius, self.feather, self.opacity, self.channels_to_process
+        )
+        # Emit the corrected image
+        self.signals.finished.emit(corrected_image)
+
+    def remove_blemish(self, image, x, y, radius, feather, opacity, channels_to_process):
+        """
+        Perform per-pixel blemish removal by sampling from surrounding circles.
+        Handles edge cases where correction circles may extend beyond image boundaries.
+        """
+        corrected_image = image.copy()
+        h, w = image.shape[:2]
+
+        # Define angles for surrounding circles
+        angles = [0, 60, 120, 180, 240, 300]
+        surrounding_centers = []
+        for angle in angles:
+            rad = math.radians(angle)
+            dx = int(math.cos(rad) * (radius * 1.5))  # 1.5 times the radius away
+            dy = int(math.sin(rad) * (radius * 1.5))
+            surrounding_centers.append((x + dx, y + dy))
+
+        # Calculate medians for each surrounding circle and the target circle
+        target_median = self.calculate_median_circle(image, x, y, radius, channels_to_process)
+        surrounding_medians = [
+            self.calculate_median_circle(image, cx, cy, radius, channels_to_process)
+            for cx, cy in surrounding_centers
+        ]
+
+        # Determine the three correction circles closest to the target median
+        median_diffs = [abs(median - target_median) for median in surrounding_medians]
+        closest_indices = np.argsort(median_diffs)[:3]  # Indices of the three closest circles
+        selected_circles = [surrounding_centers[i] for i in closest_indices]
+
+        # Iterate through each channel
+        for c in channels_to_process:
+            # Iterate through each pixel in the target blemish circle
+            for i in range(max(y - radius, 0), min(y + radius + 1, h)):
+                for j in range(max(x - radius, 0), min(x + radius + 1, w)):
+                    dist = math.sqrt((j - x) ** 2 + (i - y) ** 2)
+                    if dist <= radius:
+                        # Apply feathering based on distance
+                        if feather > 0:
+                            weight = max(0, min(1, (radius - dist) / (radius * feather)))
+                        else:
+                            weight = 1
+
+                        # Collect corresponding pixel values from the selected correction circles
+                        sampled_values = []
+                        for (cx, cy) in selected_circles:
+                            # Find the corresponding pixel position
+                            corresponding_j = j + (cx - x)
+                            corresponding_i = i + (cy - y)
+
+                            # Ensure the corresponding pixel is within image bounds
+                            if 0 <= corresponding_i < h and 0 <= corresponding_j < w:
+                                if image.ndim == 2:
+                                    sampled_values.append(image[corresponding_i, corresponding_j])
+                                elif image.ndim == 3:
+                                    if image.shape[2] == 1:
+                                        sampled_values.append(image[corresponding_i, corresponding_j, 0])
+                                    elif image.shape[2] > c:
+                                        sampled_values.append(image[corresponding_i, corresponding_j, c])
+                                    else:
+                                        continue  # Skip if channel is out of bounds
+
+                        if sampled_values:
+                            # Calculate the median of the sampled values
+                            median_val = np.median(sampled_values)
+                        else:
+                            # If no valid sampled pixels, retain the original pixel value
+                            if image.ndim == 2:
+                                median_val = image[i, j]
+                            elif image.ndim == 3 and image.shape[2] ==1:
+                                median_val = image[i, j,0]
+                            else:
+                                median_val = image[i,j,c]
+
+                        # Blend the median value into the target pixel using opacity and feathering
+                        if image.ndim ==2:
+                            original_val = image[i, j]
+                            blended_val = (1 - opacity * weight) * original_val + (opacity * weight) * median_val
+                            corrected_image[i, j] = blended_val
+                        elif image.ndim ==3 and image.shape[2] ==1:
+                            original_val = image[i, j,0]
+                            blended_val = (1 - opacity * weight) * original_val + (opacity * weight) * median_val
+                            corrected_image[i, j,0] = blended_val
+                        elif image.ndim ==3 and image.shape[2] >c:
+                            original_val = image[i, j, c]
+                            blended_val = (1 - opacity * weight) * original_val + (opacity * weight) * median_val
+                            corrected_image[i, j, c] = blended_val
+
+        return corrected_image
+
+    def calculate_median_circle(self, image, cx, cy, radius, channels):
+        """
+        Calculate the median value of a circle for the specified channels.
+
+        Args:
+            image (np.ndarray): The image array.
+            cx (int): X-coordinate of the circle center.
+            cy (int): Y-coordinate of the circle center.
+            radius (int): Radius of the circle.
+            channels (list): List of channel indices to process.
+
+        Returns:
+            float: The overall median value across specified channels.
+        """
+        values = []
+        for c in channels:
+            y_min = max(cy - radius, 0)
+            y_max = min(cy + radius + 1, image.shape[0])
+            x_min = max(cx - radius, 0)
+            x_max = min(cx + radius + 1, image.shape[1])
+
+            if image.ndim == 2:
+                # Grayscale image (2D)
+                roi = image[y_min:y_max, x_min:x_max]
+            elif image.ndim == 3:
+                if image.shape[2] ==1:
+                    # Grayscale image with single channel
+                    roi = image[y_min:y_max, x_min:x_max, 0]
+                elif image.shape[2] >= c+1:
+                    # RGB image
+                    roi = image[y_min:y_max, x_min:x_max, c]
+                else:
+                    continue  # Skip if channel is out of bounds
+            else:
+                continue  # Unsupported image dimensions
+
+            yy, xx = np.ogrid[:roi.shape[0], :roi.shape[1]]
+            dist_from_center = np.sqrt((xx - (cx - x_min))**2 + (yy - (cy - y_min))**2)
+            mask = dist_from_center <= radius
+            values.extend(roi[mask].flatten())
+
+        return np.median(values) if values else 0.0   
+         
+class GraphicsView(QGraphicsView):
+    """
+    Custom QGraphicsView to handle mouse events for blemish removal.
+    Emits signals for mouse movements and clicks.
+    """
+    mouse_moved = pyqtSignal(QPointF)
+    mouse_clicked = pyqtSignal(QPointF)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)  # Enable mouse tracking without button presses
+
+    def mouseMoveEvent(self, event):
+        pos = self.mapToScene(event.position().toPoint())
+        self.mouse_moved.emit(pos)
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = self.mapToScene(event.position().toPoint())
+            self.mouse_clicked.emit(pos)
+        super().mousePressEvent(event)
+
+
+class BlemishBlasterDialog(QDialog):
+    blemish_removed = pyqtSignal(np.ndarray)  # Signal emitted when a blemish is removed
+
+    def __init__(self, image_manager, parent=None):
+        """
+        Initializes the BlemishBlaster dialog.
+
+        Args:
+            image_manager (ImageManager): The ImageManager instance from the main application.
+            parent (QWidget, optional): Parent widget.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Blemish Blaster")
+        self.setMinimumSize(800, 600)  # Set initial size to 800x600
+
+        self.image_manager = image_manager  # Reference to ImageManager
+        self.image = self.image_manager.image.copy()  # Work on a copy for display
+
+        # Triplicate single-channel images to ensure 3 channels
+        if self.image.ndim == 2:
+            self.image = np.repeat(self.image[:, :, np.newaxis], 3, axis=2)
+        elif self.image.ndim == 3 and self.image.shape[2] == 1:
+            self.image = np.repeat(self.image, 3, axis=2)
+        elif self.image.ndim == 3 and self.image.shape[2] == 3:
+            pass  # RGB image, no action needed
+        else:
+            raise ValueError(f"Unsupported image shape: {self.image.shape}")
+
+        self.display_image = self.image.copy()
+
+        # Initialize QScrollArea for image display with scroll bars
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)  # Allow the scroll area to resize its widget
+
+        # Initialize QGraphicsScene and QGraphicsView
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.NoDrag)  # Disable panning via mouse drag
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)  # Center the image if smaller than viewport
+
+        # Initialize QGraphicsPixmapItem
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+        self.pixmap_item.setPixmap(self.convert_image_to_pixmap(self.display_image))
+
+        # Initialize QGraphicsEllipseItem for the correction circle
+        self.circle_item = QGraphicsEllipseItem()
+        self.circle_item.setPen(QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine))
+        self.circle_item.setBrush(QBrush(Qt.BrushStyle.NoBrush))  # Corrected Line
+        self.circle_item.setVisible(False)  # Initially hidden
+        self.scene.addItem(self.circle_item)
+
+        # Set the graphics_view as the widget inside the scroll area
+        self.scroll_area.setWidget(self.graphics_view)
+
+        # Main layout
+        self.layout = QVBoxLayout()
+        self.setLayout(self.layout)
+        self.layout.addWidget(self.scroll_area)
+
+        # Create a horizontal layout to hold controls and visualization side by side
+        controls_visualization_layout = QHBoxLayout()
+
+        # Sliders and Controls
+        controls_group = self.setup_controls()
+
+        # Visualization
+        visualization_group = self.setup_visualization()
+
+        # Add controls and visualization to the horizontal layout
+        controls_visualization_layout.addWidget(controls_group)
+        controls_visualization_layout.addWidget(visualization_group)
+
+        # Add the horizontal layout to the main vertical layout
+        self.layout.addLayout(controls_visualization_layout)
+
+        # Undo, Redo, and Apply Changes Buttons
+        self.setup_undo_redo_apply()
+
+        # Thread Pool for handling image processing
+        self.threadpool = QThreadPool()
+
+        # Current cursor position
+        self.current_x = None
+        self.current_y = None
+
+        # Install event filter to capture mouse events
+        self.graphics_view.installEventFilter(self)
+
+        self.graphics_view.setMouseTracking(True)
+        self.graphics_view.mousePressEvent = self.view_mouse_press_event
+        self.graphics_view.mouseMoveEvent = self.view_mouse_move_event
+
+        # Shortcut actions for Undo and Redo
+        self.setup_shortcuts()
+        self.cursor_over_scrollbar = False     
+
+        self.undo_stack = []
+        self.redo_stack = []       
+        self.is_stretched = False    
+
+        # Initialize Zoom parameters
+        self.zoom_factor = 1.0  # Current zoom level
+        self.zoom_step = 1.25   # Zoom increment factor
+        self.zoom_min = 0.02     # Minimum zoom (10%)
+        self.zoom_max = 2     # Maximum zoom (500%)
+
+    def setup_controls(self):
+        """Set up sliders for Correction Radius, Feathering, and Opacity."""
+        controls_group = QGroupBox("Controls")
+        form_layout = QFormLayout()        
+
+        # Zoom Buttons Layout
+        zoom_layout = QHBoxLayout()
+
+        # Zoom In Button
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        # Zoom Out Button
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        # Optionally, add a label to display current zoom level
+        self.zoom_label = QLabel("100%")
+        zoom_layout.addWidget(self.zoom_label)
+
+        form_layout.addRow("Zoom:", zoom_layout)
+
+ 
+
+        # Correction Radius Slider
+        self.radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.radius_slider.setMinimum(1)
+        self.radius_slider.setMaximum(100)
+        self.radius_slider.setValue(10)
+        self.radius_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.radius_slider.setTickInterval(10)
+        self.radius_slider.valueChanged.connect(self.update_visualization)
+
+        form_layout.addRow("Correction Radius:", self.radius_slider)
+
+        # Feathering Slider
+        self.feather_slider = QSlider(Qt.Orientation.Horizontal)
+        self.feather_slider.setMinimum(0)
+        self.feather_slider.setMaximum(100)
+        self.feather_slider.setValue(50)
+        self.feather_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.feather_slider.setTickInterval(10)
+        self.feather_slider.valueChanged.connect(self.update_visualization)
+        form_layout.addRow("Feathering:", self.feather_slider)
+
+        # Opacity Slider
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setMinimum(0)
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.opacity_slider.setTickInterval(10)
+        self.opacity_slider.valueChanged.connect(self.update_visualization)
+        form_layout.addRow("Opacity:", self.opacity_slider)
+
+        # Autostretch Button
+        self.autostretch_button = QPushButton("Autostretch")
+        self.autostretch_button.clicked.connect(self.autostretch_image)
+        form_layout.addRow("Autostretch:", self.autostretch_button)
+
+        controls_group.setLayout(form_layout)
+        return controls_group
+
+    def setup_visualization(self):
+        """Set up the feathering and opacity visualization."""
+        visualization_group = QGroupBox("Feathering & Opacity Visualization")
+        visualization_layout = QHBoxLayout()
+
+        self.visualization_label = QLabel()
+        self.visualization_pixmap = self.create_visualization_pixmap()
+        self.visualization_label.setPixmap(self.visualization_pixmap)
+        visualization_layout.addWidget(self.visualization_label)
+
+        visualization_group.setLayout(visualization_layout)
+        return visualization_group
+
+    def setup_undo_redo_apply(self):
+        """Set up Undo, Redo, and Apply Changes buttons."""
+        history_group = QGroupBox("History")
+        history_layout = QHBoxLayout()
+
+        # Apply Changes Button
+        self.apply_button = QPushButton("Apply Changes")
+        self.apply_button.clicked.connect(self.apply_changes)
+        history_layout.addWidget(self.apply_button)
+
+        # Undo Button
+        self.undo_button = QPushButton("Undo")
+        self.undo_button.clicked.connect(self.perform_undo)
+        history_layout.addWidget(self.undo_button)
+
+        # Redo Button
+        self.redo_button = QPushButton("Redo")
+        self.redo_button.clicked.connect(self.perform_redo)
+        history_layout.addWidget(self.redo_button)
+
+        history_group.setLayout(history_layout)
+        self.layout.addWidget(history_group)
+
+    def setup_shortcuts(self):
+        """Set up keyboard shortcuts for Undo (Ctrl+Z) and Redo (Ctrl+Y)."""
+        undo_shortcut = QAction(self)
+        undo_shortcut.setShortcut(QKeySequence.StandardKey.Undo)
+        undo_shortcut.triggered.connect(self.perform_undo)
+        self.addAction(undo_shortcut)
+
+        redo_shortcut = QAction(self)
+        redo_shortcut.setShortcut(QKeySequence.StandardKey.Redo)
+        redo_shortcut.triggered.connect(self.perform_redo)
+        self.addAction(redo_shortcut)
+
+    def perform_undo(self):
+        """Perform undo action by interacting with the local undo stack."""
+        if self.undo_stack:
+            # Push current image to redo stack
+            self.redo_stack.append(self.image.copy())
+            # Pop the last image from undo stack
+            self.image = self.undo_stack.pop()
+            self.display_image = self.image.copy()
+            self.update_display_image()
+            print("Undo performed.")
+        else:
+            QMessageBox.information(self, "Undo", "No actions to undo.")
+
+    def perform_redo(self):
+        """Perform redo action by interacting with the local redo stack."""
+        if self.redo_stack:
+            # Push current image to undo stack
+            self.undo_stack.append(self.image.copy())
+            # Pop the last image from redo stack
+            self.image = self.redo_stack.pop()
+            self.display_image = self.image.copy()
+            self.update_display_image()
+            print("Redo performed.")
+        else:
+            QMessageBox.information(self, "Redo", "No actions to redo.")   
+
+    def create_visualization_pixmap(self):
+        """
+        Create a visualization of feathering and opacity on a white disc.
+        """
+        size = 100  # Size of the visualization image
+        image = np.ones((size, size, 3), dtype=np.float32)  # White background
+
+        center = (size // 2, size // 2)
+        radius = self.radius_slider.value()
+        feather = self.feather_slider.value() / 100.0
+        opacity = self.opacity_slider.value() / 100.0
+
+        yy, xx = np.ogrid[:size, :size]
+        dist_from_center = np.sqrt((xx - center[0])**2 + (yy - center[1])**2)
+        mask = dist_from_center <= radius
+
+        # Feathering mask
+        if feather > 0:
+            feather_mask = np.clip((radius - dist_from_center) / (radius * feather), 0, 1)
+        else:
+            feather_mask = np.ones_like(mask, dtype=np.float32)
+
+        feather_mask = feather_mask * mask
+
+        # Apply opacity
+        # Red color for the correction area
+        image[mask] = (1 - opacity * feather_mask)[mask, np.newaxis] * image[mask] + \
+                      (opacity * feather_mask)[mask, np.newaxis] * np.array([1, 0, 0])
+
+        # Convert to QImage
+        image_uint8 = (image * 255).astype(np.uint8)
+        q_image = QImage(image_uint8.data, size, size, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+        return pixmap
+
+    def update_visualization(self):
+        """Update the visualization pixmap based on current feathering and opacity."""
+        self.visualization_pixmap = self.create_visualization_pixmap()
+        self.visualization_label.setPixmap(self.visualization_pixmap)
+
+    def view_mouse_press_event(self, event):
+        """Handle mouse press events in the graphics view"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Convert mouse position to scene coordinates
+            scene_pos = self.graphics_view.mapToScene(event.pos())
+            self.on_mouse_click(scene_pos)
+        event.accept()
+
+    def view_mouse_move_event(self, event):
+        """Handle mouse move events in the graphics view"""
+        # Convert mouse position to scene coordinates
+        scene_pos = self.graphics_view.mapToScene(event.pos())
+        self.on_mouse_move(scene_pos)
+        event.accept()
+
+    def convert_image_to_pixmap(self, image):
+        """
+        Convert a numpy image array to QPixmap for display.
+
+        Args:
+            image (np.ndarray): Image array normalized to [0,1].
+
+        Returns:
+            QPixmap: The converted pixmap.
+        """
+        # Convert from [0,1] to [0,255]
+        image_uint8 = np.clip(image * 255, 0, 255).astype(np.uint8)
+
+        if image_uint8.ndim == 2:
+            # Grayscale image (2D) - Triplicate to make 3 channels
+            height, width = image_uint8.shape
+            image_triplicated = np.repeat(image_uint8[:, :, np.newaxis], 3, axis=2)
+            bytes_per_line = 3 * width
+            q_image = QImage(image_triplicated.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        elif image_uint8.ndim == 3:
+            if image_uint8.shape[2] == 3:
+                # RGB image (3 channels)
+                height, width, channels = image_uint8.shape
+                bytes_per_line = channels * width
+                q_image = QImage(image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            elif image_uint8.shape[2] == 1:
+                # Grayscale image represented as (height, width, 1) - Triplicate to make 3 channels
+                height, width, channels = image_uint8.shape
+                image_triplicated = np.repeat(image_uint8, 3, axis=2)
+                bytes_per_line = 3 * width
+                q_image = QImage(image_triplicated.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            else:
+                raise ValueError(f"Unsupported number of channels: {image_uint8.shape[2]}")
+        else:
+            raise ValueError(f"Unsupported image shape: {image_uint8.shape}")
+
+        return QPixmap.fromImage(q_image)
+
+
+    def eventFilter(self, source, event):
+        """Event filter to capture mouse move and click events."""
+        if source == self.graphics_view:
+            if event.type() == QEvent.Type.MouseMove:
+                pos = self.graphics_view.mapToScene(event.position().toPoint())
+                self.on_mouse_move(pos)
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    pos = self.graphics_view.mapToScene(event.position().toPoint())
+                    self.on_mouse_click(pos)
+            elif event.type() == QEvent.Type.Enter:
+                # Optionally, set the cursor to ArrowCursor when entering
+                self.graphics_view.setCursor(Qt.CursorShape.ArrowCursor)
+            elif event.type() == QEvent.Type.Leave:
+                self.graphics_view.unsetCursor()
+        return super().eventFilter(source, event)
+
+    def on_mouse_move(self, pos):
+        """
+        Handle mouse move events to display a dynamic circle indicating the blemish removal radius.
+
+        Args:
+            pos (QPointF): The position of the mouse in scene coordinates.
+        """
+        x, y = pos.x(), pos.y()
+        self.current_x, self.current_y = x, y
+
+        radius = self.radius_slider.value()
+
+        # Update the circle's position and size
+        self.circle_item.setRect(x - radius, y - radius, 2 * radius, 2 * radius)
+        self.circle_item.setVisible(True)
+
+        # Detect if cursor is over scroll bars
+        viewport_pos = self.graphics_view.mapFromScene(pos)
+        scrollbar_over = False
+
+        # Check horizontal scroll bar
+        h_scrollbar = self.graphics_view.horizontalScrollBar()
+        if h_scrollbar.isVisible():
+            h_scrollbar_rect = h_scrollbar.geometry()
+            if h_scrollbar_rect.contains(viewport_pos):
+                scrollbar_over = True
+
+        # Check vertical scroll bar
+        v_scrollbar = self.graphics_view.verticalScrollBar()
+        if v_scrollbar.isVisible():
+            v_scrollbar_rect = v_scrollbar.geometry()
+            if v_scrollbar_rect.contains(viewport_pos):
+                scrollbar_over = True
+
+        # Update cursor based on position
+        if scrollbar_over:
+            if self.cursor_over_scrollbar:
+                # Already over scrollbar, no action needed
+                pass
+            else:
+                # Now over scrollbar
+                self.graphics_view.setCursor(Qt.CursorShape.ArrowCursor)
+                self.cursor_over_scrollbar = True
+        else:
+            if self.cursor_over_scrollbar:
+                # Moved away from scrollbar, set default cursor
+                self.graphics_view.setCursor(Qt.CursorShape.ArrowCursor)
+                self.cursor_over_scrollbar = False
+            else:
+                # Already using default cursor, no action needed
+                pass
+            
+    def on_mouse_click(self, pos):
+        """
+        Handle mouse press events to remove blemishes on click.
+
+        Args:
+            pos (QPointF): The position of the mouse click in scene coordinates.
+        """
+        x, y = int(pos.x()), int(pos.y())
+
+        # Validate coordinates
+        if 0 <= x < self.image.shape[1] and 0 <= y < self.image.shape[0]:
+            radius = self.radius_slider.value()
+            feather = self.feather_slider.value() / 100.0
+            opacity = self.opacity_slider.value() / 100.0
+
+            # Determine channels to process based on image dimensionality
+            if self.image.ndim == 2:
+                channels_to_process = [0]  # Single channel
+            elif self.image.ndim == 3:
+                channels_to_process = [0, 1, 2]  # RGB channels
+            else:
+                QMessageBox.warning(self, "Unsupported Image", "Image format not supported for blemish removal.")
+                return
+
+            # Start the blemish removal in a separate thread
+            worker = BlemishBlasterWorker(
+                image=self.image.copy(),  # Pass the current image from ImageManager
+                x=x,
+                y=y,
+                radius=radius,
+                feather=feather,
+                opacity=opacity,
+                channels_to_process=[0, 1, 2]  # RGB channels
+            )
+            worker.signals.finished.connect(self.on_processing_finished)
+            self.threadpool.start(worker)
+
+            self.setEnabled(False)  # Disable the dialog to prevent multiple clicks
+            print(f"Started blemish removal at ({x}, {y}) with radius {radius}, feathering {feather}, opacity {opacity}.")
+
+    def on_processing_finished(self, corrected_image):
+        """
+        Slot to handle the completion of blemish removal.
+
+        Args:
+            corrected_image (np.ndarray): The image after blemish removal.
+        """
+        # Push the current image to the undo stack before updating
+        self.undo_stack.append(self.image.copy())
+        # Clear the redo stack as new action invalidates future redos
+        self.redo_stack.clear()
+
+        # Update the local image with the corrected image
+        self.image = corrected_image.copy()
+        self.display_image = self.image.copy()
+        self.update_display_image()
+
+        self.setEnabled(True)  # Re-enable the dialog
+        print("Blemish removal completed.")
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image.
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # Check if the image is single-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # Initialize lists to store per-channel minima and medians
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+
+        # Initialize stretched_image as a copy of the input image
+        stretched_image = image.copy()
+
+        # Define the target median for stretching
+        target_median = 0.25
+
+        # Apply the stretch for each channel independently
+        for c in range(3):
+            # Record the minimum of the current channel
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+
+            # Subtract the channel's minimum to shift the image
+            stretched_image[..., c] -= channel_min
+
+            # Record the median of the shifted channel
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        # Clip stretched image to [0, 1] range
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+
+        # Store stretch parameters
+        self.was_single_channel = was_single_channel
+
+        return stretched_image
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch to return the image to its original state.
+        Each channel is unstretched independently by reverting the stretch formula
+        using the stored medians and adding back the individual channel minima.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # Apply the unstretch for each channel independently
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+
+            # Add back the channel's original minimum
+            image[..., c] += original_min
+
+        # Clip to [0, 1] range
+        image = np.clip(image, 0, 1)
+
+        # If the image was originally single-channel, convert back to single-channel
+        if was_single_channel:
+            image = np.mean(image, axis=2, keepdims=True)  # Convert back to single-channel
+
+        return image
+
+    def autostretch_image(self):
+        """Handle the Autostretch button click to stretch or unstretch the image."""
+        if not self.is_stretched:
+            # Perform stretching
+            stretched_image = self.stretch_image(self.image)
+            self.undo_stack.append(self.image.copy())  # Push current state to undo stack
+            self.image = stretched_image.copy()
+            self.display_image = self.image.copy()
+            self.update_display_image()
+            self.is_stretched = True
+            self.autostretch_button.setText("Remove Stretch")
+            print("Image stretched.")
+        else:
+            # Optionally, allow removing stretch before applying changes
+            # Uncomment the following lines if you want to allow removing stretch manually
+            unstretched_image = self.unstretch_image(self.image)
+            self.undo_stack.append(self.image.copy())  # Push current state to undo stack
+            self.image = unstretched_image.copy()
+            self.display_image = self.image.copy()
+            self.update_display_image()
+            self.is_stretched = False
+            self.autostretch_button.setText("Autostretch")
+            print("Stretch removed.")
+
+
+    def apply_changes(self):
+        """Apply all changes by pushing the final image to the ImageManager."""
+        try:
+            # If the image is stretched, unstretch it before applying
+            if self.is_stretched:
+                self.image = self.unstretch_image(self.image)
+                self.display_image = self.image.copy()
+                self.update_display_image()
+                self.is_stretched = False
+                self.autostretch_button.setText("Autostretch")
+                print("Image unstretched before applying changes.")
+
+            current_slot = self.image_manager.current_slot
+            existing_metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+
+            # Ensure 'notes' exists and is a list
+            if 'notes' in existing_metadata and isinstance(existing_metadata['notes'], list):
+                existing_metadata['notes'].append("Blemish removed using Blemish Blaster.")
+                print("Appended blemish removal note to existing metadata.")
+            else:
+                existing_metadata['notes'] = ["Blemish removed using Blemish Blaster."]
+                print("Initialized blemish removal note in metadata.")
+
+            # Push the updated image and metadata to the ImageManager
+            self.image_manager.set_image(self.image.copy(), metadata=existing_metadata)
+            self.blemish_removed.emit(self.image_manager.image)
+
+            # Clear the undo and redo stacks as changes are now applied
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+
+
+            self.accept()
+            print("Applied changes to ImageManager.")
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Apply Changes Error",
+                f"An error occurred while applying changes:\n{str(e)}"
+            )
+            print(f"ERROR in apply_changes: {e}")
+
+    def zoom_in(self):
+        """Zoom in the image by a predefined step."""
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self.apply_zoom()
+            self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
+            print(f"Zoomed in to {int(self.zoom_factor * 100)}%")
+        else:
+            QMessageBox.information(self, "Zoom In", "Maximum zoom level reached.")
+
+    def zoom_out(self):
+        """Zoom out the image by a predefined step."""
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self.apply_zoom()
+            self.zoom_label.setText(f"{int(self.zoom_factor * 100)}%")
+            print(f"Zoomed out to {int(self.zoom_factor * 100)}%")
+        else:
+            QMessageBox.information(self, "Zoom Out", "Minimum zoom level reached.")
+
+    def apply_zoom(self):
+        """Apply the current zoom factor to the QGraphicsView."""
+        self.graphics_view.resetTransform()  # Reset any existing transformations
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+
+    def reset_zoom(self):
+        """Reset zoom to the default factor (100%)."""
+        self.zoom_factor = 1.0
+        self.apply_zoom()
+        self.zoom_label.setText("100%")
+        print("Zoom reset to 100%.")
+
+    def update_display_image(self):
+        """Update the display image from the local image and refresh the pixmap."""
+        self.pixmap_item.setPixmap(self.convert_image_to_pixmap(self.display_image))
+        # Optionally, clear the correction circle
+        self.circle_item.setVisible(False)
+
+    def closeEvent(self, event):
+
+        super().closeEvent(event)
 
 
 class GradientRemovalDialog(QDialog):
@@ -5890,110 +6871,123 @@ class XISFViewer(QWidget):
         Load and display metadata from the given file if the file is an XISF or FITS file.
         For other file types, simply skip without failing.
         """
-        if file_path.lower().endswith('.xisf'):
-            print("Loading metadata from XISF file.")
-            # XISF handling (as before)
-            try:
-                # Load XISF file for metadata
-                xisf = XISF(file_path)
-                file_meta = xisf.get_file_metadata()
-                image_meta = xisf.get_images_metadata()[0]
+        if not file_path:
+            print("No file path provided. Skipping metadata display.")
+            return
 
-                self.metadata_tree.clear()  # Clear previous metadata
-                
-                # Add File Metadata
-                file_meta_item = QTreeWidgetItem(["File Metadata"])
-                self.metadata_tree.addTopLevelItem(file_meta_item)
-                for key, value in file_meta.items():
-                    item = QTreeWidgetItem([key, str(value.get('value', ''))])  # Ensure 'value' exists
-                    file_meta_item.addChild(item)
+        if not isinstance(file_path, str):
+            print(f"Invalid file path type: {type(file_path)}. Expected a string.")
+            return
 
-                # Add Image Metadata
-                image_meta_item = QTreeWidgetItem(["Image Metadata"])
-                self.metadata_tree.addTopLevelItem(image_meta_item)
-                for key, value in image_meta.items():
-                    if key == 'FITSKeywords':
-                        fits_item = QTreeWidgetItem(["FITS Keywords"])
-                        image_meta_item.addChild(fits_item)
-                        for kw, kw_values in value.items():
-                            for kw_value in kw_values:
-                                item = QTreeWidgetItem([kw, str(kw_value.get("value", ''))])
-                                fits_item.addChild(item)
-                    elif key == 'XISFProperties':
-                        props_item = QTreeWidgetItem(["XISF Properties"])
-                        image_meta_item.addChild(props_item)
-                        for prop_name, prop in value.items():
-                            item = QTreeWidgetItem([prop_name, str(prop.get("value", ''))])
-                            props_item.addChild(item)
-                    else:
-                        item = QTreeWidgetItem([key, str(value)])
-                        image_meta_item.addChild(item)
+        try:
+            if file_path.lower().endswith('.xisf'):
+                print("Loading metadata from XISF file.")
+                # XISF handling (as before)
+                try:
+                    # Load XISF file for metadata
+                    xisf = XISF(file_path)
+                    file_meta = xisf.get_file_metadata()
+                    image_meta = xisf.get_images_metadata()[0]
 
-                self.metadata_tree.expandAll()  # Expand all metadata items
-            except Exception as e:
-                print(f"Failed to load XISF metadata: {e}")
+                    self.metadata_tree.clear()  # Clear previous metadata
 
-        elif file_path.lower().endswith(('.fits', '.fit')):
-            print("Loading metadata from FITS file.")
-            # FITS handling
-            try:
-                # Open the FITS file using Astropy
-                hdul = fits.open(file_path)
-                header = hdul[0].header  # Extract header from primary HDU
-                hdul.close()
+                    # Add File Metadata
+                    file_meta_item = QTreeWidgetItem(["File Metadata"])
+                    self.metadata_tree.addTopLevelItem(file_meta_item)
+                    for key, value in file_meta.items():
+                        item = QTreeWidgetItem([key, str(value.get('value', ''))])  # Ensure 'value' exists
+                        file_meta_item.addChild(item)
 
-                self.metadata_tree.clear()  # Clear previous metadata
+                    # Add Image Metadata
+                    image_meta_item = QTreeWidgetItem(["Image Metadata"])
+                    self.metadata_tree.addTopLevelItem(image_meta_item)
+                    for key, value in image_meta.items():
+                        if key == 'FITSKeywords':
+                            fits_item = QTreeWidgetItem(["FITS Keywords"])
+                            image_meta_item.addChild(fits_item)
+                            for kw, kw_values in value.items():
+                                for kw_value in kw_values:
+                                    item = QTreeWidgetItem([kw, str(kw_value.get("value", ''))])
+                                    fits_item.addChild(item)
+                        elif key == 'XISFProperties':
+                            props_item = QTreeWidgetItem(["XISF Properties"])
+                            image_meta_item.addChild(props_item)
+                            for prop_name, prop in value.items():
+                                item = QTreeWidgetItem([prop_name, str(prop.get("value", ''))])
+                                props_item.addChild(item)
+                        else:
+                            item = QTreeWidgetItem([key, str(value)])
+                            image_meta_item.addChild(item)
 
-                # Add FITS Header Metadata
-                fits_header_item = QTreeWidgetItem(["FITS Header"])
-                self.metadata_tree.addTopLevelItem(fits_header_item)
+                    self.metadata_tree.expandAll()  # Expand all metadata items
+                except Exception as e:
+                    print(f"Failed to load XISF metadata: {e}")
 
-                # Loop through the header and add each keyword
-                for keyword, value in header.items():
-                    item = QTreeWidgetItem([keyword, str(value)])
-                    fits_header_item.addChild(item)
+            elif file_path.lower().endswith(('.fits', '.fit')):
+                print("Loading metadata from FITS file.")
+                # FITS handling
+                try:
+                    # Open the FITS file using Astropy
+                    hdul = fits.open(file_path)
+                    header = hdul[0].header  # Extract header from primary HDU
+                    hdul.close()
 
-                self.metadata_tree.expandAll()  # Expand all metadata items
-            except Exception as e:
-                print(f"Failed to load FITS metadata: {e}")
+                    self.metadata_tree.clear()  # Clear previous metadata
 
-        # Handle Camera Raw files (e.g., .cr2, .nef, .arw, .dng)
-        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-            print("Loading metadata from Camera RAW file.")
-            try:
-                # Use pyexiv2 to read RAW file metadata
-                raw_meta_item = QTreeWidgetItem(["Camera RAW Metadata"])
-                self.metadata_tree.addTopLevelItem(raw_meta_item)
+                    # Add FITS Header Metadata
+                    fits_header_item = QTreeWidgetItem(["FITS Header"])
+                    self.metadata_tree.addTopLevelItem(fits_header_item)
 
-                # Handle RAW file metadata using rawpy
-                with rawpy.imread(file_path) as raw:
-                    camera_info_item = QTreeWidgetItem(["Camera Info"])
-                    raw_meta_item.addChild(camera_info_item)
+                    # Loop through the header and add each keyword
+                    for keyword, value in header.items():
+                        item = QTreeWidgetItem([keyword, str(value)])
+                        fits_header_item.addChild(item)
 
-                    # Camera-specific info (e.g., white balance, camera model)
-                    camera_info_item.addChild(QTreeWidgetItem(["White Balance", str(raw.camera_whitebalance)]))
+                    self.metadata_tree.expandAll()  # Expand all metadata items
+                except Exception as e:
+                    print(f"Failed to load FITS metadata: {e}")
 
-                    # Additional rawpy metadata
-                    if raw.camera_white_level_per_channel is not None:
-                        white_level_item = QTreeWidgetItem(["Camera White Level"])
-                        raw_meta_item.addChild(white_level_item)
-                        for i, level in enumerate(raw.camera_white_level_per_channel):
-                            white_level_item.addChild(QTreeWidgetItem([f"Channel {i+1}", str(level)]))
+            # Handle Camera Raw files (e.g., .cr2, .nef, .arw, .dng)
+            elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                print("Loading metadata from Camera RAW file.")
+                try:
+                    # Use pyexiv2 to read RAW file metadata
+                    raw_meta_item = QTreeWidgetItem(["Camera RAW Metadata"])
+                    self.metadata_tree.addTopLevelItem(raw_meta_item)
 
-                    # Add tone curve data if available
-                    if raw.tone_curve is not None:
-                        tone_curve_item = QTreeWidgetItem(["Tone Curve"])
-                        raw_meta_item.addChild(tone_curve_item)
-                        tone_curve_item.addChild(QTreeWidgetItem(["Tone Curve Length", str(len(raw.tone_curve))]))
+                    # Handle RAW file metadata using rawpy
+                    with rawpy.imread(file_path) as raw:
+                        camera_info_item = QTreeWidgetItem(["Camera Info"])
+                        raw_meta_item.addChild(camera_info_item)
 
-                self.metadata_tree.expandAll()
-            except Exception as e:
-                print(f"Failed to load Camera RAW metadata: {e}")
+                        # Camera-specific info (e.g., white balance, camera model)
+                        camera_info_item.addChild(QTreeWidgetItem(["White Balance", str(raw.camera_whitebalance)]))
 
-        else:
-            # If the file is not a FITS or XISF file, simply return without displaying metadata
-            print(f"Skipping metadata for unsupported file type: {file_path}")
+                        # Additional rawpy metadata
+                        if raw.camera_white_level_per_channel is not None:
+                            white_level_item = QTreeWidgetItem(["Camera White Level"])
+                            raw_meta_item.addChild(white_level_item)
+                            for i, level in enumerate(raw.camera_white_level_per_channel):
+                                white_level_item.addChild(QTreeWidgetItem([f"Channel {i+1}", str(level)]))
 
+                        # Add tone curve data if available
+                        if raw.tone_curve is not None:
+                            tone_curve_item = QTreeWidgetItem(["Tone Curve"])
+                            raw_meta_item.addChild(tone_curve_item)
+                            tone_curve_item.addChild(QTreeWidgetItem(["Tone Curve Length", str(len(raw.tone_curve))]))
+
+                    self.metadata_tree.expandAll()
+                except Exception as e:
+                    print(f"Failed to load Camera RAW metadata: {e}")
+
+            else:
+                # If the file is not a FITS or XISF file, simply return without displaying metadata
+                print(f"Skipping metadata for unsupported file type: {file_path}")
+
+        except AttributeError as ae:
+            print(f"AttributeError in display_metadata: {ae}")
+        except Exception as e:
+            print(f"Unexpected error in display_metadata: {e}")
 
 
     def save_as(self):
@@ -9672,10 +10666,7 @@ class StatisticalStretchTab(QWidget):
 
         # left_layout.addLayout(zoom_layout)
 
-        # Save button
-        self.saveButton = QPushButton('Save Stretched Image', self)
-        self.saveButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveButton)
+
 
         # Footer
         footer_label = QLabel("""
@@ -16312,6 +17303,11 @@ class ContinuumSubtractTab(QWidget):
         left_layout.addWidget(self.continuum_button)
         left_layout.addWidget(self.continuum_label)
 
+        # **Added: Clear Loaded Images Button**
+        self.clear_button = QPushButton("Clear Loaded Images")
+        self.clear_button.clicked.connect(self.clear_loaded_images)
+        left_layout.addWidget(self.clear_button)        
+
         # Linear Output Checkbox
         self.linear_output_checkbox = QCheckBox("Output Linear Image Only")
         left_layout.addWidget(self.linear_output_checkbox)
@@ -16437,7 +17433,38 @@ class ContinuumSubtractTab(QWidget):
 
             print(f"ContinuumSubtractTab: Image updated from ImageManager slot {slot}.")
 
+    def clear_loaded_images(self):
+        """Clear the loaded NB and Continuum images and reset the UI."""
+        # Clear loaded images
+        self.nb_image = None
+        self.continuum_image = None
+        self.filename = None
+        self.combined_image = None
 
+        # Reset labels
+        self.nb_label.setText("No NB image selected")
+        self.continuum_label.setText("No Continuum image selected")
+
+        # Disable save button
+        self.save_button.setEnabled(False)
+
+        # Clear the preview image
+        self.imageLabel.clear()
+        self.original_pixmap = None
+
+        # Reset zoom factor
+        self.zoom_factor = 1.0
+        self.apply_zoom()
+
+        # Disable zoom buttons
+        self.zoomInButton.setEnabled(False)
+        self.zoomOutButton.setEnabled(False)
+
+
+        # Update status label
+        self.statusLabel.setText("Loaded images cleared.")
+
+        print("Loaded images cleared.")
 
     def selectImage(self, image_type):
         selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
@@ -18025,7 +19052,7 @@ class CustomGraphicsView(QGraphicsView):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if event.modifiers() == Qt.ControlModifier:
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 # Start annotation mode with the current tool
                 self.start_pos = self.mapToScene(event.pos())
 
@@ -18068,7 +19095,7 @@ class CustomGraphicsView(QGraphicsView):
                 elif self.parent.current_tool == "Compass":
                     self.place_celestial_compass(self.start_pos)
 
-            elif event.modifiers() == Qt.ShiftModifier:
+            elif event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
                 # Start drawing a circle for Shift+Click
                 self.drawing_circle = True
                 self.circle_center = self.mapToScene(event.pos())
@@ -18076,7 +19103,7 @@ class CustomGraphicsView(QGraphicsView):
                 self.parent.status_label.setText("Drawing circle: Shift + Drag")
                 self.update_circle()
 
-            elif event.modifiers() == Qt.AltModifier:
+            elif event.modifiers() == Qt.KeyboardModifier.AltModifier:
                 # Start celestial measurement for Alt+Click
                 self.measurement_start = self.mapToScene(event.pos())
                 self.drawing_measurement = True
@@ -18253,7 +19280,7 @@ class CustomGraphicsView(QGraphicsView):
                 # Create and add the text item at the midpoint
                 text_item = QGraphicsTextItem(distance_text)
                 text_item.setPos(midpoint)
-                text_item.setDefaultTextColor(Qt.green)
+                text_item.setDefaultTextColor(Qt.GlobalColor.green)
                 text_item.setFont(self.parent.selected_font)  # Use the selected font
                 self.parent.main_scene.addItem(text_item)
 
@@ -18396,7 +19423,7 @@ class CustomGraphicsView(QGraphicsView):
                     east_line_item = QGraphicsLineItem(
                         east_line_coords[0], east_line_coords[1], east_line_coords[2], east_line_coords[3]
                     )
-                    east_line_item.setPen(QPen(Qt.blue, 2))
+                    east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                     self.parent.main_scene.addItem(east_line_item)
                     
                     # North Label
@@ -18408,7 +19435,7 @@ class CustomGraphicsView(QGraphicsView):
                     # East Label
                     text_east = QGraphicsTextItem(compass['east_label'][2])
                     text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                    text_east.setDefaultTextColor(Qt.blue)
+                    text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                     self.parent.main_scene.addItem(text_east)
 
                 elif item[0] == 'measurement':  # Redraw celestial measurement line
@@ -18598,7 +19625,7 @@ class CustomGraphicsView(QGraphicsView):
                             )
 
                             # Draw the East line
-                            mini_painter.setPen(QPen(Qt.blue, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.blue, 1))
                             east_line = compass["east_line"]
                             mini_painter.drawLine(
                                 int(east_line[0] * scale_factor_x), int(east_line[1] * scale_factor_y),
@@ -18612,7 +19639,7 @@ class CustomGraphicsView(QGraphicsView):
                                 int(north_label[0] * scale_factor_x), int(north_label[1] * scale_factor_y), north_label[2]
                             )
 
-                            mini_painter.setPen(QPen(Qt.blue, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.blue, 1))
                             east_label = compass["east_label"]
                             mini_painter.drawText(
                                 int(east_label[0] * scale_factor_x), int(east_label[1] * scale_factor_y), east_label[2]
@@ -18651,7 +19678,7 @@ class CustomGraphicsView(QGraphicsView):
             center.x(), center.y(),
             center.x() + east_dx, center.y() + east_dy
         )
-        east_line.setPen(QPen(Qt.blue, 2))
+        east_line.setPen(QPen(Qt.GlobalColor.blue, 2))
         self.parent.main_scene.addItem(east_line)
 
         # Add labels for North and East
@@ -18661,7 +19688,7 @@ class CustomGraphicsView(QGraphicsView):
         self.parent.main_scene.addItem(text_north)
 
         text_east = QGraphicsTextItem("E")
-        text_east.setDefaultTextColor(Qt.blue)
+        text_east.setDefaultTextColor(Qt.GlobalColor.blue)
         text_east.setPos(center.x() + east_dx - 15, center.y() + east_dy - 10)
         self.parent.main_scene.addItem(text_east)
 
@@ -18769,7 +19796,7 @@ class CustomGraphicsView(QGraphicsView):
                     east_line_item = QGraphicsLineItem(
                         east_line_coords[0], east_line_coords[1], east_line_coords[2], east_line_coords[3]
                     )
-                    east_line_item.setPen(QPen(Qt.blue, 2))
+                    east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                     self.parent.main_scene.addItem(east_line_item)
                     
                     # North Label
@@ -18781,7 +19808,7 @@ class CustomGraphicsView(QGraphicsView):
                     # East Label
                     text_east = QGraphicsTextItem(compass['east_label'][2])
                     text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                    text_east.setDefaultTextColor(Qt.blue)
+                    text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                     self.parent.main_scene.addItem(text_east)                               
             # Ensure the search circle is drawn if circle data is available
             #if self.circle_center is not None and self.circle_radius > 0:
@@ -18896,7 +19923,7 @@ class CustomGraphicsView(QGraphicsView):
                     compass['east_line'][0], compass['east_line'][1],
                     compass['east_line'][2], compass['east_line'][3]
                 )
-                east_line_item.setPen(QPen(Qt.blue, 2))
+                east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                 self.parent.main_scene.addItem(east_line_item)
                 # North label
                 text_north = QGraphicsTextItem(compass['north_label'][2])
@@ -18906,7 +19933,7 @@ class CustomGraphicsView(QGraphicsView):
                 # East label
                 text_east = QGraphicsTextItem(compass['east_label'][2])
                 text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                text_east.setDefaultTextColor(Qt.blue)
+                text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                 self.parent.main_scene.addItem(text_east)
         
         # Update the circle data, if any
@@ -19041,7 +20068,7 @@ class CustomGraphicsView(QGraphicsView):
                     compass['east_line'][0], compass['east_line'][1],
                     compass['east_line'][2], compass['east_line'][3]
                 )
-                east_line_item.setPen(QPen(Qt.blue, 2))
+                east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                 self.parent.main_scene.addItem(east_line_item)
                 
                 # Redraw labels
@@ -19052,7 +20079,7 @@ class CustomGraphicsView(QGraphicsView):
                 
                 text_east = QGraphicsTextItem(compass['east_label'][2])
                 text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                text_east.setDefaultTextColor(Qt.blue)
+                text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                 self.parent.main_scene.addItem(text_east)        
 
 
@@ -19760,7 +20787,7 @@ class MainWindow(QMainWindow):
         if save_full_image:
             # Save the entire main image with annotations
             pixmap = QPixmap(self.main_image.size())
-            pixmap.fill(Qt.transparent)
+            pixmap.fill(Qt.GlobalColor.Transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter)  # Render the entire scene without the search circle
         else:
@@ -19768,7 +20795,7 @@ class MainWindow(QMainWindow):
             rect = self.main_preview.viewport().rect()
             scene_rect = self.main_preview.mapToScene(rect).boundingRect()
             pixmap = QPixmap(int(scene_rect.width()), int(scene_rect.height()))
-            pixmap.fill(Qt.transparent)
+            pixmap.fill(Qt.GlobalColor.Transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter, QRectF(0, 0, pixmap.width(), pixmap.height()), scene_rect)
 
@@ -19863,7 +20890,7 @@ class MainWindow(QMainWindow):
 
                 # Render the main image without annotations onto a QPixmap
                 patch = QPixmap(self.main_image.size())
-                patch.fill(Qt.black)
+                patch.fill(Qt.GlobalColor.black)
                 painter = QPainter(patch)
                 self.main_scene.clear()  # Clear any previous drawings on the scene
                 self.main_scene.addPixmap(self.main_image)  # Add only the main image without annotations
