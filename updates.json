@@ -1,9 +1,9 @@
 {
-  "version": "2.7.5",
+  "version": "2.8.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.7.5/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_linux"
   },
-  "notes": "Numerous Bug Fixes: Statistical Stretch, Curves, Undo functionality, CLAHE and Morpho dialogs, ABE extracted background always going to slot 1 vs checking user selection"
+  "notes": "New Function: Blemish Blaster! Content Aware blemish removal tool developed by me for PI but now in SAS.  Numerous other bug fixes"
 }
