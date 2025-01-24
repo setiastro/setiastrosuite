@@ -20748,9 +20748,9 @@ class MainWindow(QMainWindow):
         msg_box.setText("Do you want to save the Full Image or Cropped Only?")
         
         # Add custom buttons
-        full_image_button = msg_box.addButton("Save Full", QMessageBox.AcceptRole)
-        cropped_image_button = msg_box.addButton("Save Cropped", QMessageBox.DestructiveRole)
-        msg_box.addButton(QMessageBox.Cancel)
+        full_image_button = msg_box.addButton("Save Full", QMessageBox.ButtonRole.AcceptRole)
+        cropped_image_button = msg_box.addButton("Save Cropped", QMessageBox.ButtonRole.DestructiveRole)
+        msg_box.addButton(QMessageBox.StandardButton.Cancel)
 
         # Show the message box and get the user's response
         msg_box.exec()
