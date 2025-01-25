@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['setiastrosuitemac.py'],
+    ['setiastrosuitemacQT6.py'],
     pathex=[],
     binaries=[],
     datas=[
@@ -13,7 +13,6 @@ a = Analysis(
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
-        ('hubble.png', '.'), ('staradd.png', '.'),('starnet.png', '.'),('clahe.png', '.'),('morpho.png', '.'),('whitebalance.png', '.'),('neutral.png', '.'),('green.png', '.'),
         ('LExtract.png', '.'),
         ('LInsert.png', '.'),
         ('slot1.png', '.'),
@@ -21,8 +20,17 @@ a = Analysis(
         ('slot2.png', '.'),
         ('slot3.png', '.'),
         ('slot4.png', '.'),
+        ('openfile.png', '.'),
+        ('graxpert.png', '.'),
+        ('abeicon.png', '.'),
+        ('undoicon.png', '.'),
+        ('blaster.png', '.'),
+        ('redoicon.png', '.'),
+        ('cropicon.png', '.'),
         ('rgbcombo.png', '.'),
-        ('rgbextract.png', '.'),
+        ('copyslot.png', '.'),
+        ('rgbextract.png', '.'),        
+        ('hubble.png', '.'), ('staradd.png', '.'),('starnet.png', '.'),('clahe.png', '.'),('morpho.png', '.'),('whitebalance.png', '.'),('neutral.png', '.'),('green.png', '.'),
         ('imgs', 'imgs'),
         ('collage.png', '.'), 
         ('annotated.png', '.'), 
@@ -56,7 +64,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,  # Enable terminal console
+    console=False,  # Enable terminal console
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
