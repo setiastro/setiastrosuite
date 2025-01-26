@@ -51,9 +51,12 @@ from astroquery.vizier import Vizier
 import tifffile as tiff
 import pytz
 from astropy.utils.data import conf
-from scipy.interpolate import interp1d
+
 from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import Rbf
+
+from scipy.ndimage import convolve
+
 
 import rawpy
 
@@ -166,7 +169,8 @@ from math import sqrt
 import math
 from copy import deepcopy
 
-VERSION = "2.8.0"
+
+VERSION = "2.9.0"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -196,6 +200,7 @@ if hasattr(sys, '_MEIPASS'):
     undoicon_path = os.path.join(sys._MEIPASS, 'undoicon.png')  
     redoicon_path = os.path.join(sys._MEIPASS, 'redoicon.png')  
     blastericon_path = os.path.join(sys._MEIPASS, 'blaster.png')
+    hdr_path = os.path.join(sys._MEIPASS, 'hdr.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -224,6 +229,7 @@ else:
     undoicon_path = 'undoicon.png'
     redoicon_path = 'redoicon.png'
     blastericon_path = 'blaster.png'
+    hdr_path = 'hdr.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -401,6 +407,13 @@ class AstroEditingSuite(QMainWindow):
         # Add the Blemish Blaster action to the Functions menu
         functions_menu.addAction(blemish_blaster_action)
 
+        hdr_icon = QIcon(hdr_path)
+        hdr_action = QAction(hdr_icon, "WaveScale HDR", self)
+        hdr_action.setShortcut('Ctrl+H')
+        hdr_action.setStatusTip('Apply WaveScale HDR to the current image')
+        hdr_action.triggered.connect(self.open_hdr_dialog)
+        functions_menu.addAction(hdr_action)
+
         clahe_action = QAction("CLAHE", self)
         clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
         clahe_action.setStatusTip('Apply Contrast Limited Adaptive Histogram Equalization')
@@ -563,6 +576,8 @@ class AstroEditingSuite(QMainWindow):
 
         toolbar.addAction(blemish_blaster_action)
 
+        toolbar.addAction(hdr_action)
+
         # Add CLAHE Button to Toolbar with Icon
         clahe_icon = QIcon(clahe_path)
         clahe_action.setIcon(clahe_icon)
@@ -656,6 +671,15 @@ class AstroEditingSuite(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
+
+    def open_hdr_dialog(self):
+        """Open the WaveScale HDR dialog."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before using WaveScale HDR.")
+            return
+
+        dialog = WaveScaleHDRDialog(self.image_manager, self)
+        dialog.exec()
 
 
     def open_blemish_blaster(self):
@@ -2509,7 +2533,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.redo()
             print("Redo performed.")
         else:
-            QMessageBox.information(self, "Redo", "No actions to redo.")  
+            QMessageBox.information(self, "Redo", "No actions to redo.")    
 
 class CopySlotDialog(QDialog):
     def __init__(self, parent=None, available_slots=None):
@@ -2928,6 +2952,914 @@ class ImageManager(QObject):
                 print(f"ImageManager: No actions to redo in slot {slot}.")
         else:
             print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
+
+class MaskDisplayWindow(QDialog):
+    """
+    A separate window to display the luminance mask for debugging purposes.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Luminance Mask")
+        self.setMinimumSize(300, 300)
+
+        layout = QVBoxLayout(self)
+        self.setLayout(layout)
+
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+
+        layout.addWidget(self.graphics_view)
+
+    def update_mask(self, mask_array):
+        """
+        Update the mask display with the given mask array.
+        
+        Args:
+            mask_array (np.ndarray): 2D array with values in [0, 1].
+        """
+        # Convert mask array to grayscale image [0..255]
+        mask_uint8 = (np.clip(mask_array, 0, 1) * 255).astype(np.uint8)
+
+        # Ensure it's single-channel
+        if mask_uint8.ndim == 3 and mask_uint8.shape[2] == 3:
+            mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
+        elif mask_uint8.ndim == 2:
+            pass  # Already single-channel
+        else:
+            # Handle unexpected formats
+            mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
+
+        # Convert to QImage
+        h, w = mask_uint8.shape[:2]
+        qimage = QImage(
+            mask_uint8.data, w, h, w, QImage.Format.Format_Grayscale8
+        )
+        pixmap = QPixmap.fromImage(qimage)
+
+        # Update the pixmap item
+        self.pixmap_item.setPixmap(pixmap)
+        self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+
+class HDRWorker(QObject):
+    """
+    Worker class to perform WaveScale HDRation in a separate thread.
+    Emits signals to update progress.
+    """
+    progress_update = pyqtSignal(str, int)  # Signal: (current_step, percent_complete)
+    finished = pyqtSignal(np.ndarray, np.ndarray)  # Signal: (transformed_rgb, mask)
+
+    def __init__(self, rgb_image, n_scales, compression_factor, mask_gamma, b3_spline_kernel):
+        super().__init__()
+        self.rgb_image = rgb_image
+        self.n_scales = n_scales
+        self.compression_factor = compression_factor
+        self.mask_gamma = mask_gamma
+        self.b3_spline_kernel = b3_spline_kernel
+
+    def run(self):
+        try:
+            # Step 1: Convert to Lab
+            self.progress_update.emit("Converting to Lab color space...", 10)
+            lab = self.rgb_to_lab(self.rgb_image)
+            L_original = lab[..., 0].copy()  # Store original L for median calculation
+            L = lab[..., 0]  # L in [0..100] as per custom rgb_to_lab
+
+            # Step 2: Decompose using à trous wavelet
+            self.progress_update.emit("Performing wavelet decomposition...", 20)
+            scales = self.atrous_wavelet_decompose(L, self.n_scales)
+
+            # Step 3: Create Luminance Mask
+            self.progress_update.emit("Creating luminance mask...", 30)
+            mask = self.create_luminance_mask(L, gamma=self.mask_gamma)
+
+            # Step 4: Apply mask to wavelet planes
+            self.progress_update.emit("Applying mask to wavelet planes...", 40)
+            wavelet_planes = scales[:-1]
+            residual = scales[-1]
+
+            # Step 5: Enhance wavelet planes based on mask and compression factor with decaying influence
+            self.progress_update.emit("Enhancing wavelet planes...", 50)
+            decay_rate = 0.5  # Adjust decay rate as needed (0 < decay_rate < 1)
+            for i in range(len(wavelet_planes)):
+                # Calculate decay factor for the current scale
+                decay_factor = decay_rate ** i  # Higher scales have smaller decay_factor
+                # Compute scaling factor with decay
+                scaling_factor = (1.0 + (self.compression_factor - 1.0) * mask * decay_factor) * 2
+                # Apply scaling to the wavelet plane
+                wavelet_planes[i] *= scaling_factor
+                # Emit intermediate progress
+                percent = 50 + int(((i + 1) / len(wavelet_planes)) * 10)  # Distribute 10% across scales
+                self.progress_update.emit(f"Enhancing wavelet scale {i+1}...", percent)
+
+            # Step 6: Reconstruct L channel
+            self.progress_update.emit("Reconstructing L channel...", 60)
+            L_reconstructed = self.atrous_wavelet_reconstruct(wavelet_planes + [residual])
+
+            # Step 7: Apply midtones transfer to align median luminance
+            self.progress_update.emit("Applying midtones transfer...", 70)
+            median_original = np.median(L_original)
+            median_reconstructed = np.median(L_reconstructed)
+
+            if median_reconstructed == 0:
+                scaling_midtones = 1.0
+            else:
+                scaling_midtones = median_original / median_reconstructed
+
+            L_reconstructed *= scaling_midtones
+            L_reconstructed = np.clip(L_reconstructed, 0, 100)
+
+            # Update the Lab image with the reconstructed L channel
+            lab[..., 0] = L_reconstructed
+
+            # Step 8: Convert back to RGB
+            self.progress_update.emit("Converting back to RGB color space...", 80)
+            transformed_rgb = self.lab_to_rgb(lab)
+
+            # Step 9: Apply a non-linear curve to the HDR-enhanced image to dim bright areas
+            self.progress_update.emit("Applying dimming curve...", 90)
+            transformed_rgb = self.apply_curve_to_hdr_image(transformed_rgb, curve_type='gamma', strength=1.0 + self.n_scales * 0.2)
+
+            # Step 10: Finish
+            self.progress_update.emit("Finalizing...", 100)
+            self.finished.emit(transformed_rgb, mask)
+
+        except Exception as e:
+            print(f"Error during HDR transformation: {e}")
+            self.finished.emit(None, None)
+
+    # Define necessary methods copied from the main dialog
+    def rgb_to_lab(self, rgb_image):
+        """Convert a 32-bit floating-point RGB image to Lab color space."""
+        # Transformation matrix for RGB to XYZ (D65 reference white)
+        M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+
+        # Convert RGB to linear RGB (no gamma correction needed for 32-bit normalized data)
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        # Convert RGB to XYZ
+        xyz_image = np.dot(rgb_image.reshape(-1, 3), M.T).reshape(rgb_image.shape)
+        xyz_image[..., 0] /= 0.95047  # Normalize by D65 reference white
+        xyz_image[..., 2] /= 1.08883
+
+        # Convert XYZ to Lab
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+        fx = f(xyz_image[..., 0])
+        fy = f(xyz_image[..., 1])
+        fz = f(xyz_image[..., 2])
+
+        L = (116.0 * fy) - 16.0
+        a = 500.0 * (fx - fy)
+        b = 200.0 * (fy - fz)
+
+        return np.stack([L, a, b], axis=-1)
+
+    def lab_to_rgb(self, lab_image):
+        """Convert a 32-bit floating-point Lab image to RGB color space."""
+        # Transformation matrix for XYZ to RGB (D65 reference white)
+        M_inv = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)
+
+        # Convert Lab to XYZ
+        fy = (lab_image[..., 0] + 16.0) / 116.0
+        fx = fy + lab_image[..., 1] / 500.0
+        fz = fy - lab_image[..., 2] / 200.0
+
+        def f_inv(t):
+            delta = 6 / 29
+            return np.where(t > delta, t**3, 3 * delta**2 * (t - 4 / 29))
+
+        X = 0.95047 * f_inv(fx)
+        Y = f_inv(fy)
+        Z = 1.08883 * f_inv(fz)
+
+        xyz_image = np.stack([X, Y, Z], axis=-1)
+
+        # Convert XYZ to RGB
+        rgb_image = np.dot(xyz_image.reshape(-1, 3), M_inv.T).reshape(xyz_image.shape)
+
+        # Clip RGB to [0, 1] to maintain valid color ranges
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        return rgb_image
+
+    def apply_curve_to_hdr_image(self, hdr_image, curve_type='gamma', strength=2.0):
+        """
+        Apply a non-linear curve to the HDR-enhanced image to dim bright areas.
+
+        Args:
+            hdr_image (np.ndarray): HDR-enhanced RGB image with values in [0, 1].
+            curve_type (str): Type of curve to apply ('gamma').
+            strength (float): Strength of the curve effect. For 'gamma', gamma value.
+
+        Returns:
+            np.ndarray: Adjusted HDR image.
+        """
+        if curve_type == 'gamma':
+            # Gamma correction to dim the image
+            return np.power(hdr_image, strength)
+        else:
+            raise ValueError("Unsupported curve type. Currently only 'gamma' is supported.")
+
+    def atrous_wavelet_decompose(self, image_2d, n_scales):
+        """
+        à trous wavelet decomposition on a 2D (L channel) image.
+        Returns [wavelet_plane1, wavelet_plane2, ..., wavelet_planeN, residual].
+        """
+        current_image = image_2d.copy()
+        scales = []
+
+        for scale_idx in range(n_scales):
+            # Insert zeros between kernel taps
+            spaced_kernel = self._build_spaced_kernel(self.b3_spline_kernel, scale_idx)
+            # Separable convolution
+            tmp = convolve(current_image, spaced_kernel.reshape(1, -1), mode='reflect')
+            smooth = convolve(tmp, spaced_kernel.reshape(-1, 1), mode='reflect')
+
+            wavelet_plane = current_image - smooth
+            scales.append(wavelet_plane)
+            current_image = smooth
+
+        # Final residual
+        scales.append(current_image)
+        return scales
+
+    def _build_spaced_kernel(self, kernel, scale_idx):
+        """
+        Insert zeros between kernel taps for the à trous transform.
+        scale_idx=0 => use kernel as is.
+        scale_idx=1 => place 1 zero between taps (step=2).
+        scale_idx=2 => place 3 zeros (step=4), etc.
+        """
+        if scale_idx == 0:
+            return kernel
+        step = 2 ** scale_idx
+        spaced_len = len(kernel) + (len(kernel) - 1) * (step - 1)
+        spaced = np.zeros(spaced_len, dtype=kernel.dtype)
+        spaced[0::step] = kernel
+        return spaced
+
+    def atrous_wavelet_reconstruct(self, scales):
+        """Sum all wavelet planes + final residual to get the reconstructed image."""
+        reconstructed = scales[-1].copy()
+        for wplane in scales[:-1]:
+            reconstructed += wplane
+        return reconstructed
+
+    def create_luminance_mask(self, L_channel, gamma=1.0):
+        """
+        Use absolute luminance scaled to [0..1], then apply gamma:
+           M = (L / 100)^gamma
+        Bright => 1, dark => 0
+        """
+        # Assuming L_channel is in [0..100]
+        mask = L_channel / 100.0
+        mask = np.clip(mask, 0.0, 1.0)  # Ensure mask is within [0,1]
+        if gamma != 1.0:
+            mask = mask ** gamma
+        return mask.astype(np.float32)
+
+
+class WaveScaleHDRDialog(QDialog):
+    """
+    A self-contained WaveScale HDR dialog that:
+      - Displays a preview of the image in a QGraphicsView.
+      - Uses à trous (starlet) wavelet decomposition on the L channel in Lab space.
+      - Lets you adjust # of scales, coarse compression, and mask gamma, then preview or apply.
+      - Applies a simple L-based mask (absolute luminance scaled to [0..1]^gamma) so bright areas get full HDR,
+        and dark areas get minimal changes.
+      - Displays the luminance mask in a separate window for debugging purposes.
+    """
+
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("WaveScale HDR")
+        self.setMinimumSize(800, 600)  # Increased width to better accommodate preview and mask display
+
+        self.image_manager = image_manager
+
+        # Detect if the image is grayscale or RGB
+        if self.image_manager.image.ndim == 2:
+            self.is_grayscale = True
+            # Convert to 3-channel by stacking
+            self.original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
+        elif self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 3:
+            self.is_grayscale = False
+            self.original_image_rgb = self.image_manager.image.copy()
+        else:
+            QMessageBox.critical(self, "Error", "Unsupported image format.")
+            self.reject()
+            return  # Exit initialization if image format is unsupported
+
+        # Make local copies for preview and original
+        self.original_image = np.clip(self.original_image_rgb.astype(np.float32), 0, 1)
+        self.preview_image = self.original_image.copy()
+
+        # Main layout
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        # 1) Create the preview area (QGraphicsView in a scrollable region)
+        self._create_preview_area()
+        self._create_zoom_area()
+
+        # 2) Create the HDR controls
+        self._create_controls()
+
+        # 3) Lay out preview & controls with progress display
+        content_layout = QVBoxLayout()
+        content_layout.addWidget(self.scroll_area)
+        content_layout.addWidget(self.zoom_group_box)
+
+        # Create the Progress Display Area
+        self._create_progress_display()
+
+        # Create a Horizontal Layout to hold controls and progress side by side
+        hbox_layout = QHBoxLayout()
+        hbox_layout.addWidget(self.controls_group, stretch=3)        # Allocate more space to controls
+        hbox_layout.addWidget(self.progress_group_box, stretch=1)   # Allocate less space to progress
+
+        content_layout.addLayout(hbox_layout)  # Add the HBoxLayout to the content_layout
+
+        self.main_layout.addLayout(content_layout)
+
+        # 4) Bottom buttons (Apply / Cancel)
+        self._create_bottom_buttons()
+
+        # 5) Initialize and show the mask display window
+        #self._create_mask_window()
+
+        # B3-spline kernel for à trous wavelet
+        self.b3_spline_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
+
+        # Initialize zoom parameters
+        self.zoom_factor = 1.0
+        self.zoom_step = 1.25
+        self.zoom_min = 0.1
+        self.zoom_max = 5.0
+
+        # Show the initial preview
+        self._update_preview_pixmap(self.preview_image)
+
+        self.apply_button.setEnabled(False)
+        self.preview_button.clicked.connect(self._enable_apply_button)           
+
+
+    # -------------------------------------------------------------------------
+    # 1) Zoom AREA
+    # -------------------------------------------------------------------------
+    def _create_zoom_area(self):
+        """Create a QGroupBox containing Zoom In, Zoom Out, and Fit to Preview buttons."""
+        self.zoom_group_box = QGroupBox("Zoom Controls")
+        zoom_layout = QHBoxLayout()
+
+        # Zoom In Button
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self._zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        # Zoom Out Button
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self._zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        # Fit to Preview Button
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        self.zoom_group_box.setLayout(zoom_layout)
+
+    def _fit_to_preview(self):
+        """Fit the entire image within the QGraphicsView."""
+        if self.pixmap_item.pixmap().isNull():
+            return  # No image to fit
+
+        # Fit the pixmap within the view, maintaining aspect ratio
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+        # Reset zoom factor
+        self.zoom_factor = 1.0
+
+    # -------------------------------------------------------------------------
+    # 1) PREVIEW AREA
+    # -------------------------------------------------------------------------
+    def _create_preview_area(self):
+        """Create a QGraphicsView & QGraphicsScene for the preview, inside a scroll area."""
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+
+        # Enable panning with mouse drag
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+        # Optionally, enable scroll bars
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        self.scroll_area.setWidget(self.graphics_view)
+
+    # -------------------------------------------------------------------------
+    # 2) CONTROLS
+    # -------------------------------------------------------------------------
+    def _create_controls(self):
+        """Create the HDR sliders (# scales, compression, mask gamma) and zoom buttons."""
+        self.controls_group = QGroupBox("HDR Controls")
+        controls_layout = QFormLayout()
+
+        # Number of scales
+        self.scales_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scales_slider.setRange(2, 10)
+        self.scales_slider.setValue(5)
+        self.scales_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.scales_slider.setTickInterval(1)
+        controls_layout.addRow("Number of Scales:", self.scales_slider)
+
+        # Coarse compression
+        self.compression_slider = QSlider(Qt.Orientation.Horizontal)
+        # 10..300 => factor = 0.1..3.0
+        self.compression_slider.setRange(10, 500)
+        self.compression_slider.setValue(150)
+        self.compression_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.compression_slider.setTickInterval(10)
+        controls_layout.addRow("Coarse Compression:", self.compression_slider)
+
+        # Mask gamma
+        self.mask_gamma_slider = QSlider(Qt.Orientation.Horizontal)
+        # 10..300 => gamma = 0.1..3.0
+        self.mask_gamma_slider.setRange(10, 1000)
+        self.mask_gamma_slider.setValue(500)
+        self.mask_gamma_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.mask_gamma_slider.setTickInterval(10)
+        controls_layout.addRow("Mask Gamma:", self.mask_gamma_slider)
+
+
+
+        # Preview Button
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.clicked.connect(self._on_preview_clicked)
+        controls_layout.addRow(self.preview_button)
+
+        self.controls_group.setLayout(controls_layout)
+
+    # -------------------------------------------------------------------------
+    # 3) BOTTOM BUTTONS
+    # -------------------------------------------------------------------------
+    def _create_bottom_buttons(self):
+        bottom_layout = QHBoxLayout()
+
+        self.apply_button = QPushButton("Apply")
+        self.apply_button.clicked.connect(self._on_apply_clicked)
+        bottom_layout.addWidget(self.apply_button)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self._on_reset_clicked)
+        bottom_layout.addWidget(self.reset_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        bottom_layout.addWidget(self.cancel_button)
+
+        self.main_layout.addLayout(bottom_layout)
+
+    # -------------------------------------------------------------------------
+    # 4) MASK DISPLAY WINDOW
+    # -------------------------------------------------------------------------
+    #def _create_mask_window(self):
+     #   """Initialize and show the separate mask display window."""
+      #  self.mask_window = MaskDisplayWindow(self)
+       # self.mask_window.show()
+
+    # -------------------------------------------------------------------------
+    # 5) Progress Display Area
+    # -------------------------------------------------------------------------
+    def _create_progress_display(self):
+        """Create a progress display area on the right side of the content_layout."""
+        self.progress_group_box = QGroupBox("Processing Progress")
+        progress_layout = QVBoxLayout()
+
+        # Current Step Label
+        self.current_step_label = QLabel("Idle")
+        self.current_step_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        progress_layout.addWidget(self.current_step_label)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        progress_layout.addWidget(self.progress_bar)
+
+        self.progress_group_box.setLayout(progress_layout)
+
+    def _on_reset_clicked(self):
+        """Reset the image and sliders to their default states."""
+        try:
+            # Reset sliders to default values
+            self.scales_slider.setValue(5)
+            self.compression_slider.setValue(150)
+            self.mask_gamma_slider.setValue(500)
+
+            # Reset the preview image to the original image
+            self.preview_image = self.original_image.copy()
+            self._update_preview_pixmap(self.preview_image)
+
+            # Reset progress display
+            self.current_step_label.setText("Idle")
+            self.progress_bar.setValue(0)
+
+            # Disable the Apply button since no changes are pending
+            self.apply_button.setEnabled(False)
+
+            # Optionally, reset the zoom to default
+            self.zoom_factor = 1.0
+            self.graphics_view.resetTransform()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to reset: {e}")
+
+    # -------------------------------------------------------------------------
+    # PREVIEW / APPLY
+    # -------------------------------------------------------------------------
+    def _on_preview_clicked(self):
+        """Generate a preview image with current settings and display it."""
+        try:
+            # Disable buttons to prevent multiple clicks
+            self.preview_button.setEnabled(False)
+            self.apply_button.setEnabled(False)
+
+            # Reset progress display
+            self.current_step_label.setText("Starting HDR Transformation...")
+            self.progress_bar.setValue(0)
+
+            # Gather current settings
+            n_scales = self.scales_slider.value()
+            compression_factor = self.compression_slider.value() / 100.0
+            mask_gamma = self.mask_gamma_slider.value() / 100.0
+
+            # Initialize worker and thread
+            self.worker = HDRWorker(
+                rgb_image=self.original_image,
+                n_scales=n_scales,
+                compression_factor=compression_factor,
+                mask_gamma=mask_gamma,
+                b3_spline_kernel=self.b3_spline_kernel
+            )
+            self.thread = QThread()
+            self.worker.moveToThread(self.thread)
+
+            # Connect signals
+            self.thread.started.connect(self.worker.run)
+            self.worker.progress_update.connect(self._update_progress)
+            self.worker.finished.connect(self._on_worker_finished)
+            self.worker.finished.connect(self.thread.quit)
+            self.worker.finished.connect(self.worker.deleteLater)
+            self.thread.finished.connect(self.thread.deleteLater)
+
+            # Start the thread
+            self.thread.start()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+            self.preview_button.setEnabled(True)
+            self.apply_button.setEnabled(False)
+
+    def _update_progress(self, step, percent):
+        """Update the progress display based on signals from the worker."""
+        self.current_step_label.setText(step)
+        self.progress_bar.setValue(percent)
+
+    def _on_worker_finished(self, transformed_rgb, mask):
+        """Handle the completion of the worker thread."""
+        if transformed_rgb is not None:
+            if self.is_grayscale:
+                # For grayscale, take one channel and keep it single-channel
+                mask_expanded = mask[:, :, np.newaxis]  # Shape: (h, w, 1)
+                blended_preview = self.original_image[:, :, 0:1] * (1 - mask_expanded) + transformed_rgb[:, :, 0:1] * mask_expanded
+                # Stack back to 3 channels for consistent display
+                blended_preview = np.repeat(blended_preview, 3, axis=2)
+            else:
+                # For RGB
+                mask_expanded = np.repeat(mask[:, :, np.newaxis], 3, axis=2)  # Shape: (h, w, 3)
+                blended_preview = self.original_image * (1 - mask_expanded) + transformed_rgb * mask_expanded
+
+            # Update preview image
+            self.preview_image = blended_preview
+            self._update_preview_pixmap(blended_preview)
+
+            # Enable Apply button
+            self.apply_button.setEnabled(True)
+
+        else:
+            QMessageBox.critical(self, "Error", "WaveScale HDR failed.")
+
+        # Re-enable preview button
+        self.preview_button.setEnabled(True)
+
+    def _enable_apply_button(self):
+        """Enable the Apply button after a preview is generated."""
+        self.apply_button.setEnabled(True)
+
+    def _on_apply_clicked(self):
+        """Apply the HDR transform to the main image manager and close the dialog."""
+        try:
+            # Check if a preview has been generated
+            if not hasattr(self, 'preview_image'):
+                QMessageBox.warning(self, "Warning", "Please generate a preview before applying the transformation.")
+                return
+
+            # Use the existing preview_image as the output image
+            output_image = self.preview_image.copy()
+
+            # Update the main ImageManager
+            self.image_manager.set_image(output_image, {"description": "WaveScale HDR"})
+            QMessageBox.information(self, "Success", "WaveScale HDR applied.")
+            self.accept()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    # -------------------------------------------------------------------------
+    # UTILITY: UPDATE PREVIEW PIXMAP
+    # -------------------------------------------------------------------------
+    def _update_preview_pixmap(self, image):
+        """Convert `image` (float32 [0..1]) to QPixmap and display."""
+        pixmap = self._convert_image_to_pixmap(image)
+        self.pixmap_item.setPixmap(pixmap)
+        self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+
+    def _convert_image_to_pixmap(self, image):
+        """Convert float32 [0..1] image to QPixmap (RGB888)."""
+        image_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        h, w = image_uint8.shape[:2]
+
+        if image_uint8.ndim == 2:
+            # Grayscale => expand to 3 channels
+            image_uint8 = np.repeat(image_uint8[..., None], 3, axis=2)
+
+        bytes_per_line = 3 * w
+        qimage = QImage(
+            image_uint8.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+        )
+        return QPixmap.fromImage(qimage)
+
+    # -------------------------------------------------------------------------
+    # ZOOM METHODS
+    # -------------------------------------------------------------------------
+    def _zoom_in(self):
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+        else:
+            QMessageBox.information(self, "Zoom In", "Maximum zoom level reached.")
+
+    def _zoom_out(self):
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+        else:
+            QMessageBox.information(self, "Zoom Out", "Minimum zoom level reached.")
+
+    def _apply_zoom(self):
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+
+    # -------------------------------------------------------------------------
+    # HDR ALGORITHM
+    # -------------------------------------------------------------------------
+    def _perform_hdr_transform(self, rgb_image, n_scales, compression_factor, mask_gamma):
+        """
+        1) Convert to Lab
+        2) à trous wavelet decompose L
+        3) Create L-based mask: M = (L / 100)^gamma
+           - bright => near 1
+           - dark => near 0
+        4) Apply mask to wavelet planes
+        5) Compress (enhance) wavelet planes based on mask and compression factor
+        6) Reconstruct L
+        7) Apply midtones transfer to align median luminance
+        8) Convert back to RGB
+        9) Return transformed RGB and mask for blending
+        """
+        # 1) Convert to Lab using custom rgb_to_lab
+        lab = self.rgb_to_lab(rgb_image)
+        L_original = lab[..., 0].copy()  # Store original L for median calculation
+
+        L = lab[..., 0]  # L in [0..100] as per custom rgb_to_lab
+
+        # 2) Decompose
+        scales = self._atrous_wavelet_decompose(L, n_scales)
+
+        # 3) L-based mask
+        mask = self._create_luminance_mask(L, gamma=mask_gamma)
+        # => bright areas ~1.0, dark areas ~0.0
+
+        # Update the mask display window
+        #self.mask_window.update_mask(mask)
+
+        # 4) Apply mask to wavelet planes
+        wavelet_planes = scales[:-1]
+        residual = scales[-1]
+
+        # 5) Enhance wavelet planes based on mask and compression factor
+        decay_rate = 0.5  # Adjust decay rate as needed (0 < decay_rate < 1)
+        for i in range(len(wavelet_planes)):
+            # Compute scaling factor: 1 + (compression_factor -1) * mask
+            decay_factor = decay_rate ** i
+            scaling_factor = (1.0 + (compression_factor - 1.0) * mask* decay_factor)*2
+            wavelet_planes[i] *= scaling_factor
+            print(f"Scale {i} - Scaling Factor Stats: min={scaling_factor.min()}, max={scaling_factor.max()}, mean={scaling_factor.mean()}")
+            print(f"Scale {i} - Wavelet Plane Modified Stats: min={wavelet_planes[i].min()}, max={wavelet_planes[i].max()}, mean={wavelet_planes[i].mean()}")
+
+        # Reconstruct L
+        L_reconstructed = self._atrous_wavelet_reconstruct(wavelet_planes + [residual])
+
+        # 7) Apply midtones transfer to align median luminance
+        median_original = np.median(L_original)
+        median_reconstructed = np.median(L_reconstructed)
+
+        if median_reconstructed == 0:
+            scaling_midtones = 1.0
+        else:
+            scaling_midtones = median_original / median_reconstructed
+
+        L_reconstructed *= scaling_midtones
+        L_reconstructed = np.clip(L_reconstructed, 0, 100)
+
+        # Update the Lab image with the reconstructed L channel
+        lab[..., 0] = L_reconstructed
+
+        # 8) Convert back to RGB using custom lab_to_rgb
+        transformed_rgb = self.lab_to_rgb(lab)
+
+        # 9) Return both transformed RGB and mask for blending
+        transformed_rgb = self._apply_curve_to_hdr_image(transformed_rgb, curve_type='gamma', strength=1.0+n_scales*0.2)
+        return transformed_rgb, mask
+
+    def _apply_curve_to_hdr_image(self, hdr_image, curve_type='gamma', strength=2.0):
+        """
+        Apply a non-linear curve to the HDR-enhanced image to dim bright areas.
+
+        Args:
+            hdr_image (np.ndarray): HDR-enhanced RGB image with values in [0, 1].
+            curve_type (str): Type of curve to apply ('gamma').
+            strength (float): Strength of the curve effect. For 'gamma', gamma value.
+
+        Returns:
+            np.ndarray: Adjusted HDR image.
+        """
+        if curve_type == 'gamma':
+            # Gamma correction to dim the image
+            return np.power(hdr_image, strength)
+        else:
+            raise ValueError("Unsupported curve type. Currently only 'gamma' is supported.")
+
+    def _create_luminance_mask(self, L_channel, gamma=1.0):
+        """
+        Use absolute luminance scaled to [0..1], then apply gamma:
+           M = (L / 100) ^ gamma
+        Bright => 1, dark => 0
+        """
+        # Assuming L_channel is in [0..100]
+        mask = L_channel / 100.0
+        mask = np.clip(mask, 0.0, 1.0)  # Ensure mask is within [0,1]
+        if gamma != 1.0:
+            mask = mask ** gamma
+        return mask.astype(np.float32)
+
+    def _atrous_wavelet_decompose(self, image_2d, n_scales):
+        """
+        à trous wavelet decomposition on a 2D (L channel) image.
+        Returns [wavelet_plane1, wavelet_plane2, ..., wavelet_planeN, residual].
+        """
+        current_image = image_2d.copy()
+        scales = []
+
+        for scale_idx in range(n_scales):
+            # Insert zeros between kernel taps
+            spaced_kernel = self._build_spaced_kernel(self.b3_spline_kernel, scale_idx)
+            # Separable convolution
+            tmp = convolve(current_image, spaced_kernel.reshape(1, -1), mode='reflect')
+            smooth = convolve(tmp, spaced_kernel.reshape(-1, 1), mode='reflect')
+
+            wavelet_plane = current_image - smooth
+            scales.append(wavelet_plane)
+            current_image = smooth
+
+        # Final residual
+        scales.append(current_image)
+        return scales
+
+    def _build_spaced_kernel(self, kernel, scale_idx):
+        """
+        Insert zeros between kernel taps for the à trous transform.
+        scale_idx=0 => use kernel as is.
+        scale_idx=1 => place 1 zero between taps (step=2).
+        scale_idx=2 => place 3 zeros (step=4), etc.
+        """
+        if scale_idx == 0:
+            return kernel
+        step = 2 ** scale_idx
+        spaced_len = len(kernel) + (len(kernel) - 1) * (step - 1)
+        spaced = np.zeros(spaced_len, dtype=kernel.dtype)
+        spaced[0::step] = kernel
+        return spaced
+
+    def _atrous_wavelet_reconstruct(self, scales):
+        """Sum all wavelet planes + final residual to get the reconstructed image."""
+        reconstructed = scales[-1].copy()
+        for wplane in scales[:-1]:
+            reconstructed += wplane
+        return reconstructed
+
+    # -------------------------------------------------------------------------
+    # COLOR SPACE: CUSTOM LAB CONVERSIONS
+    # -------------------------------------------------------------------------
+    def rgb_to_lab(self, rgb_image):
+        """Convert a 32-bit floating-point RGB image to Lab color space."""
+        # Transformation matrix for RGB to XYZ (D65 reference white)
+        M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+
+        # Convert RGB to linear RGB (no gamma correction needed for 32-bit normalized data)
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        # Convert RGB to XYZ
+        xyz_image = np.dot(rgb_image.reshape(-1, 3), M.T).reshape(rgb_image.shape)
+        xyz_image[..., 0] /= 0.95047  # Normalize by D65 reference white
+        xyz_image[..., 2] /= 1.08883
+
+        # Convert XYZ to Lab
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta**3, np.cbrt(t), (t / (3 * delta**2)) + (4 / 29))
+
+        fx = f(xyz_image[..., 0])
+        fy = f(xyz_image[..., 1])
+        fz = f(xyz_image[..., 2])
+
+        L = (116.0 * fy) - 16.0
+        a = 500.0 * (fx - fy)
+        b = 200.0 * (fy - fz)
+
+        return np.stack([L, a, b], axis=-1)
+
+    def lab_to_rgb(self, lab_image):
+        """Convert a 32-bit floating-point Lab image to RGB color space."""
+        # Transformation matrix for XYZ to RGB (D65 reference white)
+        M_inv = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)
+
+        # Convert Lab to XYZ
+        fy = (lab_image[..., 0] + 16.0) / 116.0
+        fx = fy + lab_image[..., 1] / 500.0
+        fz = fy - lab_image[..., 2] / 200.0
+
+        def f_inv(t):
+            delta = 6 / 29
+            return np.where(t > delta, t**3, 3 * delta**2 * (t - 4 / 29))
+
+        X = 0.95047 * f_inv(fx)
+        Y = f_inv(fy)
+        Z = 1.08883 * f_inv(fz)
+
+        xyz_image = np.stack([X, Y, Z], axis=-1)
+
+        # Convert XYZ to RGB
+        rgb_image = np.dot(xyz_image.reshape(-1, 3), M_inv.T).reshape(xyz_image.shape)
+
+        # Clip RGB to [0, 1] to maintain valid color ranges
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+
+        return rgb_image
 
 class BlemishBlasterWorkerSignals(QObject):
     finished = pyqtSignal(np.ndarray)  # Emitted when processing is done
@@ -8277,6 +9209,7 @@ class CosmicClarityTab(QWidget):
         self.autostretch_enabled = False  # Track autostretch status
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
         self.cosmic_clarity_folder = None
+        self.cropped_operation_queue = []
 
         self.initUI()
 
@@ -8308,10 +9241,15 @@ class CosmicClarityTab(QWidget):
         # Radio buttons to switch between Sharpen and Denoise
         self.sharpen_radio = QRadioButton("Sharpen")
         self.denoise_radio = QRadioButton("Denoise")
+        self.both_radio = QRadioButton("Both")
+        
         self.sharpen_radio.setChecked(True)  # Default to Sharpen
         self.sharpen_radio.toggled.connect(self.update_ui_for_mode)
+        self.denoise_radio.toggled.connect(self.update_ui_for_mode)
+        self.both_radio.toggled.connect(self.update_ui_for_mode)  
         left_layout.addWidget(self.sharpen_radio)
         left_layout.addWidget(self.denoise_radio)
+        left_layout.addWidget(self.both_radio)
 
         # GPU Acceleration dropdown
         self.gpu_label = QLabel("Use GPU Acceleration:")
@@ -8538,6 +9476,37 @@ class CosmicClarityTab(QWidget):
         else:
             print("Image format not supported for conversion to QImage.")
             return None
+
+    def validate_cosmic_clarity_folder(self):
+        """Check if the Cosmic Clarity folder is set and valid."""
+        if not self.cosmic_clarity_folder:
+            QMessageBox.warning(
+                self,
+                "Missing Folder",
+                "The Cosmic Clarity folder is not set. Please use the wrench icon to select the correct folder."
+            )
+            return False
+
+        # Determine the expected executable based on the platform
+        if os.name == "nt":  # Windows
+            expected_executable = "SetiAstroCosmicClarity.exe"
+        elif sys.platform == "darwin":  # macOS
+            expected_executable = "SetiAstroCosmicClaritymac"
+        else:  # Linux
+            expected_executable = "SetiAstroCosmicClarity"  # Case-sensitive, no extension
+
+        # Check if the expected executable exists in the folder
+        executable_path = os.path.join(self.cosmic_clarity_folder, expected_executable)
+        if not os.path.exists(executable_path):
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                f"Incorrect Cosmic Clarity folder. Please choose the parent folder containing the Cosmic Clarity executable:\n\n"
+                f"Expected file: {expected_executable}"
+            )
+            return False
+
+        return True
 
 
 
@@ -8959,84 +9928,64 @@ class CosmicClarityTab(QWidget):
         else:
             QMessageBox.warning(self, "Warning", "No image to save.")
 
-
-
-
     def update_ui_for_mode(self):
-        # Show/hide sharpening controls based on mode
+        # Show/hide controls based on the selected mode
         if self.sharpen_radio.isChecked():
-            self.sharpen_mode_label.show()
-            self.sharpen_mode_dropdown.show()
-            self.psf_slider_label.show()
-            self.psf_slider.show()
-            self.stellar_amount_label.show()
-            self.stellar_amount_slider.show()
-            self.nonstellar_amount_label.show()
-            self.nonstellar_amount_slider.show()
-            self.sharpen_channels_label.show()  # Show the label for RGB sharpening
-            self.sharpen_channels_dropdown.show()  # Show the dropdown for RGB sharpening
-            # Hide denoise controls
-            self.denoise_strength_label.hide()
-            self.denoise_strength_slider.hide()
-            self.denoise_mode_label.hide()
-            self.denoise_mode_dropdown.hide()
-        else:
-            # Show denoise controls
-            self.denoise_strength_label.show()
-            self.denoise_strength_slider.show()
-            self.denoise_mode_label.show()
-            self.denoise_mode_dropdown.show()
-            self.sharpen_mode_label.hide()
-            self.sharpen_mode_dropdown.hide()
-            self.psf_slider_label.hide()
-            self.psf_slider.hide()
-            self.stellar_amount_label.hide()
-            self.stellar_amount_slider.hide()
-            self.nonstellar_amount_label.hide()
-            self.nonstellar_amount_slider.hide()
-            self.sharpen_channels_label.hide()  # Hide the label for RGB sharpening
-            self.sharpen_channels_dropdown.hide()  # Hide the dropdown for RGB sharpening
+            self.show_sharpen_controls()
+            self.hide_denoise_controls()
+        elif self.denoise_radio.isChecked():
+            self.hide_sharpen_controls()
+            self.show_denoise_controls()
+        elif self.both_radio.isChecked():
+            self.show_sharpen_controls()
+            self.show_denoise_controls()
+
+    def show_sharpen_controls(self):
+        self.sharpen_mode_label.show()
+        self.sharpen_mode_dropdown.show()
+        self.psf_slider_label.show()
+        self.psf_slider.show()
+        self.stellar_amount_label.show()
+        self.stellar_amount_slider.show()
+        self.nonstellar_amount_label.show()
+        self.nonstellar_amount_slider.show()
+        self.sharpen_channels_label.show()
+        self.sharpen_channels_dropdown.show()
+
+    def hide_sharpen_controls(self):
+        self.sharpen_mode_label.hide()
+        self.sharpen_mode_dropdown.hide()
+        self.psf_slider_label.hide()
+        self.psf_slider.hide()
+        self.stellar_amount_label.hide()
+        self.stellar_amount_slider.hide()
+        self.nonstellar_amount_label.hide()
+        self.nonstellar_amount_slider.hide()
+        self.sharpen_channels_label.hide()
+        self.sharpen_channels_dropdown.hide()
+
+    def show_denoise_controls(self):
+        self.denoise_strength_label.show()
+        self.denoise_strength_slider.show()
+        self.denoise_mode_label.show()
+        self.denoise_mode_dropdown.show()
+
+    def hide_denoise_controls(self):
+        self.denoise_strength_label.hide()
+        self.denoise_strength_slider.hide()
+        self.denoise_mode_label.hide()
+        self.denoise_mode_dropdown.hide()
+
 
     def get_psf_value(self):
         """Convert the slider value to a float in the range 1.0 - 8.0."""
         return self.psf_slider.value() / 10.0
     
-    def validate_cosmic_clarity_folder(self):
-        """Check if the Cosmic Clarity folder is set and valid."""
-        if not self.cosmic_clarity_folder:
-            QMessageBox.warning(
-                self,
-                "Missing Folder",
-                "The Cosmic Clarity folder is not set. Please use the wrench icon to select the correct folder."
-            )
-            return False
-
-        # Determine the expected executable based on the platform
-        if os.name == "nt":  # Windows
-            expected_executable = "SetiAstroCosmicClarity.exe"
-        elif sys.platform == "darwin":  # macOS
-            expected_executable = "SetiAstroCosmicClaritymac"
-        else:  # Linux
-            expected_executable = "SetiAstroCosmicClarity"  # Case-sensitive, no extension
-
-        # Check if the expected executable exists in the folder
-        executable_path = os.path.join(self.cosmic_clarity_folder, expected_executable)
-        if not os.path.exists(executable_path):
-            QMessageBox.warning(
-                self,
-                "Invalid Folder",
-                f"Incorrect Cosmic Clarity folder. Please choose the parent folder containing the Cosmic Clarity executable:\n\n"
-                f"Expected file: {expected_executable}"
-            )
-            return False
-
-        return True
-
-
     def run_cosmic_clarity(self, input_file_path=None):
         """Run Cosmic Clarity with the current parameters."""
         if not self.validate_cosmic_clarity_folder():
-            return  # Stop execution if the folder is not valid        
+            return  # Stop execution if the folder is not valid
+
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
             QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
@@ -9054,12 +10003,30 @@ class CosmicClarityTab(QWidget):
 
         # Determine mode from the radio buttons
         if self.sharpen_radio.isChecked():
-            mode = "sharpen"
-            output_suffix = "_sharpened"
+            modes = ["sharpen"]
+            output_suffixes = ["_sharpened"]
+        elif self.denoise_radio.isChecked():
+            modes = ["denoise"]
+            output_suffixes = ["_denoised"]
+        elif self.both_radio.isChecked():
+            modes = ["sharpen", "denoise"]
+            output_suffixes = ["_sharpened", "_denoised"]
         else:
-            mode = "denoise"
-            output_suffix = "_denoised"
+            QMessageBox.warning(self, "Warning", "Please select an operation mode.")
+            return
 
+        # Initialize a queue to handle sequential operations
+        self.operation_queue = list(zip(modes, output_suffixes))
+
+        # Disable Execute button to prevent multiple operations
+        self.execute_button.setEnabled(False)
+
+        # Start the first operation
+        if self.operation_queue:
+            self._execute_cosmic_clarity(*self.operation_queue.pop(0))
+
+    def _execute_cosmic_clarity(self, mode, output_suffix):
+        """Execute a single Cosmic Clarity operation."""
         # Determine the correct executable name based on platform and mode
         if os.name == 'nt':
             # Windows
@@ -9103,6 +10070,7 @@ class CosmicClarityTab(QWidget):
         exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
         if not os.path.exists(exe_path):
             QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}. Please use the wrench icon to select the correct folder.")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
             return
 
         cmd = self.build_command_args(exe_name, mode)
@@ -9116,7 +10084,7 @@ class CosmicClarityTab(QWidget):
 
         # Connect signals
         self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
-        self.process_q.finished.connect(self.qprocess_finished)
+        self.process_q.finished.connect(lambda exitCode, exitStatus: self.qprocess_finished(mode, exitCode, exitStatus))
 
         # Start the process
         self.process_q.setProgram(exe_path)
@@ -9124,10 +10092,11 @@ class CosmicClarityTab(QWidget):
         self.process_q.start()
 
         if not self.process_q.waitForStarted(3000):
-            QMessageBox.critical(self, "Error", "Failed to start the Cosmic Clarity process.")
+            QMessageBox.critical(self, "Error", f"Failed to start the Cosmic Clarity {mode} process.")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
             return
 
-        # Set up file waiting worker and wait dialog as before
+        # Set up file waiting worker and wait dialog
         self.wait_thread = WaitForFileWorker(output_file_glob, timeout=3000)
         self.wait_thread.fileFound.connect(self.on_file_found)
         self.wait_thread.error.connect(self.on_file_error)
@@ -9140,20 +10109,15 @@ class CosmicClarityTab(QWidget):
 
         self.wait_thread.start()
 
-        # Once the dialog is closed (either by file found, error, or cancellation), restore autostretch if needed
-        if was_autostretch_enabled:
-            self.auto_stretch_button.setChecked(True)
-
-
 
     ########################################
     # Below are the new helper slots (methods) to handle signals from worker and dialog.
     ########################################
 
     def qprocess_output(self):
-        if not hasattr(self, 'process_q') or self.process_q is None:
+        if not hasattr(self, 'process_q_cropped') or self.process_q_cropped is None:
             return
-        output = self.process_q.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        output = self.process_q_cropped.readAllStandardOutput().data().decode("utf-8", errors="replace")
         for line in output.splitlines():
             line = line.strip()
             if not line:
@@ -9165,19 +10129,28 @@ class CosmicClarityTab(QWidget):
                 percentage_str = parts[1].replace("%", "")
                 try:
                     percentage = float(percentage_str)
-                    self.wait_dialog.progress_bar.setValue(int(percentage))
+                    if hasattr(self, 'wait_dialog_cropped') and self.wait_dialog_cropped:
+                        self.wait_dialog_cropped.progress_bar.setValue(int(percentage))
                 except ValueError:
                     pass
             else:
                 # Append all other lines to the text box
-                self.wait_dialog.append_output(line)
+                if hasattr(self, 'wait_dialog_cropped') and self.wait_dialog_cropped:
+                    self.wait_dialog_cropped.append_output(line)
 
 
 
 
-    def qprocess_finished(self, exitCode, exitStatus):
-        """Slot called when the QProcess finishes."""
-        pass  # Handle cleanup logic if needed
+
+    def qprocess_finished(self, mode, exitCode, exitStatus):
+        """Handle process completion for a specific mode."""
+
+        
+        if exitCode != 0:
+            QMessageBox.critical(self, "Error", f"Cosmic Clarity {mode} process failed with exit code {exitCode}.")
+
+        
+
 
     def read_process_output(self):
         """Read output from the process and display it in the wait_dialog's text edit."""
@@ -9206,92 +10179,143 @@ class CosmicClarityTab(QWidget):
         self.wait_thread = None
 
         if getattr(self, 'is_cropped_mode', False):
-
-            # Cropped image logic
+            # Existing Cropped Mode handling
             processed_image, _, _, _ = load_image(output_file_path)
             if processed_image is None:
                 print(f"[ERROR] Failed to load cropped image from {output_file_path}")
                 QMessageBox.critical(self, "Error", f"Failed to load cropped image from {output_file_path}.")
+                self.execute_button.setEnabled(True)  # Re-enable Execute button
                 return
-
 
             # Apply autostretch if requested
             if getattr(self, 'cropped_apply_autostretch', False):
-
                 if self.is_mono:
                     stretched_mono = stretch_mono_image(processed_image[:, :, 0], target_median=0.25)
-
                     processed_image = np.stack([stretched_mono] * 3, axis=-1)
-
                 else:
                     processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
-
 
             # Update the preview dialog
             try:
                 self.preview_dialog.display_qimage(processed_image)
-
             except Exception as e:
                 print(f"[ERROR] Failed to update preview dialog: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to update preview dialog:\n{e}")
+                self.execute_button.setEnabled(True)  # Re-enable Execute button
                 return
 
             # Cleanup with known paths
             input_file_path = os.path.join(self.cosmic_clarity_folder, "input", "cropped_preview_image.tiff")
             self.cleanup_files(input_file_path, output_file_path)
 
-
             # Reset cropped mode
             self.is_cropped_mode = False
 
+            # Re-enable Execute button
+            self.execute_button.setEnabled(True)
         else:
-
             # Normal mode logic
             processed_image_path = output_file_path
             self.loaded_image_path = processed_image_path
-
 
             # Attempt to load the image with retries
             processed_image, original_header, bit_depth, is_mono = self.load_image_with_retry(processed_image_path)
             if processed_image is None:
                 QMessageBox.critical(self, "Error", f"Failed to load image from {processed_image_path} after multiple attempts.")
                 print(f"[ERROR] Failed to load image from {processed_image_path} after multiple attempts.")
+                self.execute_button.setEnabled(True)  # Re-enable Execute button
                 return
 
-
-            # Show the processed image by passing the image data
+            # Show the processed image
             try:
                 self.show_image(processed_image)
-
             except Exception as e:
                 print(f"[ERROR] Exception occurred while showing image: {e}")
                 QMessageBox.critical(self, "Error", f"Exception occurred while showing image:\n{e}")
+                self.execute_button.setEnabled(True)  # Re-enable Execute button
                 return
 
             # Store the image in memory
             try:
                 self.store_processed_image(processed_image)
-
             except Exception as e:
                 print(f"[ERROR] Failed to store processed image: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to store processed image:\n{e}")
+                self.execute_button.setEnabled(True)  # Re-enable Execute button
                 return
 
-            # Use the stored input file path
-            input_file_path = self.current_input_file_path
-
-
             # Cleanup input and output files
+            input_file_path = self.current_input_file_path
             self.cleanup_files(input_file_path, processed_image_path)
 
+            # Check if there are more operations queued
+            if hasattr(self, 'operation_queue') and self.operation_queue:
+                next_mode, next_suffix = self.operation_queue.pop(0)
+                self._execute_cosmic_clarity(next_mode, next_suffix)
 
-            # Update the image display
+
+    def qprocess_finished_on_cropped(self, mode, exitCode, exitStatus, apply_autostretch):
+        """Handle process completion for a specific cropped mode."""
+        print(f"Process finished for {mode} operation with exit code {exitCode} and exit status {exitStatus}.")
+
+        if exitCode != 0:
+            QMessageBox.critical(self, "Error", f"Cosmic Clarity {mode} process failed with exit code {exitCode}.")
+
+
+        self.wait_dialog_cropped.close()
+        print("WaitDialog_cropped closed.")
+
+
+
+    def on_file_found_on_cropped(self, output_file_path, mode, apply_autostretch):
+        print(f"File found for cropped {mode} operation: {output_file_path}")
+        
+        try:
+            # Load the processed cropped image
+            processed_image, _, _, _ = load_image(output_file_path)
+            if processed_image is None:
+                raise ValueError(f"Failed to load cropped image from {output_file_path}")
+            print("Processed image loaded successfully.")
+
+            # Apply autostretch if requested
+            if apply_autostretch:
+                if self.is_mono:
+                    stretched_mono = stretch_mono_image(processed_image[:, :, 0], target_median=0.25)
+                    processed_image = np.stack([stretched_mono] * 3, axis=-1)
+                    print("Autostretch applied to mono image.")
+                else:
+                    processed_image = stretch_color_image(processed_image, target_median=0.25, linked=False)
+                    print("Autostretch applied to color image.")
+
+            # Update the preview dialog
             try:
-                self.update_image_display()
-
+                self.preview_dialog.display_qimage(processed_image)
+                print("Preview dialog updated with processed image.")
             except Exception as e:
-                print(f"[ERROR] Failed to update image display: {e}")
-                QMessageBox.critical(self, "Error", f"Failed to update image display:\n{e}")
+                raise RuntimeError(f"Failed to update preview dialog: {e}")
+
+            # Cleanup input and output files with correct extension
+            input_file_path = os.path.join(self.cosmic_clarity_folder, "input", "cropped_preview_image.tif")
+            self.cleanup_files(input_file_path, output_file_path)
+            print("Input and output files cleaned up.")
+
+            # Reset cropped mode flags if necessary
+            self.is_cropped_mode = False
+            print("Cropped mode flags reset.")
+
+            # Check if there are more operations queued
+            if self.cropped_operation_queue:
+                next_mode, next_suffix = self.cropped_operation_queue.pop(0)
+                print(f"Proceeding to next operation: {next_mode} with suffix {next_suffix}.")
+                # Execute the next operation
+                self._execute_cosmic_clarity_on_cropped(next_mode, next_suffix, processed_image, apply_autostretch)
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            QMessageBox.critical(self, "Error", f"An error occurred: {e}")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
+
+
 
 
     def on_file_error(self, msg):
@@ -9309,10 +10333,6 @@ class CosmicClarityTab(QWidget):
 
 
     def on_wait_cancelled(self):
-        # User clicked cancel in the wait dialog
-        if self.wait_thread and self.wait_thread.isRunning():
-            self.wait_thread.stop()
-
         # If we have a QProcess reference, terminate it
         if hasattr(self, 'process_q') and self.process_q is not None:
             self.process_q.kill()  # or self.process_q.terminate()
@@ -9324,12 +10344,10 @@ class CosmicClarityTab(QWidget):
 
     def run_cosmic_clarity_on_cropped(self, cropped_image, apply_autostretch=False):
         """Run Cosmic Clarity on a cropped image, with an option to autostretch upon receipt."""
+
         if not self.validate_cosmic_clarity_folder():
-            return  # Stop execution if the folder is not valid        
-        psf_value = self.get_psf_value()
-        if not self.cosmic_clarity_folder:
-            QMessageBox.warning(self, "Warning", "Please select the Cosmic Clarity folder.")
-            return
+            return  # Stop execution if the folder is not valid
+
         if cropped_image is None:  # Ensure a cropped image is provided
             QMessageBox.warning(self, "Warning", "No cropped image provided.")
             return
@@ -9337,13 +10355,34 @@ class CosmicClarityTab(QWidget):
         # Convert the cropped image to 32-bit floating point format
         cropped_image_32bit = cropped_image.astype(np.float32) / np.max(cropped_image)  # Normalize if needed
 
-        # Determine mode and suffix
-        if self.sharpen_radio.isChecked():
-            mode = "sharpen"
-            output_suffix = "_sharpened"
+        # Determine mode and suffix based on the selected radio button
+        if self.both_radio.isChecked():
+            modes = ["sharpen", "denoise"]
+            output_suffixes = ["_sharpened", "_denoised"]
+        elif self.sharpen_radio.isChecked():
+            modes = ["sharpen"]
+            output_suffixes = ["_sharpened"]
+        elif self.denoise_radio.isChecked():
+            modes = ["denoise"]
+            output_suffixes = ["_denoised"]
         else:
-            mode = "denoise"
-            output_suffix = "_denoised"
+            QMessageBox.warning(self, "Warning", "Please select an operation mode.")
+            return
+
+        # Initialize a queue to handle sequential operations
+        self.cropped_operation_queue = list(zip(modes, output_suffixes))
+
+        # Disable Execute button to prevent multiple operations
+        self.execute_button.setEnabled(False)
+
+        # Start the first operation
+        if self.cropped_operation_queue:
+            self._execute_cosmic_clarity_on_cropped(*self.cropped_operation_queue.pop(0), cropped_image_32bit, apply_autostretch)
+
+
+    def _execute_cosmic_clarity_on_cropped(self, mode, output_suffix, cropped_image_32bit, apply_autostretch):
+        """Execute a single Cosmic Clarity operation on a cropped image."""
+        print(f"Starting '{mode}' operation with suffix '{output_suffix}'.")
 
         # Determine the correct executable name based on platform and mode
         if os.name == 'nt':
@@ -9370,50 +10409,75 @@ class CosmicClarityTab(QWidget):
         # Define paths for input and output
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
-        input_file_path = os.path.join(input_folder, "cropped_preview_image.tiff")
+        base_filename = "cropped_preview_image"  # Using a fixed name for cropped images
+        input_file_path = os.path.join(input_folder, f"{base_filename}.tif")  # Changed to .tif
+
+        # Ensure input and output directories exist
+        os.makedirs(input_folder, exist_ok=True)
+        os.makedirs(output_folder, exist_ok=True)
 
         # Save the 32-bit floating-point cropped image to the input folder
-        save_image(cropped_image_32bit, input_file_path, "tiff", "32-bit floating point", self.original_header, self.is_mono)
-
-        # Build command args (no batch script)
-        cmd = self.build_command_args(exe_name, mode)
-
-        # Set cropped mode and store parameters needed after file is found
-        self.is_cropped_mode = True
-        self.cropped_apply_autostretch = apply_autostretch
-        self.cropped_output_suffix = output_suffix
-
-        # Use QProcess (already defined in run_cosmic_clarity)
-        self.process_q = QProcess(self)
-        self.process_q.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
-        self.process_q.finished.connect(self.qprocess_finished)
-
-        exe_path = cmd[0]
-        args = cmd[1:]
-        self.process_q.setProgram(exe_path)
-        self.process_q.setArguments(args)
-        self.process_q.start()
-
-        if not self.process_q.waitForStarted(3000):
-            QMessageBox.critical(self, "Error", "Failed to start the Cosmic Clarity process.")
+        try:
+            save_image(cropped_image_32bit, input_file_path, "tiff", "32-bit floating point", self.original_header, self.is_mono)
+            print(f"Saved cropped image to input path: {input_file_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save cropped image: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save cropped image:\n{e}")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
             return
 
-        # Set up wait thread for cropped file
-        output_file_glob = os.path.join(output_folder, "cropped_preview_image" + output_suffix + ".*")
-        self.wait_thread = WaitForFileWorker(output_file_glob, timeout=1800)
-        self.wait_thread.fileFound.connect(self.on_file_found)
-        self.wait_thread.error.connect(self.on_file_error)
-        self.wait_thread.cancelled.connect(self.on_file_cancelled)
+        # Construct the expected output file glob
+        output_file_glob = os.path.join(output_folder, f"{base_filename}{output_suffix}.*")
+        print(f"Waiting for output file matching: {output_file_glob}")  # Debug print
 
-        # Use the same WaitDialog
-        self.wait_dialog = WaitDialog(self)
-        self.wait_dialog.cancelled.connect(self.on_wait_cancelled)
-        self.wait_dialog.setWindowModality(Qt.WindowModality.NonModal)
-        self.wait_dialog.show()
+        # Check if the executable exists
+        exe_path = os.path.join(self.cosmic_clarity_folder, exe_name)
+        if not os.path.exists(exe_path):
+            QMessageBox.critical(self, "Error", f"Executable not found: {exe_path}. Please use the wrench icon to select the correct folder.")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
+            return
 
-        self.wait_thread.start()
-        
+        # Build command arguments
+        cmd = self.build_command_args(exe_name, mode)
+        exe_path = cmd[0]
+        args = cmd[1:]  # Separate the executable from its arguments
+        print(f"Running command: {exe_path} {' '.join(args)}")  # Debug print
+
+        # Initialize QProcess
+        self.process_q_cropped = QProcess(self)
+        self.process_q_cropped.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)  # Combine stdout/stderr
+
+        # Connect signals
+        self.process_q_cropped.readyReadStandardOutput.connect(self.qprocess_output)
+        self.process_q_cropped.finished.connect(lambda exitCode, exitStatus: self.qprocess_finished_on_cropped(mode, exitCode, exitStatus, apply_autostretch))
+
+        # Start the process
+        self.process_q_cropped.setProgram(exe_path)
+        self.process_q_cropped.setArguments(args)
+        self.process_q_cropped.start()
+
+        if not self.process_q_cropped.waitForStarted(3000):
+            QMessageBox.critical(self, "Error", f"Failed to start the Cosmic Clarity {mode} process.")
+            self.execute_button.setEnabled(True)  # Re-enable Execute button
+            return
+
+        print(f"Started Cosmic Clarity process for mode '{mode}'.")
+
+        # Set up file waiting worker and wait dialog
+        self.wait_thread_cropped = WaitForFileWorker(output_file_glob, timeout=1800)
+        self.wait_thread_cropped.fileFound.connect(lambda path: self.on_file_found_on_cropped(path, mode, apply_autostretch))
+        self.wait_thread_cropped.error.connect(self.on_file_error)
+        self.wait_thread_cropped.cancelled.connect(self.on_file_cancelled)
+
+        self.wait_dialog_cropped = WaitDialog(self)
+        self.wait_dialog_cropped.cancelled.connect(self.on_wait_cancelled)
+        self.wait_dialog_cropped.setWindowModality(Qt.WindowModality.NonModal)
+        self.wait_dialog_cropped.show()
+
+        self.wait_thread_cropped.start()
+        print("WaitDialog_cropped displayed and WaitForFileWorker started.")
+
+
     def build_command_args(self, exe_name, mode):
         """Build the command line arguments for Cosmic Clarity without using a batch file."""
         # exe_name is now fully resolved (including .exe on Windows if needed)
@@ -9459,7 +10523,7 @@ class CosmicClarityTab(QWidget):
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Save Processed Image", "", 
             "TIFF Files (*.tif *.tiff);;PNG Files (*.png);;FITS Files (*.fits *.fit)"
-     
+
         )
         
         if not save_path:
@@ -9550,13 +10614,13 @@ class CosmicClarityTab(QWidget):
                 os.remove(input_file_path)
                 print(f"Deleted input file: {input_file_path}")
             else:
-                print(f"")
+                print(f"Input file not found, skipping deletion: {input_file_path}")
 
             if output_file_path and os.path.exists(output_file_path):
                 os.remove(output_file_path)
                 print(f"Deleted output file: {output_file_path}")
             else:
-                print(f"")
+                print(f"Output file not found, skipping deletion: {output_file_path}")
         except Exception as e:
             print(f"Failed to delete files: {e}")
 
@@ -9716,10 +10780,10 @@ class PreviewDialog(QDialog):
         if self.dragging:
             delta = event.pos() - self.drag_start_pos
             self.scroll_area.horizontalScrollBar().setValue(
-                self.scroll_area.horizontalScrollBar().value() - int(delta.x())
+                self.scroll_area.horizontalScrollBar().value() - delta.x()
             )
             self.scroll_area.verticalScrollBar().setValue(
-                self.scroll_area.verticalScrollBar().value() - int(delta.y())
+                self.scroll_area.verticalScrollBar().value() - delta.y()
             )
             self.drag_start_pos = event.pos()
 
@@ -9848,7 +10912,7 @@ class WaitForFileWorker(QThread):
 
     def stop(self):
         self._running = False
-
+        
 class CosmicClaritySatelliteTab(QWidget):
     def __init__(self):
         super().__init__()
