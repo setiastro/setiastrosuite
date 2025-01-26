@@ -18,6 +18,7 @@ a = Analysis(
         ('slot1.png', '.'),
         ('slot0.png', '.'),
         ('slot2.png', '.'),
+        ('hdr.png', '.'),
         ('slot3.png', '.'),
         ('slot4.png', '.'),
         ('openfile.png', '.'),
