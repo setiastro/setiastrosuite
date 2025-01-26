@@ -170,7 +170,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.9.0"
+VERSION = "2.9.1"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -1247,42 +1247,79 @@ class AstroEditingSuite(QMainWindow):
 
 
     def recombine_luminance(self):
-        """Recombines luminance from slot 0 with the RGB image in slot 1."""
-        # Ensure slot 1 has the original RGB image
-        original_rgb = self.image_manager._images[1]
+        """Recombines luminance from a selected slot with the RGB image from another selected slot."""
+        
+        # Define the available slot range
+        available_slots = list(range(5))  # Slots 0-4
+        
+        # Initialize and display the custom dialog
+        dialog = RecombineDialog(available_slots, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            QMessageBox.information(self, "Operation Cancelled", "Recombination operation was cancelled.")
+            return
+        
+        # Retrieve selections
+        luminance_slot, rgb_slot = dialog.getSelections()
+        
+        # Retrieve the images from the selected slots
+        luminance = self.image_manager._images[luminance_slot]
+        original_rgb = self.image_manager._images[rgb_slot]
+        
+        # Validate the RGB image
         if original_rgb is None:
-            QMessageBox.warning(self, "No Image", "Slot 1 does not contain an RGB image for recombination.")
+            QMessageBox.warning(self, "No Image", f"Slot {rgb_slot} does not contain an RGB image for recombination.")
             return
         if original_rgb.ndim != 3 or original_rgb.shape[2] != 3:
-            QMessageBox.warning(self, "Invalid Image", "Slot 1 must contain an RGB image for recombination.")
+            QMessageBox.warning(self, "Invalid Image", f"Slot {rgb_slot} must contain an RGB image for recombination.")
             return
-
-        # Ensure slot 0 has the luminance image
-        luminance = self.image_manager._images[0]
-        if luminance is None or luminance.ndim != 2:
-            QMessageBox.warning(self, "No Luminance", "Slot 0 must contain a luminance image for recombination.")
+        
+        # Validate the luminance image
+        if luminance is None:
+            QMessageBox.warning(self, "No Luminance", f"Slot {luminance_slot} does not contain a luminance image for recombination.")
             return
-
+        if luminance.ndim < 2:
+            QMessageBox.warning(self, "Invalid Luminance Image", f"Slot {luminance_slot} must contain a 2D luminance image.")
+            return
+        
+        # If luminance has more than one channel, use only the first channel
+        if luminance.ndim == 3 and luminance.shape[2] > 1:
+            QMessageBox.information(
+                self,
+                "Multiple Channels Detected",
+                f"Luminance image in slot {luminance_slot} has multiple channels. Only the first channel will be used."
+            )
+            luminance = luminance[:, :, 0]
+        elif luminance.ndim > 3:
+            QMessageBox.warning(
+                self,
+                "Invalid Luminance Image",
+                f"Luminance image in slot {luminance_slot} has unsupported number of dimensions."
+            )
+            return
+        
         # Clip luminance to [0, 1] to ensure valid data
         luminance = np.clip(luminance, 0.0, 1.0)
-
+        
         # Convert the RGB image to Lab color space
         lab_image = self.rgb_to_lab(original_rgb)
-
+        
         # Replace the L* channel with the luminance
         lab_image[..., 0] = luminance * 100.0  # L* is scaled to [0, 100] in Lab
-
+        
         # Convert the modified Lab image back to RGB color space
         updated_rgb = self.lab_to_rgb(lab_image)
-
+        
         # Clip to [0, 1] to ensure valid RGB values
         updated_rgb = np.clip(updated_rgb, 0.0, 1.0)
-
-        # Update slot 0 with the recombined image
-        metadata = self.image_manager._metadata[1]
-        metadata['file_path'] = "Luminance Recombined"
+        
+        # Retrieve metadata from the RGB slot and update it
+        metadata = self.image_manager._metadata[rgb_slot].copy()
+        metadata['file_path'] = f"Luminance Recombined (Lum Slot: {luminance_slot}, RGB Slot: {rgb_slot})"
+        
+        # Update the selected RGB slot with the recombined image
         self.image_manager.set_image(updated_rgb, metadata)
-        print("Recombined image updated in slot 0.")
+        
+        print(f"Recombined image updated in slot {rgb_slot} with luminance from slot {luminance_slot}.")
 
 
     def rgb_to_lab(self, rgb_image):
@@ -2534,6 +2571,73 @@ class AstroEditingSuite(QMainWindow):
             print("Redo performed.")
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")    
+
+
+class RecombineDialog(QDialog):
+    def __init__(self, available_slots, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Recombine Luminance and RGB Images")
+        self.selected_lum_slot = None
+        self.selected_rgb_slot = None
+        self.initUI(available_slots)
+    
+    def initUI(self, available_slots):
+        layout = QVBoxLayout()
+        
+        # Instruction Label
+        instruction_label = QLabel("Select the slots for Luminance and RGB images:")
+        layout.addWidget(instruction_label)
+        
+        # Luminance Slot Selection
+        lum_layout = QHBoxLayout()
+        lum_label = QLabel("Luminance Slot:")
+        self.lum_combo = QComboBox()
+        self.lum_combo.addItems([f"Slot {slot}" for slot in available_slots])
+        lum_layout.addWidget(lum_label)
+        lum_layout.addWidget(self.lum_combo)
+        layout.addLayout(lum_layout)
+        
+        # RGB Slot Selection
+        rgb_layout = QHBoxLayout()
+        rgb_label = QLabel("RGB Slot:")
+        self.rgb_combo = QComboBox()
+        self.rgb_combo.addItems([f"Slot {slot}" for slot in available_slots])
+        rgb_layout.addWidget(rgb_label)
+        rgb_layout.addWidget(self.rgb_combo)
+        layout.addLayout(rgb_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.clicked.connect(self.validate_and_accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def validate_and_accept(self):
+        """Ensure that the selected slots are different before accepting."""
+        lum_slot = self.lum_combo.currentIndex()
+        rgb_slot = self.rgb_combo.currentIndex()
+        
+        if lum_slot == rgb_slot:
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Luminance and RGB slots must be different. Please select distinct slots."
+            )
+            return
+        self.selected_lum_slot = lum_slot
+        self.selected_rgb_slot = rgb_slot
+        self.accept()
+    
+    def getSelections(self):
+        """Return the selected luminance and RGB slot numbers."""
+        return self.selected_lum_slot, self.selected_rgb_slot
+
 
 class CopySlotDialog(QDialog):
     def __init__(self, parent=None, available_slots=None):
@@ -10018,8 +10122,7 @@ class CosmicClarityTab(QWidget):
         # Initialize a queue to handle sequential operations
         self.operation_queue = list(zip(modes, output_suffixes))
 
-        # Disable Execute button to prevent multiple operations
-        self.execute_button.setEnabled(False)
+
 
         # Start the first operation
         if self.operation_queue:
@@ -10372,8 +10475,7 @@ class CosmicClarityTab(QWidget):
         # Initialize a queue to handle sequential operations
         self.cropped_operation_queue = list(zip(modes, output_suffixes))
 
-        # Disable Execute button to prevent multiple operations
-        self.execute_button.setEnabled(False)
+
 
         # Start the first operation
         if self.cropped_operation_queue:
@@ -10912,7 +11014,7 @@ class WaitForFileWorker(QThread):
 
     def stop(self):
         self._running = False
-        
+
 class CosmicClaritySatelliteTab(QWidget):
     def __init__(self):
         super().__init__()
