@@ -1,9 +1,9 @@
 {
-  "version": "2.8.0",
+  "version": "2.9.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.8.0/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.0/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.0/setiastrosuite_linux"
   },
-  "notes": "New Function: Blemish Blaster! Content Aware blemish removal tool developed by me for PI but now in SAS.  Numerous other bug fixes"
+  "notes": "New Function: WaveScale HDR:  Reduces and enhances very bright areas in your image.  New addition to Cosmic Clarity SharpenDenoise: Both button if you want to run sharpen and denoise all in one click"
 }
