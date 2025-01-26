@@ -170,7 +170,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.9.0"
+VERSION = "2.9.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1244,46 +1244,81 @@ class AstroEditingSuite(QMainWindow):
 
         QMessageBox.information(self, "Success", "Gradient removed successfully.")
 
-
-
-
     def recombine_luminance(self):
-        """Recombines luminance from slot 0 with the RGB image in slot 1."""
-        # Ensure slot 1 has the original RGB image
-        original_rgb = self.image_manager._images[1]
+        """Recombines luminance from a selected slot with the RGB image from another selected slot."""
+        
+        # Define the available slot range
+        available_slots = list(range(5))  # Slots 0-4
+        
+        # Initialize and display the custom dialog
+        dialog = RecombineDialog(available_slots, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            QMessageBox.information(self, "Operation Cancelled", "Recombination operation was cancelled.")
+            return
+        
+        # Retrieve selections
+        luminance_slot, rgb_slot = dialog.getSelections()
+        
+        # Retrieve the images from the selected slots
+        luminance = self.image_manager._images[luminance_slot]
+        original_rgb = self.image_manager._images[rgb_slot]
+        
+        # Validate the RGB image
         if original_rgb is None:
-            QMessageBox.warning(self, "No Image", "Slot 1 does not contain an RGB image for recombination.")
+            QMessageBox.warning(self, "No Image", f"Slot {rgb_slot} does not contain an RGB image for recombination.")
             return
         if original_rgb.ndim != 3 or original_rgb.shape[2] != 3:
-            QMessageBox.warning(self, "Invalid Image", "Slot 1 must contain an RGB image for recombination.")
+            QMessageBox.warning(self, "Invalid Image", f"Slot {rgb_slot} must contain an RGB image for recombination.")
             return
-
-        # Ensure slot 0 has the luminance image
-        luminance = self.image_manager._images[0]
-        if luminance is None or luminance.ndim != 2:
-            QMessageBox.warning(self, "No Luminance", "Slot 0 must contain a luminance image for recombination.")
+        
+        # Validate the luminance image
+        if luminance is None:
+            QMessageBox.warning(self, "No Luminance", f"Slot {luminance_slot} does not contain a luminance image for recombination.")
             return
-
+        if luminance.ndim < 2:
+            QMessageBox.warning(self, "Invalid Luminance Image", f"Slot {luminance_slot} must contain a 2D luminance image.")
+            return
+        
+        # If luminance has more than one channel, use only the first channel
+        if luminance.ndim == 3 and luminance.shape[2] > 1:
+            QMessageBox.information(
+                self,
+                "Multiple Channels Detected",
+                f"Luminance image in slot {luminance_slot} has multiple channels. Only the first channel will be used."
+            )
+            luminance = luminance[:, :, 0]
+        elif luminance.ndim > 3:
+            QMessageBox.warning(
+                self,
+                "Invalid Luminance Image",
+                f"Luminance image in slot {luminance_slot} has unsupported number of dimensions."
+            )
+            return
+        
         # Clip luminance to [0, 1] to ensure valid data
         luminance = np.clip(luminance, 0.0, 1.0)
-
+        
         # Convert the RGB image to Lab color space
         lab_image = self.rgb_to_lab(original_rgb)
-
+        
         # Replace the L* channel with the luminance
         lab_image[..., 0] = luminance * 100.0  # L* is scaled to [0, 100] in Lab
-
+        
         # Convert the modified Lab image back to RGB color space
         updated_rgb = self.lab_to_rgb(lab_image)
-
+        
         # Clip to [0, 1] to ensure valid RGB values
         updated_rgb = np.clip(updated_rgb, 0.0, 1.0)
-
-        # Update slot 0 with the recombined image
-        metadata = self.image_manager._metadata[1]
-        metadata['file_path'] = "Luminance Recombined"
+        
+        # Retrieve metadata from the RGB slot and update it
+        metadata = self.image_manager._metadata[rgb_slot].copy()
+        metadata['file_path'] = f"Luminance Recombined (Lum Slot: {luminance_slot}, RGB Slot: {rgb_slot})"
+        
+        # Update the selected RGB slot with the recombined image
         self.image_manager.set_image(updated_rgb, metadata)
-        print("Recombined image updated in slot 0.")
+        
+        print(f"Recombined image updated in slot {rgb_slot} with luminance from slot {luminance_slot}.")
+        
 
 
     def rgb_to_lab(self, rgb_image):
@@ -2536,6 +2571,72 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
+class RecombineDialog(QDialog):
+    def __init__(self, available_slots, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Recombine Luminance and RGB Images")
+        self.selected_lum_slot = None
+        self.selected_rgb_slot = None
+        self.initUI(available_slots)
+    
+    def initUI(self, available_slots):
+        layout = QVBoxLayout()
+        
+        # Instruction Label
+        instruction_label = QLabel("Select the slots for Luminance and RGB images:")
+        layout.addWidget(instruction_label)
+        
+        # Luminance Slot Selection
+        lum_layout = QHBoxLayout()
+        lum_label = QLabel("Luminance Slot:")
+        self.lum_combo = QComboBox()
+        self.lum_combo.addItems([f"Slot {slot}" for slot in available_slots])
+        lum_layout.addWidget(lum_label)
+        lum_layout.addWidget(self.lum_combo)
+        layout.addLayout(lum_layout)
+        
+        # RGB Slot Selection
+        rgb_layout = QHBoxLayout()
+        rgb_label = QLabel("RGB Slot:")
+        self.rgb_combo = QComboBox()
+        self.rgb_combo.addItems([f"Slot {slot}" for slot in available_slots])
+        rgb_layout.addWidget(rgb_label)
+        rgb_layout.addWidget(self.rgb_combo)
+        layout.addLayout(rgb_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.clicked.connect(self.validate_and_accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+    
+    def validate_and_accept(self):
+        """Ensure that the selected slots are different before accepting."""
+        lum_slot = self.lum_combo.currentIndex()
+        rgb_slot = self.rgb_combo.currentIndex()
+        
+        if lum_slot == rgb_slot:
+            QMessageBox.warning(
+                self,
+                "Invalid Selection",
+                "Luminance and RGB slots must be different. Please select distinct slots."
+            )
+            return
+        self.selected_lum_slot = lum_slot
+        self.selected_rgb_slot = rgb_slot
+        self.accept()
+    
+    def getSelections(self):
+        """Return the selected luminance and RGB slot numbers."""
+        return self.selected_lum_slot, self.selected_rgb_slot
+
+
 class CopySlotDialog(QDialog):
     def __init__(self, parent=None, available_slots=None):
         super().__init__(parent)
@@ -2959,15 +3060,34 @@ class ImageManager(QObject):
 class MaskDisplayWindow(QDialog):
     """
     A separate window to display the luminance mask for debugging purposes.
+    Includes Zoom In, Zoom Out, and Fit to Preview controls.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Luminance Mask")
         self.setMinimumSize(300, 300)
 
-        layout = QVBoxLayout(self)
-        self.setLayout(layout)
+        # Initialize zoom parameters
+        self.zoom_factor = 1.0
+        self.zoom_step = 1.25
+        self.zoom_min = 0.1
+        self.zoom_max = 5.0
 
+        # Main layout
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        # 1) Create the mask display area (QGraphicsView in a scrollable region)
+        self._create_mask_display_area()
+
+        # 2) Create the zoom controls
+        self._create_zoom_controls()
+
+    # -------------------------------------------------------------------------
+    # 1) MASK DISPLAY AREA
+    # -------------------------------------------------------------------------
+    def _create_mask_display_area(self):
+        """Create a QGraphicsView & QGraphicsScene for the mask display."""
         self.scene = QGraphicsScene()
         self.graphics_view = QGraphicsView()
         self.graphics_view.setScene(self.scene)
@@ -2976,8 +3096,90 @@ class MaskDisplayWindow(QDialog):
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene.addItem(self.pixmap_item)
 
-        layout.addWidget(self.graphics_view)
+        # Enable panning with mouse drag
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
 
+        # Enable scroll bars
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        # Add the graphics view to the main layout
+        self.main_layout.addWidget(self.graphics_view)
+
+    # -------------------------------------------------------------------------
+    # 2) ZOOM CONTROLS
+    # -------------------------------------------------------------------------
+    def _create_zoom_controls(self):
+        """Create a QGroupBox containing Zoom In, Zoom Out, and Fit to Preview buttons."""
+        self.zoom_controls_group = QGroupBox("Zoom Controls")
+        zoom_layout = QHBoxLayout()
+
+        # Zoom In Button
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self._zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        # Zoom Out Button
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self._zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        # Fit to Preview Button
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        self.zoom_controls_group.setLayout(zoom_layout)
+
+        # Add the zoom controls to the main layout
+        self.main_layout.addWidget(self.zoom_controls_group)
+
+    # -------------------------------------------------------------------------
+    # ZOOM METHODS
+    # -------------------------------------------------------------------------
+    def _zoom_in(self):
+        """Zoom in the mask display."""
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+            print(f"MaskDisplayWindow: Zoomed in to {self.zoom_factor}x.")
+        else:
+            QMessageBox.information(self, "Zoom In", "Maximum zoom level reached.")
+            print("MaskDisplayWindow: Maximum zoom level reached.")
+
+    def _zoom_out(self):
+        """Zoom out the mask display."""
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+            print(f"MaskDisplayWindow: Zoomed out to {self.zoom_factor}x.")
+        else:
+            QMessageBox.information(self, "Zoom Out", "Minimum zoom level reached.")
+            print("MaskDisplayWindow: Minimum zoom level reached.")
+
+    def _fit_to_preview(self):
+        """Fit the entire mask within the QGraphicsView."""
+        if self.pixmap_item.pixmap().isNull():
+            return  # No mask to fit
+
+        # Fit the pixmap within the view, maintaining aspect ratio
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+        # Reset zoom factor
+        self.zoom_factor = 1.0
+        print("MaskDisplayWindow: Fitted mask to preview and reset zoom factor to 1.0.")
+
+    def _apply_zoom(self):
+        """Apply the current zoom factor to the graphics view."""
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+        print(f"MaskDisplayWindow: Applied zoom factor of {self.zoom_factor}x.")
+
+    # -------------------------------------------------------------------------
+    # MASK UPDATE METHOD
+    # -------------------------------------------------------------------------
     def update_mask(self, mask_array):
         """
         Update the mask display with the given mask array.
@@ -2985,28 +3187,38 @@ class MaskDisplayWindow(QDialog):
         Args:
             mask_array (np.ndarray): 2D array with values in [0, 1].
         """
-        # Convert mask array to grayscale image [0..255]
-        mask_uint8 = (np.clip(mask_array, 0, 1) * 255).astype(np.uint8)
+        try:
+            # Convert mask array to grayscale image [0..255]
+            mask_uint8 = (np.clip(mask_array, 0, 1) * 255).astype(np.uint8)
 
-        # Ensure it's single-channel
-        if mask_uint8.ndim == 3 and mask_uint8.shape[2] == 3:
-            mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
-        elif mask_uint8.ndim == 2:
-            pass  # Already single-channel
-        else:
-            # Handle unexpected formats
-            mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
+            # Ensure it's single-channel
+            if mask_uint8.ndim == 3 and mask_uint8.shape[2] == 3:
+                mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
+            elif mask_uint8.ndim == 2:
+                pass  # Already single-channel
+            else:
+                # Handle unexpected formats
+                mask_uint8 = np.mean(mask_uint8, axis=2).astype(np.uint8)
 
-        # Convert to QImage
-        h, w = mask_uint8.shape[:2]
-        qimage = QImage(
-            mask_uint8.data, w, h, w, QImage.Format.Format_Grayscale8
-        )
-        pixmap = QPixmap.fromImage(qimage)
+            # Convert to QImage
+            h, w = mask_uint8.shape[:2]
+            qimage = QImage(
+                mask_uint8.data, w, h, w, QImage.Format.Format_Grayscale8
+            )
+            pixmap = QPixmap.fromImage(qimage)
 
-        # Update the pixmap item
-        self.pixmap_item.setPixmap(pixmap)
-        self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+            # Update the pixmap item
+            self.pixmap_item.setPixmap(pixmap)
+            self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+
+            # Reset zoom to fit the new mask
+            self._fit_to_preview()
+
+            print("MaskDisplayWindow: Mask updated and fitted to preview.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update mask: {e}")
+            print(f"MaskDisplayWindow: Error updating mask - {e}")
 
 class HDRWorker(QObject):
     """
@@ -3304,7 +3516,7 @@ class WaveScaleHDRDialog(QDialog):
         self._create_bottom_buttons()
 
         # 5) Initialize and show the mask display window
-        #self._create_mask_window()
+        self._create_mask_window()
 
         # B3-spline kernel for à trous wavelet
         self.b3_spline_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
@@ -3315,12 +3527,37 @@ class WaveScaleHDRDialog(QDialog):
         self.zoom_min = 0.1
         self.zoom_max = 5.0
 
+        # Convert original image to Lab and compute initial mask
+        self.lab_original = self.rgb_to_lab(self.original_image)
+        self.L_original = self.lab_original[..., 0].copy()  # Store original L for mask computation
+        self.mask = self._create_luminance_mask(self.L_original, gamma=self.mask_gamma_slider.value() / 100.0)
+
+
+
         # Show the initial preview
         self._update_preview_pixmap(self.preview_image)
 
-        self.apply_button.setEnabled(False)
-        self.preview_button.clicked.connect(self._enable_apply_button)           
+        # Show the initial mask in MaskDisplayWindow
+        self.mask_window.update_mask(self.mask)        
 
+        self.apply_button.setEnabled(False)
+        self.preview_button.clicked.connect(self._enable_apply_button)   
+        self.mask_gamma_slider.valueChanged.connect(self._on_mask_gamma_changed)        
+
+    def _on_mask_gamma_changed(self, value):
+        """
+        Recompute the luminance mask based on the new gamma value and update the mask display.
+        
+        Args:
+            value (int): The new value from the mask_gamma_slider.
+        """
+        try:
+            gamma = value / 100.0  # Convert slider value to gamma
+            self.mask = self._create_luminance_mask(self.L_original, gamma=gamma)
+            self.mask_window.update_mask(self.mask)
+            print(f"Mask gamma changed to {gamma}, mask updated.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update mask: {e}")
 
     # -------------------------------------------------------------------------
     # 1) Zoom AREA
@@ -3449,10 +3686,10 @@ class WaveScaleHDRDialog(QDialog):
     # -------------------------------------------------------------------------
     # 4) MASK DISPLAY WINDOW
     # -------------------------------------------------------------------------
-    #def _create_mask_window(self):
-     #   """Initialize and show the separate mask display window."""
-      #  self.mask_window = MaskDisplayWindow(self)
-       # self.mask_window.show()
+    def _create_mask_window(self):
+        """Initialize and show the separate mask display window."""
+        self.mask_window = MaskDisplayWindow(self)
+        self.mask_window.show()
 
     # -------------------------------------------------------------------------
     # 5) Progress Display Area
@@ -10034,8 +10271,7 @@ class CosmicClarityTab(QWidget):
         # Initialize a queue to handle sequential operations
         self.operation_queue = list(zip(modes, output_suffixes))
 
-        # Disable Execute button to prevent multiple operations
-        self.execute_button.setEnabled(False)
+
 
         # Start the first operation
         if self.operation_queue:
@@ -10388,9 +10624,7 @@ class CosmicClarityTab(QWidget):
         # Initialize a queue to handle sequential operations
         self.cropped_operation_queue = list(zip(modes, output_suffixes))
 
-        # Disable Execute button to prevent multiple operations
-        self.execute_button.setEnabled(False)
-
+ 
         # Start the first operation
         if self.cropped_operation_queue:
             self._execute_cosmic_clarity_on_cropped(*self.cropped_operation_queue.pop(0), cropped_image_32bit, apply_autostretch)
