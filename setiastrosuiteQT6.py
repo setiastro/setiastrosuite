@@ -170,7 +170,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.9.2"
+VERSION = "2.9.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -806,50 +806,91 @@ class AstroEditingSuite(QMainWindow):
     def check_for_updatesstartup(self):
         try:
             # URL to the JSON file on GitHub
-            update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/refs/heads/main/updates.json"
-
-            # Fetch the JSON data
+            update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/main/updates.json"
+    
+            # Fetch the JSON data with a timeout to prevent hanging
             response = requests.get(update_url, timeout=5)
-            response.raise_for_status()
+            response.raise_for_status()  # Raise an exception for HTTP errors
             update_data = response.json()
-
+    
             # Parse the current version and latest version
-            current_version = VERSION  # Replace with your app's current version
-            latest_version = update_data.get("version", "")
-
+            current_version_str = VERSION  # Your app's current version as a string
+            latest_version_str = update_data.get("version", "")
+    
+            if not latest_version_str:
+                # If 'version' key is missing or empty in the JSON
+                print("Update check: 'version' key not found in update data.")
+                return  # Exit silently
+    
+            # Convert version strings to tuples for accurate comparison
+            current_version = self.version_str_to_tuple(current_version_str)
+            latest_version = self.version_str_to_tuple(latest_version_str)
+    
             # Compare versions
             if latest_version > current_version:
                 notes = update_data.get("notes", "No details provided.")
                 downloads = update_data.get("downloads", {})
-
+    
                 # Show a dialog to notify the user about the new version
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Information)
                 msg_box.setWindowTitle("Update Available")
-                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setText(f"A new version ({latest_version_str}) is available!")
                 msg_box.setInformativeText(f"Release Notes:\n{notes}")
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-                # Add download links to the message box
-                msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
-
+    
+                # Add download links to the message box's detailed text
+                detailed_text = "\n".join([f"{k}: {v}" for k, v in downloads.items()])
+                msg_box.setDetailedText(detailed_text)
+    
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
                     import webbrowser
                     # Open the appropriate link based on the user's OS
                     platform = sys.platform
                     if platform.startswith("win"):
-                        webbrowser.open(downloads.get("Windows", ""))
+                        download_link = downloads.get("Windows", "")
                     elif platform.startswith("darwin"):
-                        webbrowser.open(downloads.get("macOS", ""))
+                        download_link = downloads.get("macOS", "")
                     elif platform.startswith("linux"):
-                        webbrowser.open(downloads.get("Linux", ""))
+                        download_link = downloads.get("Linux", "")
                     else:
                         QMessageBox.warning(self, "Error", "Unsupported platform.")
-
+                        download_link = ""
+    
+                    if download_link:
+                        webbrowser.open(download_link)
+                    else:
+                        QMessageBox.warning(self, "Error", "Download link not available.")
+    
+            else:
+                # No update available; do nothing
+                pass
+    
         except requests.RequestException as e:
-            QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
-
+            # Handle network-related errors gracefully
+            # Instead of a critical error, show a warning or log the error
+            print(f"Update check failed: {e}")  # Log the error to console for debugging
+    
+            # Option 1: Show a non-intrusive warning message
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setWindowTitle("Update Check Failed")
+            msg_box.setText("Unable to check for updates at this time.")
+            msg_box.setInformativeText("Please check your internet connection and try again later.")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+    
+            # Option 2: If you prefer not to notify the user, simply log the error
+            # Uncomment the lines below to use this approach
+            # pass  # Do nothing; silently ignore the failure
+    
+    def version_str_to_tuple(self, version_str):
+        """
+        Convert a version string into a tuple of integers for comparison.
+        Example: "1.10.2" -> (1, 10, 2)
+        """
+        return tuple(int(part) for part in version_str.split('.') if part.isdigit())
 
     def open_preferences_dialog(self):
         dialog = QDialog(self)
@@ -10335,7 +10376,7 @@ class CosmicClarityTab(QWidget):
         self.process_q.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)  # Combine stdout/stderr
 
         # Connect signals
-        self.process_q.readyReadStandardOutput.connect(self.qprocess_output)
+        self.process_q.readyReadStandardOutput.connect(self.qprocess_output_main)
         self.process_q.finished.connect(lambda exitCode, exitStatus: self.qprocess_finished(mode, exitCode, exitStatus))
 
         # Start the process
@@ -10390,8 +10431,52 @@ class CosmicClarityTab(QWidget):
                 if hasattr(self, 'wait_dialog_cropped') and self.wait_dialog_cropped:
                     self.wait_dialog_cropped.append_output(line)
 
+    def qprocess_output_main(self):
+        """Handle output from the main Cosmic Clarity process."""
+        output = self.process_q.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("Progress:"):
+                # Extract the percentage and update the progress bar
+                parts = line.split()
+                percentage_str = parts[1].replace("%", "")
+                try:
+                    percentage = float(percentage_str)
+                    if hasattr(self, 'wait_dialog') and self.wait_dialog:
+                        self.wait_dialog.progress_bar.setValue(int(percentage))
+                except ValueError:
+                    pass
+            else:
+                # Append all other lines to the text box
+                if hasattr(self, 'wait_dialog') and self.wait_dialog:
+                    self.wait_dialog.append_output(line)
 
 
+    def qprocess_output_cropped(self):
+        """Handle output from the cropped Cosmic Clarity process."""
+        output = self.process_q_cropped.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.startswith("Progress:"):
+                # Extract the percentage and update the progress bar
+                parts = line.split()
+                percentage_str = parts[1].replace("%", "")
+                try:
+                    percentage = float(percentage_str)
+                    if hasattr(self, 'wait_dialog_cropped') and self.wait_dialog_cropped:
+                        self.wait_dialog_cropped.progress_bar.setValue(int(percentage))
+                except ValueError:
+                    pass
+            else:
+                # Append all other lines to the text box
+                if hasattr(self, 'wait_dialog_cropped') and self.wait_dialog_cropped:
+                    self.wait_dialog_cropped.append_output(line)
 
 
     def qprocess_finished(self, mode, exitCode, exitStatus):
@@ -10698,7 +10783,7 @@ class CosmicClarityTab(QWidget):
         self.process_q_cropped.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)  # Combine stdout/stderr
 
         # Connect signals
-        self.process_q_cropped.readyReadStandardOutput.connect(self.qprocess_output)
+        self.process_q_cropped.readyReadStandardOutput.connect(self.qprocess_output_cropped)
         self.process_q_cropped.finished.connect(lambda exitCode, exitStatus: self.qprocess_finished_on_cropped(mode, exitCode, exitStatus, apply_autostretch))
 
         # Start the process
