@@ -9,7 +9,9 @@ pytz
 scipy
 rawpy
 requests
-pyqt6
+pyqt5
 lz4
 zstandard
 pywavelets
+pyqt6
+pyinstaller
