@@ -1,9 +1,9 @@
 {
-  "version": "2.9.4",
+  "version": "2.9.5",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.5/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.5/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.5/setiastrosuite_linux"
   },
-  "notes": "New Feature: Masks!!!  Various other geometry related functions and continuation of bug fixes. "
+  "notes": "New Feature: Masks!!!  Various other geometry related functions and continuation of bug fixes. Additional Blink Features!!"
 }
