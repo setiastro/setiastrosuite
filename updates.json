@@ -1,9 +1,9 @@
 {
-  "version": "2.9.2",
+  "version": "2.9.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.2/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.2/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.2/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.9.4/setiastrosuite_linux"
   },
-  "notes": "New Function: WaveScale HDR:  Reduces and enhances very bright areas in your image.  Feature Add to WaveScale HDR: Luminance mask now shows and will adjust in realtime as you adjust the mask gamma.  This will help you visualize the mask that is getting applied. New addition to Cosmic Clarity SharpenDenoise: Both button if you want to run sharpen and denoise all in one click. Recombine Luminance: Allows you to select which slot the Luminance and RGB images are in. BugFix: Cosmic Clarity Execute button being disabled after operation completed "
+  "notes": "New Feature: Masks!!!  Various other geometry related functions and continuation of bug fixes. "
 }
