@@ -118,7 +118,7 @@ from PyQt6.QtWidgets import (
     QGraphicsItem,
     QToolButton,
     QStatusBar,
-    QMenu  # NOTE: In PyQt6, QMenu remains in QtWidgets
+    QMenu
 )
 
 # ----- QtGui -----
@@ -136,7 +136,9 @@ from PyQt6.QtGui import (
     QMovie,
     QCursor,
     QBrush,
+    QShortcut,
     QPolygon,
+    QPalette,    
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -170,7 +172,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.9.4"
+VERSION = "2.9.5"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -11228,6 +11230,7 @@ class BlinkTab(QWidget):
         self.last_mouse_pos = None  # Store the last mouse position
 
         self.initUI()
+        self.init_shortcuts()
 
     def initUI(self):
         main_layout = QHBoxLayout(self)
@@ -11239,10 +11242,43 @@ class BlinkTab(QWidget):
         left_widget = QWidget(self)
         left_layout = QVBoxLayout(left_widget)
 
-        # File Selection Button
+        # --------------------
+        # Instruction Label
+        # --------------------
+        instruction_text = "Press 'F' to flag/unflag an image.\nRight-click on an image for more options."
+        self.instruction_label = QLabel(instruction_text, self)
+        self.instruction_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.instruction_label.setWordWrap(True)
+        self.instruction_label.setStyleSheet("font-weight: bold;")  # Optional: Make the text bold for emphasis
+
+        self.instruction_label.setStyleSheet(f"""
+            QLabel {{
+                font-weight: bold;
+            }}
+        """)
+
+        # Add the instruction label to the left layout at the top
+        left_layout.addWidget(self.instruction_label)
+
+        # Horizontal layout for "Select Images" and "Select Directory" buttons
+        button_layout = QHBoxLayout()
+
+        # "Select Images" Button
         self.fileButton = QPushButton('Select Images', self)
         self.fileButton.clicked.connect(self.openFileDialog)
-        left_layout.addWidget(self.fileButton)
+        button_layout.addWidget(self.fileButton)
+
+        # "Select Directory" Button
+        self.dirButton = QPushButton('Select Directory', self)
+        self.dirButton.clicked.connect(self.openDirectoryDialog)
+        button_layout.addWidget(self.dirButton)
+
+        left_layout.addLayout(button_layout)
+
+        # "Clear Images" Button
+        self.clearButton = QPushButton('Clear Images', self)
+        self.clearButton.clicked.connect(self.clearImages)
+        left_layout.addWidget(self.clearButton)
 
         # Playback controls (left arrow, play, pause, right arrow)
         playback_controls_layout = QHBoxLayout()
@@ -11362,6 +11398,221 @@ class BlinkTab(QWidget):
 
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def init_shortcuts(self):
+        """Initialize keyboard shortcuts."""
+        # Create a shortcut for the "F" key to flag images
+        flag_shortcut = QShortcut(QKeySequence("F"), self.fileTree)
+        flag_shortcut.activated.connect(self.flag_current_image)
+
+    def openDirectoryDialog(self):
+        """Allow users to select a directory and load all images within it recursively."""
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "")
+        if directory:
+            # Supported image extensions
+            supported_extensions = (
+                '.png', '.tif', '.tiff', '.fits', '.fit',
+                '.xisf', '.cr2', '.nef', '.arw', '.dng',
+                '.orf', '.rw2', '.pef'
+            )
+
+            # Collect all image file paths recursively
+            new_file_paths = []
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    if file.lower().endswith(supported_extensions):
+                        full_path = os.path.join(root, file)
+                        if full_path not in self.image_paths:  # Avoid duplicates
+                            new_file_paths.append(full_path)
+
+            if new_file_paths:
+                self.loadImages(new_file_paths)
+            else:
+                QMessageBox.information(self, "No Images Found", "No supported image files were found in the selected directory.")
+
+    def clearImages(self):
+        """Clear all loaded images and reset the tree view."""
+        confirmation = QMessageBox.question(
+            self,
+            "Clear All Images",
+            "Are you sure you want to clear all loaded images?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if confirmation == QMessageBox.Yes:
+            self.image_paths.clear()
+            self.loaded_images.clear()
+            self.image_labels.clear()
+            self.fileTree.clear()
+            self.preview_label.clear()
+            self.preview_label.setText('No image selected.')
+            self.current_pixmap = None
+            self.progress_bar.setValue(0)
+            self.loading_label.setText("Loading images...")
+
+    def loadImages(self, file_paths):
+        """Load images from the provided file paths and update the tree view."""
+        if not file_paths:
+            return
+
+        # Append new image paths
+        self.image_paths.extend(file_paths)
+
+        # Dictionary to store images grouped by filter and exposure time
+        grouped_images = {}
+
+        # Load the images into memory (storing both file path and image data)
+        total_files = len(file_paths)
+
+        for index, file_path in enumerate(file_paths):
+            try:
+                image, header, bit_depth, is_mono = load_image(file_path)
+            except Exception as e:
+                print(f"Failed to load image {file_path}: {e}")
+                continue
+
+            # Debayer the image if needed (for non-mono images)
+            if is_mono:
+                image = self.debayer_image(image, file_path, header)
+
+            # Stretch the image now while loading it
+            target_median = 0.25
+            if image.ndim == 2:  # Mono image
+                stretched_image = stretch_mono_image(image, target_median)
+            else:  # Color image
+                stretched_image = stretch_color_image(image, target_median, linked=False)
+
+            # Append the stretched image data
+            self.loaded_images.append({
+                'file_path': file_path,
+                'image_data': stretched_image,
+                'header': header,
+                'bit_depth': bit_depth,
+                'is_mono': is_mono,
+                'flagged': False
+            })
+
+            # Safely extract filter and exposure time from FITS header if available
+            object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
+            filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
+            exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
+
+            # Group images by filter and exposure time
+            group_key = (object_name, filter_name, exposure_time)
+            if group_key not in grouped_images:
+                grouped_images[group_key] = []
+            grouped_images[group_key].append(file_path)
+
+            # Update progress bar
+            progress = int((index + 1) / total_files * 100)
+            self.progress_bar.setValue(progress)
+            QApplication.processEvents()  # Ensure the UI updates in real-time
+
+        print(f"Loaded {len(self.loaded_images)} images into memory.")
+        self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
+
+        # Optionally, reset the progress bar and loading message when done
+        self.progress_bar.setValue(100)
+        self.loading_label.setText("Loading complete.")
+
+        # Display grouped images in the tree view
+        grouped_by_object = {}
+
+        # First, group by object_name
+        for (object_name, filter_name, exposure_time), paths in grouped_images.items():
+            if object_name not in grouped_by_object:
+                grouped_by_object[object_name] = {}
+            if filter_name not in grouped_by_object[object_name]:
+                grouped_by_object[object_name][filter_name] = {}
+            if exposure_time not in grouped_by_object[object_name][filter_name]:
+                grouped_by_object[object_name][filter_name][exposure_time] = []
+            grouped_by_object[object_name][filter_name][exposure_time].extend(paths)
+
+        # Now, create the tree structure
+        for object_name, filters in grouped_by_object.items():
+            # Check if object already exists in the tree
+            object_item = self.findTopLevelItemByName(f"Object: {object_name}")
+            if not object_item:
+                object_item = QTreeWidgetItem([f"Object: {object_name}"])
+                self.fileTree.addTopLevelItem(object_item)
+                object_item.setExpanded(True)  # Expand the object item
+
+            for filter_name, exposures in filters.items():
+                # Check if filter already exists under the object
+                filter_item = self.findChildItemByName(object_item, f"Filter: {filter_name}")
+                if not filter_item:
+                    filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
+                    object_item.addChild(filter_item)
+                    filter_item.setExpanded(True)  # Expand the filter item
+
+                for exposure_time, paths in exposures.items():
+                    # Check if exposure exists under the filter
+                    exposure_item = self.findChildItemByName(filter_item, f"Exposure: {exposure_time}")
+                    if not exposure_item:
+                        exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
+                        filter_item.addChild(exposure_item)
+                        exposure_item.setExpanded(True)  # Expand the exposure item
+
+                    for file_path in paths:
+                        file_name = os.path.basename(file_path)
+                        item = QTreeWidgetItem([file_name])
+                        exposure_item.addChild(item)
+
+    def findTopLevelItemByName(self, name):
+        """Find a top-level item in the tree by its name."""
+        for index in range(self.fileTree.topLevelItemCount()):
+            item = self.fileTree.topLevelItem(index)
+            if item.text(0) == name:
+                return item
+        return None
+
+    def findChildItemByName(self, parent, name):
+        """Find a child item under a given parent by its name."""
+        for index in range(parent.childCount()):
+            child = parent.child(index)
+            if child.text(0) == name:
+                return child
+        return None
+
+    def flag_current_image(self):
+        """Flag or unflag the currently selected image as bad."""
+        current_item = self.fileTree.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "No Selection", "No image is currently selected to flag.")
+            return
+
+        # Remove any existing flag icon before processing
+        file_name = current_item.text(0).lstrip("⚠️ ")
+
+        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+
+        if file_path:
+            index = self.image_paths.index(file_path)
+            image_entry = self.loaded_images[index]
+
+            # Toggle the flagged state
+            image_entry['flagged'] = not image_entry['flagged']
+            RED = Qt.GlobalColor.red
+
+            # Fetch the current text color from the palette
+            palette = self.fileTree.palette()
+            current_text_color = palette.color(QPalette.ColorRole.WindowText)
+
+            # Update the tree view to reflect the flag
+            if image_entry['flagged']:
+                # Add a flag icon and change text color to red
+                current_item.setText(0, f"⚠️ {file_name}")  # Prefix with a warning icon
+                current_item.setForeground(0, QBrush(RED))
+            else:
+                # Remove the flag icon and reset text color based on the current theme
+                current_item.setText(0, file_name)
+                current_item.setForeground(0, QBrush(current_text_color))
+
+            # Optional: Provide feedback to the user
+            status = "flagged as bad" if image_entry['flagged'] else "unflagged"
+            print(f"Image '{file_name}' has been {status}.")
+
 
     def on_current_item_changed(self, current, previous):
         """Ensure the selected item is visible by scrolling to it."""
@@ -11438,97 +11689,21 @@ class BlinkTab(QWidget):
 
 
     def openFileDialog(self):
-        """Allow users to select multiple images."""
-        file_paths, _ = QFileDialog.getOpenFileNames(self, "Open Images", "", "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+        """Allow users to select multiple images and add them to the existing list."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Open Images",
+            "",
+            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)"
+        )
         
-        if file_paths:
-            self.image_paths = file_paths
-            self.fileTree.clear()  # Clear the existing tree items
+        # Filter out already loaded images to prevent duplicates
+        new_file_paths = [path for path in file_paths if path not in self.image_paths]
 
-            # Dictionary to store images grouped by filter and exposure time
-            grouped_images = {}
-
-            # Load the images into memory (storing both file path and image data)
-            self.loaded_images = []
-            total_files = len(file_paths)
-
-            for index, file_path in enumerate(file_paths):
-                image, header, bit_depth, is_mono = load_image(file_path)
-
-                # Debayer the image if needed (for non-mono images)
-                if is_mono:
-                    image = self.debayer_image(image, file_path, header)
-
-                # Stretch the image now while loading it
-                target_median = 0.25
-                if image.ndim == 2:  # Mono image
-                    stretched_image = stretch_mono_image(image, target_median)
-                else:  # Color image
-                    stretched_image = stretch_color_image(image, target_median, linked=False)
-
-                # Append the stretched image data
-                self.loaded_images.append({
-                    'file_path': file_path,
-                    'image_data': stretched_image,
-                    'header': header,
-                    'bit_depth': bit_depth,
-                    'is_mono': is_mono
-                })
-
-                # Safely extract filter and exposure time from FITS header if available
-                object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
-                filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
-                exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
-
-                # Group images by filter and exposure time
-                group_key = (object_name, filter_name, exposure_time)
-                if group_key not in grouped_images:
-                    grouped_images[group_key] = []
-                grouped_images[group_key].append(file_path)
-
-                # Update progress bar
-                progress = int((index + 1) / total_files * 100)
-                self.progress_bar.setValue(progress)
-                QApplication.processEvents()  # Ensure the UI updates in real-time
-
-            print(f"Loaded {len(self.loaded_images)} images into memory.")
-            self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
-
-            # Optionally, reset the progress bar and loading message when done
-            self.progress_bar.setValue(100)
-            self.loading_label.setText("Loading complete.")
-
-            # Display grouped images in the tree view
-            grouped_by_object = {}
-
-            # First, group by object_name
-            for (object_name, filter_name, exposure_time), paths in grouped_images.items():
-                if object_name not in grouped_by_object:
-                    grouped_by_object[object_name] = {}
-                if filter_name not in grouped_by_object[object_name]:
-                    grouped_by_object[object_name][filter_name] = {}
-                if exposure_time not in grouped_by_object[object_name][filter_name]:
-                    grouped_by_object[object_name][filter_name][exposure_time] = []
-                grouped_by_object[object_name][filter_name][exposure_time].extend(paths)
-
-            # Now, create the tree structure
-            for object_name, filters in grouped_by_object.items():
-                object_item = QTreeWidgetItem([f"Object: {object_name}"])
-                self.fileTree.addTopLevelItem(object_item)
-                object_item.setExpanded(True)  # Expand the object item
-                for filter_name, exposures in filters.items():
-                    filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
-                    object_item.addChild(filter_item)
-                    filter_item.setExpanded(True)  # Expand the filter item
-                    for exposure_time, paths in exposures.items():
-                        exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
-                        filter_item.addChild(exposure_item)
-                        exposure_item.setExpanded(True)  # Expand the exposure item
-                        for file_path in paths:
-                            file_name = os.path.basename(file_path)
-                            item = QTreeWidgetItem([file_name])
-                            exposure_item.addChild(item)
-
+        if new_file_paths:
+            self.loadImages(new_file_paths)
+        else:
+            QMessageBox.information(self, "No New Images", "No new images were selected or all selected images are already loaded.")
 
 
     def debayer_image(self, image, file_path, header):
@@ -11600,6 +11775,63 @@ class BlinkTab(QWidget):
         else:
             raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
 
+    def remove_item_from_tree(self, file_path):
+        """Remove a specific item from the tree view based on file path."""
+        file_name = os.path.basename(file_path)
+        root = self.fileTree.invisibleRootItem()
+
+        def recurse(parent):
+            for index in range(parent.childCount()):
+                child = parent.child(index)
+                if child.text(0).endswith(file_name):
+                    parent.removeChild(child)
+                    return True
+                if recurse(child):
+                    return True
+            return False
+
+        recurse(root)
+
+    def add_item_to_tree(self, file_path):
+        """Add a specific item to the tree view based on file path."""
+        # Extract metadata for grouping
+        image_entry = next((img for img in self.loaded_images if img['file_path'] == file_path), None)
+        if not image_entry:
+            return
+
+        header = image_entry['header']
+        object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
+        filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
+        exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
+
+        # Group images by filter and exposure time
+        group_key = (object_name, filter_name, exposure_time)
+
+        # Find or create the object item
+        object_item = self.findTopLevelItemByName(f"Object: {object_name}")
+        if not object_item:
+            object_item = QTreeWidgetItem([f"Object: {object_name}"])
+            self.fileTree.addTopLevelItem(object_item)
+            object_item.setExpanded(True)
+
+        # Find or create the filter item
+        filter_item = self.findChildItemByName(object_item, f"Filter: {filter_name}")
+        if not filter_item:
+            filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
+            object_item.addChild(filter_item)
+            filter_item.setExpanded(True)
+
+        # Find or create the exposure item
+        exposure_item = self.findChildItemByName(filter_item, f"Exposure: {exposure_time}")
+        if not exposure_item:
+            exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
+            filter_item.addChild(exposure_item)
+            exposure_item.setExpanded(True)
+
+        # Add the file item
+        file_name = os.path.basename(file_path)
+        item = QTreeWidgetItem([file_name])
+        exposure_item.addChild(item)
 
 
 
@@ -11656,6 +11888,8 @@ class BlinkTab(QWidget):
 
     def on_item_clicked(self, item, column):
         """Handle click on a file name in the tree to preview the image."""
+        self.fileTree.setFocus()
+
         file_name = item.text(0)
         file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
@@ -11729,47 +11963,45 @@ class BlinkTab(QWidget):
             print("No image loaded. Cannot fit to preview.")
             QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
-
-
-
-
     def on_right_click(self, pos):
-        """Allow renaming, moving, and deleting an image file from the list."""
+        """Allow renaming, moving, deleting, and batch operations on images."""
         item = self.fileTree.itemAt(pos)
-        if item:
-            menu = QMenu(self)
+        menu = QMenu(self)
 
-            # Add action to push image to ImageManager
+        if item:
+            # Existing actions
             push_action = QAction("Push Image for Processing", self)
             push_action.triggered.connect(lambda: self.push_image_to_manager(item))
             menu.addAction(push_action)
 
-            # Add action to rename the image
             rename_action = QAction("Rename", self)
             rename_action.triggered.connect(lambda: self.rename_item(item))
             menu.addAction(rename_action)
 
-
-            # Add action to batch rename items
-            batch_rename_action = QAction("Batch Flag Items", self)
-            batch_rename_action.triggered.connect(lambda: self.batch_rename_items())
-            menu.addAction(batch_rename_action)
-
-            # Add action to move the image
             move_action = QAction("Move Selected Items", self)
             move_action.triggered.connect(lambda: self.move_items())
             menu.addAction(move_action)
 
-            # Add action to delete image from the list
             delete_action = QAction("Delete Selected Items", self)
             delete_action.triggered.connect(lambda: self.delete_items())
             menu.addAction(delete_action)
 
-            menu.exec(self.fileTree.mapToGlobal(pos))
+        # Batch operations
+        menu.addSeparator()
+
+        batch_delete_action = QAction("Delete All Flagged Images", self)
+        batch_delete_action.triggered.connect(self.batch_delete_flagged_images)
+        menu.addAction(batch_delete_action)
+
+        batch_move_action = QAction("Move All Flagged Images", self)
+        batch_move_action.triggered.connect(self.batch_move_flagged_images)
+        menu.addAction(batch_move_action)
+
+        menu.exec(self.fileTree.mapToGlobal(pos))
 
     def rename_item(self, item):
         """Allow the user to rename the selected image."""
-        current_name = item.text(0)
+        current_name = item.text(0).lstrip("⚠️ ")
         new_name, ok = QInputDialog.getText(self, "Rename Image", "Enter new name:", text=current_name)
 
         if ok and new_name:
@@ -11864,6 +12096,79 @@ class BlinkTab(QWidget):
 
             print(f"Batch renamed {len(selected_items)} items.")
 
+    def batch_delete_flagged_images(self):
+        """Delete all flagged images."""
+        flagged_images = [img for img in self.loaded_images if img['flagged']]
+        
+        if not flagged_images:
+            QMessageBox.information(self, "No Flagged Images", "There are no flagged images to delete.")
+            return
+
+        confirmation = QMessageBox.question(
+            self,
+            "Confirm Batch Deletion",
+            f"Are you sure you want to permanently delete {len(flagged_images)} flagged images? This action is irreversible.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if confirmation == QMessageBox.StandardButton.Yes:
+            for img in flagged_images:
+                file_path = img['file_path']
+                try:
+                    os.remove(file_path)
+                    print(f"Deleted flagged image: {file_path}")
+                except Exception as e:
+                    print(f"Failed to delete {file_path}: {e}")
+                    QMessageBox.critical(self, "Error", f"Failed to delete {file_path}: {e}")
+
+                # Remove from data structures
+                self.image_paths.remove(file_path)
+                self.loaded_images.remove(img)
+
+                # Remove from tree view
+                self.remove_item_from_tree(file_path)
+
+            QMessageBox.information(self, "Batch Deletion", f"Deleted {len(flagged_images)} flagged images.")
+
+    def batch_move_flagged_images(self):
+        """Move all flagged images to a selected directory."""
+        flagged_images = [img for img in self.loaded_images if img['flagged']]
+        
+        if not flagged_images:
+            QMessageBox.information(self, "No Flagged Images", "There are no flagged images to move.")
+            return
+
+        # Select destination directory
+        destination_dir = QFileDialog.getExistingDirectory(self, "Select Destination Folder", "")
+        if not destination_dir:
+            return  # User canceled
+
+        for img in flagged_images:
+            src_path = img['file_path']
+            file_name = os.path.basename(src_path)
+            dest_path = os.path.join(destination_dir, file_name)
+
+            try:
+                os.rename(src_path, dest_path)
+                print(f"Moved flagged image from {src_path} to {dest_path}")
+            except Exception as e:
+                print(f"Failed to move {src_path}: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to move {src_path}: {e}")
+                continue
+
+            # Update data structures
+            self.image_paths.remove(src_path)
+            self.image_paths.append(dest_path)
+            img['file_path'] = dest_path
+            img['flagged'] = False  # Reset flag if desired
+
+            # Update tree view
+            self.remove_item_from_tree(src_path)
+            self.add_item_to_tree(dest_path)
+
+        QMessageBox.information(self, "Batch Move", f"Moved {len(flagged_images)} flagged images.")
+
 
     def move_items(self):
         """Allow the user to move selected images to a different directory."""
@@ -11879,7 +12184,7 @@ class BlinkTab(QWidget):
             return  # User canceled the directory selection
 
         for item in selected_items:
-            current_name = item.text(0)
+            current_name = item.text(0).lstrip("⚠️ ")
             file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
 
             if file_path:
@@ -11907,10 +12212,9 @@ class BlinkTab(QWidget):
 
         print(f"Moved {len(selected_items)} items.")
 
-
     def push_image_to_manager(self, item):
         """Push the selected image to the ImageManager."""
-        file_name = item.text(0)
+        file_name = item.text(0).lstrip("⚠️ ")
         file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
         if file_path and self.image_manager:
@@ -11973,7 +12277,7 @@ class BlinkTab(QWidget):
 
         if reply == QMessageBox.StandardButton.Yes:
             for item in selected_items:
-                file_name = item.text(0)
+                file_name = item.text(0).lstrip("⚠️ ")
                 file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
 
                 if file_path:
@@ -12012,7 +12316,7 @@ class BlinkTab(QWidget):
                         self.fileTree.takeTopLevelItem(index)
 
             print(f"Deleted {len(selected_items)} items.")
-            
+
             # Clear the preview if the deleted items include the currently displayed image
             self.preview_label.clear()
             self.preview_label.setText('No image selected.')
