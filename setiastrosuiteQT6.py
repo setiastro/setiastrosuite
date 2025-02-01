@@ -54,7 +54,7 @@ from astropy.utils.data import conf
 
 from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import Rbf
-
+from scipy.ndimage import median_filter
 from scipy.ndimage import convolve
 
 
@@ -114,6 +114,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QMenuBar,
     QTextEdit,
+    QPlainTextEdit,      
     QProgressBar,
     QGraphicsItem,
     QToolButton,
@@ -138,7 +139,7 @@ from PyQt6.QtGui import (
     QBrush,
     QShortcut,
     QPolygon,
-    QPalette,    
+    QPalette,  
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -172,7 +173,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.9.5"
+VERSION = "2.10.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -212,6 +213,12 @@ if hasattr(sys, '_MEIPASS'):
     maskcreate_path = os.path.join(sys._MEIPASS, 'maskcreate.png')
     maskapply_path = os.path.join(sys._MEIPASS, 'maskapply.png')
     maskremove_path = os.path.join(sys._MEIPASS, 'maskremove.png')
+    slot5_path = os.path.join(sys._MEIPASS, 'slot5.png')
+    slot6_path = os.path.join(sys._MEIPASS, 'slot6.png')
+    slot7_path = os.path.join(sys._MEIPASS, 'slot7.png')
+    slot8_path = os.path.join(sys._MEIPASS, 'slot8.png')
+    slot9_path = os.path.join(sys._MEIPASS, 'slot9.png') 
+    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')    
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -249,6 +256,12 @@ else:
     maskcreate_path = 'maskcreate.png'
     maskapply_path = 'maskapply.png'
     maskremove_path = 'maskremove.png'
+    slot5_path = 'slot5.png'
+    slot6_path = 'slot6.png'
+    slot7_path = 'slot7.png'
+    slot8_path  = 'slot8.png'
+    slot9_path  = 'slot9.png'
+    pixelmath_path = 'pixelmath.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -257,12 +270,20 @@ class AstroEditingSuite(QMainWindow):
         self.setWindowIcon(QIcon(icon_path))
         self.setDockNestingEnabled(True)
         self.current_theme = "dark"  # Default theme
-        self.image_manager = ImageManager(max_slots=5)  # Initialize ImageManager
+        self.image_manager = ImageManager(max_slots=10)  # Initialize ImageManager
         self.mask_manager = self.image_manager.mask_manager
         self.image_manager.image_changed.connect(self.update_file_name)
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
         self.preview_windows = {}
+
+        # NEW: Dictionary to store custom slot names (default names)
+        self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+        self.slot_actions = {}
+
+        # NEW: Dictionary to store custom mask slot names (default names)
+        self.mask_slot_names = {i: f"Mask Slot {i}" for i in range(5)}
+        self.mask_slot_actions = {}
 
         # Initialize the mask banner
         self.mask_banner = QLabel()  # Initialize QLabel
@@ -475,7 +496,13 @@ class AstroEditingSuite(QMainWindow):
         add_stars_action.triggered.connect(self.add_stars)
 
         # Add Add Stars to Functions menu
-        functions_menu.addAction(add_stars_action)        
+        functions_menu.addAction(add_stars_action)   
+
+        # Pixel Math Action
+        pixel_math_action = QAction(QIcon(pixelmath_path), "Pixel Math", self)
+        pixel_math_action.setStatusTip("Perform pixel math operations on the current image")
+        pixel_math_action.triggered.connect(self.open_pixel_math_dialog)
+        functions_menu.addAction(pixel_math_action)             
 
         # --------------------
         # Geometry Menu
@@ -544,23 +571,31 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         slot_menu = menubar.addMenu("Slots")
 
-        # Define the number of slots based on ImageManager
         num_slots = self.image_manager.max_slots
 
         for slot in range(num_slots):
-            # Dynamically get the slot icon path
-            slot_icon_path = getattr(sys.modules[__name__], f'slot{slot}_path', 'slot0.png')  # Default to slot0.png if not found
+            # Get the slot icon (or use a default if not defined)
+            slot_icon_path = getattr(sys.modules[__name__], f'slot{slot}_path', 'slot0.png')
             slot_icon = QIcon(slot_icon_path)
 
-            # Create a QAction for each slot
-            slot_action = QAction(slot_icon, f"Slot {slot}", self)
-            slot_action.setStatusTip(f"Open preview for Slot {slot}")
+            # Use the custom name (default is "Slot {slot}")
+            slot_name = self.slot_names.get(slot, f"Slot {slot}")
 
-            # Connect the action to a method with the slot number as an argument
+            # Create the QAction for this slot using the custom name
+            slot_action = QAction(slot_icon, slot_name, self)
+            slot_action.setStatusTip(f"Open preview for {slot_name}")
+            # Connect the action to open the preview for the slot
             slot_action.triggered.connect(lambda checked, s=slot: self.open_preview_window(s))
-
-            # Add the action to the Slot Menu
             slot_menu.addAction(slot_action)
+            # Save the action so we can update its text later
+            self.slot_actions[slot] = slot_action
+
+        # Add a separator and a "Rename Slot" action
+        slot_menu.addSeparator()
+        rename_slot_action = QAction("Rename Slot", self)
+        rename_slot_action.setStatusTip("Rename a slot with a custom name")
+        rename_slot_action.triggered.connect(self.rename_slot)
+        slot_menu.addAction(rename_slot_action)
 
 
         # --------------------
@@ -607,10 +642,21 @@ class AstroEditingSuite(QMainWindow):
         # Mask Slots Submenu
         mask_slots_menu = masks_menu.addMenu("Mask Slots")
 
+
         for slot in range(5):  # Five mask slots (0-4)
-            slot_action = QAction(f"Mask Slot {slot}", self)
+            # Use the custom name from the dictionary
+            mask_slot_name = self.mask_slot_names.get(slot, f"Mask Slot {slot}")
+            slot_action = QAction(mask_slot_name, self)
             slot_action.triggered.connect(lambda checked, s=slot: self.preview_mask_slot(s))
             mask_slots_menu.addAction(slot_action)
+            self.mask_slot_actions[slot] = slot_action
+
+        # Add a separator and a "Rename Mask Slot" action
+        mask_slots_menu.addSeparator()
+        rename_mask_slot_action = QAction("Rename Mask Slot", self)
+        rename_mask_slot_action.setStatusTip("Rename a mask slot with a custom name")
+        rename_mask_slot_action.triggered.connect(self.rename_mask_slot)
+        mask_slots_menu.addAction(rename_mask_slot_action)
 
         # --------------------
         # Toolbar
@@ -732,6 +778,7 @@ class AstroEditingSuite(QMainWindow):
         morpho_action.setToolTip("Apply morphological operations to the image.")
         toolbar.addAction(morpho_action)    
 
+        toolbar.addAction(pixel_math_action)
 
         geometrybar = QToolBar("Geometry Toolbar")
 
@@ -837,6 +884,86 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
 
+    def rename_slot(self):
+        """
+        Prompts the user to select a slot and enter a new name (with no spaces).
+        The new name is then applied to the slot and updates the UI.
+        """
+        # Ask the user which slot to rename (0 to max_slots-1)
+        slot, ok = QInputDialog.getInt(
+            self, "Rename Slot", "Enter slot number to rename:",
+            0, 0, self.image_manager.max_slots - 1
+        )
+        if not ok:
+            return
+
+        # Ask for the new name
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Slot", "Enter new name (no spaces):"
+        )
+        if not ok or not new_name:
+            return
+
+        # Validate that the new name contains no spaces
+        if " " in new_name:
+            QMessageBox.warning(self, "Invalid Name", "The name cannot contain spaces.")
+            return
+
+        # Update the custom name in our dictionary
+        self.slot_names[slot] = new_name
+
+        # Update the corresponding QAction's text and tooltip
+        if slot in self.slot_actions:
+            self.slot_actions[slot].setText(new_name)
+            self.slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
+
+        # If there is an open preview window for this slot, update its title
+        if slot in self.preview_windows:
+            self.preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
+
+        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
+
+    def rename_mask_slot(self):
+        """
+        Prompts the user to select a mask slot (0-4) and enter a new name (without spaces),
+        then updates the mask slot name in the dictionary and the corresponding QAction.
+        """
+        # Ask for the mask slot number
+        slot, ok = QInputDialog.getInt(self, "Rename Mask Slot", "Enter mask slot number (0-4):", 0, 0, 4)
+        if not ok:
+            return
+
+        # Ask for the new name
+        new_name, ok = QInputDialog.getText(self, "Rename Mask Slot", "Enter new name (no spaces):")
+        if not ok or not new_name:
+            return
+
+        # Validate that the new name has no spaces
+        if " " in new_name:
+            QMessageBox.warning(self, "Invalid Name", "The name cannot contain spaces.")
+            return
+
+        # Update the custom mask slot names dictionary
+        self.mask_slot_names[slot] = new_name
+
+        # Update the corresponding QAction text and tooltip
+        if slot in self.mask_slot_actions:
+            self.mask_slot_actions[slot].setText(new_name)
+            self.mask_slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
+
+        # Optionally, if you keep track of open mask preview dialogs, update their titles as well.
+        # For example, if you maintain a dictionary self.mask_preview_windows:
+        # if slot in self.mask_preview_windows:
+        #     self.mask_preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
+
+        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
+
+    def open_pixel_math_dialog(self):
+        """Opens the Pixel Math dialog."""
+        dialog = PixelMathDialog(self, self.image_manager)
+        dialog.exec()  # Using exec() to open as a modal dialog
+
     def connect_mask_manager_signals(self):
         """
         Connect signals from MaskManager to update the banner dynamically.
@@ -845,16 +972,23 @@ class AstroEditingSuite(QMainWindow):
 
     def update_mask_banner(self, slot, mask):
         """
-        Updates the mask banner to indicate whether a mask is applied.
+        Updates the mask banner to indicate whether a mask is applied,
+        using the custom name for the mask slot if available.
         """
         if mask is not None:
-            self.mask_banner.setText(f"Mask Applied: Slot {slot}")
+            # Check if a custom name exists for this mask slot
+            if hasattr(self, 'mask_slot_names'):
+                custom_name = self.mask_slot_names.get(slot, f"Slot {slot}")
+            else:
+                custom_name = f"Slot {slot}"
+            self.mask_banner.setText(f"Mask Applied: {custom_name}")
             self.mask_banner.setStyleSheet("background-color: orange; color: black; font-size: 14px; padding: 5px;")
             self.mask_banner.setVisible(True)
         else:
             self.mask_banner.setText("Mask Applied: None")
             self.mask_banner.setStyleSheet("background-color: transparent; color: #dcdcdc; font-size: 14px; padding: 5px;")
             self.mask_banner.setVisible(False)
+
 
     def preview_mask_slot(self, slot):
         """
@@ -1372,6 +1506,15 @@ class AstroEditingSuite(QMainWindow):
                 self.image_manager._metadata[slot_1] = metadata_slot1
 
                 print(f"Gradient background stored in Slot {slot_1}.")
+
+                # --- Update custom slot name for Slot 1 ---
+                if hasattr(self, 'slot_names'):
+                    self.slot_names[slot_1] = "Extracted Gradient"
+                if hasattr(self, 'slot_actions') and slot_1 in self.slot_actions:
+                    self.slot_actions[slot_1].setText("Extracted Gradient")
+                    self.slot_actions[slot_1].setStatusTip("Open preview for Extracted Gradient")
+                if hasattr(self, 'preview_windows') and slot_1 in self.preview_windows:
+                    self.preview_windows[slot_1].setWindowTitle("Preview - Extracted Gradient")
             else:
                 print("Gradient background was not saved to Slot 1 as per user choice.")
 
@@ -1676,8 +1819,7 @@ class AstroEditingSuite(QMainWindow):
 
     def rgb_extract(self):
         """Handle the RGB Extract action."""
-        # Determine which slot to extract from
-        # For this example, we'll extract from Slot 0
+        # Determine which slot to extract from. For this example, we'll extract from Slot 0.
         slot_to_extract = 0
         image = self.image_manager._images.get(slot_to_extract, None)
         
@@ -1725,13 +1867,41 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager._metadata[3] = metadata_g
             self.image_manager._metadata[4] = metadata_b
             
+            # Update the custom slot names in the main window's slot_names dictionary
+            self.slot_names[2] = "Red"
+            self.slot_names[3] = "Green"
+            self.slot_names[4] = "Blue"
             
-            print(f"Extracted R, G, B channels from Slot {slot_to_extract} and stored in Slots 2, 3, 4 respectively.")
-            QMessageBox.information(self, "Success", "RGB channels extracted and stored in Slots 2, 3, and 4.")
+            # Update the associated QAction texts and tooltips if they exist
+            if 2 in self.slot_actions:
+                self.slot_actions[2].setText("Red")
+                self.slot_actions[2].setStatusTip("Open preview for Red")
+            if 3 in self.slot_actions:
+                self.slot_actions[3].setText("Green")
+                self.slot_actions[3].setStatusTip("Open preview for Green")
+            if 4 in self.slot_actions:
+                self.slot_actions[4].setText("Blue")
+                self.slot_actions[4].setStatusTip("Open preview for Blue")
+                
+            # Optionally, update any open preview windows for these slots
+            if 2 in self.preview_windows:
+                self.preview_windows[2].setWindowTitle("Preview - Red")
+            if 3 in self.preview_windows:
+                self.preview_windows[3].setWindowTitle("Preview - Green")
+            if 4 in self.preview_windows:
+                self.preview_windows[4].setWindowTitle("Preview - Blue")
+                
+            print(f"Extracted R, G, B channels from Slot {slot_to_extract} and stored in Slots 2, 3, 4 as Red, Green, and Blue respectively.")
+            QMessageBox.information(self, "Success", "RGB channels extracted and stored in Slots 2 (Red), 3 (Green), and 4 (Blue).")
+            
+            # Open the preview windows for each extracted channel
+            self.open_preview_window(slot=2)
+            self.open_preview_window(slot=3)
+            self.open_preview_window(slot=4)
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to extract RGB channels: {e}")
             print(f"Error during RGB Extract: {e}")
-
 
     def extract_luminance(self):
         """Extracts the luminance from the current image and updates slots."""
@@ -1752,27 +1922,39 @@ class AstroEditingSuite(QMainWindow):
         lab_image = self.rgb_to_lab(current_image)
         luminance = lab_image[..., 0] / 100.0  # Normalize L* to [0, 1] for storage
 
-        # Update slot 1 with the original RGB image (do not change current_slot)
-        self.image_manager._images[1] = current_image
-        self.image_manager._metadata[1] = self.image_manager._metadata[self.image_manager.current_slot].copy()
-        print("Original RGB image moved to slot 1.")
+        # --- Swap assignments: ---
+        # Store the original RGB image in Slot 0.
+        self.image_manager._images[0] = current_image
+        self.image_manager._metadata[0] = self.image_manager._metadata[self.image_manager.current_slot].copy()
+        print("Original RGB image moved to slot 0.")
 
-        # Update slot 0 with the luminance image
+        # Store the luminance image in Slot 1.
         luminance_metadata = {
             'file_path': "Luminance Extracted",
             'is_mono': True,
             'bit_depth': "32-bit floating point",
         }
-        self.image_manager._images[0] = luminance
-        self.image_manager._metadata[0] = luminance_metadata
-        print("Luminance image updated in slot 0.")
+        self.image_manager._images[1] = luminance
+        self.image_manager._metadata[1] = luminance_metadata
+        print("Luminance image updated in slot 1.")
 
-        # Emit signals for both slots to refresh views if necessary
-        self.image_manager.image_changed.emit(0, luminance, luminance_metadata)
-        self.image_manager.image_changed.emit(1, current_image, self.image_manager._metadata[1])
+        # Emit signals for both slots to refresh views if necessary.
+        self.image_manager.image_changed.emit(0, current_image, self.image_manager._metadata[0])
 
-        # Open a preview for the original RGB image in slot 1
+
+        # --- Update custom slot names to reflect the new content ---
+        # Assuming your main window stores custom names in self.slot_names and slot actions in self.slot_actions.
+        if hasattr(self, 'slot_names'):
+            self.slot_names[1] = "Luminance"
+        if hasattr(self, 'slot_actions') and 1 in self.slot_actions:
+            self.slot_actions[1].setText("Luminance")
+            self.slot_actions[1].setStatusTip("Open preview for Luminance")
+        if hasattr(self, 'preview_windows') and 1 in self.preview_windows:
+            self.preview_windows[1].setWindowTitle("Preview - Luminance")
+
+        # Open a preview for the luminance image in Slot 1.
         self.open_preview_window(slot=1)
+
 
     def remove_gradient_with_graxpert(self):
         """Integrate GraXpert for gradient removal."""
@@ -2296,7 +2478,7 @@ class AstroEditingSuite(QMainWindow):
         # Create a new ImagePreview window with a copy of the image data
         image_copy = image.copy()
         preview = ImagePreview(image_data=image_copy, slot=slot, parent=self)  # Pass parent=self
-        preview.setWindowTitle(f"Preview - Slot {slot}")
+
 
         # Store the reference to prevent garbage collection
         self.preview_windows[slot] = preview
@@ -3375,47 +3557,50 @@ class CopySlotDialog(QDialog):
     def update_source_slots(self, source_type):
         self.source_slot_combo.clear()
         if source_type == "Image":
-            available_slots = [f"Image Slot {i}" for i in range(self.image_manager.max_slots)]
+            # Use parent's custom names if available; fall back to default text if not.
+            if self.parent() is not None and hasattr(self.parent(), 'slot_names'):
+                available_slots = [
+                    (self.parent().slot_names.get(i, f"Image Slot {i}"), i)
+                    for i in range(self.image_manager.max_slots)
+                ]
+            else:
+                available_slots = [(f"Image Slot {i}", i) for i in range(self.image_manager.max_slots)]
         elif source_type == "Mask":
-            available_slots = [f"Mask Slot {i}" for i in range(self.mask_manager.max_slots)]
+            # For masks, we use default text (or you could create a similar renaming mechanism)
+            available_slots = [(f"Mask Slot {i}", i) for i in range(self.mask_manager.max_slots)]
         else:
             available_slots = []
-        self.source_slot_combo.addItems(available_slots)
+        for text, slot_number in available_slots:
+            self.source_slot_combo.addItem(text, slot_number)
     
     def update_target_slots(self, target_type):
         self.target_slot_combo.clear()
         if target_type == "Image":
-            available_slots = [f"Image Slot {i}" for i in range(self.image_manager.max_slots)]
+            if self.parent() is not None and hasattr(self.parent(), 'slot_names'):
+                available_slots = [
+                    (self.parent().slot_names.get(i, f"Image Slot {i}"), i)
+                    for i in range(self.image_manager.max_slots)
+                ]
+            else:
+                available_slots = [(f"Image Slot {i}", i) for i in range(self.image_manager.max_slots)]
         elif target_type == "Mask":
-            available_slots = [f"Mask Slot {i}" for i in range(self.mask_manager.max_slots)]
+            available_slots = [(f"Mask Slot {i}", i) for i in range(self.mask_manager.max_slots)]
         else:
             available_slots = []
-        self.target_slot_combo.addItems(available_slots)
+        for text, slot_number in available_slots:
+            self.target_slot_combo.addItem(text, slot_number)
     
     def get_selected_source(self):
         source_type = self.source_type_combo.currentText()
-        source_slot_str = self.source_slot_combo.currentText()
-        if source_type == "Image":
-            source_slot_num = int(source_slot_str.split()[-1])
-            return ("Image", source_slot_num)
-        elif source_type == "Mask":
-            source_slot_num = int(source_slot_str.split()[-1])
-            return ("Mask", source_slot_num)
-        else:
-            return (None, None)
+        # Retrieve the slot number from the combo box item data.
+        source_slot_num = self.source_slot_combo.currentData()
+        return (source_type, source_slot_num)
     
     def get_selected_target(self):
         target_type = self.target_type_combo.currentText()
-        target_slot_str = self.target_slot_combo.currentText()
-        if target_type == "Image":
-            target_slot_num = int(target_slot_str.split()[-1])
-            return ("Image", target_slot_num)
-        elif target_type == "Mask":
-            target_slot_num = int(target_slot_str.split()[-1])
-            return ("Mask", target_slot_num)
-        else:
-            return (None, None)
-        
+        target_slot_num = self.target_slot_combo.currentData()
+        return (target_type, target_slot_num)
+           
 class CropTool(QDialog):
     """A cropping tool using QGraphicsView for better rectangle handling."""
     crop_applied = pyqtSignal(object)
@@ -3998,7 +4183,12 @@ class MaskSlotPreviewDialog(QDialog):
 
     def __init__(self, mask, slot, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Mask Slot {slot} Preview")
+        # If the parent has a 'mask_slot_names' dictionary, use it
+        if parent is not None and hasattr(parent, 'mask_slot_names'):
+            custom_name = parent.mask_slot_names.get(slot, f"Mask Slot {slot}")
+        else:
+            custom_name = f"Mask Slot {slot}"
+        self.setWindowTitle(f"Preview - {custom_name}")
         self.mask = mask.copy()  # The mask to display (ensure a copy is made)
         self.slot = slot  # Mask slot number
         self.scale_factor = 1.0
@@ -4162,7 +4352,8 @@ class MaskSlotPreviewDialog(QDialog):
 
     def invert_mask(self):
         """
-        Inverts the current mask and updates the display and mask slot.
+        Inverts the current mask and updates the display and mask slot,
+        while preserving the current zoom and scroll positions.
         """
         reply = QMessageBox.question(
             self, 
@@ -4175,25 +4366,24 @@ class MaskSlotPreviewDialog(QDialog):
             return
 
         try:
-            # Invert the mask: assuming mask is normalized between 0 and 1
+            # Invert the mask (assuming the mask is normalized between 0 and 1)
             inverted_mask = 1.0 - self.mask
             print("Mask inversion performed.")
-
-            # Update the mask attribute
+            
+            # Update the internal mask and create a new pixmap
             self.mask = inverted_mask.copy()
-
-            # Update the displayed pixmap
             self.pixmap = self.convert_to_pixmap(self.mask)
-            self.image_label.setPixmap(self.pixmap)
-            self.image_label.resize(self.pixmap.size())
-            print("Mask display updated with inverted mask.")
-
-            # Optionally, notify the user
+            
+            # Call update_image() to rescale and reposition the image, preserving zoom/scroll.
+            self.update_image()
+            print("Mask display updated with inverted mask while preserving zoom and scroll positions.")
+            
             QMessageBox.information(self, "Mask Inverted", "The mask has been successfully inverted.")
-
+            
         except Exception as e:
             QMessageBox.critical(self, "Inversion Failed", f"Failed to invert the mask:\n{e}")
             print(f"Failed to invert the mask: {e}")
+
 
     def apply_mask(self):
         """
@@ -7969,7 +8159,12 @@ class ImagePreview(QWidget):
     
     def __init__(self, image_data, slot, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle(f"Preview - Slot {slot}")
+        # Use the parent's custom slot name if available; otherwise default to "Slot {slot}"
+        if parent is not None and hasattr(parent, 'slot_names'):
+            custom_name = parent.slot_names.get(slot, f"Slot {slot}")
+        else:
+            custom_name = f"Slot {slot}"
+        self.setWindowTitle(f"Preview - {custom_name}")
         self.image_data = image_data  # Numpy array containing the image
         self.zoom_factor = 1.0
         self.slot = slot
@@ -9469,8 +9664,10 @@ class CLAHEDialog(QDialog):
         Updates the preview image based on current slider values and applied mask.
         """
         if self.original_image is None:
-            self.pixmap_item.setPixmap(QPixmap())
+            # Clear the scene and then re-add the pixmap item.
             self.preview_scene.clear()
+            self.pixmap_item = QGraphicsPixmapItem()  # Reinitialize pixmap item.
+            self.preview_scene.addItem(self.pixmap_item)
             self.preview_scene.addText("No image loaded.")
             return
 
@@ -10229,6 +10426,385 @@ class WhiteBalanceDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to apply White Balance:\n{e}")
             self.reject()
 
+class PixelImage:
+    def __init__(self, array):
+        self.array = array
+
+    def __add__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(self.array + other.array)
+        else:
+            return PixelImage(self.array + other)
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(self.array - other.array)
+        else:
+            return PixelImage(self.array - other)
+
+    def __rsub__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(other.array - self.array)
+        else:
+            return PixelImage(other - self.array)
+
+    def __mul__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(self.array * other.array)
+        else:
+            return PixelImage(self.array * other)
+    __rmul__ = __mul__
+
+    def __truediv__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(self.array / other.array)
+        else:
+            return PixelImage(self.array / other)
+
+    def __invert__(self):
+        # Overload the ~ operator to mean image inversion: 1 - array.
+        return PixelImage(1 - self.array)
+
+    def __xor__(self, other):
+        # Overload the ^ operator for exponentiation.
+        if isinstance(other, PixelImage):
+            return PixelImage(self.array ** other.array)
+        else:
+            return PixelImage(self.array ** other)
+
+    def __rxor__(self, other):
+        if isinstance(other, PixelImage):
+            return PixelImage(other.array ** self.array)
+        else:
+            return PixelImage(other ** self.array)
+
+    def __repr__(self):
+        return f"PixelImage({self.array})"
+    
+    def __lt__(self, other):
+        if isinstance(other, PixelImage):
+            return self.array < other.array
+        else:
+            return self.array < other   
+
+    def __eq__(self, other):
+        if isinstance(other, PixelImage):
+            return self.array == other.array
+        else:
+            return self.array == other
+
+class PixelMathDialog(QDialog):
+    def __init__(self, parent=None, image_manager=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("Pixel Math")
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        
+        instruction = QLabel(
+            "Enter a pixel math expression using image slot variables.\n"
+            "Examples:\n"
+            "  (slot0 + slot1) / 2\n"
+            "  slot0 - med(slot0)\n"
+            "  ~(~slot0 * ~slot1)\n"
+            "  slot0 - mean(slot0)\n"
+            "  min(slot0) + max(slot0)\n"
+            "  log(slot0)\n"
+            "  iff(slot0 < med(slot0), 0, 1)\n\n"
+            "You may also use your renamed slot names (e.g., stars_image, starless_image).\n"
+            "Note: The '~' operator means image inversion (i.e., 1 - image),\n"
+            "      '^' is overloaded for exponentiation, and 'iff' is a conditional function."
+        )
+        layout.addWidget(instruction)
+        
+        self.expression_edit = QPlainTextEdit()
+        self.expression_edit.setPlaceholderText("Enter pixel math expression")
+        layout.addWidget(self.expression_edit)
+        
+        # Create a button box with OK, Cancel, and Help buttons.
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | 
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.apply_pixel_math)
+        buttons.rejected.connect(self.reject)
+        
+        # Add a Help button with the HelpRole.
+        help_button = buttons.addButton("Help", QDialogButtonBox.ButtonRole.HelpRole)
+        help_button.clicked.connect(self.show_help)
+        
+        layout.addWidget(buttons)
+        
+        self.setLayout(layout)
+
+    def show_help(self):
+        help_text = (
+            "Allowed Operators:\n"
+            "  +, -, *, /: Standard arithmetic operations\n"
+            "  ^: Exponentiation (overloaded; e.g., slot0 ^ 2 means slot0**2)\n"
+            "  ~: Image inversion (i.e., 1 - image)\n"
+            "  <, ==: Elementwise comparisons (you can use these to form conditions)\n\n"
+            "Allowed Functions:\n"
+            "  med(x): Returns a constant image (per channel) where each pixel is the median of x\n"
+            "  mean(x): Returns a constant image (per channel) with the mean of x\n"
+            "  min(x): Returns a constant image (per channel) with the minimum of x\n"
+            "  max(x): Returns a constant image (per channel) with the maximum of x\n"
+            "  std(x): Returns a constant image (per channel) with the standard deviation of x\n"
+            "  mad(x): Returns a constant image (per channel) with the median absolute deviation of x\n"
+            "  log(x): Returns the natural logarithm of x\n"
+            "  iff(condition, a, b): Returns 'a' where condition is True, else 'b'\n\n"
+            "Variables:\n"
+            "  img: the current image (converted to RGB if needed)\n"
+            "  slot0, slot1, ...: image slots (also available by custom names if renamed)\n\n"
+            "Notes:\n"
+            "  - All images are wrapped in a PixelImage, which supports elementwise arithmetic\n"
+            "  - If a grayscale image is encountered, it is automatically replicated to 3 channels\n"
+            "  - Use double equals (==) for equality comparisons\n"
+        )
+        QMessageBox.information(self, "Pixel Math Help", help_text)
+
+
+    # Updated helper functions:
+    def med(self, x):
+        """Return a PixelImage where each channel is set to its median value computed per channel."""
+        if isinstance(x, PixelImage):
+            med_vals = np.median(x.array, axis=(0,1))  # Per-channel medians
+            new_arr = np.empty_like(x.array)
+            for ch in range(x.array.shape[2]):
+                new_arr[..., ch] = med_vals[ch]
+            return PixelImage(new_arr)
+        else:
+            # For a raw numpy array:
+            if x.ndim == 3:
+                med_vals = np.median(x, axis=(0,1))
+                new_arr = np.empty_like(x)
+                for ch in range(x.shape[2]):
+                    new_arr[..., ch] = med_vals[ch]
+                return new_arr
+            else:
+                return np.median(x)
+            
+    def mean(self, x):
+        """
+        Returns an image (or PixelImage) where every pixel in each channel is replaced
+        by the mean of that channel.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        if arr.ndim == 2:
+            val = np.mean(arr)
+            new_arr = np.full(arr.shape, val, dtype=arr.dtype)
+        elif arr.ndim == 3:
+            means = np.mean(arr, axis=(0, 1))
+            new_arr = np.empty_like(arr)
+            for ch in range(arr.shape[2]):
+                new_arr[..., ch] = means[ch]
+        else:
+            new_arr = arr
+        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+    def min(self, x):
+        """
+        Returns an image (or PixelImage) where every pixel in each channel is replaced
+        by the minimum of that channel.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        if arr.ndim == 2:
+            val = np.min(arr)
+            new_arr = np.full(arr.shape, val, dtype=arr.dtype)
+        elif arr.ndim == 3:
+            mins = np.min(arr, axis=(0, 1))
+            new_arr = np.empty_like(arr)
+            for ch in range(arr.shape[2]):
+                new_arr[..., ch] = mins[ch]
+        else:
+            new_arr = arr
+        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+    def max(self, x):
+        """
+        Returns an image (or PixelImage) where every pixel in each channel is replaced
+        by the maximum of that channel.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        if arr.ndim == 2:
+            val = np.max(arr)
+            new_arr = np.full(arr.shape, val, dtype=arr.dtype)
+        elif arr.ndim == 3:
+            maxs = np.max(arr, axis=(0, 1))
+            new_arr = np.empty_like(arr)
+            for ch in range(arr.shape[2]):
+                new_arr[..., ch] = maxs[ch]
+        else:
+            new_arr = arr
+        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+    def std(self, x):
+        """
+        Returns an image (or PixelImage) where every pixel in each channel is replaced
+        by the standard deviation of that channel.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        if arr.ndim == 2:
+            val = np.std(arr)
+            new_arr = np.full(arr.shape, val, dtype=arr.dtype)
+        elif arr.ndim == 3:
+            stds = np.std(arr, axis=(0, 1))
+            new_arr = np.empty_like(arr)
+            for ch in range(arr.shape[2]):
+                new_arr[..., ch] = stds[ch]
+        else:
+            new_arr = arr
+        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+    def mad(self, x):
+        """
+        Returns an image (or PixelImage) where every pixel in each channel is replaced
+        by the median absolute deviation (MAD) of that channel.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        if arr.ndim == 2:
+            m = np.median(arr)
+            mad_val = np.median(np.abs(arr - m))
+            new_arr = np.full(arr.shape, mad_val, dtype=arr.dtype)
+        elif arr.ndim == 3:
+            new_arr = np.empty_like(arr)
+            for ch in range(arr.shape[2]):
+                m = np.median(arr[..., ch])
+                mad_val = np.median(np.abs(arr[..., ch] - m))
+                new_arr[..., ch] = mad_val
+        else:
+            new_arr = arr
+        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+    def log(self, x):
+        """
+        Returns the natural logarithm of x.
+        If x is a PixelImage, returns a new PixelImage with the logarithm applied.
+        """
+        if isinstance(x, PixelImage):
+            return PixelImage(np.log(x.array))
+        else:
+            return np.log(x)
+
+    def iff(self, condition, a, b):
+        """
+        Implements an if-then-else (immediate if) function.
+        For a scalar condition, returns a if condition is True, else b.
+        For array inputs, returns np.where(condition, a, b).
+        If any argument is a PixelImage, their underlying arrays are used and the result
+        is wrapped in a PixelImage.
+        """
+        # Unwrap PixelImage inputs.
+        if isinstance(condition, PixelImage):
+            cond_val = condition.array
+        else:
+            cond_val = condition
+
+        if isinstance(a, PixelImage):
+            a_val = a.array
+        else:
+            a_val = a
+
+        if isinstance(b, PixelImage):
+            b_val = b.array
+        else:
+            b_val = b
+
+        result = np.where(cond_val, a_val, b_val)
+        # If any input was a PixelImage, return a PixelImage.
+        if isinstance(condition, PixelImage) or isinstance(a, PixelImage) or isinstance(b, PixelImage):
+            return PixelImage(result)
+        else:
+            return result
+
+    def apply_pixel_math(self):
+        """Evaluates the user-entered expression and updates the current image slot."""
+        expr = self.expression_edit.toPlainText().strip()
+        if not expr:
+            QMessageBox.warning(self, "No Expression", "Please enter a valid pixel math expression.")
+            return
+        
+        try:
+            # Build a safe namespace.
+            safe_namespace = {
+                "np": np,
+                "med": self.med,
+                "mean": self.mean,
+                "min": self.min,
+                "max": self.max,
+                "std": self.std,
+                "mad": self.mad,
+                "log": self.log,
+                "iff": self.iff,
+            }
+            
+            # Insert the current image as 'img'
+            current_img = self.image_manager.image
+            if current_img is None:
+                QMessageBox.warning(self, "No Image", "There is no image loaded to operate on.")
+                return
+            # If current_img is grayscale (2D), replicate it to 3 channels.
+            if current_img.ndim == 2:
+                current_img = np.stack([current_img] * 3, axis=-1)
+            safe_namespace["img"] = PixelImage(current_img)
+            
+            # Insert each image slot as a variable.
+            max_slots = self.image_manager.max_slots
+            parent = self.parent()
+            for i in range(max_slots):
+                img = self.image_manager._images.get(i, None)
+                if img is not None:
+                    # If the image is grayscale, replicate to 3 channels.
+                    if img.ndim == 2:
+                        img = np.stack([img] * 3, axis=-1)
+                    pix_img = PixelImage(img)
+                    safe_namespace[f"slot{i}"] = pix_img
+                    if parent is not None and hasattr(parent, "slot_names"):
+                        custom_name = parent.slot_names.get(i, None)
+                        if custom_name:
+                            safe_namespace[custom_name] = pix_img
+            
+            # Evaluate the expression in a restricted namespace.
+            result = eval(expr, {"__builtins__": None}, safe_namespace)
+            
+            # If result is a PixelImage, extract its array.
+            if isinstance(result, PixelImage):
+                new_img = result.array
+            else:
+                new_img = result
+
+            # If result is a scalar, convert it to a constant image with the same shape as the current image.
+            if np.isscalar(new_img):
+                new_img = np.full(current_img.shape, new_img, dtype=current_img.dtype)
+            
+            # Update the current image slot.
+            current_slot = self.image_manager.current_slot
+            metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+            metadata['pixel_math'] = expr
+            self.image_manager.set_image(new_img, metadata)
+            QMessageBox.information(self, "Pixel Math", "Pixel math operation applied successfully.")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply pixel math expression:\n{e}")
+
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -10418,6 +10994,9 @@ class XISFViewer(QWidget):
         self.image_label.resize(scaled_pixmap.size())
 
     def toggle_autostretch(self):
+        if self.image_data is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to apply autostretch.")
+            return        
         self.autostretch_enabled = not self.autostretch_enabled
         if self.autostretch_enabled:
             self.apply_autostretch()
@@ -11536,7 +12115,7 @@ class BlinkTab(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        if confirmation == QMessageBox.Yes:
+        if confirmation == QMessageBox.StandardButton.Yes:
             self.image_paths.clear()
             self.loaded_images.clear()
             self.image_labels.clear()
@@ -12490,6 +13069,7 @@ class CosmicClarityTab(QWidget):
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
         self.cosmic_clarity_folder = None
         self.cropped_operation_queue = []
+        self.image = None
 
         self.initUI()
 
@@ -13187,6 +13767,9 @@ class CosmicClarityTab(QWidget):
 
 
     def toggle_auto_stretch(self, checked):
+        if self.image is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to apply autostretch.")
+            return             
         """Toggle autostretch and apply it to the current image display."""
         self.autostretch_enabled = checked
         self.auto_stretch_button.setText("AutoStretch (On)" if checked else "AutoStretch (Off)")
@@ -14923,6 +15506,7 @@ class StatisticalStretchTab(QWidget):
         self.zoom_factor = 1.0
         self.image = None  # Current image (from ImageManager)
         self.stretched_image = None  # Processed image
+        self.current_pixmap = None
         self.initUI()
 
         if self.image_manager:
@@ -20828,6 +21412,10 @@ class NBtoRGBstarsTab(QWidget):
                 QMessageBox.critical(self, "Error", f"Failed to load {image_type} image:\n{e}")
 
     def previewCombine(self):
+        # Check if required images are loaded prior to starting the processing thread
+        if not ((self.ha_image is not None and self.oiii_image is not None) or (self.osc_image is not None)):
+            QMessageBox.warning(self, "Missing Images", "Please Select Images Before Combining")
+            return    
         ha_to_oii_ratio = self.haToOiiRatioSlider.value() / 100.0
         enable_star_stretch = self.starStretchCheckBox.isChecked()
         stretch_factor = self.stretchSlider.value() / 100.0
@@ -21041,7 +21629,7 @@ class NBtoRGBstarsTab(QWidget):
 class NBtoRGBProcessingThread(QThread):
     preview_generated = pyqtSignal(np.ndarray)
 
-    def __init__(self, ha_image, oiii_image, sii_image=None, osc_image=None, ha_to_oii_ratio=0.3, enable_star_stretch=True, stretch_factor=5.0):
+    def __init__(self, ha_image=None, oiii_image=None, sii_image=None, osc_image=None, ha_to_oii_ratio=0.3, enable_star_stretch=True, stretch_factor=5.0):
         super().__init__()
         self.ha_image = ha_image
         self.oiii_image = oiii_image
@@ -23049,6 +23637,10 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
                 # Handle mono (2D) images
                 if is_mono or img_array.ndim == 2:
+                    # If the image is 3D but marked as mono, assume channels are identical and take one channel.
+                    if img_array.ndim == 3:
+                        print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
+                        img_array = img_array[..., 0]  # Now img_array is 2D.
                     if bit_depth == "16-bit":
                         img_array_fits = (img_array * 65535).astype(np.uint16)
                     elif bit_depth == "32-bit unsigned":
