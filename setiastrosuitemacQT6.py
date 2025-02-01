@@ -1625,8 +1625,8 @@ class AstroEditingSuite(QMainWindow):
             QMessageBox.warning(self, "No Image", "Please load an image before cropping.")
             return
 
-        # Open the Crop Tool
-        crop_tool = CropTool(self.image_manager.image, self)
+        # Open the Crop Tool with correct parameters
+        crop_tool = CropTool(self.image_manager, self.image_manager.image, self)
         crop_tool.crop_applied.connect(self.apply_cropped_image)
         crop_tool.exec()
 
@@ -3421,11 +3421,12 @@ class CropTool(QDialog):
     # Class-level variable to store the previous crop rectangle
     previous_crop_rect = None
 
-    def __init__(self, image_data, parent=None):
+    def __init__(self, image_manager, image_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
         self.setGeometry(150, 150, 800, 600)  # Initial size
 
+        self.image_manager = image_manager
         self.original_image_data = image_data.copy()  # Keep a copy of the original image
         self.image_data = image_data  # Displayed image (can be autostretched)
         self.scene = QGraphicsScene()
@@ -3453,6 +3454,10 @@ class CropTool(QDialog):
         self.crop_button = QPushButton("Apply Crop")
         self.crop_button.clicked.connect(self.apply_crop)
         layout.addWidget(self.crop_button)
+
+        self.batch_crop_button = QPushButton("Batch Crop All Slots")
+        self.batch_crop_button.clicked.connect(self.batch_crop_all_slots)
+        layout.addWidget(self.batch_crop_button)
 
         self.setLayout(layout)
 
@@ -3487,6 +3492,95 @@ class CropTool(QDialog):
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.pixmap_item)
         self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def batch_crop_all_slots(self):
+        """Apply the current crop rectangle to all images in the ImageManager."""
+        if self.current_rect.isNull():
+            QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying batch cropping.")
+            return
+
+        # Calculate the number of images (slots with actual images)
+        num_images = sum(1 for img in self.image_manager._images.values() if img is not None)
+        if num_images == 0:
+            QMessageBox.information(self, "No Images", "There are no images to crop.")
+            return
+
+        # Confirm the action with the user
+        reply = QMessageBox.question(
+            self,
+            "Confirm Batch Crop",
+            f"Are you sure you want to apply the current crop to all {num_images} images?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return  # User canceled the action
+
+        # Get the crop rectangle in image coordinates
+        scene_rect = self.scene.sceneRect()
+        scale_x = self.original_image_data.shape[1] / scene_rect.width()
+        scale_y = self.original_image_data.shape[0] / scene_rect.height()
+
+        x = int(self.current_rect.left() * scale_x)
+        y = int(self.current_rect.top() * scale_y)
+        w = int(self.current_rect.width() * scale_x)
+        h = int(self.current_rect.height() * scale_y)
+
+        # Validate and adjust the crop rectangle
+        x = max(0, min(x, self.original_image_data.shape[1] - 1))
+        y = max(0, min(y, self.original_image_data.shape[0] - 1))
+        w = max(1, min(w, self.original_image_data.shape[1] - x))
+        h = max(1, min(h, self.original_image_data.shape[0] - y))
+
+        # Flag to track if any image was cropped
+        any_cropped = False
+
+        # Iterate through all images and apply the crop
+        for slot, img_data in self.image_manager._images.items():
+            if img_data is not None:
+                # Check if the crop rectangle is within the image bounds
+                if y + h > img_data.shape[0] or x + w > img_data.shape[1]:
+                    QMessageBox.warning(
+                        self,
+                        "Crop Out of Bounds",
+                        f"Crop rectangle exceeds image dimensions for slot {slot}. Skipping this image."
+                    )
+                    continue
+
+                # Save current state to undo stack
+                self.image_manager._undo_stacks[slot].append(
+                    (self.image_manager._images[slot].copy(), self.image_manager._metadata[slot].copy())
+                )
+                # Clear redo stack since new action invalidates the redo history
+                self.image_manager._redo_stacks[slot].clear()
+                print(f"ImageManager: Previous state of Slot {slot} pushed to undo stack.")
+
+                # Apply the crop
+                cropped_image = img_data[y:y + h, x:x + w]
+
+                # Update the image data in the ImageManager
+                self.image_manager._images[slot] = cropped_image
+
+                # Emit the image_changed signal to notify other components
+                self.image_manager.image_changed.emit(slot, cropped_image, self.image_manager._metadata[slot])
+                print(f"ImageManager: Image in Slot {slot} cropped and updated.")
+
+                any_cropped = True
+
+        if any_cropped:
+            QMessageBox.information(
+                self,
+                "Batch Crop Completed",
+                f"Successfully cropped {num_images} images."
+            )
+            self.accept()
+        else:
+            QMessageBox.information(
+                self,
+                "Batch Crop",
+                "No images were cropped."
+            )
 
 
     def eventFilter(self, source, event):
@@ -11440,7 +11534,7 @@ class BlinkTab(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-        if confirmation == QMessageBox.Yes:
+        if confirmation == QMessageBox.StandardButton.Yes:
             self.image_paths.clear()
             self.loaded_images.clear()
             self.image_labels.clear()
