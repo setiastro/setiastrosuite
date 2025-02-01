@@ -1536,12 +1536,13 @@ class AstroEditingSuite(QMainWindow):
             response.raise_for_status()
             update_data = response.json()
 
-            # Parse the current version and latest version
-            current_version = VERSION  # Replace with your app's current version
-            latest_version = update_data.get("version", "")
+            # Convert version strings to tuples for proper comparison.
+            current_version_tuple = tuple(map(int, VERSION.split(".")))
+            latest_version_str = update_data.get("version", "")
+            latest_version_tuple = tuple(map(int, latest_version_str.split(".")))
 
             # Compare versions
-            if latest_version > current_version:
+            if latest_version_tuple > current_version_tuple:
                 notes = update_data.get("notes", "No details provided.")
                 downloads = update_data.get("downloads", {})
 
@@ -1549,12 +1550,12 @@ class AstroEditingSuite(QMainWindow):
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Information)
                 msg_box.setWindowTitle("Update Available")
-                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setText(f"A new version ({latest_version_str}) is available!")
                 msg_box.setInformativeText(f"Release Notes:\n{notes}")
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
 
-                # Add download links to the message box
+                # Add download links to the detailed text
                 msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
@@ -1575,34 +1576,31 @@ class AstroEditingSuite(QMainWindow):
         except requests.RequestException as e:
             QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
 
+
     def check_for_updatesstartup(self):
         try:
             # URL to the JSON file on GitHub
             update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/main/updates.json"
-    
+
             # Fetch the JSON data with a timeout to prevent hanging
             response = requests.get(update_url, timeout=5)
             response.raise_for_status()  # Raise an exception for HTTP errors
             update_data = response.json()
-    
-            # Parse the current version and latest version
-            current_version_str = VERSION  # Your app's current version as a string
+
+            # Convert version strings to tuples for accurate comparison.
+            current_version_tuple = tuple(map(int, VERSION.split(".")))
             latest_version_str = update_data.get("version", "")
-    
             if not latest_version_str:
-                # If 'version' key is missing or empty in the JSON
                 print("Update check: 'version' key not found in update data.")
                 return  # Exit silently
-    
-            # Convert version strings to tuples for accurate comparison
-            current_version = self.version_str_to_tuple(current_version_str)
-            latest_version = self.version_str_to_tuple(latest_version_str)
-    
+
+            latest_version_tuple = tuple(map(int, latest_version_str.split(".")))
+
             # Compare versions
-            if latest_version > current_version:
+            if latest_version_tuple > current_version_tuple:
                 notes = update_data.get("notes", "No details provided.")
                 downloads = update_data.get("downloads", {})
-    
+
                 # Show a dialog to notify the user about the new version
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Information)
@@ -1611,11 +1609,11 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setInformativeText(f"Release Notes:\n{notes}")
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
-    
-                # Add download links to the message box's detailed text
+
+                # Add download links to the detailed text
                 detailed_text = "\n".join([f"{k}: {v}" for k, v in downloads.items()])
                 msg_box.setDetailedText(detailed_text)
-    
+
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
                     import webbrowser
                     # Open the appropriate link based on the user's OS
@@ -1629,22 +1627,22 @@ class AstroEditingSuite(QMainWindow):
                     else:
                         QMessageBox.warning(self, "Error", "Unsupported platform.")
                         download_link = ""
-    
+
                     if download_link:
                         webbrowser.open(download_link)
                     else:
                         QMessageBox.warning(self, "Error", "Download link not available.")
-    
+                else:
+                    # If the user declines the update, you might want to log it or simply do nothing.
+                    pass
             else:
-                # No update available; do nothing
+                # No update available; you might opt to notify the user at startup,
+                # but typically it's best to remain silent.
                 pass
-    
+
         except requests.RequestException as e:
-            # Handle network-related errors gracefully
-            # Instead of a critical error, show a warning or log the error
-            print(f"Update check failed: {e}")  # Log the error to console for debugging
-    
-            # Option 1: Show a non-intrusive warning message
+            # Log the error and optionally show a non-intrusive warning.
+            print(f"Update check failed: {e}")
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Icon.Warning)
             msg_box.setWindowTitle("Update Check Failed")
@@ -1652,10 +1650,6 @@ class AstroEditingSuite(QMainWindow):
             msg_box.setInformativeText("Please check your internet connection and try again later.")
             msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg_box.exec()
-    
-            # Option 2: If you prefer not to notify the user, simply log the error
-            # Uncomment the lines below to use this approach
-            # pass  # Do nothing; silently ignore the failure
     
     def version_str_to_tuple(self, version_str):
         """
