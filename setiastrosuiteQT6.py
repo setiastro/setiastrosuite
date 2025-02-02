@@ -38,7 +38,6 @@ import pandas as pd
 import cv2
 from PIL import Image, ImageDraw, ImageFont
 
-
 # Astropy and Astroquery imports
 from astropy.io import fits
 from astropy.time import Time
@@ -119,7 +118,9 @@ from PyQt6.QtWidgets import (
     QGraphicsItem,
     QToolButton,
     QStatusBar,
-    QMenu
+    QMenu,
+    QTableWidget,
+    QTableWidgetItem
 )
 
 # ----- QtGui -----
@@ -173,7 +174,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.0"
+VERSION = "2.10.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -218,7 +219,8 @@ if hasattr(sys, '_MEIPASS'):
     slot7_path = os.path.join(sys._MEIPASS, 'slot7.png')
     slot8_path = os.path.join(sys._MEIPASS, 'slot8.png')
     slot9_path = os.path.join(sys._MEIPASS, 'slot9.png') 
-    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')    
+    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')   
+    histogram_path = os.path.join(sys._MEIPASS, 'histogram.png') 
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -262,6 +264,7 @@ else:
     slot8_path  = 'slot8.png'
     slot9_path  = 'slot9.png'
     pixelmath_path = 'pixelmath.png'
+    histogram_path = 'histogram.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -363,6 +366,12 @@ class AstroEditingSuite(QMainWindow):
         # Functions Menu
         # --------------------
         functions_menu = menubar.addMenu("Functions")
+
+        # Add Histogram Action
+        histogram_action = QAction(QIcon(histogram_path), "Histogram", self)
+        histogram_action.setStatusTip("Show histogram of Slot 0")
+        histogram_action.triggered.connect(self.open_histogram)
+        functions_menu.addAction(histogram_action)
 
         gradient_removal_icon = QIcon(abeicon_path)  # Replace with the actual path variable
         gradient_removal_action = QAction(gradient_removal_icon, "Remove Gradient with SetiAstro ABE", self)
@@ -705,6 +714,8 @@ class AstroEditingSuite(QMainWindow):
         copy_slot_action.triggered.connect(self.copy_slot_to_target)
         toolbar.addAction(copy_slot_action)
 
+        toolbar.addAction(histogram_action)
+
         crop_icon = QIcon(cropicon_path)
         crop_action.setIcon(crop_icon)
         toolbar.addAction(crop_action)
@@ -883,6 +894,37 @@ class AstroEditingSuite(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
+
+    def open_histogram(self):
+        # Check if a histogram dialog is already open; if so, bring it to front.
+        if hasattr(self, 'hist_dialog') and self.hist_dialog is not None and self.hist_dialog.isVisible():
+            self.hist_dialog.raise_()
+            self.hist_dialog.activateWindow()
+            return
+
+        # Get the image from slot0 (or change slot as desired).
+        img = self.image_manager._images.get(0, None)
+        if img is None:
+            QMessageBox.warning(self, "No Image", "Slot 0 does not contain an image.")
+            return
+        # If grayscale, replicate to 3 channels.
+        if img.ndim == 2:
+            img = np.stack([img]*3, axis=-1)
+        # Create the histogram dialog.
+        self.hist_dialog = HistogramDialog(img, self)
+        
+        # Define a helper function to update the histogram when slot0 changes.
+        def update_hist(slot, image, metadata):
+            if slot == 0:
+                if image is None:
+                    return
+                if image.ndim == 2:
+                    image = np.stack([image]*3, axis=-1)
+                self.hist_dialog.updateHistogram(image)
+        # Connect the image_changed signal.
+        self.image_manager.image_changed.connect(update_hist)
+        
+        self.hist_dialog.show()
 
     def rename_slot(self):
         """
@@ -1538,12 +1580,13 @@ class AstroEditingSuite(QMainWindow):
             response.raise_for_status()
             update_data = response.json()
 
-            # Parse the current version and latest version
-            current_version = VERSION  # Replace with your app's current version
-            latest_version = update_data.get("version", "")
+            # Convert version strings to tuples for proper comparison.
+            current_version_tuple = tuple(map(int, VERSION.split(".")))
+            latest_version_str = update_data.get("version", "")
+            latest_version_tuple = tuple(map(int, latest_version_str.split(".")))
 
             # Compare versions
-            if latest_version > current_version:
+            if latest_version_tuple > current_version_tuple:
                 notes = update_data.get("notes", "No details provided.")
                 downloads = update_data.get("downloads", {})
 
@@ -1551,12 +1594,12 @@ class AstroEditingSuite(QMainWindow):
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Information)
                 msg_box.setWindowTitle("Update Available")
-                msg_box.setText(f"A new version ({latest_version}) is available!")
+                msg_box.setText(f"A new version ({latest_version_str}) is available!")
                 msg_box.setInformativeText(f"Release Notes:\n{notes}")
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
 
-                # Add download links to the message box
+                # Add download links to the detailed text
                 msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
@@ -1577,34 +1620,31 @@ class AstroEditingSuite(QMainWindow):
         except requests.RequestException as e:
             QMessageBox.critical(self, "Error", f"Failed to check for updates:\n{e}")
 
+
     def check_for_updatesstartup(self):
         try:
             # URL to the JSON file on GitHub
             update_url = "https://raw.githubusercontent.com/setiastro/setiastrosuite/main/updates.json"
-    
+
             # Fetch the JSON data with a timeout to prevent hanging
             response = requests.get(update_url, timeout=5)
             response.raise_for_status()  # Raise an exception for HTTP errors
             update_data = response.json()
-    
-            # Parse the current version and latest version
-            current_version_str = VERSION  # Your app's current version as a string
+
+            # Convert version strings to tuples for accurate comparison.
+            current_version_tuple = tuple(map(int, VERSION.split(".")))
             latest_version_str = update_data.get("version", "")
-    
             if not latest_version_str:
-                # If 'version' key is missing or empty in the JSON
                 print("Update check: 'version' key not found in update data.")
                 return  # Exit silently
-    
-            # Convert version strings to tuples for accurate comparison
-            current_version = self.version_str_to_tuple(current_version_str)
-            latest_version = self.version_str_to_tuple(latest_version_str)
-    
+
+            latest_version_tuple = tuple(map(int, latest_version_str.split(".")))
+
             # Compare versions
-            if latest_version > current_version:
+            if latest_version_tuple > current_version_tuple:
                 notes = update_data.get("notes", "No details provided.")
                 downloads = update_data.get("downloads", {})
-    
+
                 # Show a dialog to notify the user about the new version
                 msg_box = QMessageBox(self)
                 msg_box.setIcon(QMessageBox.Icon.Information)
@@ -1613,11 +1653,11 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setInformativeText(f"Release Notes:\n{notes}")
                 msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
-    
-                # Add download links to the message box's detailed text
+
+                # Add download links to the detailed text
                 detailed_text = "\n".join([f"{k}: {v}" for k, v in downloads.items()])
                 msg_box.setDetailedText(detailed_text)
-    
+
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
                     import webbrowser
                     # Open the appropriate link based on the user's OS
@@ -1631,22 +1671,22 @@ class AstroEditingSuite(QMainWindow):
                     else:
                         QMessageBox.warning(self, "Error", "Unsupported platform.")
                         download_link = ""
-    
+
                     if download_link:
                         webbrowser.open(download_link)
                     else:
                         QMessageBox.warning(self, "Error", "Download link not available.")
-    
+                else:
+                    # If the user declines the update, you might want to log it or simply do nothing.
+                    pass
             else:
-                # No update available; do nothing
+                # No update available; you might opt to notify the user at startup,
+                # but typically it's best to remain silent.
                 pass
-    
+
         except requests.RequestException as e:
-            # Handle network-related errors gracefully
-            # Instead of a critical error, show a warning or log the error
-            print(f"Update check failed: {e}")  # Log the error to console for debugging
-    
-            # Option 1: Show a non-intrusive warning message
+            # Log the error and optionally show a non-intrusive warning.
+            print(f"Update check failed: {e}")
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Icon.Warning)
             msg_box.setWindowTitle("Update Check Failed")
@@ -1654,11 +1694,7 @@ class AstroEditingSuite(QMainWindow):
             msg_box.setInformativeText("Please check your internet connection and try again later.")
             msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
             msg_box.exec()
-    
-            # Option 2: If you prefer not to notify the user, simply log the error
-            # Uncomment the lines below to use this approach
-            # pass  # Do nothing; silently ignore the failure
-    
+        
     def version_str_to_tuple(self, version_str):
         """
         Convert a version string into a tuple of integers for comparison.
@@ -5376,6 +5412,191 @@ class MaskDisplayWindow(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to update mask: {e}")
             print(f"MaskDisplayWindow: Error updating mask - {e}")
+
+class HistogramDialog(QDialog):
+    def __init__(self, image, parent=None):
+        """
+        Initialize the histogram dialog.
+
+        Args:
+            image (np.ndarray): The image array (either grayscale or RGB).
+                                  Pixel values are expected to be in [0, 1].
+            parent: Parent widget.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Histogram")
+        self.image = image  # The image from which to compute the histogram.
+        self.zoom_factor = 1.0  # 1.0 means 100%
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QVBoxLayout(self)
+        
+        # Create a top-level horizontal layout to hold the histogram and the statistics table.
+        top_layout = QHBoxLayout()
+
+        # Create a scroll area for the histogram display.
+        self.scroll_area = QScrollArea(self)
+        # Set a fixed size for the scroll area so the dialog doesn't expand.
+        self.scroll_area.setFixedSize(520, 310)
+        self.scroll_area.setWidgetResizable(False)
+        
+        # Create the histogram label that will be placed inside the scroll area.
+        self.hist_label = QLabel(self)
+        self.hist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setWidget(self.hist_label)
+        top_layout.addWidget(self.scroll_area)
+
+        # Create the statistics table.
+        self.stats_table = QTableWidget(self)
+        # We will update the number of columns in updateStatistics() based on image channels.
+        self.stats_table.setRowCount(4)  # Min, Max, Median, StdDev
+        self.stats_table.setColumnCount(1)  # Default to 1 column for mono; update later if RGB.
+        # Set row headers.
+        self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
+        # Fix the width of the table.
+        self.stats_table.setFixedWidth(360)
+        top_layout.addWidget(self.stats_table)
+        
+        # Add the top_layout to the main layout.
+        main_layout.addLayout(top_layout)
+        
+        # Add a zoom slider.
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.zoom_slider.setRange(50, 1000)  # 50% to 200%
+        self.zoom_slider.setValue(100)       # Default 100%
+        self.zoom_slider.setTickInterval(10)
+        self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.zoom_slider.valueChanged.connect(self.updateZoom)
+        main_layout.addWidget(self.zoom_slider)
+        
+        # Add a Close button.
+        close_btn = QPushButton("Close", self)
+        close_btn.clicked.connect(self.accept)
+        main_layout.addWidget(close_btn)
+        
+        self.setLayout(main_layout)
+        self.drawHistogram()
+
+    def updateHistogram(self, new_image):
+        """
+        Update the histogram with a new image.
+        """
+        self.image = new_image
+        self.drawHistogram()
+
+    def updateZoom(self, value):
+        self.zoom_factor = value / 100.0
+        self.drawHistogram()
+
+    def drawHistogram(self):
+        """
+        Computes and draws the histogram and updates the statistics table.
+        """
+        # Set the base dimensions.
+        base_width = 512
+        height = 300
+        width = int(base_width * self.zoom_factor)
+        
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.white)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        bin_count = 512
+        bin_width = width / bin_count
+        
+        # Draw the histogram:
+        if self.image.ndim == 3 and self.image.shape[2] == 3:
+            # RGB: Draw each channel separately.
+            channel_colors = [
+                QColor(255, 0, 0, 120),   # Red
+                QColor(0, 255, 0, 120),   # Green
+                QColor(0, 0, 255, 120)    # Blue
+            ]
+            for ch in range(3):
+                hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_count, range=(0, 1))
+                if hist.max() > 0:
+                    hist = hist.astype(np.float32) / hist.max()
+                else:
+                    hist = hist.astype(np.float32)
+                painter.setPen(QPen(channel_colors[ch]))
+                for i in range(bin_count):
+                    bar_height = hist[i] * height
+                    painter.drawRect(int(i * bin_width), int(height - bar_height), int(bin_width), int(bar_height))
+        else:
+            # Mono: if 3D with one channel, squeeze it.
+            if self.image.ndim == 3 and self.image.shape[2] == 1:
+                gray = self.image.squeeze()
+            else:
+                gray = self.image
+            hist, _ = np.histogram(gray.ravel(), bins=bin_count, range=(0, 1))
+            if hist.max() > 0:
+                hist = hist.astype(np.float32) / hist.max()
+            else:
+                hist = hist.astype(np.float32)
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            for i in range(bin_count):
+                bar_height = hist[i] * height
+                painter.drawRect(int(i * bin_width), int(height - bar_height), int(bin_width), int(bar_height))
+        
+        # Draw x-axis line at the bottom.
+        painter.setPen(QPen(QColor(0, 0, 0), 2))
+        painter.drawLine(0, height - 1, width, height - 1)
+        
+        # Draw tick marks and labels.
+        painter.setFont(QFont("Arial", 10))
+        tick_values = np.linspace(0, 1, 11)  # 0, 0.2, ... 1.0
+        for tick in tick_values:
+            x = int(tick * width)
+            painter.drawLine(x, height - 1, x, height - 6)
+            painter.drawText(x - 10, height - 10, f"{tick:.1f}")
+        
+        painter.end()
+        self.hist_label.setPixmap(pixmap)
+        self.hist_label.resize(pixmap.size())
+        
+        # Update the statistics table.
+        self.updateStatistics()
+
+    def updateStatistics(self):
+        """
+        Computes statistics for the current image and updates the table.
+        For an RGB image, computes per-channel min, max, median, and standard deviation.
+        For a mono image, computes statistics for the first channel.
+        """
+        # Determine if the image is color or mono.
+        if self.image.ndim == 3 and self.image.shape[2] == 3:
+            # Color image: 3 columns.
+            self.stats_table.setColumnCount(3)
+            self.stats_table.setHorizontalHeaderLabels(["R", "G", "B"])
+            channels = [self.image[..., i] for i in range(3)]
+        else:
+            # Mono: 1 column.
+            self.stats_table.setColumnCount(1)
+            self.stats_table.setHorizontalHeaderLabels(["Gray"])
+            # If the image is 3D with 1 channel, squeeze it.
+            if self.image.ndim == 3 and self.image.shape[2] == 1:
+                channels = [self.image.squeeze()]
+            else:
+                channels = [self.image]
+        
+        # Compute statistics for each channel.
+        stats = {"Min": [], "Max": [], "Median": [], "StdDev": []}
+        for ch in channels:
+            stats["Min"].append(np.min(ch))
+            stats["Max"].append(np.max(ch))
+            stats["Median"].append(np.median(ch))
+            stats["StdDev"].append(np.std(ch))
+        
+        # Update the table cells.
+        row_labels = ["Min", "Max", "Median", "StdDev"]
+        for row, label in enumerate(row_labels):
+            for col in range(self.stats_table.columnCount()):
+                val = stats[label][col]
+                item = QTableWidgetItem(f"{val:.3f}")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.stats_table.setItem(row, col, item)
 
 class HDRWorker(QObject):
     """
@@ -10513,7 +10734,8 @@ class PixelMathDialog(QDialog):
             "  slot0 - mean(slot0)\n"
             "  min(slot0) + max(slot0)\n"
             "  log(slot0)\n"
-            "  iff(slot0 < med(slot0), 0, 1)\n\n"
+            "  iff(slot0 < med(slot0), 0, 1)\n"
+            "  mtf(slot0, 0.25)   <-- midtones transform\n\n"
             "You may also use your renamed slot names (e.g., stars_image, starless_image).\n"
             "Note: The '~' operator means image inversion (i.e., 1 - image),\n"
             "      '^' is overloaded for exponentiation, and 'iff' is a conditional function."
@@ -10546,23 +10768,24 @@ class PixelMathDialog(QDialog):
             "  +, -, *, /: Standard arithmetic operations\n"
             "  ^: Exponentiation (overloaded; e.g., slot0 ^ 2 means slot0**2)\n"
             "  ~: Image inversion (i.e., 1 - image)\n"
-            "  <, ==: Elementwise comparisons (you can use these to form conditions)\n\n"
+            "  <, ==: Elementwise comparisons (for example, slot0 < med(slot0))\n\n"
             "Allowed Functions:\n"
-            "  med(x): Returns a constant image (per channel) where each pixel is the median of x\n"
+            "  med(x): Returns a constant image (per channel) where each pixel is set to the median of x\n"
             "  mean(x): Returns a constant image (per channel) with the mean of x\n"
             "  min(x): Returns a constant image (per channel) with the minimum of x\n"
             "  max(x): Returns a constant image (per channel) with the maximum of x\n"
             "  std(x): Returns a constant image (per channel) with the standard deviation of x\n"
             "  mad(x): Returns a constant image (per channel) with the median absolute deviation of x\n"
             "  log(x): Returns the natural logarithm of x\n"
-            "  iff(condition, a, b): Returns 'a' where condition is True, else 'b'\n\n"
+            "  iff(condition, a, b): If condition is True (elementwise), returns a; otherwise, returns b\n"
+            "  mtf(x, m): Midtones transform.  Applies the transformation:\n"
+            "            ((m-1)*x)/(((2*m-1)*x)-m)\n\n"
             "Variables:\n"
             "  img: the current image (converted to RGB if needed)\n"
             "  slot0, slot1, ...: image slots (also available by custom names if renamed)\n\n"
             "Notes:\n"
-            "  - All images are wrapped in a PixelImage, which supports elementwise arithmetic\n"
-            "  - If a grayscale image is encountered, it is automatically replicated to 3 channels\n"
-            "  - Use double equals (==) for equality comparisons\n"
+            "  - Grayscale images are automatically replicated to 3 channels.\n"
+            "  - Use double equals (==) for equality comparisons.\n"
         )
         QMessageBox.information(self, "Pixel Math Help", help_text)
 
@@ -10735,6 +10958,29 @@ class PixelMathDialog(QDialog):
         else:
             return result
 
+    def mtf(self, x, m):
+        """
+        Midtones Transform function:
+        
+            M(x; m) = ((m-1)*x) / (((2*m-1)*x) - m)
+        
+        where x is the image (or pixel value) and m is the midtones parameter.
+        This function applies the transformation elementwise.
+        """
+        if isinstance(x, PixelImage):
+            arr = x.array
+        else:
+            arr = x
+        # Use np.errstate to ignore warnings from division.
+        with np.errstate(divide='ignore', invalid='ignore'):
+            new_arr = ((m - 1) * arr) / (((2 * m - 1) * arr) - m)
+            # Replace NaNs or Infs with appropriate fallback values
+            new_arr = np.nan_to_num(new_arr, nan=0.0, posinf=1.0, neginf=0.0)
+        if isinstance(x, PixelImage):
+            return PixelImage(new_arr)
+        else:
+            return new_arr
+
     def apply_pixel_math(self):
         """Evaluates the user-entered expression and updates the current image slot."""
         expr = self.expression_edit.toPlainText().strip()
@@ -10743,7 +10989,6 @@ class PixelMathDialog(QDialog):
             return
         
         try:
-            # Build a safe namespace.
             safe_namespace = {
                 "np": np,
                 "med": self.med,
@@ -10754,6 +10999,7 @@ class PixelMathDialog(QDialog):
                 "mad": self.mad,
                 "log": self.log,
                 "iff": self.iff,
+                "mtf": self.mtf,
             }
             
             # Insert the current image as 'img'
