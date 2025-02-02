@@ -27,6 +27,7 @@ a = Analysis(
         ('slot8.png', '.'),
         ('slot9.png', '.'),    
         ('pixelmath.png', '.'),
+        ('histogram.png', '.'),   
         ('invert.png', '.'),
         ('fliphorizontal.png', '.'),
         ('flipvertical.png', '.'),
