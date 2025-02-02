@@ -11121,7 +11121,7 @@ class PixelMathDialog(QDialog):
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply pixel math expression:\n{e}")
-            
+
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
