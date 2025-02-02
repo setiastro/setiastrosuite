@@ -9077,13 +9077,20 @@ class AddStarsDialog(QDialog):
     def populate_slot_combo(self, combo_box):
         """
         Populates a QComboBox with available image slots from the ImageManager.
+        Uses the custom slot names if they have been renamed.
         """
         combo_box.clear()
         combo_box.addItem("Select Slot")
+        parent = self.parent()  # Assume the parent has the custom slot names
         for slot in range(self.image_manager.max_slots):
             image = self.image_manager._images.get(slot, None)
             if image is not None:
-                combo_box.addItem(f"Slot {slot}")
+                if parent is not None and hasattr(parent, "slot_names"):
+                    # Use the renamed slot if it exists; otherwise, default to "Slot {slot}"
+                    name = parent.slot_names.get(slot, f"Slot {slot}")
+                else:
+                    name = f"Slot {slot}"
+                combo_box.addItem(name)
         combo_box.addItem("Load from File")  # Option to load from file
 
     def load_image_from_file(self, source):
