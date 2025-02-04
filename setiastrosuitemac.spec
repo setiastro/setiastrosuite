@@ -1,11 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+directory = '/Users/jackson/Documents/GitHub/setiastrosuite/'
+
 a = Analysis(
     ['setiastrosuitemacQT6.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
+        (directory + '.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
         ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
@@ -54,8 +56,8 @@ a = Analysis(
         ('font.png', '.'), 
         ('spinner.gif', '.'), 
         ('cvs.png', '.'), 
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
+        (directory + '.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
+        (directory + '.venvenv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
     ],
     hiddenimports=[],
     hookspath=[],
