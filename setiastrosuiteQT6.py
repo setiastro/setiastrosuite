@@ -174,7 +174,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.1"
+VERSION = "2.10.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -5427,6 +5427,7 @@ class HistogramDialog(QDialog):
         self.setWindowTitle("Histogram")
         self.image = image  # The image from which to compute the histogram.
         self.zoom_factor = 1.0  # 1.0 means 100%
+        self.log_scale = False  # Default: linear x-axis
         self.initUI()
 
     def initUI(self):
@@ -5461,15 +5462,27 @@ class HistogramDialog(QDialog):
         # Add the top_layout to the main layout.
         main_layout.addLayout(top_layout)
         
-        # Add a zoom slider.
+        # Controls layout: zoom slider and log toggle button.
+        controls_layout = QHBoxLayout()
+        
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
-        self.zoom_slider.setRange(50, 1000)  # 50% to 200%
+        self.zoom_slider.setRange(50, 1000)  # 50% to 1000%
         self.zoom_slider.setValue(100)       # Default 100%
         self.zoom_slider.setTickInterval(10)
         self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.zoom_slider.valueChanged.connect(self.updateZoom)
-        main_layout.addWidget(self.zoom_slider)
+        controls_layout.addWidget(QLabel("Zoom:"))
+        controls_layout.addWidget(self.zoom_slider)
         
+        # Toggle button for log x-axis.
+        self.log_toggle_button = QPushButton("Toggle Log X-Axis", self)
+        self.log_toggle_button.setCheckable(True)
+        self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
+        self.log_toggle_button.toggled.connect(self.toggleLogScale)
+        controls_layout.addWidget(self.log_toggle_button)
+        
+        main_layout.addLayout(controls_layout)
+
         # Add a Close button.
         close_btn = QPushButton("Close", self)
         close_btn.clicked.connect(self.accept)
@@ -5489,68 +5502,101 @@ class HistogramDialog(QDialog):
         self.zoom_factor = value / 100.0
         self.drawHistogram()
 
+    def toggleLogScale(self, checked):
+        self.log_scale = checked
+        self.drawHistogram()
+
     def drawHistogram(self):
         """
-        Computes and draws the histogram and updates the statistics table.
+        Computes and draws the histogram.
+        In linear mode, it uses equally spaced bins.
+        In log mode, it uses logarithmically spaced bins (with a small epsilon to avoid log(0)).
+        Also draws an x-axis with tick marks and labels.
         """
-        # Set the base dimensions.
+        # Base dimensions.
         base_width = 512
         height = 300
         width = int(base_width * self.zoom_factor)
         
+        # Create a pixmap with the computed dimensions.
         pixmap = QPixmap(width, height)
         pixmap.fill(Qt.GlobalColor.white)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         bin_count = 512
-        bin_width = width / bin_count
         
-        # Draw the histogram:
+        # Choose bin edges based on the log_scale toggle.
+        if self.log_scale:
+            eps = 1e-4  # Cannot start at 0 for log scale.
+            bin_edges = np.logspace(np.log10(eps), 0, bin_count + 1)
+            log_min = np.log10(eps)
+            log_max = 0  # log10(1)=0
+            def x_pos(edge):
+                return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
+        else:
+            bin_edges = np.linspace(0, 1, bin_count + 1)
+            def x_pos(edge):
+                return int(edge * width)
+        
+        # Draw histogram bars.
         if self.image.ndim == 3 and self.image.shape[2] == 3:
-            # RGB: Draw each channel separately.
+            # For RGB images, draw each channel histogram.
             channel_colors = [
-                QColor(255, 0, 0, 120),   # Red
-                QColor(0, 255, 0, 120),   # Green
-                QColor(0, 0, 255, 120)    # Blue
+                QColor(255, 0, 0, 120),
+                QColor(0, 255, 0, 120),
+                QColor(0, 0, 255, 120)
             ]
             for ch in range(3):
-                hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_count, range=(0, 1))
+                hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_edges)
                 if hist.max() > 0:
                     hist = hist.astype(np.float32) / hist.max()
                 else:
                     hist = hist.astype(np.float32)
                 painter.setPen(QPen(channel_colors[ch]))
                 for i in range(bin_count):
+                    x0 = x_pos(bin_edges[i])
+                    x1 = x_pos(bin_edges[i+1])
+                    bar_width = x1 - x0
                     bar_height = hist[i] * height
-                    painter.drawRect(int(i * bin_width), int(height - bar_height), int(bin_width), int(bar_height))
+                    painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
         else:
-            # Mono: if 3D with one channel, squeeze it.
+            # Mono: if image is 3D with one channel, squeeze.
             if self.image.ndim == 3 and self.image.shape[2] == 1:
                 gray = self.image.squeeze()
             else:
                 gray = self.image
-            hist, _ = np.histogram(gray.ravel(), bins=bin_count, range=(0, 1))
+            hist, _ = np.histogram(gray.ravel(), bins=bin_edges)
             if hist.max() > 0:
                 hist = hist.astype(np.float32) / hist.max()
             else:
                 hist = hist.astype(np.float32)
             painter.setPen(QPen(QColor(0, 0, 0)))
             for i in range(bin_count):
+                x0 = x_pos(bin_edges[i])
+                x1 = x_pos(bin_edges[i+1])
+                bar_width = x1 - x0
                 bar_height = hist[i] * height
-                painter.drawRect(int(i * bin_width), int(height - bar_height), int(bin_width), int(bar_height))
+                painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
         
-        # Draw x-axis line at the bottom.
+        # Draw x-axis.
         painter.setPen(QPen(QColor(0, 0, 0), 2))
         painter.drawLine(0, height - 1, width, height - 1)
         
         # Draw tick marks and labels.
         painter.setFont(QFont("Arial", 10))
-        tick_values = np.linspace(0, 1, 11)  # 0, 0.2, ... 1.0
-        for tick in tick_values:
-            x = int(tick * width)
-            painter.drawLine(x, height - 1, x, height - 6)
-            painter.drawText(x - 10, height - 10, f"{tick:.1f}")
+        if self.log_scale:
+            tick_values = np.logspace(np.log10(eps), 0, 11)
+            for tick in tick_values:
+                x = x_pos(tick)
+                painter.drawLine(x, height - 1, x, height - 6)
+                painter.drawText(x - 10, height - 10, f"{tick:.3f}")
+        else:
+            tick_values = np.linspace(0, 1, 11)
+            for tick in tick_values:
+                x = x_pos(tick)
+                painter.drawLine(x, height - 1, x, height - 6)
+                painter.drawText(x - 10, height - 10, f"{tick:.1f}")
         
         painter.end()
         self.hist_label.setPixmap(pixmap)
@@ -10658,6 +10704,20 @@ class PixelImage:
     def __init__(self, array):
         self.array = array
 
+    def __getitem__(self, channel_index):
+        """
+        Return a new PixelImage containing only the requested channel (2D array).
+        For example, slot0[0] -> red channel, slot0[1] -> green, slot0[2] -> blue.
+        """
+        # Make sure the requested channel is valid for this image's shape.
+        if self.array.ndim < 3:
+            raise ValueError("This image has no channel dimension to index.")
+        if not (0 <= channel_index < self.array.shape[2]):
+            raise IndexError(f"Channel index {channel_index} is out of range for shape {self.array.shape}")
+        
+        single_channel = self.array[..., channel_index]  # shape (height, width)
+        return PixelImage(single_channel)
+
     def __add__(self, other):
         if isinstance(other, PixelImage):
             return PixelImage(self.array + other.array)
@@ -10727,11 +10787,20 @@ class PixelMathDialog(QDialog):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("Pixel Math")
+        
+        # Attempt to retrieve QSettings from the parent
+        if parent is not None and hasattr(parent, "settings"):
+            self.settings = parent.settings
+        else:
+            self.settings = None
+
+        self.favorites = []
         self.initUI()
+        self.load_favorites()
 
     def initUI(self):
-        layout = QVBoxLayout()
-        
+        main_layout = QVBoxLayout(self)
+
         instruction = QLabel(
             "Enter a pixel math expression using image slot variables.\n"
             "Examples:\n"
@@ -10745,108 +10814,371 @@ class PixelMathDialog(QDialog):
             "  mtf(slot0, 0.25)   <-- midtones transform\n\n"
             "You may also use your renamed slot names (e.g., stars_image, starless_image).\n"
             "Note: The '~' operator means image inversion (i.e., 1 - image),\n"
-            "      '^' is overloaded for exponentiation, and 'iff' is a conditional function."
+            "      '^' is overloaded for exponentiation, and 'iff' is a conditional function.\n"
+            "      For Separate Expressions use channel indexes ie slot0[0] + slot0[1] etc.\n"
         )
-        layout.addWidget(instruction)
+        main_layout.addWidget(instruction)
+
+        # --- Radio Buttons for Single vs. Separate ---
+        mode_layout = QHBoxLayout()
+        self.single_expr_radio = QRadioButton("Single Expression")
+        self.separate_expr_radio = QRadioButton("Separate Expressions (R, G, B)")
+        self.single_expr_radio.setChecked(True)
         
-        self.expression_edit = QPlainTextEdit()
-        self.expression_edit.setPlaceholderText("Enter pixel math expression")
-        layout.addWidget(self.expression_edit)
+        self.mode_button_group = QButtonGroup()
+        self.mode_button_group.addButton(self.single_expr_radio)
+        self.mode_button_group.addButton(self.separate_expr_radio)
+        self.mode_button_group.buttonClicked.connect(self.on_mode_changed)
         
-        # Create a button box with OK, Cancel, and Help buttons.
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | 
-            QDialogButtonBox.StandardButton.Cancel
-        )
+        mode_layout.addWidget(self.single_expr_radio)
+        mode_layout.addWidget(self.separate_expr_radio)
+        main_layout.addLayout(mode_layout)
+
+        # --- Single Expression Field ---
+        self.single_expression_edit = QPlainTextEdit()
+        self.single_expression_edit.setPlaceholderText("Enter single pixel math expression")
+        self.single_expression_edit.setStyleSheet("""
+                QPlainTextEdit {
+                    background-color: white;
+                    color: black;
+                    font-size: 12px;
+                    font-family: 'Courier New', Courier, monospace;
+                    padding: 5px;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                }
+                QPlainTextEdit::line {
+                    background-color: #f0faff;
+                }
+                QPlainTextEdit::line:nth-child(odd) {
+                    background-color: #e6f7ff;
+                }
+                QPlainTextEdit::line:nth-child(even) {
+                    background-color: #f0faff;
+                }
+            """)
+
+        main_layout.addWidget(self.single_expression_edit)
+
+        # --- Separate (Per-Channel) Expressions (Tab Widget) ---
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setVisible(False)  # hidden by default
+        # Create a tab for R, G, B
+        self.red_edit = QPlainTextEdit()
+        self.red_edit.setPlaceholderText("Expression for Red channel")
+        self.green_edit = QPlainTextEdit()
+        self.green_edit.setPlaceholderText("Expression for Green channel")
+        self.blue_edit = QPlainTextEdit()
+        self.blue_edit.setPlaceholderText("Expression for Blue channel")
+
+        # Optionally set the same stylesheet on these fields:
+        for editor in (self.red_edit, self.green_edit, self.blue_edit):
+            editor.setStyleSheet("""
+                QPlainTextEdit {
+                    background-color: white;
+                    color: black;
+                    font-size: 12px;
+                    font-family: 'Courier New', Courier, monospace;
+                    padding: 5px;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                }
+                QPlainTextEdit::line {
+                    background-color: #f0faff;
+                }
+                QPlainTextEdit::line:nth-child(odd) {
+                    background-color: #e6f7ff;
+                }
+                QPlainTextEdit::line:nth-child(even) {
+                    background-color: #f0faff;
+                }
+            """)
+
+        # Add them as tabs
+        tab_r = QWidget()
+        tab_r_layout = QVBoxLayout(tab_r)
+        tab_r_layout.addWidget(self.red_edit)
+        self.tab_widget.addTab(tab_r, "Red")
+
+        tab_g = QWidget()
+        tab_g_layout = QVBoxLayout(tab_g)
+        tab_g_layout.addWidget(self.green_edit)
+        self.tab_widget.addTab(tab_g, "Green")
+
+        tab_b = QWidget()
+        tab_b_layout = QVBoxLayout(tab_b)
+        tab_b_layout.addWidget(self.blue_edit)
+        self.tab_widget.addTab(tab_b, "Blue")
+
+        main_layout.addWidget(self.tab_widget)
+
+        # --- Favorites area ---
+        favorites_layout = QHBoxLayout()
+        self.favorites_dropdown = QComboBox()
+        self.favorites_dropdown.addItem("Select a favorite expression")
+        self.favorites_dropdown.currentTextChanged.connect(self.load_favorite)
+        favorites_layout.addWidget(self.favorites_dropdown)
+
+        self.save_favorite_button = QPushButton("Save as Favorite")
+        self.save_favorite_button.clicked.connect(self.save_favorite)
+        favorites_layout.addWidget(self.save_favorite_button)
+
+        # Remove Favorite Button
+        self.remove_favorite_button = QPushButton("Remove Favorite")
+        self.remove_favorite_button.clicked.connect(self.remove_selected_favorite)
+        favorites_layout.addWidget(self.remove_favorite_button)
+
+        # Clear All Favorites Button
+        self.clear_all_favorites_button = QPushButton("Clear All Favorites")
+        self.clear_all_favorites_button.clicked.connect(self.clear_all_favorites)
+        favorites_layout.addWidget(self.clear_all_favorites_button)
+
+        main_layout.addLayout(favorites_layout)
+
+        # --- Buttons (OK, Cancel, Help) ---
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.apply_pixel_math)
         buttons.rejected.connect(self.reject)
-        
-        # Add a Help button with the HelpRole.
         help_button = buttons.addButton("Help", QDialogButtonBox.ButtonRole.HelpRole)
         help_button.clicked.connect(self.show_help)
-        
-        layout.addWidget(buttons)
-        
-        self.setLayout(layout)
+        main_layout.addWidget(buttons)
 
+        self.setLayout(main_layout)
+
+    def on_mode_changed(self, button):
+        """
+        Switch UI between single expression mode and separate (R,G,B) mode.
+        """
+        if button == self.single_expr_radio:
+            # Single expression
+            self.single_expression_edit.setVisible(True)
+            self.tab_widget.setVisible(False)
+        else:
+            # Separate (R,G,B)
+            self.single_expression_edit.setVisible(False)
+            self.tab_widget.setVisible(True)
+
+    # --- Favorite Expressions Persistence ---
+    def load_favorites(self):
+        if self.settings:
+            favorites_list = self.settings.value("pixelmath_favorites", [])
+            if isinstance(favorites_list, str):
+                try:
+                    favorites_list = json.loads(favorites_list)
+                except Exception:
+                    favorites_list = []
+            elif not isinstance(favorites_list, list):
+                favorites_list = list(favorites_list)
+            self.favorites = favorites_list
+        else:
+            self.favorites = []
+        
+        self.favorites_dropdown.clear()
+        self.favorites_dropdown.addItem("Select a favorite expression")
+        for fav in self.favorites:
+            self.favorites_dropdown.addItem(fav)
+
+    def save_favorite(self):
+        """
+        Save the currently visible expression(s) as a favorite.
+        For simplicity, we’ll just store the single or the RGB triple.
+        """
+        if self.single_expr_radio.isChecked():
+            expr = self.single_expression_edit.toPlainText().strip()
+        else:
+            # For separate mode, maybe store the R/G/B together in some notation:
+            r_expr = self.red_edit.toPlainText().strip()
+            g_expr = self.green_edit.toPlainText().strip()
+            b_expr = self.blue_edit.toPlainText().strip()
+            expr = f"[R]{r_expr} | [G]{g_expr} | [B]{b_expr}"
+
+        if expr and expr not in self.favorites:
+            self.favorites.append(expr)
+            if self.settings:
+                self.settings.setValue("pixelmath_favorites", self.favorites)
+            self.favorites_dropdown.addItem(expr)
+            QMessageBox.information(self, "Saved as Favorite", "Expression saved to favorites.")
+        else:
+            QMessageBox.warning(self, "Invalid Expression", "Expression is empty or already in favorites.")
+
+    def remove_selected_favorite(self):
+        """
+        Remove the currently selected favorite from the dropdown and from self.favorites.
+        """
+        current_text = self.favorites_dropdown.currentText()
+        if current_text == "Select a favorite expression":
+            QMessageBox.information(self, "Remove Favorite", "No valid favorite is selected.")
+            return
+
+        # Confirm removal
+        reply = QMessageBox.question(
+            self, 
+            "Remove Favorite", 
+            f"Are you sure you want to remove '{current_text}' from favorites?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if current_text in self.favorites:
+                self.favorites.remove(current_text)
+                if self.settings:
+                    self.settings.setValue("pixelmath_favorites", self.favorites)
+                self.load_favorites()  # reload the dropdown
+                QMessageBox.information(self, "Remove Favorite", "Favorite removed successfully.")
+            else:
+                QMessageBox.warning(self, "Remove Favorite", "Favorite not found in list.")
+
+    def clear_all_favorites(self):
+        """
+        Clear all favorites after a confirmation.
+        """
+        reply = QMessageBox.question(
+            self,
+            "Clear All Favorites",
+            "Are you sure you want to remove ALL favorites?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.favorites.clear()
+            if self.settings:
+                self.settings.setValue("pixelmath_favorites", self.favorites)
+            self.load_favorites()
+            QMessageBox.information(self, "Clear All Favorites", "All favorites have been removed.")
+
+    def load_favorite(self, favorite_expr):
+        """
+        If the user picks a favorite that has the [R] [G] [B] format,
+        parse it into the separate text fields. Otherwise, treat it as a single expression.
+        """
+        if favorite_expr == "Select a favorite expression":
+            return
+
+        # Quick detection to see if it has the [R] or [G] or [B] tokens
+        if "[R]" in favorite_expr or "[G]" in favorite_expr or "[B]" in favorite_expr:
+            # Switch to separate mode
+            self.separate_expr_radio.setChecked(True)
+            self.on_mode_changed(self.separate_expr_radio)
+
+            # Attempt to split them out
+            # Simple approach: [R] ... | [G] ... | [B] ...
+            parts = favorite_expr.split("|")
+            r_expr = ""
+            g_expr = ""
+            b_expr = ""
+            for p in parts:
+                p = p.strip()
+                if p.startswith("[R]"):
+                    r_expr = p[3:].strip()
+                elif p.startswith("[G]"):
+                    g_expr = p[3:].strip()
+                elif p.startswith("[B]"):
+                    b_expr = p[3:].strip()
+
+            self.red_edit.setPlainText(r_expr)
+            self.green_edit.setPlainText(g_expr)
+            self.blue_edit.setPlainText(b_expr)
+        else:
+            # Single expression
+            self.single_expr_radio.setChecked(True)
+            self.on_mode_changed(self.single_expr_radio)
+            self.single_expression_edit.setPlainText(favorite_expr)
+    # --- Pixel Math Evaluation ---
     def show_help(self):
         help_text = (
             "Allowed Operators:\n"
             "  +, -, *, /: Standard arithmetic operations\n"
             "  ^: Exponentiation (overloaded; e.g., slot0 ^ 2 means slot0**2)\n"
             "  ~: Image inversion (i.e., 1 - image)\n"
-            "  <, ==: Elementwise comparisons (for example, slot0 < med(slot0))\n\n"
+            "  <, ==: Elementwise comparisons (slot0 < med(slot0))\n\n"
             "Allowed Functions:\n"
-            "  med(x): Returns a constant image (per channel) where each pixel is set to the median of x\n"
-            "  mean(x): Returns a constant image (per channel) with the mean of x\n"
-            "  min(x): Returns a constant image (per channel) with the minimum of x\n"
-            "  max(x): Returns a constant image (per channel) with the maximum of x\n"
-            "  std(x): Returns a constant image (per channel) with the standard deviation of x\n"
-            "  mad(x): Returns a constant image (per channel) with the median absolute deviation of x\n"
-            "  log(x): Returns the natural logarithm of x\n"
-            "  iff(condition, a, b): If condition is True (elementwise), returns a; otherwise, returns b\n"
-            "  mtf(x, m): Midtones transform.  Applies the transformation:\n"
-            "            ((m-1)*x)/(((2*m-1)*x)-m)\n\n"
+            "  med(x), mean(x), min(x), max(x), std(x), mad(x), log(x)\n"
+            "  iff(condition, a, b): elementwise conditional\n"
+            "  mtf(x, m): Midtones transform\n\n"
             "Variables:\n"
-            "  img: the current image (converted to RGB if needed)\n"
-            "  slot0, slot1, ...: image slots (also available by custom names if renamed)\n\n"
+            "  img: The current image (replicated to RGB if needed)\n"
+            "  slot0, slot1, ...: image slots\n"
+            "  Channels can be accessed via [0],[1],[2]. e.g. slot0[0]\n\n"
             "Notes:\n"
-            "  - Grayscale images are automatically replicated to 3 channels.\n"
-            "  - Use double equals (==) for equality comparisons.\n"
+            "  - Grayscale images automatically get 3 channels.\n"
+            "  - For separate expressions mode, each expression is evaluated for its channel.\n"
         )
         QMessageBox.information(self, "Pixel Math Help", help_text)
 
-
-    # Updated helper functions:
+    # Updated helper functions (med, mean, min, max, std, mad, log, iff, mtf) remain unchanged...
     def med(self, x):
-        """Return a PixelImage where each channel is set to its median value computed per channel."""
+        """
+        Return a PixelImage where each channel (if present) is replaced by its median value.
+        If x is 2D, we replace that entire 2D array with its median.
+        """
         if isinstance(x, PixelImage):
-            med_vals = np.median(x.array, axis=(0,1))  # Per-channel medians
-            new_arr = np.empty_like(x.array)
-            for ch in range(x.array.shape[2]):
-                new_arr[..., ch] = med_vals[ch]
-            return PixelImage(new_arr)
+            arr = x.array
+            if arr.ndim == 2:
+                # Single-channel (2D)
+                median_val = np.median(arr)
+                # Make a new 2D array with every pixel = median_val
+                new_arr = np.full_like(arr, median_val)
+                return PixelImage(new_arr)
+            elif arr.ndim == 3:
+                # 3D: compute per-channel medians
+                med_vals = np.median(arr, axis=(0, 1))  # shape (3,)
+                new_arr = np.empty_like(arr)
+                for ch in range(arr.shape[2]):
+                    new_arr[..., ch] = med_vals[ch]
+                return PixelImage(new_arr)
+            else:
+                # Some unexpected dimensionality
+                raise ValueError(f"med() got array with unsupported ndim={arr.ndim}")
         else:
-            # For a raw numpy array:
-            if x.ndim == 3:
+            # If x is not a PixelImage but a raw np.ndarray, handle that scenario similarly:
+            if x.ndim == 2:
+                median_val = np.median(x)
+                new_arr = np.full_like(x, median_val)
+                return new_arr
+            elif x.ndim == 3:
                 med_vals = np.median(x, axis=(0,1))
                 new_arr = np.empty_like(x)
                 for ch in range(x.shape[2]):
                     new_arr[..., ch] = med_vals[ch]
                 return new_arr
             else:
+                # 1D or something else
                 return np.median(x)
             
     def mean(self, x):
-        """
-        Returns an image (or PixelImage) where every pixel in each channel is replaced
-        by the mean of that channel.
-        """
+        """Replace each channel (or the single channel) by its mean value."""
         if isinstance(x, PixelImage):
             arr = x.array
+            was_pixelimage = True
         else:
             arr = x
+            was_pixelimage = False
+
         if arr.ndim == 2:
+            # Single channel (2D)
             val = np.mean(arr)
             new_arr = np.full(arr.shape, val, dtype=arr.dtype)
         elif arr.ndim == 3:
-            means = np.mean(arr, axis=(0, 1))
+            # 3-channel
+            means = np.mean(arr, axis=(0, 1))  # shape=(3,)
             new_arr = np.empty_like(arr)
             for ch in range(arr.shape[2]):
                 new_arr[..., ch] = means[ch]
         else:
+            # 1D or something else—decide how you want to handle it or just return arr
             new_arr = arr
-        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+        return PixelImage(new_arr) if was_pixelimage else new_arr
 
     def min(self, x):
-        """
-        Returns an image (or PixelImage) where every pixel in each channel is replaced
-        by the minimum of that channel.
-        """
+        """Replace each channel (or the single channel) by its min value."""
         if isinstance(x, PixelImage):
             arr = x.array
+            was_pixelimage = True
         else:
             arr = x
+            was_pixelimage = False
+
         if arr.ndim == 2:
             val = np.min(arr)
             new_arr = np.full(arr.shape, val, dtype=arr.dtype)
@@ -10857,17 +11189,18 @@ class PixelMathDialog(QDialog):
                 new_arr[..., ch] = mins[ch]
         else:
             new_arr = arr
-        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+        return PixelImage(new_arr) if was_pixelimage else new_arr
 
     def max(self, x):
-        """
-        Returns an image (or PixelImage) where every pixel in each channel is replaced
-        by the maximum of that channel.
-        """
+        """Replace each channel (or the single channel) by its max value."""
         if isinstance(x, PixelImage):
             arr = x.array
+            was_pixelimage = True
         else:
             arr = x
+            was_pixelimage = False
+
         if arr.ndim == 2:
             val = np.max(arr)
             new_arr = np.full(arr.shape, val, dtype=arr.dtype)
@@ -10878,17 +11211,18 @@ class PixelMathDialog(QDialog):
                 new_arr[..., ch] = maxs[ch]
         else:
             new_arr = arr
-        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+        return PixelImage(new_arr) if was_pixelimage else new_arr
 
     def std(self, x):
-        """
-        Returns an image (or PixelImage) where every pixel in each channel is replaced
-        by the standard deviation of that channel.
-        """
+        """Replace each channel (or the single channel) by its std value."""
         if isinstance(x, PixelImage):
             arr = x.array
+            was_pixelimage = True
         else:
             arr = x
+            was_pixelimage = False
+
         if arr.ndim == 2:
             val = np.std(arr)
             new_arr = np.full(arr.shape, val, dtype=arr.dtype)
@@ -10899,17 +11233,18 @@ class PixelMathDialog(QDialog):
                 new_arr[..., ch] = stds[ch]
         else:
             new_arr = arr
-        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+        return PixelImage(new_arr) if was_pixelimage else new_arr
 
     def mad(self, x):
-        """
-        Returns an image (or PixelImage) where every pixel in each channel is replaced
-        by the median absolute deviation (MAD) of that channel.
-        """
+        """Replace each channel (or the single channel) by its median absolute deviation."""
         if isinstance(x, PixelImage):
             arr = x.array
+            was_pixelimage = True
         else:
             arr = x
+            was_pixelimage = False
+
         if arr.ndim == 2:
             m = np.median(arr)
             mad_val = np.median(np.abs(arr - m))
@@ -10917,32 +11252,22 @@ class PixelMathDialog(QDialog):
         elif arr.ndim == 3:
             new_arr = np.empty_like(arr)
             for ch in range(arr.shape[2]):
-                m = np.median(arr[..., ch])
-                mad_val = np.median(np.abs(arr[..., ch] - m))
+                channel = arr[..., ch]
+                m = np.median(channel)
+                mad_val = np.median(np.abs(channel - m))
                 new_arr[..., ch] = mad_val
         else:
             new_arr = arr
-        return PixelImage(new_arr) if isinstance(x, PixelImage) else new_arr
+
+        return PixelImage(new_arr) if was_pixelimage else new_arr
 
     def log(self, x):
-        """
-        Returns the natural logarithm of x.
-        If x is a PixelImage, returns a new PixelImage with the logarithm applied.
-        """
         if isinstance(x, PixelImage):
             return PixelImage(np.log(x.array))
         else:
             return np.log(x)
 
     def iff(self, condition, a, b):
-        """
-        Implements an if-then-else (immediate if) function.
-        For a scalar condition, returns a if condition is True, else b.
-        For array inputs, returns np.where(condition, a, b).
-        If any argument is a PixelImage, their underlying arrays are used and the result
-        is wrapped in a PixelImage.
-        """
-        # Unwrap PixelImage inputs.
         if isinstance(condition, PixelImage):
             cond_val = condition.array
         else:
@@ -10959,104 +11284,210 @@ class PixelMathDialog(QDialog):
             b_val = b
 
         result = np.where(cond_val, a_val, b_val)
-        # If any input was a PixelImage, return a PixelImage.
         if isinstance(condition, PixelImage) or isinstance(a, PixelImage) or isinstance(b, PixelImage):
             return PixelImage(result)
         else:
             return result
 
     def mtf(self, x, m):
-        """
-        Midtones Transform function:
-        
-            M(x; m) = ((m-1)*x) / (((2*m-1)*x) - m)
-        
-        where x is the image (or pixel value) and m is the midtones parameter.
-        This function applies the transformation elementwise.
-        """
         if isinstance(x, PixelImage):
             arr = x.array
         else:
             arr = x
-        # Use np.errstate to ignore warnings from division.
         with np.errstate(divide='ignore', invalid='ignore'):
             new_arr = ((m - 1) * arr) / (((2 * m - 1) * arr) - m)
-            # Replace NaNs or Infs with appropriate fallback values
             new_arr = np.nan_to_num(new_arr, nan=0.0, posinf=1.0, neginf=0.0)
         if isinstance(x, PixelImage):
             return PixelImage(new_arr)
         else:
             return new_arr
 
-    def apply_pixel_math(self):
-        """Evaluates the user-entered expression and updates the current image slot."""
-        expr = self.expression_edit.toPlainText().strip()
-        if not expr:
-            QMessageBox.warning(self, "No Expression", "Please enter a valid pixel math expression.")
-            return
-        
-        try:
-            safe_namespace = {
-                "np": np,
-                "med": self.med,
-                "mean": self.mean,
-                "min": self.min,
-                "max": self.max,
-                "std": self.std,
-                "mad": self.mad,
-                "log": self.log,
-                "iff": self.iff,
-                "mtf": self.mtf,
-            }
-            
-            # Insert the current image as 'img'
-            current_img = self.image_manager.image
-            if current_img is None:
-                QMessageBox.warning(self, "No Image", "There is no image loaded to operate on.")
-                return
-            # If current_img is grayscale (2D), replicate it to 3 channels.
-            if current_img.ndim == 2:
-                current_img = np.stack([current_img] * 3, axis=-1)
-            safe_namespace["img"] = PixelImage(current_img)
-            
-            # Insert each image slot as a variable.
-            max_slots = self.image_manager.max_slots
-            parent = self.parent()
-            for i in range(max_slots):
-                img = self.image_manager._images.get(i, None)
-                if img is not None:
-                    # If the image is grayscale, replicate to 3 channels.
-                    if img.ndim == 2:
-                        img = np.stack([img] * 3, axis=-1)
-                    pix_img = PixelImage(img)
-                    safe_namespace[f"slot{i}"] = pix_img
-                    if parent is not None and hasattr(parent, "slot_names"):
-                        custom_name = parent.slot_names.get(i, None)
-                        if custom_name:
-                            safe_namespace[custom_name] = pix_img
-            
-            # Evaluate the expression in a restricted namespace.
-            result = eval(expr, {"__builtins__": None}, safe_namespace)
-            
-            # If result is a PixelImage, extract its array.
-            if isinstance(result, PixelImage):
-                new_img = result.array
-            else:
-                new_img = result
+    def evaluate_multiline_expression(self, expr, safe_namespace):
+        """
+        Allows multiple lines in the user expression.
+        - All but the last line are executed with `exec`, so they can contain assignments.
+        - The last line is evaluated with `eval` to produce the final result.
+        """
 
-            # If result is a scalar, convert it to a constant image with the same shape as the current image.
-            if np.isscalar(new_img):
-                new_img = np.full(current_img.shape, new_img, dtype=current_img.dtype)
+        # Split into lines and strip out empty ones
+        lines = [line.strip() for line in expr.split('\n') if line.strip()]
+        if not lines:
+            raise ValueError("No expression provided.")
+
+        # Exec each line except the last
+        for line in lines[:-1]:
+            exec(line, {"__builtins__": None}, safe_namespace)
+
+        # Evaluate the last line, which must be an expression returning a result
+        final_line = lines[-1]
+        result = eval(final_line, {"__builtins__": None}, safe_namespace)
+        return result
+
+    def apply_pixel_math(self):
+        """
+        Evaluates the user-entered expression(s) and updates the current image slot.
+        If single_expr_radio is checked, we do the usual single-expression approach.
+        If separate_expr_radio is checked, we evaluate three expressions (R, G, B).
+        """
+        if self.single_expr_radio.isChecked():
+            # Single expression mode
+            expr = self.single_expression_edit.toPlainText().strip()
+            if not expr:
+                QMessageBox.warning(self, "No Expression", "Please enter a valid pixel math expression.")
+                return
             
-            # Update the current image slot.
-            current_slot = self.image_manager.current_slot
-            metadata = self.image_manager._metadata.get(current_slot, {}).copy()
-            metadata['pixel_math'] = expr
-            self.image_manager.set_image(new_img, metadata)
-            QMessageBox.information(self, "Pixel Math", "Pixel math operation applied successfully.")
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to apply pixel math expression:\n{e}")
+            try:
+                # Evaluate single expression
+                result = self.evaluate_expression(expr)
+
+                # Convert PixelImage -> array if needed
+                if isinstance(result, PixelImage):
+                    new_img = result.array
+                else:
+                    new_img = result
+
+                # If it's a scalar, fill the current image shape
+                current_img = self.image_manager.image
+                if current_img.ndim == 2:
+                    current_img = np.stack([current_img]*3, axis=-1)
+                if np.isscalar(new_img):
+                    new_img = np.full(current_img.shape, new_img, dtype=current_img.dtype)
+
+                # Update the image
+                current_slot = self.image_manager.current_slot
+                metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+                metadata['pixel_math'] = expr
+                self.image_manager.set_image(new_img, metadata)
+                QMessageBox.information(self, "Pixel Math", "Pixel math operation applied successfully.")
+                self.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to apply pixel math expression:\n{e}")
+
+        else:
+            # Separate expressions mode
+            expr_r = self.red_edit.toPlainText().strip()
+            expr_g = self.green_edit.toPlainText().strip()
+            expr_b = self.blue_edit.toPlainText().strip()
+
+            if not expr_r and not expr_g and not expr_b:
+                QMessageBox.warning(self, "No Expression", 
+                                    "Please enter a valid expression for at least one channel.")
+                return
+
+            try:
+                # Evaluate each channel expression or treat as 0 if blank
+                r_result = self.evaluate_expression(expr_r) if expr_r else 0
+                g_result = self.evaluate_expression(expr_g) if expr_g else 0
+                b_result = self.evaluate_expression(expr_b) if expr_b else 0
+
+                # Convert PixelImages to arrays
+                if isinstance(r_result, PixelImage):
+                    r_result = r_result.array
+                if isinstance(g_result, PixelImage):
+                    g_result = g_result.array
+                if isinstance(b_result, PixelImage):
+                    b_result = b_result.array
+
+                # Validate shapes: must be scalar or 2D
+                def ensure_2d_or_scalar(arr, channel_name):
+                    if np.isscalar(arr):
+                        return
+                    if arr.ndim == 3:
+                        raise ValueError(
+                            f"Expression for {channel_name} returned a 3D array. "
+                            "In separate expressions mode, please specify a single channel, e.g. slot0[0]."
+                        )
+
+                ensure_2d_or_scalar(r_result, "Red")
+                ensure_2d_or_scalar(g_result, "Green")
+                ensure_2d_or_scalar(b_result, "Blue")
+
+                # Now get shape of current image for stacking
+                current_img = self.image_manager.image
+                if current_img is None:
+                    QMessageBox.warning(self, "No Image", "There is no image loaded to operate on.")
+                    return
+                if current_img.ndim == 2:
+                    current_img = np.stack([current_img]*3, axis=-1)
+                
+                h, w, _ = current_img.shape
+
+                # If scalar, fill to (H,W)
+                if np.isscalar(r_result):
+                    r_result = np.full((h, w), r_result, dtype=current_img.dtype)
+                if np.isscalar(g_result):
+                    g_result = np.full((h, w), g_result, dtype=current_img.dtype)
+                if np.isscalar(b_result):
+                    b_result = np.full((h, w), b_result, dtype=current_img.dtype)
+
+                # Stack
+                combined = np.stack([r_result, g_result, b_result], axis=-1)
+
+                # Update the slot
+                current_slot = self.image_manager.current_slot
+                metadata = self.image_manager._metadata.get(current_slot, {}).copy()
+                metadata['pixel_math'] = f"R:{expr_r}, G:{expr_g}, B:{expr_b}"
+                self.image_manager.set_image(combined, metadata)
+
+                QMessageBox.information(self, "Pixel Math", 
+                                        "Pixel math operation (per-channel) applied successfully.")
+                self.accept()
+
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to apply pixel math expression:\n{e}")
+
+    def evaluate_expression(self, expr):
+        """
+        Evaluates a single expression in the restricted environment (safe_namespace).
+        Returns a PixelImage or numpy array. 
+        """
+        if not expr:
+            return 0  # If no expression, treat as 0
+
+        # Create a safe namespace
+        safe_namespace = {
+            "np": np,
+            "med": self.med,
+            "mean": self.mean,
+            "min": self.min,
+            "max": self.max,
+            "std": self.std,
+            "mad": self.mad,
+            "log": self.log,
+            "iff": self.iff,
+            "mtf": self.mtf,
+        }
+
+        # Insert current image as 'img'
+        current_img = self.image_manager.image
+        if current_img is None:
+            raise ValueError("No current image loaded.")
+        if current_img.ndim == 2:
+            current_img = np.stack([current_img]*3, axis=-1)
+        safe_namespace["img"] = PixelImage(current_img)
+
+        # Insert image slots as slot0, slot1, ...
+        max_slots = self.image_manager.max_slots
+        parent = self.parent()
+        for i in range(max_slots):
+            img = self.image_manager._images.get(i, None)
+            if img is not None:
+                if img.ndim == 2:
+                    img = np.stack([img]*3, axis=-1)
+                pix_img = PixelImage(img)
+                safe_namespace[f"slot{i}"] = pix_img
+                if parent is not None and hasattr(parent, "slot_names"):
+                    custom_name = parent.slot_names.get(i, None)
+                    if custom_name:
+                        safe_namespace[custom_name] = pix_img
+
+        # Evaluate
+            # Instead of a direct `eval`, we now do:
+        return self.evaluate_multiline_expression(expr, safe_namespace)
+        if isinstance(result, PixelImage):
+            return result
+        else:
+            return result  # Could be scalar or ndarray
 
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
