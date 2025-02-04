@@ -21716,7 +21716,7 @@ class PerfectPalettePickerTab(QWidget):
                 'file_path': file_path,
                 'original_header': sanitized_header,  # Use the sanitized or minimal header
                 'bit_depth': self.bit_depth if hasattr(self, 'bit_depth') else "Unknown",
-                'is_mono': self.is_mono if hasattr(self, 'is_mono') else False,
+                'is_mono': False,
                 'processing_parameters': {
                     'zoom_factor': self.zoom_factor,
                     'preview_scale': self.preview_scale
