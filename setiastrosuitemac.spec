@@ -1,11 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+directory = '/Users/jackson/Documents/GitHub/setiastrosuite'
+
 a = Analysis(
     ['setiastrosuitemacQT6.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
+        (directory + '/.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
         ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
@@ -54,8 +56,8 @@ a = Analysis(
         ('font.png', '.'), 
         ('spinner.gif', '.'), 
         ('cvs.png', '.'), 
-        ('.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
-        ('.venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
+        (directory + '/.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
+        (directory + '/.venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
     ],
     hiddenimports=[],
     hookspath=[],
@@ -86,6 +88,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['astrosuite.icns'],
+    icon=[directory + 'astrosuite.icns'],
     onefile=True  # Enable single-file mode
 )
