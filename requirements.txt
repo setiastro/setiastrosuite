@@ -15,3 +15,5 @@ zstandard
 pywavelets
 pyqt6
 pyinstaller
+photutils
+reproject
