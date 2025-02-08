@@ -26,15 +26,15 @@ from PyInstaller.utils.hooks import get_package_paths
 
 photutils_path = get_package_paths('photutils')[0]
 
-directory = '/Users/jackson/Documents/GitHub/setiastrosuite'
+directory = './.venv/lib/python3.*/site-packages'
 
 a = Analysis(
     ['setiastrosuitemacQT6.py'],
     pathex=[],
     binaries=[],
     datas=[
-        (directory + '/.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
+        (directory + '/astroquery/CITATION', 'astroquery'),
+        (directory + '/photutils/CITATION.rst', 'photutils'),
         ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
@@ -64,7 +64,8 @@ a = Analysis(
         ('rotatecounterclockwise.png', '.'),
         ('maskcreate.png', '.'),
         ('maskapply.png', '.'),
-        ('maskremove.png', '.'),        
+        ('maskremove.png', '.'),
+        ('mosaic.png', '.'),
         ('openfile.png', '.'),
         ('graxpert.png', '.'),
         ('abeicon.png', '.'),
@@ -83,8 +84,8 @@ a = Analysis(
         ('font.png', '.'), 
         ('spinner.gif', '.'), 
         ('cvs.png', '.'), 
-        (directory + '/.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
-        (directory + '/.venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
+        (directory + '/astroquery/simbad/data', 'astroquery/simbad/data'), 
+        (directory + '/astropy/CITATION', 'astropy')
     ] + dask_data+ photutils_data,
     hiddenimports=[] + photutils_submodules,
     hookspath=[],
