@@ -1,9 +1,9 @@
 {
-  "version": "2.10.2",
+  "version": "2.10.3",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.2/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.2/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.2/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.3/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.3/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.3/setiastrosuite_linux"
   },
-  "notes": "New Feature: Initial release of Mosaic Master!, New Feature: Save Project and Open Project,Expanded Pixel Math: Store and recoall favorite expressions, indexed expressions, seperate expressions per channel and Multi line expressions with variables, Histogram View has log x-axis view "
+  "notes": "New Feature: Initial release of Mosaic Master with improved blending!, New Feature: Save Project and Open Project,Expanded Pixel Math: Store and recoall favorite expressions, indexed expressions, seperate expressions per channel and Multi line expressions with variables, Histogram View has log x-axis view.  Bug Fixes: curves crashed when keypressed, rgb combination not working properly, and lots more "
 }
