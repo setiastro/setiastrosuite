@@ -6595,7 +6595,7 @@ class MosaicMasterDialog(QDialog):
                     scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
                     scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
                     scale = (scale1 + scale2) / 2.0
-                    if scale > 2.0 or scale < 0.5:
+                    if scale > 1.25 or scale < 0.8:
                         continue
 
                     # Failsafe 2: Check the translation.
