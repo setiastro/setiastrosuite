@@ -1,4 +1,5 @@
 # Standard library imports
+import pickle
 import os
 import tempfile
 import sys
@@ -27,8 +28,28 @@ from datetime import datetime
 import pywt
 from io import BytesIO
 
+from astropy.stats import sigma_clipped_stats
+from photutils.detection import DAOStarFinder
+from scipy.spatial import ConvexHull
 
 
+from astropy.wcs.utils import skycoord_to_pixel
+from astropy.coordinates import SkyCoord
+from astropy import units as u
+import itertools
+
+# Reproject for WCS-based alignment
+try:
+    from reproject import reproject_interp
+except ImportError:
+    reproject_interp = None  # fallback if not installed
+
+# OpenCV for transform estimation & warping
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
 
 
 # Third-party library imports
@@ -120,7 +141,9 @@ from PyQt6.QtWidgets import (
     QStatusBar,
     QMenu,
     QTableWidget,
-    QTableWidgetItem
+    QTableWidgetItem,
+    QListWidget,
+    QListWidgetItem
 )
 
 # ----- QtGui -----
@@ -221,6 +244,7 @@ if hasattr(sys, '_MEIPASS'):
     slot9_path = os.path.join(sys._MEIPASS, 'slot9.png') 
     pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')   
     histogram_path = os.path.join(sys._MEIPASS, 'histogram.png') 
+    mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -265,6 +289,7 @@ else:
     slot9_path  = 'slot9.png'
     pixelmath_path = 'pixelmath.png'
     histogram_path = 'histogram.png'
+    mosaic_path = 'mosaic.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -340,12 +365,24 @@ class AstroEditingSuite(QMainWindow):
         exit_action.setStatusTip('Exit the application')
         exit_action.triggered.connect(self.close)  # Close the application
 
+        # --- New Project Actions ---
+        save_project_action = QAction("Save Project", self)
+        save_project_action.setStatusTip("Save the entire project (images, metadata, masks, etc.)")
+        save_project_action.triggered.connect(self.save_project)
+        
+        open_project_action = QAction("Open Project", self)
+        open_project_action.setStatusTip("Open a saved project")
+        open_project_action.triggered.connect(self.open_project)        
+
         # Add actions to the File menu
         file_menu.addAction(open_action)
         file_menu.addAction(save_action)
         file_menu.addSeparator()
         file_menu.addAction(undo_action)
         file_menu.addAction(redo_action)
+        file_menu.addSeparator()
+        file_menu.addAction(save_project_action)   # New action
+        file_menu.addAction(open_project_action)   # New action
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
 
@@ -668,6 +705,17 @@ class AstroEditingSuite(QMainWindow):
         mask_slots_menu.addAction(rename_mask_slot_action)
 
         # --------------------
+        # Mosaic Menu
+        # --------------------
+        mosaic_menu = menubar.addMenu("Mosaic")
+
+        mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
+        mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
+        mosaic_master_action.triggered.connect(self.open_mosaic_master)
+
+        mosaic_menu.addAction(mosaic_master_action)
+
+        # --------------------
         # Toolbar
         # --------------------
         filebar = QToolBar("File Toolbar")
@@ -799,7 +847,8 @@ class AstroEditingSuite(QMainWindow):
         geometrybar.addAction(flip_horizontal_action)
         geometrybar.addAction(flip_vertical_action)        
         geometrybar.addAction(rotate_clockwise_action)
-        geometrybar.addAction(rotate_counterclockwise_action)        
+        geometrybar.addAction(rotate_counterclockwise_action)    
+        geometrybar.addAction(mosaic_master_action)    
 
         # --------------------
         # Mask Toolbar
@@ -812,6 +861,7 @@ class AstroEditingSuite(QMainWindow):
         mask_toolbar.addAction(create_mask_action)
         mask_toolbar.addAction(apply_mask_action)
         mask_toolbar.addAction(remove_mask_action)
+        
 
         # --------------------
         # Status Bar
@@ -894,6 +944,119 @@ class AstroEditingSuite(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
+
+    def open_mosaic_master(self):
+        """
+        Opens a new MosaicMasterDialog (or QMainWindow) where the user can
+        add multiple images, star-align them, and create a large mosaic.
+        """
+        # Create the mosaic master window if not already created, or just each time:
+        mosaic_window = MosaicMasterDialog(parent=self, image_manager=self.image_manager)
+        mosaic_window.show()
+
+    def save_project(self):
+        """Save all project data to a single file."""
+        fileName, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project",
+            "",
+            "Astro Project Files (*.sas)"
+        )
+        if not fileName:
+            return
+
+        # Assemble project data into one dictionary.
+        project_data = {
+            # ImageManager data: images and metadata
+            "images": self.image_manager._images,       # dictionary {slot: image array}
+            "metadata": self.image_manager._metadata,   # dictionary {slot: metadata dict}
+            # Save custom slot names
+            "slot_names": self.slot_names,
+            
+            # MaskManager data
+            "masks": self.mask_manager._masks,          # dictionary {slot: mask array}
+            "applied_mask_slot": self.mask_manager.applied_mask_slot,
+            "applied_mask": self.mask_manager.applied_mask,
+            # Save custom mask slot names
+            "mask_slot_names": self.mask_slot_names,
+            
+            # Additional settings
+            "current_slot": self.image_manager.current_slot,
+            "theme": self.current_theme,
+        }
+
+        try:
+            with open(fileName, "wb") as f:
+                pickle.dump(project_data, f)
+            print("Project saved successfully to:", fileName)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Project Error", f"Error saving project: {str(e)}")
+
+
+    def open_project(self):
+        """Open a project file and repopulate all managers and UI elements."""
+        fileName, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            "",
+            "Astro Project Files (*.sas)"
+        )
+        if not fileName:
+            return
+
+        try:
+            with open(fileName, "rb") as f:
+                project_data = pickle.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Open Project Error", f"Error opening project: {str(e)}")
+            return
+
+        # Restore ImageManager data
+        if "images" in project_data and "metadata" in project_data:
+            self.image_manager._images = project_data["images"]
+            self.image_manager._metadata = project_data["metadata"]
+            self.image_manager.current_slot = project_data.get("current_slot", 0)
+        else:
+            QMessageBox.warning(self, "Project Data", "No image data found in project file.")
+
+        # Restore slot names if available
+        if "slot_names" in project_data:
+            self.slot_names = project_data["slot_names"]
+
+        # Restore MaskManager data
+        if "masks" in project_data:
+            self.mask_manager._masks = project_data["masks"]
+            self.mask_manager.applied_mask_slot = project_data.get("applied_mask_slot")
+            self.mask_manager.applied_mask = project_data.get("applied_mask")
+        
+        # Restore custom mask slot names
+        if "mask_slot_names" in project_data:
+            self.mask_slot_names = project_data["mask_slot_names"]
+
+        # Restore additional settings, e.g., theme
+        if "theme" in project_data:
+            self.current_theme = project_data["theme"]
+
+        # Emit a signal to update the UI for the current slot if needed
+        self.image_manager.image_changed.emit(
+            self.image_manager.current_slot,
+            self.image_manager._images[self.image_manager.current_slot],
+            self.image_manager._metadata[self.image_manager.current_slot]
+        )
+
+        # **Update the slot menu actions to reflect the new custom slot names**
+        for slot, action in self.slot_actions.items():
+            new_name = self.slot_names.get(slot, f"Slot {slot}")
+            action.setText(new_name)
+            action.setStatusTip(f"Open preview for {new_name}")
+        
+        # (Optionally, update mask slot actions similarly if needed.)
+        for slot, action in self.mask_slot_actions.items():
+            new_name = self.mask_slot_names.get(slot, f"Mask Slot {slot}")
+            action.setText(new_name)
+            action.setStatusTip(f"Open preview for {new_name}")        
+
+        print("Project loaded successfully from:", fileName)
 
     def open_histogram(self):
         # Check if a histogram dialog is already open; if so, bring it to front.
@@ -3465,6 +3628,8 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
+
+
 class RecombineDialog(QDialog):
     def __init__(self, available_slots, parent=None):
         super().__init__(parent)
@@ -5643,6 +5808,1176 @@ class HistogramDialog(QDialog):
                 item = QTableWidgetItem(f"{val:.3f}")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row, col, item)
+
+def get_wcs_from_header(header):
+    """Attempt to create a WCS from a FITS header."""
+    if not header:
+        return None
+    try:
+        # First, try normally:
+        wcs = WCS(header)
+        if wcs.is_celestial:
+            return wcs
+        # If not celestial and header has more than 2 axes, force naxis=2.
+        if header.get('NAXIS', 0) > 2:
+            wcs = WCS(header, naxis=2)
+            if wcs.is_celestial:
+                return wcs
+        return None
+    except Exception:
+        return None
+    
+def robust_api_request(method, url, data=None, files=None, max_retries=5, retry_delay=10, prompt_on_failure=False):
+    """
+    Sends an API request with automatic retries.
+    Handles network errors, invalid JSON responses, and API failures gracefully.
+    If prompt_on_failure is True, a dialog is shown after a failure asking if the user wants to try again.
+    """
+    for attempt in range(max_retries):
+        try:
+            if method == "GET":
+                response = requests.get(url, timeout=30)
+            elif method == "POST":
+                response = requests.post(url, data=data, files=files, timeout=30)
+            else:
+                raise ValueError("Unsupported request method: " + method)
+
+            response.raise_for_status()  # Raise HTTP errors (e.g., 500, 404)
+
+            try:
+                return response.json()  # Parse JSON response
+            except json.JSONDecodeError:
+                print(f"Attempt {attempt+1}: Invalid JSON response from {url}. Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                continue
+
+        except requests.exceptions.RequestException as e:
+            error_message = f"Attempt {attempt+1}: Network error when contacting {url}: {e}."
+            print(error_message)
+            if prompt_on_failure:
+                # Prompt the user if they want to try again.
+                # (Pass None as parent if you don't have a reference to the main window.)
+                user_choice = QMessageBox.question(
+                    None,
+                    "Network Error",
+                    f"{error_message}\nDo you want to try again?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if user_choice != QMessageBox.StandardButton.Yes:
+                    return None
+            else:
+                print(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+
+    print(f"Failed to get a valid response from {url} after {max_retries} attempts.")
+    return None  # Return None if all retries fail
+
+def scale_image_for_display(image):
+    """
+    Scales a floating point image (0-1) to 8-bit (0-255) for display.
+    """
+    if np.max(image) == np.min(image):
+        return np.zeros_like(image, dtype=np.uint8)  # Prevent division by zero
+    scaled = (255 * (image - np.min(image)) / (np.max(image) - np.min(image))).astype(np.uint8)
+    return scaled
+
+
+
+def estimate_transform_from_triangles(mosaic_stars, new_stars):
+    """
+    A naive approach:
+    1) Build triangle signatures in mosaic_stars.
+    2) Build triangle signatures in new_stars.
+    3) For each matching signature, compute candidate transform, count inliers.
+    4) Return best transform matrix.
+    """
+    mosaic_signatures = build_triangle_signatures(mosaic_stars)
+    new_signatures    = build_triangle_signatures(new_stars)
+
+    best_inliers = 0
+    best_matrix = None
+
+    # For each signature in 'new_signatures', check if it exists in 'mosaic_signatures'
+    for sig, new_triplets in new_signatures.items():
+        if sig not in mosaic_signatures:
+            continue
+        mosaic_triplets = mosaic_signatures[sig]
+
+        # We have a possible triangle match
+        for new_tri in new_triplets:
+            # new_tri is (i1,i2,i3) in new_stars
+            new_points = np.float32([new_stars[i] for i in new_tri])
+
+            for mosaic_tri in mosaic_triplets:
+                # mosaic_tri is (j1,j2,j3) in mosaic_stars
+                mosaic_points = np.float32([mosaic_stars[j] for j in mosaic_tri])
+
+                # Estimate affine transform from new_points -> mosaic_points
+                matrix, _ = cv2.estimateAffinePartial2D(
+                    new_points.reshape(-1, 1, 2),
+                    mosaic_points.reshape(-1, 1, 2),
+                    method=cv2.LMEDS
+                )
+                if matrix is None:
+                    continue
+                # Build a 3x3 for easier usage
+                full_mat = np.eye(3, dtype=np.float32)
+                full_mat[:2] = matrix
+
+                # Count how many 'new_stars' are inliers under this transform
+                inliers_count = 0
+                for (x,y) in new_stars:
+                    src_pt = np.array([x,y,1], dtype=np.float32)
+                    dst_pt = full_mat @ src_pt
+                    # Compare to nearest mosaic star or do distance threshold
+                    # For simplicity, let's do a distance threshold to ANY mosaic star
+                    for (mx,my) in mosaic_stars:
+                        dist = math.hypot(dst_pt[0]-mx, dst_pt[1]-my)
+                        if dist < 3.0: # within 3 pixels => match
+                            inliers_count += 1
+                            break
+
+                if inliers_count > best_inliers:
+                    best_inliers = inliers_count
+                    best_matrix  = full_mat
+
+    return best_matrix, best_inliers
+
+class MosaicPreviewWindow(QDialog):
+    def __init__(self, image_array, title="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title if title else "Preview")
+        self.image_array = image_array
+        self.original_array = image_array.copy()  # Keep original for re-stretching
+        self.auto_stretch = True  # Default to auto-stretch
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Preview label
+        self.preview_label = QLabel("No image yet.")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.preview_label)
+
+        # Auto-Stretch Toggle
+        self.stretch_toggle = QCheckBox("Auto-Stretch for Display")
+        self.stretch_toggle.setChecked(True)
+        self.stretch_toggle.stateChanged.connect(self.update_display)
+        layout.addWidget(self.stretch_toggle)
+
+        # Button row
+        button_layout = QHBoxLayout()
+        self.autostretch_button = QPushButton("Reapply Stretch")
+        self.autostretch_button.clicked.connect(self.autostretch_image)
+        button_layout.addWidget(self.autostretch_button)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        button_layout.addWidget(close_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+        self.display_image(self.image_array)
+
+    def display_image(self, arr):
+        """ Convert array to QPixmap and display """
+        if arr is None or arr.size == 0:
+            print("WARNING: Trying to display an empty image.")
+            return
+
+        # Apply stretching only if enabled
+        if self.stretch_toggle.isChecked():
+            arr = self.stretch_for_display(arr)
+
+        # Convert to 3-channel for Qt display if grayscale
+        if arr.ndim == 2:
+            arr_3ch = np.stack([arr] * 3, axis=-1)
+        else:
+            arr_3ch = arr
+
+        h, w, c = arr_3ch.shape
+        bytes_per_line = w * c
+        qimg = QImage(arr_3ch.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
+        pixmap = QPixmap.fromImage(qimg)
+
+        # Scale to fit window
+        pixmap = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(pixmap)
+
+    def stretch_for_display(self, arr):
+        """ Applies an auto-stretch to improve visualization """
+        arr = arr.astype(np.float32)
+        mn, mx = np.percentile(arr, (0.5, 99.5))  # Ignore extreme tails
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        else:
+            arr = np.zeros_like(arr)
+        return (arr * 255).clip(0, 255).astype(np.uint8)
+
+    def update_display(self):
+        """ Toggle between raw and stretched display """
+        self.display_image(self.image_array)
+
+    def autostretch_image(self):
+        """ Auto-stretch original image and update preview """
+        arr = self.original_array.copy()
+        if arr.ndim == 2:
+            arr_stretched = self.stretch_for_display(arr)
+        else:
+            # If image has three channels, use the mean for stretching.
+            arr_stretched = self.stretch_for_display(np.mean(arr, axis=-1))
+        self.image_array = arr_stretched
+        self.display_image(self.image_array)
+
+    def resizeEvent(self, event):
+        """ Refresh displayed pixmap when window is resized """
+        super().resizeEvent(event)
+        self.display_image(self.image_array)
+
+
+# --------------------------------------------------
+# MosaicMasterDialog with blending/normalization integrated
+# --------------------------------------------------
+class MosaicMasterDialog(QDialog):
+    def __init__(self, parent=None, image_manager=None):
+        super().__init__(parent)
+        self.image_manager = image_manager
+        self.setWindowTitle("Mosaic Master")
+        self.resize(600, 400)
+        self.loaded_images = []  
+        self.final_mosaic = None
+        self.weight_mosaic = None
+        self.wcs_metadata = None  # To store mosaic WCS header
+        # Variables to store stretching parameters:
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        self.was_single_channel = False
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        instructions = QLabel(
+            "Mosaic Master:\n"
+            "1) Add images\n"
+            "2) Align & Create Mosaic\n"
+            "3) Save to Image Manager"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+        btn_layout = QHBoxLayout()
+        # Button to add image from disk
+        add_btn = QPushButton("Add Image")
+        add_btn.clicked.connect(self.add_image)
+        btn_layout.addWidget(add_btn)
+
+        # New button to add an image from one of the ImageManager slots
+        add_from_slot_btn = QPushButton("Add from Slot")
+        add_from_slot_btn.clicked.connect(self.add_image_from_slot)
+        btn_layout.addWidget(add_from_slot_btn)
+
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected)
+        btn_layout.addWidget(remove_btn)
+
+        preview_btn = QPushButton("Preview Selected")
+        preview_btn.clicked.connect(self.preview_selected)
+        btn_layout.addWidget(preview_btn)
+
+        align_btn = QPushButton("Align and Create Mosaic")
+        align_btn.clicked.connect(self.align_images)
+        btn_layout.addWidget(align_btn)
+
+        save_btn = QPushButton("Save to Image Manager")
+        save_btn.clicked.connect(self.create_mosaic)
+        btn_layout.addWidget(save_btn)
+
+        layout.addLayout(btn_layout)
+
+        # Checkbox for forcing blind solve
+        self.forceBlindCheckBox = QCheckBox("Force Blind Solve (ignore existing WCS)")
+        layout.addWidget(self.forceBlindCheckBox)
+
+        self.images_list = QListWidget()
+        self.images_list.setSelectionMode(self.images_list.SelectionMode.SingleSelection)
+        layout.addWidget(self.images_list)
+
+        self.status_label = QLabel("Status: no images")
+        layout.addWidget(self.status_label)
+
+        self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spinnerMovie = QMovie(resource_path("spinner.gif"))
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.hide() 
+        layout.addWidget(self.spinnerLabel)
+
+        self.setLayout(layout)
+
+    # ---------- Add / Remove ----------
+    def add_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Add Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
+        )
+        if path:
+            arr, header, bitdepth, ismono = load_image(path)
+            wcs_obj = get_wcs_from_header(header) if header else None
+            d = {
+                "path": path,
+                "image": arr,
+                "header": header,
+                "wcs": wcs_obj,
+                "bit_depth": bitdepth,
+                "is_mono": ismono,
+                "transform": None
+            }
+            self.loaded_images.append(d)
+
+            text = os.path.basename(path)
+            if wcs_obj is not None:
+                text += " [WCS]"
+            item = QListWidgetItem(text)
+            item.setToolTip(path)
+            self.images_list.addItem(item)
+            self.update_status()
+
+
+    # ---------- New Method: Add Image From a Slot ----------
+    def add_image_from_slot(self):
+        """
+        Allow the user to add an image from one of the ImageManager’s slots.
+        The dropdown will list only slots that contain an image, showing the renamed name
+        (if available via metadata['display_name']), or else falling back to the file basename.
+        """
+        available_slots = []
+        # Iterate through all slots managed by ImageManager
+        for slot, img in self.image_manager._images.items():
+            if img is not None:
+                metadata = self.image_manager._metadata[slot]
+                # Use a renamed name if available, otherwise use the file path basename or a default
+                display_name = metadata.get("display_name")
+                if not display_name:
+                    file_path = metadata.get("file_path")
+                    display_name = os.path.basename(file_path) if file_path else f"Slot {slot}"
+                available_slots.append((slot, display_name))
+        
+        if not available_slots:
+            QMessageBox.information(self, "Add Image", "No images available in slots.")
+            return
+
+        # Create a list of strings for the dropdown, e.g., "Slot 0: MyRenamedImage"
+        items = [f"Slot {slot}: {name}" for slot, name in available_slots]
+
+        # Let the user choose from the available slots
+        item, ok = QInputDialog.getItem(self, "Select Image", "Select an image from slots:", items, 0, False)
+        if not ok or not item:
+            return
+
+        # Parse the selected slot number. We assume the string format "Slot X: <name>"
+        selected_slot = int(item.split(":")[0].split()[1])
+        metadata = self.image_manager._metadata[selected_slot]
+        image = self.image_manager._images[selected_slot]
+        wcs_obj = get_wcs_from_header(metadata.get("original_header", None)) if metadata.get("original_header") else None
+
+        # Create a dictionary similar to that used for loaded images
+        d = {
+            "path": metadata.get("file_path", f"Slot {selected_slot} image"),
+            "image": image,
+            "header": metadata.get("original_header"),
+            "wcs": wcs_obj,
+            "bit_depth": metadata.get("bit_depth"),
+            "is_mono": metadata.get("is_mono", False),
+            "transform": None
+        }
+        self.loaded_images.append(d)
+
+        # Determine the text to display. Use the renamed name if available.
+        text = metadata.get("display_name")
+        if not text:
+            file_path = metadata.get("file_path")
+            text = os.path.basename(file_path) if file_path else f"Slot {selected_slot} image"
+        if wcs_obj is not None:
+            text += " [WCS]"
+        list_item = QListWidgetItem(text)
+        list_item.setToolTip(metadata.get("file_path", ""))
+        self.images_list.addItem(list_item)
+        self.update_status()
+
+    def remove_selected(self):
+        s = self.images_list.selectedItems()
+        if not s:
+            QMessageBox.information(self, "Remove", "No item selected.")
+            return
+        for itm in s:
+            row = self.images_list.row(itm)
+            self.images_list.takeItem(row)
+            p = itm.toolTip()
+            self.loaded_images = [x for x in self.loaded_images if x["path"] != p]
+        self.update_status()
+
+    def update_status(self):
+        c = len(self.loaded_images)
+        self.status_label.setText(f"{c} images loaded.")
+
+    # ---------- Preview ----------
+    def preview_selected(self):
+        s = self.images_list.selectedItems()
+        if not s:
+            QMessageBox.information(self, "Preview", "No item selected.")
+            return
+        path = s[0].toolTip()
+        for d in self.loaded_images:
+            if d["path"] == path:
+                preview_image = d["image"]
+                if np.all(preview_image == 0):
+                    print(f"WARNING: Preview for {path} is completely black!")
+                print(f"Previewing {path}, shape={preview_image.shape}, max={np.max(preview_image)}")
+                win = MosaicPreviewWindow(preview_image, title=f"Preview - {os.path.basename(path)}", parent=self)
+                win.show()
+                break
+
+    # ---------- Align (Entry Point) ----------
+    def align_images(self):
+        if len(self.loaded_images) == 0:
+            QMessageBox.warning(self, "Align", "No images to align.")
+            return
+
+        # Show spinner and start animation.
+        self.spinnerLabel.show()
+        self.spinnerMovie.start()
+        QApplication.processEvents()
+
+        # Step1: Determine if the user wants to force blind solve.
+        force_blind = self.forceBlindCheckBox.isChecked()
+
+        if force_blind:
+            # Force a blind solve on every image.
+            for item in self.loaded_images:
+                self.status_label.setText(f"Force blind solving {item['path']}...")
+                QApplication.processEvents()
+                self.perform_blind_solve(item)
+        else:
+            # Only blind-solve images that lack a valid WCS.
+            unsolved_images = [item for item in self.loaded_images if item["wcs"] is None]
+            for item in unsolved_images:
+                self.status_label.setText(f"Blind solving {item['path']}...")
+                QApplication.processEvents()
+                self.perform_blind_solve(item)
+
+        # Step 2: Get all images with valid WCS.
+        wcs_items = [x for x in self.loaded_images if x["wcs"] is not None]
+        if not wcs_items:
+            print("No images have WCS, skipping WCS alignment.")
+            return
+
+        # Use the first image's WCS as reference and compute the mosaic bounding box.
+        reference_wcs = wcs_items[0]["wcs"].deepcopy()
+        min_x, min_y, max_x, max_y = self.compute_mosaic_bounding_box(wcs_items, reference_wcs)
+        mosaic_width = int(max_x - min_x)
+        mosaic_height = int(max_y - min_y)
+        if mosaic_width < 1 or mosaic_height < 1:
+            print("ERROR: Computed mosaic size is invalid. Check WCS or inputs.")
+            return
+
+        # Adjust the reference WCS so that (min_x, min_y) becomes (0,0).
+        mosaic_wcs = reference_wcs.deepcopy()
+        mosaic_wcs.wcs.crpix[0] -= min_x
+        mosaic_wcs.wcs.crpix[1] -= min_y
+        self.wcs_metadata = mosaic_wcs.to_header()
+
+        # Determine whether we are processing any color images.
+        is_color = any(not item["is_mono"] for item in wcs_items)
+        if is_color:
+            # For color images, our accumulator is 3-channel.
+            self.final_mosaic = np.zeros((mosaic_height, mosaic_width, 3), dtype=np.float32)
+        else:
+            self.final_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
+        # The weight mosaic is always 2D.
+        self.weight_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
+
+        first_image = True
+        for idx, itm in enumerate(wcs_items):
+            arr = itm["image"]
+            self.status_label.setText(f"Projecting {itm['path']} onto the celestial sphere...")
+            QApplication.processEvents()
+
+            # Pre-stretch the image.
+            stretched_arr = self.stretch_image(arr)
+            # For alignment, we want to work with identical data in all channels.
+            # (Even if the image is color, we use the first channel for alignment.)
+            if not itm["is_mono"]:
+                # For a color image, we assume the three channels contain the same (or very similar) data.
+                # Therefore, use only the red channel (channel 0) for alignment.
+                red_stretched = stretched_arr[..., 0]
+            else:
+                # For mono images, take the first channel.
+                if stretched_arr.ndim == 3:
+                    red_stretched = stretched_arr[..., 0]
+                else:
+                    red_stretched = stretched_arr
+
+            # Reproject the image once.
+            if not itm["is_mono"]:
+                # For color images, reproject each channel separately.
+                channels = []
+                for c in range(3):
+                    channel = stretched_arr[..., c]
+                    reproj, _ = reproject_interp((channel, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
+                    reproj = np.nan_to_num(reproj, nan=0.0).astype(np.float32)
+                    channels.append(reproj)
+                reprojected = np.stack(channels, axis=-1)
+                # Also reproject the red channel (from our already stretched data).
+                reproj_red = reprojected[..., 0]
+            else:
+                # For mono images, reproject the red channel.
+                reproj_red, _ = reproject_interp((red_stretched, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
+                reproj_red = np.nan_to_num(reproj_red, nan=0.0).astype(np.float32)
+                # Duplicate the mono result into 3 channels for accumulation.
+                reprojected = np.stack([reproj_red, reproj_red, reproj_red], axis=-1)
+
+            self.status_label.setText(f"WCS Reproject: {itm['path']} processed.")
+            QApplication.processEvents()
+
+            # Stellar alignment: use the red channel from the reprojected image for computing the warp.
+            if not first_image:
+                mosaic_gray = (self.final_mosaic if self.final_mosaic.ndim == 2 
+                               else np.mean(self.final_mosaic, axis=-1))
+                if not itm["is_mono"]:
+                    # For a color image, compute the warp using the red channel.
+                    warp_matrix, best_inliers = self.star_refine_alignment_triangle(reproj_red, mosaic_gray, return_matrix=True)
+                    if warp_matrix is not None:
+                        # Apply the computed warp to each color channel.
+                        warped_channels = []
+                        for c in range(3):
+                            warped_channel = cv2.warpAffine(reprojected[..., c],
+                                                            warp_matrix[:2],
+                                                            (mosaic_width, mosaic_height),
+                                                            flags=cv2.INTER_LINEAR)
+                            warped_channels.append(warped_channel)
+                        aligned = np.stack(warped_channels, axis=-1)
+                        # For computing the weight mask, use the warped red channel.
+                        gray_aligned = aligned[..., 0]
+                    else:
+                        aligned = reprojected
+                        gray_aligned = np.mean(aligned, axis=-1)
+                else:
+                    # Mono images use the existing routine.
+                    aligned_mono = self.star_refine_alignment_triangle(
+                        reprojected[..., 0],
+                        mosaic_gray
+                    )
+                    # Duplicate the aligned mono result into 3 channels.
+                    aligned = np.stack([aligned_mono]*3, axis=-1)
+                    gray_aligned = aligned[..., 0]
+            else:
+                aligned = reprojected
+                if not itm["is_mono"]:
+                    gray_aligned = np.mean(aligned, axis=-1)
+                else:
+                    gray_aligned = aligned[..., 0]
+                first_image = False
+
+            # Compute weight mask from the grayscale aligned image.
+            binary_mask = (gray_aligned > 0).astype(np.uint8)
+            smooth_mask = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 5)
+            if np.max(smooth_mask) > 0:
+                smooth_mask = smooth_mask / np.max(smooth_mask)
+            else:
+                smooth_mask = binary_mask.astype(np.float32)
+            gamma = 0.5
+            smooth_mask = np.power(smooth_mask, gamma)
+
+            # Accumulate the aligned image.
+            if is_color:
+                self.final_mosaic += aligned * smooth_mask[..., np.newaxis]
+            else:
+                self.final_mosaic += aligned[..., 0] * smooth_mask
+            self.weight_mosaic += smooth_mask
+
+            self.status_label.setText(f"Processed: {itm['path']}")
+            QApplication.processEvents()
+
+        # Compute the weighted average.
+        nonzero_mask = (self.weight_mosaic > 0)
+        if is_color:
+            self.final_mosaic = np.where(
+                self.weight_mosaic[..., None] > 0,
+                self.final_mosaic / self.weight_mosaic[..., None],
+                self.final_mosaic
+            )
+        else:
+            self.final_mosaic[nonzero_mask] = self.final_mosaic[nonzero_mask] / self.weight_mosaic[nonzero_mask]
+
+        print("WCS + Star Alignment Complete.")
+        self.status_label.setText("WCS + Star Alignment Complete. De-Normalizing Mosaic...")
+        self.final_mosaic = self.unstretch_image(self.final_mosaic)
+        self.status_label.setText("Final Mosaic Ready.")
+        QApplication.processEvents()
+
+        # For display, if the mosaic is 2D, convert to 3 channels.
+        if self.final_mosaic.ndim == 2:
+            display_image = np.stack([self.final_mosaic] * 3, axis=-1)
+        else:
+            display_image = self.stretch_for_display(self.final_mosaic)
+        mosaic_win = MosaicPreviewWindow(display_image, title="Incremental Mosaic", parent=self)
+        mosaic_win.show()
+
+        self.spinnerMovie.stop()
+        self.spinnerLabel.hide()
+        QApplication.processEvents()
+        
+    # ---------- Star alignment using triangle matching ----------
+    def star_refine_alignment_triangle(self, new_img, mosaic_img, return_matrix=False):
+        """
+        Star alignment using triangle matching. Uses overlapping regions to determine
+        an affine transform that maps the new image into the mosaic coordinate frame.
+        If return_matrix is True, return the best transform (and inlier count) instead
+        of immediately warping the new_img.
+        """
+        if not OPENCV_AVAILABLE:
+            print("No cv2 available, skipping star refine.")
+            return new_img if not return_matrix else (None, 0)
+
+        self.status_label.setText("Star refine: Extracting overlapping region...")
+        QApplication.processEvents()
+
+        overlap_mask = (mosaic_img > 0) & (new_img > 0)
+        overlap_pixel_count = np.count_nonzero(overlap_mask)
+        print(f"Star refine: Overlap pixel count = {overlap_pixel_count}")
+        if overlap_pixel_count < 500:
+            print("Star refine: No sufficient overlap found.")
+            return new_img if not return_matrix else (None, 0)
+
+        mosaic_for_stars = np.where(overlap_mask, mosaic_img, 0)
+        new_for_stars = np.where(overlap_mask, new_img, 0)
+        mosaic_stars = self.detect_stars(mosaic_for_stars, max_stars=25)
+        new_stars = self.detect_stars(new_for_stars, max_stars=25)
+        print(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
+        self.status_label.setText(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
+        QApplication.processEvents()
+
+        if len(mosaic_stars) < 3 or len(new_stars) < 3:
+            print("Not enough overlap stars for triangle alignment; skipping.")
+            return new_img if not return_matrix else (None, 0)
+
+        best_matrix, best_inliers = self.estimate_transform_from_triangles(mosaic_stars, new_stars)
+        if best_matrix is None:
+            print("No triangle-based transform found.")
+            return new_img if not return_matrix else (None, 0)
+
+        self.status_label.setText(f"Star refine: {best_inliers} inliers found, applying warp...")
+        QApplication.processEvents()
+        if return_matrix:
+            # Return the computed matrix (and inliers) for later use.
+            return best_matrix, best_inliers
+        else:
+            H, W = mosaic_img.shape[:2]
+            warped = cv2.warpAffine(new_img, best_matrix[:2], (W, H), flags=cv2.INTER_LINEAR)
+            print(f"Triangle-based star refine complete: {best_inliers} inliers, warped shape={warped.shape}")
+            self.status_label.setText("Triangle refine complete.")
+            QApplication.processEvents()
+            return warped
+        
+    def build_triangle_signatures(self, stars):
+        signature_map = {}
+        for combo in itertools.combinations(range(len(stars)), 3):
+            i, j, k = combo
+            p1, p2, p3 = stars[i], stars[j], stars[k]
+            sides = [
+                (p2[0]-p1[0])**2 + (p2[1]-p1[1])**2,
+                (p3[0]-p2[0])**2 + (p3[1]-p2[1])**2,
+                (p1[0]-p3[0])**2 + (p1[1]-p3[1])**2
+            ]
+            sides.sort()
+            min_side = sides[0]
+            norm_sides = tuple(round(s / min_side, 3) for s in sides)
+            signature_map.setdefault(norm_sides, []).append(combo)
+        return signature_map
+
+    def find_closest_signature(self, target_sig, signature_dict, threshold=0.02):
+        for sig in signature_dict.keys():
+            if np.allclose(sig, target_sig, atol=threshold):
+                return sig
+        return None
+
+    def estimate_transform_from_triangles(self, mosaic_stars, new_stars):
+        mosaic_signatures = self.build_triangle_signatures(mosaic_stars)
+        new_signatures = self.build_triangle_signatures(new_stars)
+        print(f"🔹 Found {len(mosaic_signatures)} unique mosaic triangles")
+        print(f"🔹 Found {len(new_signatures)} unique new image triangles")
+        best_inliers = 0
+        best_matrix = None
+        total_steps = sum(len(new_triplets) * len(mosaic_signatures.get(sig, [])) for sig, new_triplets in new_signatures.items())
+        step_count = 0
+        for target_sig, new_triplets in new_signatures.items():
+            closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
+            if closest_match is None:
+                continue
+            mosaic_triplets = mosaic_signatures[closest_match]
+            for new_tri in new_triplets:
+                new_points = np.float32([new_stars[i] for i in new_tri])
+                for mosaic_tri in mosaic_triplets:
+                    mosaic_points = np.float32([mosaic_stars[j] for j in mosaic_tri])
+                    matrix, _ = cv2.estimateAffinePartial2D(
+                        new_points.reshape(-1, 1, 2),
+                        mosaic_points.reshape(-1, 1, 2),
+                        method=cv2.LMEDS
+                    )
+                    if matrix is None:
+                        continue
+                    full_mat = np.eye(3, dtype=np.float32)
+                    full_mat[:2] = matrix
+                    inliers_count = 0
+                    for (x, y) in new_stars:
+                        src_pt = np.array([x, y, 1], dtype=np.float32)
+                        dst_pt = full_mat @ src_pt
+                        for (mx, my) in mosaic_stars:
+                            if math.hypot(dst_pt[0] - mx, dst_pt[1] - my) < 3.0:
+                                inliers_count += 1
+                                break
+                    if inliers_count > best_inliers:
+                        best_inliers = inliers_count
+                        best_matrix = full_mat
+                    step_count += 1
+                    progress_percent = step_count
+                    self.status_label.setText(f"Aligning triangles... Fit {progress_percent:.0f} triangles out of a possible 2300 complete")
+                    QApplication.processEvents()
+        return best_matrix, best_inliers
+
+    def stretch_for_display(self, arr):
+        arr = arr.astype(np.float32)
+        mn, mx = np.percentile(arr, (0.5, 99.5))
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        else:
+            arr = np.zeros_like(arr)
+        return (arr * 255).clip(0, 255).astype(np.uint8)
+
+    def detect_stars(self, image2d, max_stars=25):
+        mean_val, median_val, std_val = sigma_clipped_stats(image2d, sigma=3.0)
+        daofind = DAOStarFinder(threshold=3 * std_val, fwhm=3.0)
+        sources = daofind(image2d - median_val)
+        if sources is None or len(sources) == 0:
+            return []
+        x_coords = sources['xcentroid'].data
+        y_coords = sources['ycentroid'].data
+        flux = sources['flux'].data
+        sorted_indices = np.argsort(-flux)
+        top_indices = sorted_indices[:max_stars]
+        return list(zip(x_coords[top_indices], y_coords[top_indices]))
+
+    def estimate_transform(self, source_stars, dest_stars):
+        min_len = min(len(source_stars), len(dest_stars))
+        if min_len < 3:
+            return None
+        src_pts = np.float32(source_stars[:min_len])
+        dst_pts = np.float32(dest_stars[:min_len])
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            src_pts, dst_pts,
+            method=cv2.RANSAC, ransacReprojThreshold=3.0
+        )
+        if matrix is None:
+            return None
+        full_mat = np.eye(3, dtype=np.float32)
+        full_mat[:2] = matrix
+        return full_mat
+
+
+    def compute_mosaic_bounding_box(self, wcs_items, reference_wcs):
+        """
+        Compute the mosaic bounding box in pixel coordinates relative to a shared WCS frame,
+        properly accounting for rotation and orientation dynamically.
+        """
+        all_pixels = []
+
+        for itm in wcs_items:
+            wcs = itm["wcs"]
+            H, W = itm["image"].shape[:2]  # Use only the height and width
+
+            # Get image corner coordinates in world coordinates (RA/Dec)
+            pixel_corners = np.array([
+                [0, 0],         # Top-left
+                [W - 1, 0],     # Top-right
+                [0, H - 1],     # Bottom-left
+                [W - 1, H - 1]  # Bottom-right
+            ])
+
+            # Convert pixel to world coordinates (RA, Dec)
+            world_coords = np.column_stack(wcs.pixel_to_world_values(pixel_corners[:, 0], pixel_corners[:, 1]))
+
+            # Convert RA/Dec to pixel coordinates in the reference WCS
+            sky_coords = SkyCoord(ra=world_coords[:, 0] * u.deg, dec=world_coords[:, 1] * u.deg, frame='icrs')
+            pixel_coords = skycoord_to_pixel(sky_coords, reference_wcs)
+
+            # Ensure we're only using the first two values (x, y)
+            all_pixels.append(np.column_stack(pixel_coords[:2]))
+
+        # Stack all pixel coordinates and compute bounding box
+        all_pixels = np.vstack(all_pixels)
+
+        min_x, max_x = np.min(all_pixels[:, 0]), np.max(all_pixels[:, 0])
+        min_y, max_y = np.min(all_pixels[:, 1]), np.max(all_pixels[:, 1])
+
+        # **Determine whether the mosaic is wider or taller dynamically**
+        width = max_x - min_x
+        height = max_y - min_y
+
+        print(f"Detected Bounding Box (X={min_x} to {max_x}, Y={min_y} to {max_y})")
+        print(f"Calculated Mosaic Size: Width={width}, Height={height}")
+        self.status_label.setText(f"Detected Bounding Box: X={min_x} to {max_x}, Y={min_y} to {max_y}")
+        self.status_label.setText(f"Calculated Mosaic Size: Width={width}, Height={height}")
+        QApplication.processEvents()
+
+        return int(np.floor(min_x)), int(np.floor(min_y)), int(np.ceil(max_x)), int(np.ceil(max_y))
+
+    # ---------- Finalize / Save Mosaic ----------
+    def create_mosaic(self):
+        """Finalize the mosaic (including blending/normalization) and push it to the image manager."""
+        if self.final_mosaic is None:
+            print("No mosaic to finalize.")
+            return
+        self.finalize_mosaic()
+        display_image = self.stretch_for_display(self.final_mosaic)
+        mosaic_win = MosaicPreviewWindow(display_image, title="Final Mosaic", parent=self)
+        mosaic_win.show()
+
+    def finalize_mosaic(self):
+        """ Push the final mosaic (and its WCS metadata) to the image manager """
+        if self.final_mosaic is None:
+            print("No mosaic to finalize.")
+            return
+        print("🔹 Pushing mosaic to image manager...")
+
+        # Convert the Header to a dict before passing it
+        meta = dict(self.wcs_metadata)
+
+        # If the final mosaic is 2D (grayscale), replicate it across three channels
+        final_img = self.final_mosaic
+        if final_img.ndim == 2:
+            final_img = np.stack([final_img, final_img, final_img], axis=-1)
+
+        self.image_manager.set_image(final_img, metadata=meta)
+        print("✅ Mosaic pushed successfully.")
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image.
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # Check if the image is single-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)  # Convert to 3-channel by duplicating
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # Initialize lists to store per-channel minima and medians
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+
+        # Initialize stretched_image as a copy of the input image
+        stretched_image = image.copy()
+
+        # Define the target median for stretching
+        target_median = 0.08
+
+        # Apply the stretch for each channel independently
+        for c in range(3):
+            # Record the minimum of the current channel
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+
+            # Subtract the channel's minimum to shift the image
+            stretched_image[..., c] -= channel_min
+
+            # Record the median of the shifted channel
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        # Clip stretched image to [0, 1] range
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+
+        # Store stretch parameters
+        self.was_single_channel = was_single_channel
+
+        return stretched_image
+
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch to return the image to its original state.
+        Each channel is unstretched independently by reverting the stretch formula
+        using the stored medians and adding back the individual channel minima.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        # Ensure the image is a float32 array for precise calculations and writable
+        image = image.astype(np.float32).copy()
+
+        # If the image is 2D, treat it as a single channel.
+        if image.ndim == 2:
+            # Process as a single channel:
+            channel_median = np.median(image)
+            original_median = original_medians[0]
+            original_min = original_mins[0]
+
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image
+                denominator = channel_median * (original_median + image - 1) - original_median * image
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image = numerator / denominator
+            else:
+                print("Channel median or original median is zero. Skipping unstretch.")
+
+            # Add back the original minimum
+            image += original_min
+
+            # Clip to [0, 1]
+            image = np.clip(image, 0, 1)
+            # Optionally, if you want to keep it 2D (since it was originally mono), just return image.
+            # If you want to convert to a 3-channel image for display later, you can do that later.
+            return image
+
+        # Otherwise, if the image is 3D, process each channel
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                # To avoid division by zero
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+
+            # Add back the channel's original minimum
+            image[..., c] += original_min
+
+        # Clip to [0, 1] range
+        image = np.clip(image, 0, 1)
+
+        # If the image was originally single-channel but has 3 dimensions now, convert it back.
+        if was_single_channel and image.ndim == 3:
+            image = np.mean(image, axis=2, keepdims=True)
+
+        return image
+
+
+    # ---------- Blind Solve via Astrometry.net ----------
+    def perform_blind_solve(self, item):
+        """
+        Performs a blind solve using Astrometry.net and constructs the WCS header directly.
+        If any step fails (e.g. network error), prompts the user to try again.
+        """
+        while True:
+            self.status_label.setText("Status: Logging in to Astrometry.net...")
+            QApplication.processEvents()
+            api_key = load_api_key()
+            if not api_key:
+                api_key, ok = QInputDialog.getText(self, "Enter API Key", "Please enter your Astrometry.net API key:")
+                if ok and api_key:
+                    save_api_key(api_key)
+                else:
+                    QMessageBox.warning(self, "API Key Required", "Blind solve canceled (no API key).")
+                    return None
+
+            session_key = self.login_to_astrometry(api_key)
+            if session_key is None:
+                if QMessageBox.question(self, "Login Failed",
+                                        "Could not log in to Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return None
+
+            self.status_label.setText("Status: Uploading image to Astrometry.net...")
+            QApplication.processEvents()
+            subid = self.upload_image_to_astrometry(item["path"], session_key)
+            if not subid:
+                if QMessageBox.question(self, "Upload Failed",
+                                        "Image upload failed or no subid returned. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return None
+
+            self.status_label.setText("Status: Waiting for job ID...")
+            QApplication.processEvents()
+            job_id = self.poll_submission_status(subid)
+            if not job_id:
+                if QMessageBox.question(self, "Blind Solve Failed",
+                                        "Failed to retrieve job ID from Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return None
+
+            self.status_label.setText("Status: Retrieving calibration data...")
+            QApplication.processEvents()
+            calibration_data = self.poll_calibration_data(job_id)
+            if not calibration_data:
+                if QMessageBox.question(self, "Blind Solve Failed",
+                                        "Calibration data did not arrive from Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return None
+
+            # If all steps succeeded, exit the loop.
+            break
+
+        wcs_header = self.construct_wcs_header(calibration_data, item["image"].shape)
+        if item["path"].lower().endswith(('.fits', '.fit')):
+            self.update_fits_with_wcs(item["path"], calibration_data, wcs_header)
+        self.status_label.setText(f"Blind Solve Complete: Astrometric solution applied successfully.")
+        item["wcs"] = WCS(wcs_header)
+        return wcs_header
+
+    def login_to_astrometry(self, api_key):
+        url = ASTROMETRY_API_URL + "login"
+        data = {'request-json': json.dumps({"apikey": api_key})}
+        response = robust_api_request("POST", url, data=data, prompt_on_failure=True)
+        if response and response.get("status") == "success":
+            return response["session"]
+        print("Login failed after multiple attempts.")
+        QMessageBox.critical(self, "Login Failed", "Could not log in to Astrometry.net. Check your API key or internet connection.")
+        return None
+
+    def upload_image_to_astrometry(self, image_path, session_key):
+        url = ASTROMETRY_API_URL + "upload"
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            data = {
+                'request-json': json.dumps({
+                    "publicly_visible": "y",
+                    "allow_modifications": "d",
+                    "session": session_key,
+                    "allow_commercial_use": "d"
+                })
+            }
+            response = robust_api_request("POST", url, data=data, files=files)
+        if response and response.get("status") == "success":
+            return response["subid"]
+        QMessageBox.critical(self, "Upload Failed", "Image upload failed after multiple attempts.")
+        return None
+
+    def poll_submission_status(self, subid):
+        url = ASTROMETRY_API_URL + f"submissions/{subid}"
+        for attempt in range(90):  # up to ~15 minutes
+            response = robust_api_request("GET", url)
+            if response:
+                jobs = response.get("jobs", [])
+                if jobs and jobs[0] is not None:
+                    return jobs[0]
+            print(f"Polling attempt {attempt+1}: Job ID not ready yet.")
+            time.sleep(10)
+        QMessageBox.critical(self, "Blind Solve Failed", "Failed to retrieve job ID from Astrometry.net after multiple attempts.")
+        return None
+
+    def poll_calibration_data(self, job_id):
+        url = ASTROMETRY_API_URL + f"jobs/{job_id}/calibration/"
+        for attempt in range(90):
+            response = robust_api_request("GET", url)
+            if response and 'ra' in response and 'dec' in response:
+                print("Calibration data retrieved:", response)
+                return response
+            print(f"Calibration data not available yet (attempt {attempt+1})")
+            time.sleep(10)
+        QMessageBox.critical(self, "Blind Solve Failed", "Calibration data did not complete in the expected timeframe.")
+        return None
+
+    def construct_wcs_header(self, calibration_data, image_shape):
+        h = fits.Header()
+        h['CTYPE1'] = 'RA---TAN'
+        h['CTYPE2'] = 'DEC--TAN'
+        h['CRPIX1'] = image_shape[1] / 2
+        h['CRPIX2'] = image_shape[0] / 2
+        h['CRVAL1'] = calibration_data['ra']
+        h['CRVAL2'] = calibration_data['dec']
+        scale = calibration_data['pixscale'] / 3600.0  # degrees/pixel
+        orientation = math.radians(calibration_data['orientation'])
+        h['CD1_1'] = -scale * np.cos(orientation)
+        h['CD1_2'] = scale * np.sin(orientation)
+        h['CD2_1'] = -scale * np.sin(orientation)
+        h['CD2_2'] = -scale * np.cos(orientation)
+        h['RADECSYS'] = 'ICRS'
+        h['WCSAXES'] = 2
+        print("Generated WCS header from calibration data.")
+        return h
+
+    def update_fits_with_wcs(self, filepath, calibration_data, wcs_header):
+        if not filepath.lower().endswith(('.fits','.fit')):
+            print("Not a FITS, skipping WCS update.")
+            return
+        try:
+            with fits.open(filepath, mode='update') as hdul:
+                hdr = hdul[0].header
+                if 'NAXIS3' in hdr:
+                    del hdr['NAXIS3']
+                hdr['NAXIS'] = 2
+                hdr['CTYPE1'] = 'RA---TAN'
+                hdr['CTYPE2'] = 'DEC--TAN'
+                hdr['CRVAL1'] = calibration_data['ra']
+                hdr['CRVAL2'] = calibration_data['dec']
+                # Determine H and W based on the data's dimensionality.
+                if hdul[0].data.ndim == 3:
+                    # Assume data are stored as (channels, height, width)
+                    _, H, W = hdul[0].data.shape
+                else:
+                    H, W = hdul[0].data.shape[:2]
+                hdr['CRPIX1'] = W/2.0
+                hdr['CRPIX2'] = H/2.0
+                scale = calibration_data['pixscale']/3600.0
+                orientation = math.radians(calibration_data.get('orientation', 0.0))
+                hdr['CD1_1'] = -scale * np.cos(orientation)
+                hdr['CD1_2'] = scale * np.sin(orientation)
+                hdr['CD2_1'] = -scale * np.sin(orientation)
+                hdr['CD2_2'] = -scale * np.cos(orientation)
+                hdr['WCSAXES'] = 2
+                hdr['RADECSYS'] = 'ICRS'
+                hdul.flush()
+                print("WCS updated in FITS.")
+            # Re-open to verify changes:
+            with fits.open(filepath) as hdul_verify:
+                print("Updated header keys:", hdul_verify[0].header.keys())
+        except Exception as e:
+            print(f"Error updating FITS with WCS: {e}")
 
 class HDRWorker(QObject):
     """
@@ -9126,18 +10461,25 @@ class AddStarsDialog(QDialog):
         Uses the custom slot names if they have been renamed.
         """
         combo_box.clear()
-        combo_box.addItem("Select Slot")
-        parent = self.parent()  # Assume the parent has the custom slot names
+        # "Select Slot" item, with no slot data
+        combo_box.addItem("Select Slot", None)
+
+        parent = self.parent()  # The parent might have slot_names
         for slot in range(self.image_manager.max_slots):
             image = self.image_manager._images.get(slot, None)
             if image is not None:
                 if parent is not None and hasattr(parent, "slot_names"):
-                    # Use the renamed slot if it exists; otherwise, default to "Slot {slot}"
+                    # Use the renamed slot if it exists; otherwise default to "Slot {slot}"
                     name = parent.slot_names.get(slot, f"Slot {slot}")
                 else:
                     name = f"Slot {slot}"
-                combo_box.addItem(name)
-        combo_box.addItem("Load from File")  # Option to load from file
+
+                # --> Add the item with the *display text* = name and *data* = slot index
+                combo_box.addItem(name, slot)
+
+        # Option to load from file, store a sentinel like "file" or -1
+        combo_box.addItem("Load from File", "file")
+
 
     def load_image_from_file(self, source):
         """
@@ -9148,7 +10490,7 @@ class AddStarsDialog(QDialog):
             self,
             f"Select {'Starless' if source == 'starless' else 'Stars-Only'} Image",
             "",
-            "Image Files (*.png *.tif *.tiff *.fits *.jpg *.jpeg *.raw *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.jpg *.jpeg *.raw *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
         if filename:
             # Utilize the global load_image function
@@ -9170,49 +10512,55 @@ class AddStarsDialog(QDialog):
             self.update_preview()
 
     def load_starless_image(self):
-        """
-        Loads the starless image based on the selection in the combo box.
-        """
-        selected = self.starless_combo.currentText()
-        if selected.startswith("Slot"):
-            slot = int(selected.split()[-1])
+        """Loads the starless image based on the selection in the combo box."""
+        selected_data = self.starless_combo.currentData()
+
+        if selected_data is None:
+            # This is the "Select Slot" item
+            self.starless_image = None
+
+        elif selected_data == "file":
+            # "Load from File" is handled by the button, so do nothing here
+            pass
+
+        else:
+            # Here, selected_data should be the integer slot index
+            slot = selected_data  
             image = self.image_manager._images.get(slot, None)
             if image is not None:
                 self.starless_image = image.copy()
-                print(f"Starless image loaded from Slot {slot}.")
+                print(f"Starless image loaded from slot {slot}.")
             else:
                 QMessageBox.warning(self, "Empty Slot", f"Slot {slot} does not contain an image.")
                 self.starless_image = None
-        elif selected == "Load from File":
-            # Already handled via the "Load from File" button
-            pass
-        else:
-            self.starless_image = None
 
         self.update_preview()
 
+
     def load_stars_only_image(self):
-        """
-        Loads the stars-only image based on the selection in the combo box.
-        """
-        selected = self.stars_only_combo.currentText()
-        if selected.startswith("Slot"):
-            slot = int(selected.split()[-1])
+        """Loads the stars-only image based on the selection in the combo box."""
+        selected_data = self.stars_only_combo.currentData()
+
+        if selected_data is None:
+            # "Select Slot"
+            self.stars_only_image = None
+
+        elif selected_data == "file":
+            # "Load from File" is handled by the button
+            pass
+
+        else:
+            slot = selected_data
             image = self.image_manager._images.get(slot, None)
             if image is not None:
                 self.stars_only_image = image.copy()
-                print(f"Stars-only image loaded from Slot {slot}.")
+                print(f"Stars-only image loaded from slot {slot}.")
             else:
                 QMessageBox.warning(self, "Empty Slot", f"Slot {slot} does not contain an image.")
                 self.stars_only_image = None
-        elif selected == "Load from File":
-            # Already handled via the "Load from File" button
-            pass
-        else:
-            self.stars_only_image = None
 
         self.update_preview()
-
+        
     def blend_images(self):
         """
         Blends the starless and stars-only images based on the selected method and blend ratio.
@@ -9590,8 +10938,11 @@ class BackgroundNeutralizationDialog(QDialog):
 
         # Get the image dimensions
         height, width, channels = image.shape
+        if channels != 3:
+            QMessageBox.warning(self, "Not RGB", "Background Neutralization currently supports only 3-channel RGB images.")
+            return
 
-        # Calculate scaling factors
+        # Calculate scaling factors to map from scene coords to image coords
         scene_rect = self.scene.sceneRect()
         scale_x = width / scene_rect.width()
         scale_y = height / scene_rect.height()
@@ -9608,35 +10959,46 @@ class BackgroundNeutralizationDialog(QDialog):
         w = max(1, min(w, width - x))
         h = max(1, min(h, height - y))
 
-        sample_region = image[y:y + h, x:x + w, :]  # Extract the sample region
+        # Extract the sample region
+        sample_region = image[y:y + h, x:x + w, :]  # Shape: (h, w, 3)
 
         # Calculate medians for each channel
         medians = np.median(sample_region, axis=(0, 1))  # Shape: (3,)
+        # Compute the average of these three medians
         average_median = np.mean(medians)
 
-        # Calculate adjustments: average_median - channel_median
-        adjustments = average_median - medians  # Shape: (3,)
-
-        # Apply adjustments to the entire image
+        # Create a copy of the image for adjustments
         adjusted_image = image.copy()
-        for channel in range(3):
-            delta = adjustments[channel]
-            if delta > 0:
-                # Need to subtract delta from the channel
-                adjusted_image[:, :, channel] -= delta
-                # Prevent division by zero or negative values
-                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
-                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
-            elif delta < 0:
-                # Need to add delta (since delta is negative, this is subtraction)
-                adjusted_image[:, :, channel] += delta
-                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
-                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
-            # If delta == 0, no change
 
-        # Update the image in ImageManager
-        self.image_manager.update_image(
-            updated_image=adjusted_image,
+        # For each RGB channel, compute the difference and apply the formula
+        # newChannel = (oldChannel - diff) / (1 - diff),
+        # where diff = median(channel) - average_median
+        for c in range(3):
+            diff = medians[c] - average_median
+
+            # Numerator = old - diff
+            # Denominator = 1 - diff
+            # Make sure we handle any extreme edge cases where (1 - diff) could be 0 or negative
+            numerator = adjusted_image[:, :, c] - diff
+            denominator = 1.0 - diff
+
+            # Avoid division by zero or extremely small denominators
+            # (in normal circumstances, diff should be well within -1..1 for images in [0,1])
+            if abs(denominator) < 1e-8:
+                # If this occurs, you could skip or handle differently.
+                # For safety, just skip or clamp in real code:
+                denominator = 1e-8 if denominator >= 0 else -1e-8
+
+            new_values = numerator / denominator
+
+            # Clip the results to [0, 1] to remain in valid image range
+            new_values = np.clip(new_values, 0.0, 1.0)
+
+            adjusted_image[:, :, c] = new_values
+
+        # Update the image in the ImageManager
+        self.image_manager.set_image(
+            adjusted_image,
             metadata=self.image_manager._metadata[self.image_manager.current_slot]
         )
 
@@ -9645,7 +11007,7 @@ class BackgroundNeutralizationDialog(QDialog):
 
         # Close the dialog
         self.accept()
-        
+
 class RemoveGreenDialog(QDialog):
     def __init__(self, image_manager, mask_manager, parent=None):
         """
@@ -18064,7 +19426,9 @@ class FullCurvesTab(QWidget):
                 self.scrollArea.verticalScrollBar().value()
             )
             
-            self.fileLabel.setText(self.loaded_image_path if self.loaded_image_path else "")
+            if not isinstance(self.loaded_image_path, str):
+                self.loaded_image_path = ""
+            self.fileLabel.setText(self.loaded_image_path)
             
             # Update the UI elements (buttons, etc.)
             self.show_image(image)
@@ -19291,8 +20655,14 @@ class FrequencySeperationTab(QWidget):
             if self.image_manager.image is not None:
                 # Retrieve the file path from the metadata in ImageManager
                 file_path = self.image_manager._metadata[self.image_manager.current_slot].get('file_path', None)
-                # Update the file label with the basename of the file path
-                self.fileLabel.setText(os.path.basename(file_path) if file_path else "No file selected")
+
+                # If file_path is a string, get the basename; otherwise, use a default message.
+                if file_path and isinstance(file_path, str):
+                    display_name = os.path.basename(file_path)
+                else:
+                    display_name = "No file selected"
+
+                self.fileLabel.setText(display_name)
             else:
                 self.fileLabel.setText("No file selected")
 
