@@ -197,13 +197,13 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.2"
+VERSION = "2.10.3"
 
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
     icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
-    windowslogo_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+    windowslogo_path = os.path.join(sys._MEIPASS, 'astrosuite.ico')
     green_path = os.path.join(sys._MEIPASS, 'green.png')
     neutral_path = os.path.join(sys._MEIPASS, 'neutral.png')
     whitebalance_path = os.path.join(sys._MEIPASS, 'whitebalance.png')
@@ -228,7 +228,7 @@ if hasattr(sys, '_MEIPASS'):
     undoicon_path = os.path.join(sys._MEIPASS, 'undoicon.png')  
     redoicon_path = os.path.join(sys._MEIPASS, 'redoicon.png')  
     blastericon_path = os.path.join(sys._MEIPASS, 'blaster.png')
-    hdr_path = os.path.join(sys._MEIPASS, 'hdr.png')
+    hdr_path = os.path.join(sys._MEIPASS, 'hdr.png')  
     invert_path = os.path.join(sys._MEIPASS, 'invert.png')  
     fliphorizontal_path = os.path.join(sys._MEIPASS, 'fliphorizontal.png')
     flipvertical_path = os.path.join(sys._MEIPASS, 'flipvertical.png')
@@ -236,19 +236,19 @@ if hasattr(sys, '_MEIPASS'):
     rotatecounterclockwise_path = os.path.join(sys._MEIPASS, 'rotatecounterclockwise.png')
     maskcreate_path = os.path.join(sys._MEIPASS, 'maskcreate.png')
     maskapply_path = os.path.join(sys._MEIPASS, 'maskapply.png')
-    maskremove_path = os.path.join(sys._MEIPASS, 'maskremove.png')  
+    maskremove_path = os.path.join(sys._MEIPASS, 'maskremove.png')
     slot5_path = os.path.join(sys._MEIPASS, 'slot5.png')
     slot6_path = os.path.join(sys._MEIPASS, 'slot6.png')
     slot7_path = os.path.join(sys._MEIPASS, 'slot7.png')
     slot8_path = os.path.join(sys._MEIPASS, 'slot8.png')
     slot9_path = os.path.join(sys._MEIPASS, 'slot9.png') 
-    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')        
-    histogram_path = os.path.join(sys._MEIPASS, 'histogram.png')  
-    mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')    
+    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')   
+    histogram_path = os.path.join(sys._MEIPASS, 'histogram.png') 
+    mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
-    windowslogo_path = 'astrosuite.png'
+    windowslogo_path = 'astrosuite.ico'
     green_path = 'green.png'
     neutral_path = 'neutral.png'
     whitebalance_path = 'whitebalance.png'
@@ -287,9 +287,10 @@ else:
     slot7_path = 'slot7.png'
     slot8_path  = 'slot8.png'
     slot9_path  = 'slot9.png'
-    pixelmath_path = 'pixelmath.png'    
-    histogram_path = 'histogram.png'  
-    mosaic_path = 'mosaic.png'  
+    pixelmath_path = 'pixelmath.png'
+    histogram_path = 'histogram.png'
+    mosaic_path = 'mosaic.png'
+
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -5826,50 +5827,58 @@ def get_wcs_from_header(header):
     except Exception:
         return None
     
-def robust_api_request(method, url, data=None, files=None, max_retries=5, retry_delay=10, prompt_on_failure=False):
+def robust_api_request(method, url, data=None, files=None, prompt_on_failure=False):
     """
-    Sends an API request with automatic retries.
-    Handles network errors, invalid JSON responses, and API failures gracefully.
-    If prompt_on_failure is True, a dialog is shown after a failure asking if the user wants to try again.
+    Sends an API request without automatic retries. If the request fails (network error or invalid JSON response),
+    prompts the user if they want to start completely over. If the user chooses to try again,
+    the function calls itself recursively.
     """
-    for attempt in range(max_retries):
+    try:
+        if method == "GET":
+            response = requests.get(url, timeout=30)
+        elif method == "POST":
+            response = requests.post(url, data=data, files=files, timeout=30)
+        else:
+            raise ValueError("Unsupported request method: " + method)
+
+        response.raise_for_status()  # Raise HTTP errors (e.g., 500, 404)
+
         try:
-            if method == "GET":
-                response = requests.get(url, timeout=30)
-            elif method == "POST":
-                response = requests.post(url, data=data, files=files, timeout=30)
-            else:
-                raise ValueError("Unsupported request method: " + method)
-
-            response.raise_for_status()  # Raise HTTP errors (e.g., 500, 404)
-
-            try:
-                return response.json()  # Parse JSON response
-            except json.JSONDecodeError:
-                print(f"Attempt {attempt+1}: Invalid JSON response from {url}. Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                continue
-
-        except requests.exceptions.RequestException as e:
-            error_message = f"Attempt {attempt+1}: Network error when contacting {url}: {e}."
+            return response.json()  # Attempt to parse JSON
+        except json.JSONDecodeError:
+            error_message = f"Invalid JSON response from {url}."
             print(error_message)
             if prompt_on_failure:
-                # Prompt the user if they want to try again.
-                # (Pass None as parent if you don't have a reference to the main window.)
                 user_choice = QMessageBox.question(
                     None,
-                    "Network Error",
-                    f"{error_message}\nDo you want to try again?",
+                    "Invalid Response",
+                    f"{error_message}\nDo you want to start over?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                 )
-                if user_choice != QMessageBox.StandardButton.Yes:
+                if user_choice == QMessageBox.StandardButton.Yes:
+                    return robust_api_request(method, url, data, files, prompt_on_failure=prompt_on_failure)
+                else:
                     return None
             else:
-                print(f"Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
+                return None
 
-    print(f"Failed to get a valid response from {url} after {max_retries} attempts.")
-    return None  # Return None if all retries fail
+    except requests.exceptions.RequestException as e:
+        error_message = f"Network error when contacting {url}: {e}."
+        print(error_message)
+        if prompt_on_failure:
+            user_choice = QMessageBox.question(
+                None,
+                "Network Error",
+                f"{error_message}\nDo you want to start over?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if user_choice == QMessageBox.StandardButton.Yes:
+                return robust_api_request(method, url, data, files, prompt_on_failure=prompt_on_failure)
+            else:
+                return None
+        else:
+            return None
+
 
 def scale_image_for_display(image):
     """
@@ -6063,7 +6072,7 @@ class MosaicMasterDialog(QDialog):
 
         instructions = QLabel(
             "Mosaic Master:\n"
-            "1) Add images\n"
+            "1) Add images - Highly Recommend Images be Linear FITS\n"
             "2) Align & Create Mosaic\n"
             "3) Save to Image Manager"
         )
@@ -6392,8 +6401,33 @@ class MosaicMasterDialog(QDialog):
                 smooth_mask = smooth_mask / np.max(smooth_mask)
             else:
                 smooth_mask = binary_mask.astype(np.float32)
-            gamma = 0.5
-            smooth_mask = np.power(smooth_mask, gamma)
+            smooth_mask = cv2.GaussianBlur(smooth_mask, (15,15), 0)
+
+            # Intensity normalization in the overlapping region:
+            # Compute a grayscale version of the current mosaic.
+            if is_color:
+                mosaic_gray = np.mean(self.final_mosaic, axis=-1)
+            else:
+                mosaic_gray = self.final_mosaic
+
+            # Define the overlapping region: pixels where both the new image and the mosaic are nonzero.
+            #overlap_mask = (gray_aligned > 0) & (mosaic_gray > 0)
+            #if np.any(overlap_mask):
+            #    mosaic_median = np.mean(mosaic_gray[overlap_mask])
+            #    new_median = np.mean(gray_aligned[overlap_mask])
+            #    print(f"Before normalization: mosaic median = {mosaic_median}, new image median = {new_median}")
+            #    
+            #    # Adjust the new (aligned) image so that:
+            #    # new_image_adjusted = new_image - new_image_median + mosaic_median
+            #    aligned = aligned - new_median + mosaic_median
+
+                # For color images, compute the grayscale version of the adjusted image.
+            #    if aligned.ndim == 3:
+            #        adjusted_gray = np.mean(aligned, axis=-1)
+            #    else:
+            #        adjusted_gray = aligned
+            #    new_adjusted_median = np.median(adjusted_gray[overlap_mask])
+            #    print(f"After normalization: adjusted new image median = {new_adjusted_median}")
 
             # Accumulate the aligned image.
             if is_color:
@@ -6515,13 +6549,24 @@ class MosaicMasterDialog(QDialog):
         print(f"🔹 Found {len(new_signatures)} unique new image triangles")
         best_inliers = 0
         best_matrix = None
-        total_steps = sum(len(new_triplets) * len(mosaic_signatures.get(sig, [])) for sig, new_triplets in new_signatures.items())
-        step_count = 0
-        # Compute an approximate mosaic width from mosaic_stars (to use as a threshold for translation)
+
+        # For reporting progress:
+        total_signatures = len(new_signatures)
+        processed_signatures = 0
+        processed_candidates = 0
+
+        # Precompute an approximate mosaic width (for translation threshold).
         mosaic_x = [pt[0] for pt in mosaic_stars]
         mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
 
+        # Process each new signature.
         for target_sig, new_triplets in new_signatures.items():
+            processed_signatures += 1
+            # Update status at the top of each signature processing:
+            if processed_signatures % 100 == 0 or processed_signatures == total_signatures:
+                self.status_label.setText(f"Checking signature {processed_signatures}/{total_signatures}...")
+                QApplication.processEvents()
+
             closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
             if closest_match is None:
                 continue
@@ -6529,10 +6574,14 @@ class MosaicMasterDialog(QDialog):
             for new_tri in new_triplets:
                 new_points = np.float32([new_stars[i] for i in new_tri])
                 for mosaic_tri in mosaic_triplets:
-                    mosaic_points = np.float32([mosaic_stars[j] for j in mosaic_tri])
+                    processed_candidates += 1
+                    # Update status for each candidate.
+                    self.status_label.setText(f"Checked {processed_candidates} triangle candidates")
+                    QApplication.processEvents()
+                        
                     matrix, _ = cv2.estimateAffinePartial2D(
                         new_points.reshape(-1, 1, 2),
-                        mosaic_points.reshape(-1, 1, 2),
+                        np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
                         method=cv2.LMEDS
                     )
                     if matrix is None:
@@ -6542,26 +6591,20 @@ class MosaicMasterDialog(QDialog):
                     full_mat[:2] = matrix
 
                     # Failsafe 1: Check the scaling factor.
-                    # Compute the scale factors for the two column vectors of the linear part.
                     A = full_mat[:2, :2]
                     scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
                     scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
                     scale = (scale1 + scale2) / 2.0
-                    # If the scale changes by more than 2× or less than 0.5×, skip this transform.
                     if scale > 2.0 or scale < 0.5:
-                        #print(f"Rejecting transform due to scale: {scale}")
                         continue
 
                     # Failsafe 2: Check the translation.
                     t = full_mat[:2, 2]
-                    # Use half the mosaic width (or a fallback threshold) as the limit.
-                    # If mosaic_width is 0 (should not happen if stars exist), use a default (e.g., 100 pixels).
                     trans_threshold = (mosaic_width / 2.0) if mosaic_width > 0 else 100.0
                     if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
-                        #print(f"Rejecting transform due to translation: {t} (threshold {trans_threshold})")
                         continue
 
-                    # Count inliers by testing how many new star positions map near a mosaic star.
+                    # Count inliers: For each new star, test if its mapped position is within 3 pixels of any mosaic star.
                     inliers_count = 0
                     for (x, y) in new_stars:
                         src_pt = np.array([x, y, 1], dtype=np.float32)
@@ -6575,10 +6618,11 @@ class MosaicMasterDialog(QDialog):
                         best_inliers = inliers_count
                         best_matrix = full_mat
 
-                    step_count += 1
-                    progress_percent = step_count
-                    self.status_label.setText(f"Aligning triangles... Fit {progress_percent:.0f} triangles out of a possible 2300 complete")
-                    QApplication.processEvents()
+        # Final summary update.
+        summary = f"Triangle alignment complete: Checked {processed_candidates} candidates; best transform had {best_inliers} inliers."
+        print(summary)
+        self.status_label.setText(summary)
+        QApplication.processEvents()
         return best_matrix, best_inliers
 
     def stretch_for_display(self, arr):
@@ -10257,42 +10301,40 @@ class RGBCombinationDialog(QDialog):
                 r = self.image_manager._images.get(2).copy()
                 g = self.image_manager._images.get(3).copy()
                 b = self.image_manager._images.get(4).copy()
-                
-                # Ensure all images have the same dimensions
-                if not (r.shape == g.shape == b.shape):
-                    raise ValueError("All images must have the same dimensions.")
             else:
-                # Load images from file paths
-                r = cv2.imread(self.r_image_path, cv2.IMREAD_GRAYSCALE)
-                g = cv2.imread(self.g_image_path, cv2.IMREAD_GRAYSCALE)
-                b = cv2.imread(self.b_image_path, cv2.IMREAD_GRAYSCALE)
-                
+                # Load images using the global load_image function
+                r, _, _, _ = load_image(self.r_image_path)
+                g, _, _, _ = load_image(self.g_image_path)
+                b, _, _, _ = load_image(self.b_image_path)
+
                 if r is None or g is None or b is None:
                     raise ValueError("One or more images failed to load.")
-                
-                # Ensure all images have the same dimensions
-                if not (r.shape == g.shape == b.shape):
-                    raise ValueError("All images must have the same dimensions.")
-                
-                # Normalize images to [0,1]
-                r = r.astype('float32') / 255.0
-                g = g.astype('float32') / 255.0
-                b = b.astype('float32') / 255.0
-            
+
+            # Ensure images are grayscale (extract first channel if they are multi-channel)
+            if r.ndim == 3 and r.shape[2] > 1:
+                print("Red channel image has multiple channels, extracting first channel.")
+                r = r[:, :, 0]
+            if g.ndim == 3 and g.shape[2] > 1:
+                print("Green channel image has multiple channels, extracting first channel.")
+                g = g[:, :, 0]
+            if b.ndim == 3 and b.shape[2] > 1:
+                print("Blue channel image has multiple channels, extracting first channel.")
+                b = b[:, :, 0]
+
+            # Ensure all images have the same dimensions
+            if not (r.shape == g.shape == b.shape):
+                raise ValueError("All images must have the same dimensions.")
+
             # Stack channels to form RGB image
             rgb_image = np.stack([r, g, b], axis=2)
-            
-            # Check for grayscale images stored as RGB (all channels same)
-            if np.array_equal(r, g) and np.array_equal(r, b):
-                print("Detected grayscale image stored as RGB. Using only the red channel.")
-                rgb_image = np.stack([r, np.zeros_like(r), np.zeros_like(r)], axis=2)
-            
+
             self.rgb_image = rgb_image  # Store the combined image
             self.accept()  # Close the dialog with success
             print("RGB Combination successful.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to combine images: {e}")
             print(f"Error in RGB Combination: {e}")
+
 
 class StarNetThread(QThread):
     # Define signals to communicate with the main thread
@@ -20129,7 +20171,7 @@ class CurveEditor(QGraphicsView):
 
     def keyPressEvent(self, event):
         """Remove selected points on Delete key press."""
-        if event.key() == Qt.Key_Delete:
+        if event.key() == Qt.Key.Key_Delete:
             for point in self.control_points[:]:
                 if point.isSelected():
                     self.scene.removeItem(point)
