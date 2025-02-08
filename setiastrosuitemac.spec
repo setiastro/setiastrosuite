@@ -34,6 +34,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (directory + '/.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
+        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
         ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
