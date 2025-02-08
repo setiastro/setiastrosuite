@@ -1,5 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import (
+    collect_submodules,
+    collect_data_files,
+    collect_dynamic_libs
+)
+
+from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import get_package_paths
+
+# 1) Collect photutils data (including CITATION.rst).
+photutils_data = collect_data_files('photutils')
+
+# 2) Collect all photutils submodules (pure Python).
+photutils_submodules = collect_submodules('photutils')
+
+# 3) Collect any compiled libraries from photutils (the .pyd / .dll / .so).
+photutils_binaries = collect_dynamic_libs('photutils')
+
+
+# 1. Collect Dask data (templates, etc.)
+dask_data = collect_data_files('dask', include_py_files=False)
+from PyInstaller.utils.hooks import get_package_paths
+
+photutils_path = get_package_paths('photutils')[0]
+
 directory = '/Users/jackson/Documents/GitHub/setiastrosuite'
 
 a = Analysis(
@@ -58,8 +84,8 @@ a = Analysis(
         ('cvs.png', '.'), 
         (directory + '/.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
         (directory + '/.venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
-    ],
-    hiddenimports=[],
+    ] + dask_data+ photutils_data,
+    hiddenimports=[] + photutils_submodules,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
