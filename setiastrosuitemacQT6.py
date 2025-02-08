@@ -6517,6 +6517,10 @@ class MosaicMasterDialog(QDialog):
         best_matrix = None
         total_steps = sum(len(new_triplets) * len(mosaic_signatures.get(sig, [])) for sig, new_triplets in new_signatures.items())
         step_count = 0
+        # Compute an approximate mosaic width from mosaic_stars (to use as a threshold for translation)
+        mosaic_x = [pt[0] for pt in mosaic_stars]
+        mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
+
         for target_sig, new_triplets in new_signatures.items():
             closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
             if closest_match is None:
@@ -6533,8 +6537,31 @@ class MosaicMasterDialog(QDialog):
                     )
                     if matrix is None:
                         continue
+
                     full_mat = np.eye(3, dtype=np.float32)
                     full_mat[:2] = matrix
+
+                    # Failsafe 1: Check the scaling factor.
+                    # Compute the scale factors for the two column vectors of the linear part.
+                    A = full_mat[:2, :2]
+                    scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
+                    scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
+                    scale = (scale1 + scale2) / 2.0
+                    # If the scale changes by more than 2× or less than 0.5×, skip this transform.
+                    if scale > 2.0 or scale < 0.5:
+                        #print(f"Rejecting transform due to scale: {scale}")
+                        continue
+
+                    # Failsafe 2: Check the translation.
+                    t = full_mat[:2, 2]
+                    # Use half the mosaic width (or a fallback threshold) as the limit.
+                    # If mosaic_width is 0 (should not happen if stars exist), use a default (e.g., 100 pixels).
+                    trans_threshold = (mosaic_width / 2.0) if mosaic_width > 0 else 100.0
+                    if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
+                        #print(f"Rejecting transform due to translation: {t} (threshold {trans_threshold})")
+                        continue
+
+                    # Count inliers by testing how many new star positions map near a mosaic star.
                     inliers_count = 0
                     for (x, y) in new_stars:
                         src_pt = np.array([x, y, 1], dtype=np.float32)
@@ -6543,9 +6570,11 @@ class MosaicMasterDialog(QDialog):
                             if math.hypot(dst_pt[0] - mx, dst_pt[1] - my) < 3.0:
                                 inliers_count += 1
                                 break
+
                     if inliers_count > best_inliers:
                         best_inliers = inliers_count
                         best_matrix = full_mat
+
                     step_count += 1
                     progress_percent = step_count
                     self.status_label.setText(f"Aligning triangles... Fit {progress_percent:.0f} triangles out of a possible 2300 complete")
