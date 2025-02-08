@@ -6828,7 +6828,28 @@ class MosaicMasterDialog(QDialog):
 
             self.status_label.setText("Status: Uploading image to Astrometry.net...")
             QApplication.processEvents()
-            subid = self.upload_image_to_astrometry(item["path"], session_key)
+
+            # Check file extension; if it is not FITS/TIFF, convert using save_image
+            ext = os.path.splitext(item["path"])[1].lower()
+            if ext not in ('.fits', '.fit', '.tif', '.tiff'):
+                # Create a temporary file with a .tif extension.
+                temp_file = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
+                temp_file.close()  # Close it so save_image can write to it.
+                
+                # Here we assume you want 16-bit TIFF output. Adjust bit_depth as needed.
+                save_image(
+                    img_array=item["image"],
+                    filename=temp_file.name,
+                    original_format="tiff",
+                    bit_depth="16-bit",
+                    original_header=None,  # if not needed for TIFF saving in your use-case
+                    is_mono=item.get("is_mono", False)
+                )
+                upload_path = temp_file.name
+            else:
+                upload_path = item["path"]
+
+            subid = self.upload_image_to_astrometry(upload_path, session_key)
             if not subid:
                 if QMessageBox.question(self, "Upload Failed",
                                         "Image upload failed or no subid returned. Try again?",
@@ -6859,13 +6880,20 @@ class MosaicMasterDialog(QDialog):
                 else:
                     return None
 
-            # If all steps succeeded, exit the loop.
+            # If we created a temporary file, remove it after upload
+            if ext not in ('.fits', '.fit', '.tif', '.tiff'):
+                try:
+                    os.remove(upload_path)
+                except Exception as e:
+                    print("Could not remove temporary file:", e)
+
+            # Exit the loop once all steps have succeeded.
             break
 
         wcs_header = self.construct_wcs_header(calibration_data, item["image"].shape)
         if item["path"].lower().endswith(('.fits', '.fit')):
             self.update_fits_with_wcs(item["path"], calibration_data, wcs_header)
-        self.status_label.setText(f"Blind Solve Complete: Astrometric solution applied successfully.")
+        self.status_label.setText("Blind Solve Complete: Astrometric solution applied successfully.")
         item["wcs"] = WCS(wcs_header)
         return wcs_header
 
