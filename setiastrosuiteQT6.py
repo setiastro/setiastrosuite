@@ -197,7 +197,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.3"
+VERSION = "2.10.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -5835,9 +5835,9 @@ def robust_api_request(method, url, data=None, files=None, prompt_on_failure=Fal
     """
     try:
         if method == "GET":
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=600)
         elif method == "POST":
-            response = requests.post(url, data=data, files=files, timeout=30)
+            response = requests.post(url, data=data, files=files, timeout=600)
         else:
             raise ValueError("Unsupported request method: " + method)
 
@@ -5889,7 +5889,21 @@ def scale_image_for_display(image):
     scaled = (255 * (image - np.min(image)) / (np.max(image) - np.min(image))).astype(np.uint8)
     return scaled
 
-
+def generate_minimal_fits_header(image):
+    header = Header()
+    header['SIMPLE'] = True
+    # Set BITPIX according to the image’s data type.
+    if np.issubdtype(image.dtype, np.integer):
+        header['BITPIX'] = 16  # For 16-bit integer data.
+    elif np.issubdtype(image.dtype, np.floating):
+        header['BITPIX'] = -32  # For 32-bit float data.
+    else:
+        raise ValueError("Unsupported image data type for FITS header generation.")
+    header['NAXIS'] = 2
+    header['NAXIS1'] = image.shape[1]  # width
+    header['NAXIS2'] = image.shape[0]  # height
+    header['COMMENT'] = "Minimal header generated for blind solve"
+    return header
 
 def estimate_transform_from_triangles(mosaic_stars, new_stars):
     """
@@ -6073,8 +6087,13 @@ class MosaicMasterDialog(QDialog):
         instructions = QLabel(
             "Mosaic Master:\n"
             "1) Add images - Highly Recommend Images be Linear FITS\n"
-            "2) Align & Create Mosaic\n"
-            "3) Save to Image Manager"
+            "2) Choose Transformation Type:\n"
+            "....Partial Affine - Great for Images with Translation, Rotation, and Scaling Needs\n"
+            "....Affine - Great for Images that also have skew distortions\n"
+            "....Homography - Great for Images that also have lens or perspective distortion\n"
+            "....Spline - Most computationally expensive.  Great for local distortions\n"
+            "3) Align & Create Mosaic\n"
+            "4) Save to Image Manager"
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
@@ -6111,6 +6130,18 @@ class MosaicMasterDialog(QDialog):
         # Checkbox for forcing blind solve
         self.forceBlindCheckBox = QCheckBox("Force Blind Solve (ignore existing WCS)")
         layout.addWidget(self.forceBlindCheckBox)
+
+        self.transform_combo = QComboBox()
+        self.transform_combo.addItems([
+            "Partial Affine Transform",
+            "Affine Transform",
+            "Homography Transform",
+            "Spline Based Transform"
+        ])
+        # Set the default selection to "Affine Transform" (index 1)
+        self.transform_combo.setCurrentIndex(1)
+        layout.addWidget(QLabel("Select Transformation Method:"))
+        layout.addWidget(self.transform_combo)
 
         self.images_list = QListWidget()
         self.images_list.setSelectionMode(self.images_list.SelectionMode.SingleSelection)
@@ -6264,17 +6295,14 @@ class MosaicMasterDialog(QDialog):
         self.spinnerMovie.start()
         QApplication.processEvents()
 
-        # Step1: Determine if the user wants to force blind solve.
+        # Step 1: Force blind solve if requested.
         force_blind = self.forceBlindCheckBox.isChecked()
-
         if force_blind:
-            # Force a blind solve on every image.
             for item in self.loaded_images:
                 self.status_label.setText(f"Force blind solving {item['path']}...")
                 QApplication.processEvents()
                 self.perform_blind_solve(item)
         else:
-            # Only blind-solve images that lack a valid WCS.
             unsolved_images = [item for item in self.loaded_images if item["wcs"] is None]
             for item in unsolved_images:
                 self.status_label.setText(f"Blind solving {item['path']}...")
@@ -6302,14 +6330,12 @@ class MosaicMasterDialog(QDialog):
         mosaic_wcs.wcs.crpix[1] -= min_y
         self.wcs_metadata = mosaic_wcs.to_header()
 
-        # Determine whether we are processing any color images.
+        # Set up accumulators.
         is_color = any(not item["is_mono"] for item in wcs_items)
         if is_color:
-            # For color images, our accumulator is 3-channel.
             self.final_mosaic = np.zeros((mosaic_height, mosaic_width, 3), dtype=np.float32)
         else:
             self.final_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
-        # The weight mosaic is always 2D.
         self.weight_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
 
         first_image = True
@@ -6320,22 +6346,14 @@ class MosaicMasterDialog(QDialog):
 
             # Pre-stretch the image.
             stretched_arr = self.stretch_image(arr)
-            # For alignment, we want to work with identical data in all channels.
-            # (Even if the image is color, we use the first channel for alignment.)
+            # Use the first channel for alignment.
             if not itm["is_mono"]:
-                # For a color image, we assume the three channels contain the same (or very similar) data.
-                # Therefore, use only the red channel (channel 0) for alignment.
                 red_stretched = stretched_arr[..., 0]
             else:
-                # For mono images, take the first channel.
-                if stretched_arr.ndim == 3:
-                    red_stretched = stretched_arr[..., 0]
-                else:
-                    red_stretched = stretched_arr
+                red_stretched = stretched_arr[..., 0] if stretched_arr.ndim == 3 else stretched_arr
 
-            # Reproject the image once.
+            # Reproject the image.
             if not itm["is_mono"]:
-                # For color images, reproject each channel separately.
                 channels = []
                 for c in range(3):
                     channel = stretched_arr[..., c]
@@ -6343,55 +6361,51 @@ class MosaicMasterDialog(QDialog):
                     reproj = np.nan_to_num(reproj, nan=0.0).astype(np.float32)
                     channels.append(reproj)
                 reprojected = np.stack(channels, axis=-1)
-                # Also reproject the red channel (from our already stretched data).
                 reproj_red = reprojected[..., 0]
             else:
-                # For mono images, reproject the red channel.
                 reproj_red, _ = reproject_interp((red_stretched, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
                 reproj_red = np.nan_to_num(reproj_red, nan=0.0).astype(np.float32)
-                # Duplicate the mono result into 3 channels for accumulation.
                 reprojected = np.stack([reproj_red, reproj_red, reproj_red], axis=-1)
 
             self.status_label.setText(f"WCS Reproject: {itm['path']} processed.")
             QApplication.processEvents()
 
-            # Stellar alignment: use the red channel from the reprojected image for computing the warp.
+            # --- Stellar Alignment ---
             if not first_image:
-                mosaic_gray = (self.final_mosaic if self.final_mosaic.ndim == 2 
-                               else np.mean(self.final_mosaic, axis=-1))
-                if not itm["is_mono"]:
-                    # For a color image, compute the warp using the red channel.
-                    warp_matrix, best_inliers = self.star_refine_alignment_triangle(reproj_red, mosaic_gray, return_matrix=True)
-                    if warp_matrix is not None:
-                        # Apply the computed warp to each color channel.
-                        warped_channels = []
-                        for c in range(3):
-                            warped_channel = cv2.warpAffine(reprojected[..., c],
-                                                            warp_matrix[:2],
-                                                            (mosaic_width, mosaic_height),
-                                                            flags=cv2.INTER_LINEAR)
-                            warped_channels.append(warped_channel)
-                        aligned = np.stack(warped_channels, axis=-1)
-                        # For computing the weight mask, use the warped red channel.
-                        gray_aligned = aligned[..., 0]
-                    else:
-                        aligned = reprojected
-                        gray_aligned = np.mean(aligned, axis=-1)
+                mosaic_gray = self.final_mosaic if self.final_mosaic.ndim == 2 else np.mean(self.final_mosaic, axis=-1)
+                transform_method = self.transform_combo.currentText()
+                
+                # Always compute the affine transform first.
+                affine_transform, best_inliers = self.star_refine_alignment_triangle(reproj_red, mosaic_gray, return_matrix=True)
+                if affine_transform is not None:
+                    affine_aligned = cv2.warpAffine(reprojected, affine_transform[:2], (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
                 else:
-                    # Mono images use the existing routine.
-                    aligned_mono = self.star_refine_alignment_triangle(
-                        reprojected[..., 0],
-                        mosaic_gray
-                    )
-                    # Duplicate the aligned mono result into 3 channels.
-                    aligned = np.stack([aligned_mono]*3, axis=-1)
-                    gray_aligned = aligned[..., 0]
+                    affine_aligned = reprojected
+                    self.status_label.setText("Affine transform not found; using reprojected image.")
+                    QApplication.processEvents()
+                    affine_transform = np.eye(3, dtype=np.float32)
+                
+                # If the user selected a refined method, further refine the alignment.
+                if transform_method in ["Homography Transform", "Spline Based Transform"]:
+                    self.status_label.setText(f"Starting refined alignment using {transform_method}...")
+                    QApplication.processEvents()                    
+                    refined_result = self.refined_alignment(affine_aligned, mosaic_gray, method=transform_method)
+                    if refined_result is not None:
+                        # refined_result now returns (warped_image, inlier_count)
+                        
+                        aligned, best_inliers2 = refined_result
+                        self.status_label.setText(f"Refined alignment succeeded with {best_inliers2} inliers.")
+                    else:
+                        # If refinement fails, fall back to the affine result.
+                        self.status_label.setText("Refined alignment failed; falling back to affine alignment.")
+                        aligned = affine_aligned
+                else:
+                    aligned = affine_aligned
+                
+                gray_aligned = aligned[..., 0] if aligned.ndim == 3 else aligned
             else:
                 aligned = reprojected
-                if not itm["is_mono"]:
-                    gray_aligned = np.mean(aligned, axis=-1)
-                else:
-                    gray_aligned = aligned[..., 0]
+                gray_aligned = np.mean(aligned, axis=-1) if not itm["is_mono"] else aligned[..., 0]
                 first_image = False
 
             # Compute weight mask from the grayscale aligned image.
@@ -6401,33 +6415,7 @@ class MosaicMasterDialog(QDialog):
                 smooth_mask = smooth_mask / np.max(smooth_mask)
             else:
                 smooth_mask = binary_mask.astype(np.float32)
-            smooth_mask = cv2.GaussianBlur(smooth_mask, (15,15), 0)
-
-            # Intensity normalization in the overlapping region:
-            # Compute a grayscale version of the current mosaic.
-            if is_color:
-                mosaic_gray = np.mean(self.final_mosaic, axis=-1)
-            else:
-                mosaic_gray = self.final_mosaic
-
-            # Define the overlapping region: pixels where both the new image and the mosaic are nonzero.
-            #overlap_mask = (gray_aligned > 0) & (mosaic_gray > 0)
-            #if np.any(overlap_mask):
-            #    mosaic_median = np.mean(mosaic_gray[overlap_mask])
-            #    new_median = np.mean(gray_aligned[overlap_mask])
-            #    print(f"Before normalization: mosaic median = {mosaic_median}, new image median = {new_median}")
-            #    
-            #    # Adjust the new (aligned) image so that:
-            #    # new_image_adjusted = new_image - new_image_median + mosaic_median
-            #    aligned = aligned - new_median + mosaic_median
-
-                # For color images, compute the grayscale version of the adjusted image.
-            #    if aligned.ndim == 3:
-            #        adjusted_gray = np.mean(aligned, axis=-1)
-            #    else:
-            #        adjusted_gray = aligned
-            #    new_adjusted_median = np.median(adjusted_gray[overlap_mask])
-            #    print(f"After normalization: adjusted new image median = {new_adjusted_median}")
+            smooth_mask = cv2.GaussianBlur(smooth_mask, (15, 15), 0)
 
             # Accumulate the aligned image.
             if is_color:
@@ -6439,14 +6427,10 @@ class MosaicMasterDialog(QDialog):
             self.status_label.setText(f"Processed: {itm['path']}")
             QApplication.processEvents()
 
-        # Compute the weighted average.
+        # Final blending.
         nonzero_mask = (self.weight_mosaic > 0)
         if is_color:
-            self.final_mosaic = np.where(
-                self.weight_mosaic[..., None] > 0,
-                self.final_mosaic / self.weight_mosaic[..., None],
-                self.final_mosaic
-            )
+            self.final_mosaic = np.where(self.weight_mosaic[..., None] > 0, self.final_mosaic / self.weight_mosaic[..., None], self.final_mosaic)
         else:
             self.final_mosaic[nonzero_mask] = self.final_mosaic[nonzero_mask] / self.weight_mosaic[nonzero_mask]
 
@@ -6456,7 +6440,6 @@ class MosaicMasterDialog(QDialog):
         self.status_label.setText("Final Mosaic Ready.")
         QApplication.processEvents()
 
-        # For display, if the mosaic is 2D, convert to 3 channels.
         if self.final_mosaic.ndim == 2:
             display_image = np.stack([self.final_mosaic] * 3, axis=-1)
         else:
@@ -6467,14 +6450,18 @@ class MosaicMasterDialog(QDialog):
         self.spinnerMovie.stop()
         self.spinnerLabel.hide()
         QApplication.processEvents()
+
         
     # ---------- Star alignment using triangle matching ----------
     def star_refine_alignment_triangle(self, new_img, mosaic_img, return_matrix=False):
         """
-        Star alignment using triangle matching. Uses overlapping regions to determine
-        an affine transform that maps the new image into the mosaic coordinate frame.
-        If return_matrix is True, return the best transform (and inlier count) instead
-        of immediately warping the new_img.
+        Affine star alignment routine using triangle matching.
+        This routine always computes an affine (or partial affine) transform
+        based on the candidate overlap region.
+        
+        Returns:
+        - If return_matrix is True: (affine_transform, inlier_count)
+        - Otherwise, returns the warped image.
         """
         if not OPENCV_AVAILABLE:
             print("No cv2 available, skipping star refine.")
@@ -6483,17 +6470,15 @@ class MosaicMasterDialog(QDialog):
         self.status_label.setText("Star refine: Extracting overlapping region...")
         QApplication.processEvents()
 
+        # Compute overlap mask.
         overlap_mask = (mosaic_img > 0) & (new_img > 0)
-        overlap_pixel_count = np.count_nonzero(overlap_mask)
-        print(f"Star refine: Overlap pixel count = {overlap_pixel_count}")
-        if overlap_pixel_count < 500:
+        if np.count_nonzero(overlap_mask) < 500:
             print("Star refine: No sufficient overlap found.")
             return new_img if not return_matrix else (None, 0)
 
-        mosaic_for_stars = np.where(overlap_mask, mosaic_img, 0)
-        new_for_stars = np.where(overlap_mask, new_img, 0)
-        mosaic_stars = self.detect_stars(mosaic_for_stars, max_stars=25)
-        new_stars = self.detect_stars(new_for_stars, max_stars=25)
+        # Detect stars (with flux) in the masked regions.
+        mosaic_stars = self.detect_stars(np.where(overlap_mask, mosaic_img, 0), max_stars=25)
+        new_stars = self.detect_stars(np.where(overlap_mask, new_img, 0), max_stars=25)
         print(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
         self.status_label.setText(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
         QApplication.processEvents()
@@ -6502,24 +6487,135 @@ class MosaicMasterDialog(QDialog):
             print("Not enough overlap stars for triangle alignment; skipping.")
             return new_img if not return_matrix else (None, 0)
 
-        best_matrix, best_inliers = self.estimate_transform_from_triangles(mosaic_stars, new_stars)
+        # Choose method flag based solely on affine options.
+        transform_method = self.transform_combo.currentText()
+        if transform_method == "Partial Affine Transform":
+            method_flag = "partial_affine"
+        else:
+            method_flag = "affine"  # Treat all non-partial as full affine.
+        
+        best_matrix, best_inliers = self.estimate_transform_from_triangles(
+            [(s[0], s[1]) for s in mosaic_stars],
+            [(s[0], s[1]) for s in new_stars],
+            method=method_flag
+        )
+
         if best_matrix is None:
-            print("No triangle-based transform found.")
+            print("No transform found.")
             return new_img if not return_matrix else (None, 0)
 
         self.status_label.setText(f"Star refine: {best_inliers} inliers found, applying warp...")
         QApplication.processEvents()
         if return_matrix:
-            # Return the computed matrix (and inliers) for later use.
             return best_matrix, best_inliers
         else:
             H, W = mosaic_img.shape[:2]
             warped = cv2.warpAffine(new_img, best_matrix[:2], (W, H), flags=cv2.INTER_LINEAR)
-            print(f"Triangle-based star refine complete: {best_inliers} inliers, warped shape={warped.shape}")
-            self.status_label.setText("Triangle refine complete.")
+            print(f"Transform complete: {best_inliers} inliers, warped shape={warped.shape}")
+            self.status_label.setText("Star refine complete.")
             QApplication.processEvents()
             return warped
+
+
+    def refined_alignment(self, affine_aligned, mosaic_img, method="Homography Transform"):
+        """
+        Refined alignment that assumes affine_aligned is the result of the affine alignment step.
+        It re-detects stars in the candidate (overlap) region and computes a refined transform from
+        affine_aligned to mosaic_img. Then it applies the refined transform to affine_aligned and
+        returns the fully warped image.
         
+        Returns:
+        - For "Homography Transform": (warped_image, inlier_count)
+        - For "Spline Based Transform": (warped_image, inlier_count)
+        - If refinement fails, returns None.
+        """
+        print("\n--- Starting Refined Alignment ---")
+        self.status_label.setText("Refinement: Converting images to grayscale...")
+        QApplication.processEvents()
+        
+        # Convert images to grayscale
+        if affine_aligned.ndim == 3:
+            affine_aligned_gray = np.mean(affine_aligned, axis=-1)
+        else:
+            affine_aligned_gray = affine_aligned
+        if mosaic_img.ndim == 3:
+            mosaic_gray = np.mean(mosaic_img, axis=-1)
+        else:
+            mosaic_gray = mosaic_img
+
+        print("Grayscale conversion done.")
+        
+        # Compute overlap mask
+        self.status_label.setText("Refinement: Computing overlap mask...")
+        QApplication.processEvents()
+        overlap_mask = (mosaic_gray > 0) & (affine_aligned_gray > 0)
+
+        # Detect stars
+        self.status_label.setText("Refinement: Detecting stars in mosaic and affine-aligned images...")
+        QApplication.processEvents()
+        # Increase max_stars to 50 for debugging purposes.
+        mosaic_stars_masked = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=100)
+        new_stars_aligned = self.detect_stars(np.where(overlap_mask, affine_aligned_gray, 0), max_stars=100)
+
+        # Debug: Print out the star lists.
+        print("Mosaic stars (refined alignment):")
+        for s in mosaic_stars_masked:
+            print(f"({s[0]:.2f}, {s[1]:.2f}) flux: {s[2]:.2f}")
+        print("New stars (refined alignment):")
+        for s in new_stars_aligned:
+            print(f"({s[0]:.2f}, {s[1]:.2f}) flux: {s[2]:.2f}")
+
+        self.status_label.setText(f"Refinement: Detected {len(mosaic_stars_masked)} mosaic stars and {len(new_stars_aligned)} new stars.")
+        QApplication.processEvents()
+
+        if len(mosaic_stars_masked) < 4 or len(new_stars_aligned) < 4:
+            self.status_label.setText("Refinement: Not enough stars detected in candidate region.")
+            return None
+
+        # Match stars using position and flux.
+        self.status_label.setText("Refinement: Matching stars...")
+        QApplication.processEvents()
+        # For debugging, you might try a higher threshold.
+        matches = self.match_stars(new_stars_aligned, mosaic_stars_masked, distance_thresh=10.0, flux_thresh=1.0)
+        print(f"Matched stars: {len(matches)}")
+        self.status_label.setText(f"Refinement: {len(matches)} matches found.")
+        if len(matches) < 4:
+            self.status_label.setText("Refinement: Not enough matched stars for refined transform.")
+            return None
+
+        src_pts = np.float32([match[0][:2] for match in matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([match[1][:2] for match in matches]).reshape(-1, 1, 2)
+
+        if method == "Homography Transform":
+            self.status_label.setText("Refinement: Computing homography transform...")
+            QApplication.processEvents()
+            H_refined, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+            inliers = int(np.count_nonzero(mask)) if mask is not None else 0
+            self.status_label.setText(f"Refinement: Homography computed with {inliers} inliers. Warping image...")
+            QApplication.processEvents()
+            if H_refined is None:
+                self.status_label.setText("Refinement: Homography estimation failed.")
+                return None
+            warped_image = cv2.warpPerspective(affine_aligned, H_refined,
+                                                (affine_aligned.shape[1], affine_aligned.shape[0]),
+                                                flags=cv2.INTER_LINEAR)
+            return (warped_image, inliers)
+        elif method == "Spline Based Transform":
+            self.status_label.setText("Refinement: Computing TPS transform...")
+            QApplication.processEvents()
+            tps, inliers = self.estimate_spline_transform_from_stars(mosaic_stars_masked, new_stars_aligned)
+            if tps is None:
+                self.status_label.setText("Refinement: TPS estimation failed.")
+                return None
+            self.status_label.setText("Refinement: TPS computed. Warping image...")
+            QApplication.processEvents()
+            warped_image = tps.warpImage(affine_aligned)
+            return (warped_image, inliers)
+        else:
+            self.status_label.setText("Refinement: Unexpected transformation method.")
+            return None
+
+                    
     def build_triangle_signatures(self, stars):
         signature_map = {}
         for combo in itertools.combinations(range(len(stars)), 3):
@@ -6542,7 +6638,7 @@ class MosaicMasterDialog(QDialog):
                 return sig
         return None
 
-    def estimate_transform_from_triangles(self, mosaic_stars, new_stars):
+    def estimate_transform_from_triangles(self, mosaic_stars, new_stars, method="affine"):
         mosaic_signatures = self.build_triangle_signatures(mosaic_stars)
         new_signatures = self.build_triangle_signatures(new_stars)
         print(f"🔹 Found {len(mosaic_signatures)} unique mosaic triangles")
@@ -6550,19 +6646,15 @@ class MosaicMasterDialog(QDialog):
         best_inliers = 0
         best_matrix = None
 
-        # For reporting progress:
         total_signatures = len(new_signatures)
         processed_signatures = 0
         processed_candidates = 0
 
-        # Precompute an approximate mosaic width (for translation threshold).
         mosaic_x = [pt[0] for pt in mosaic_stars]
         mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
 
-        # Process each new signature.
         for target_sig, new_triplets in new_signatures.items():
             processed_signatures += 1
-            # Update status at the top of each signature processing:
             if processed_signatures % 100 == 0 or processed_signatures == total_signatures:
                 self.status_label.setText(f"Checking signature {processed_signatures}/{total_signatures}...")
                 QApplication.processEvents()
@@ -6575,36 +6667,49 @@ class MosaicMasterDialog(QDialog):
                 new_points = np.float32([new_stars[i] for i in new_tri])
                 for mosaic_tri in mosaic_triplets:
                     processed_candidates += 1
-                    # Update status for each candidate.
                     self.status_label.setText(f"Checked {processed_candidates} triangle candidates")
                     QApplication.processEvents()
-                        
-                    matrix, _ = cv2.estimateAffinePartial2D(
-                        new_points.reshape(-1, 1, 2),
-                        np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
-                        method=cv2.LMEDS
-                    )
+                    
+                    if method == "partial_affine":
+                        matrix, _ = cv2.estimateAffinePartial2D(
+                            new_points.reshape(-1, 1, 2),
+                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
+                            method=cv2.LMEDS
+                        )
+                    else:  # method == "affine" or default
+                        matrix, _ = cv2.estimateAffine2D(
+                            new_points.reshape(-1, 1, 2),
+                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
+                            method=cv2.LMEDS
+                        )
                     if matrix is None:
                         continue
 
                     full_mat = np.eye(3, dtype=np.float32)
                     full_mat[:2] = matrix
 
-                    # Failsafe 1: Check the scaling factor.
+                    # Failsafe: scaling check.
                     A = full_mat[:2, :2]
                     scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
                     scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
                     scale = (scale1 + scale2) / 2.0
-                    if scale > 2.0 or scale < 0.5:
+                    if scale > 1.25 or scale < 0.8:
                         continue
 
-                    # Failsafe 2: Check the translation.
+                    # Failsafe: translation check.
                     t = full_mat[:2, 2]
-                    trans_threshold = (mosaic_width / 2.0) if mosaic_width > 0 else 100.0
+                    trans_threshold = (mosaic_width / 3.0) if mosaic_width > 0 else 100.0
                     if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
                         continue
 
-                    # Count inliers: For each new star, test if its mapped position is within 3 pixels of any mosaic star.
+                    # Failsafe: rotation angle check.
+                    # Compute the rotation angle (in radians) from the matrix.
+                    # Here we use arctan2 on the first column (assuming a near-rotation+uniform scale).
+                    angle = np.arctan2(A[1, 0], A[0, 0])
+                    if abs(angle) > (np.pi / 4):  # 45 degrees ≈ 0.7854 radians.
+                        continue
+
+                    # Count inliers.
                     inliers_count = 0
                     for (x, y) in new_stars:
                         src_pt = np.array([x, y, 1], dtype=np.float32)
@@ -6618,12 +6723,53 @@ class MosaicMasterDialog(QDialog):
                         best_inliers = inliers_count
                         best_matrix = full_mat
 
-        # Final summary update.
         summary = f"Triangle alignment complete: Checked {processed_candidates} candidates; best transform had {best_inliers} inliers."
         print(summary)
         self.status_label.setText(summary)
         QApplication.processEvents()
         return best_matrix, best_inliers
+
+    def estimate_homography_from_stars(self, mosaic_stars, new_stars):
+        self.status_label.setText("Matching stars for homography...")
+        QApplication.processEvents()
+        matches = self.match_stars(new_stars, mosaic_stars, distance_thresh=20.0, flux_thresh=0.5)
+        if len(matches) < 4:
+            self.status_label.setText("Not enough matched stars for homography.")
+            return None, 0
+        self.status_label.setText(f"Found {len(matches)} matched stars. Computing homography...")
+        QApplication.processEvents()
+        src_pts = np.float32([match[0][:2] for match in matches]).reshape(-1, 1, 2)
+        dst_pts = np.float32([match[1][:2] for match in matches]).reshape(-1, 1, 2)
+        H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        inliers = int(np.count_nonzero(mask)) if mask is not None else 0
+        self.status_label.setText(f"Homography computed with {inliers} inliers.")
+        return H, inliers
+
+
+
+    def estimate_spline_transform_from_stars(self, mosaic_stars, new_stars):
+        self.status_label.setText("Matching stars for TPS transform...")
+        QApplication.processEvents()
+        if len(mosaic_stars) < 3 or len(new_stars) < 3:
+            self.status_label.setText("Not enough stars for TPS.")
+            return None, 0
+        n = min(len(mosaic_stars), len(new_stars))
+        # Extract only the (x,y) coordinates from each star.
+        src_pts = np.float32([s[:2] for s in new_stars[:n]]).reshape(n, 1, 2)
+        dst_pts = np.float32([s[:2] for s in mosaic_stars[:n]]).reshape(n, 1, 2)
+        matches = [cv2.DMatch(i, i, 0) for i in range(n)]
+        try:
+            tps = cv2.createThinPlateSplineShapeTransformer()
+            tps.estimateTransformation(src_pts, dst_pts, matches)
+            inliers = n  # For simplicity, count all as inliers.
+            self.status_label.setText("TPS transform estimated successfully.")
+            return tps, inliers
+        except Exception as e:
+            self.status_label.setText(f"TPS transform estimation failed: {e}")
+            return None, 0
+
+
+
 
     def stretch_for_display(self, arr):
         arr = arr.astype(np.float32)
@@ -6643,9 +6789,57 @@ class MosaicMasterDialog(QDialog):
         x_coords = sources['xcentroid'].data
         y_coords = sources['ycentroid'].data
         flux = sources['flux'].data
+        # Sort stars by brightness (flux) and take the top ones.
         sorted_indices = np.argsort(-flux)
         top_indices = sorted_indices[:max_stars]
-        return list(zip(x_coords[top_indices], y_coords[top_indices]))
+        stars = [(x_coords[i], y_coords[i], flux[i]) for i in top_indices]
+        return stars
+
+    def match_stars(self, new_stars, mosaic_stars, distance_thresh=10.0, flux_thresh=0.2):
+        """
+        Matches stars between two lists.
+        new_stars and mosaic_stars should be lists of (x, y, flux).
+        
+        This version normalizes the flux values in each list by dividing by the median flux.
+        
+        distance_thresh: maximum distance (in pixels) allowed for a match.
+        flux_thresh: allowed absolute difference in normalized flux.
+                    For example, if set to 0.2, then the normalized flux difference must be less than 0.2.
+                    
+        Returns a list of matched pairs: [(new_star, mosaic_star), ...]
+        """
+        # If either list is empty, return an empty match list.
+        if not new_stars or not mosaic_stars:
+            return []
+        
+        # Compute median fluxes.
+        new_fluxes = [s[2] for s in new_stars]
+        mosaic_fluxes = [s[2] for s in mosaic_stars]
+        new_median = np.median(new_fluxes) if new_fluxes else 1.0
+        mosaic_median = np.median(mosaic_fluxes) if mosaic_fluxes else 1.0
+
+        # Normalize the flux for each star.
+        norm_new_stars = [(s[0], s[1], s[2] / new_median) for s in new_stars]
+        norm_mosaic_stars = [(s[0], s[1], s[2] / mosaic_median) for s in mosaic_stars]
+
+        matches = []
+        for ns in norm_new_stars:
+            best_match = None
+            best_distance = float('inf')
+            for ms in norm_mosaic_stars:
+                dx = ns[0] - ms[0]
+                dy = ns[1] - ms[1]
+                dist = np.hypot(dx, dy)
+                # Check spatial proximity.
+                if dist < distance_thresh and dist < best_distance:
+                    # Check if the normalized fluxes are similar.
+                    # Here, flux_thresh is an absolute threshold on the difference.
+                    if abs(ns[2] - ms[2]) < flux_thresh:
+                        best_match = ms
+                        best_distance = dist
+            if best_match is not None:
+                matches.append((ns, best_match))
+        return matches
 
     def estimate_transform(self, source_stars, dest_stars):
         min_len = min(len(source_stars), len(dest_stars))
@@ -6872,6 +7066,7 @@ class MosaicMasterDialog(QDialog):
 
 
     # ---------- Blind Solve via Astrometry.net ----------
+    # ---------- Blind Solve via Astrometry.net ----------
     def perform_blind_solve(self, item):
         """
         Performs a blind solve using Astrometry.net and constructs the WCS header directly.
@@ -6901,20 +7096,25 @@ class MosaicMasterDialog(QDialog):
             self.status_label.setText("Status: Uploading image to Astrometry.net...")
             QApplication.processEvents()
 
-            # Check file extension; if it is not FITS/TIFF, convert using save_image
+            # Determine the file extension of the original image.
             ext = os.path.splitext(item["path"])[1].lower()
+            # If the image is not already FITS or TIFF, convert it.
             if ext not in ('.fits', '.fit', '.tif', '.tiff'):
-                # Create a temporary file with a .tif extension.
-                temp_file = tempfile.NamedTemporaryFile(suffix=".tif", delete=False)
-                temp_file.close()  # Close it so save_image can write to it.
-                
-                # Here we assume you want 16-bit TIFF output. Adjust bit_depth as needed.
+                # Create a temporary file with a .fit extension.
+                temp_file = tempfile.NamedTemporaryFile(suffix=".fit", delete=False)
+                temp_file.close()  # Close it so that save_image can write to it.
+
+                # Generate a minimal FITS header from the image array.
+                minimal_header = generate_minimal_fits_header(item["image"])
+
+                # Save the image as a FITS file using the minimal header.
+                # (Adjust bit_depth as needed.)
                 save_image(
                     img_array=item["image"],
                     filename=temp_file.name,
-                    original_format="tiff",
+                    original_format="fit",
                     bit_depth="16-bit",
-                    original_header=None,  # if not needed for TIFF saving in your use-case
+                    original_header=minimal_header,
                     is_mono=item.get("is_mono", False)
                 )
                 upload_path = temp_file.name
@@ -6952,7 +7152,7 @@ class MosaicMasterDialog(QDialog):
                 else:
                     return None
 
-            # If we created a temporary file, remove it after upload
+            # If we created a temporary file (i.e. the original file wasn’t FITS or TIFF), remove it.
             if ext not in ('.fits', '.fit', '.tif', '.tiff'):
                 try:
                     os.remove(upload_path)
@@ -9975,32 +10175,26 @@ class ImagePreview(QWidget):
             self.is_autostretched = False
             self.update_image_display()
         else:
-            # Perform AutoStretch and display it
+            # Perform AutoStretch using the global stretch functions (target median = 0.25) and display it
             self.is_autostretched = True
             self.stretched_image_data = self.stretch_image(self.image_data)
             self.update_image_display()
 
     def stretch_image(self, image):
         """
-        Perform an unlinked linear stretch on the image.
-        Each channel is stretched independently to enhance visualization.
+        Apply the global stretch functions to the image with a target median of 0.25.
+        For grayscale images, use stretch_mono_image.
+        For color images, use stretch_color_image.
         """
-        if image.ndim == 2:  # Grayscale image
-            channels = [image]
-        else:  # RGB image
-            channels = [image[..., i] for i in range(image.shape[2])]
-
-        stretched_channels = []
-        for channel in channels:
-            channel_min = np.min(channel)
-            channel_max = np.max(channel)
-            stretched_channel = (channel - channel_min) / (channel_max - channel_min + 1e-6)
-            stretched_channels.append(stretched_channel)
-
-        if len(stretched_channels) == 1:
-            return stretched_channels[0]  # Return grayscale
+        target_median = 0.25
+        if image.ndim == 2:
+            # Grayscale image
+            return stretch_mono_image(image, target_median)
+        elif image.ndim == 3:
+            # Color image (assumes channels are in the last dimension)
+            return stretch_color_image(image, target_median)
         else:
-            return np.stack(stretched_channels, axis=-1)  # Return RGB
+            raise ValueError("Unsupported image dimensions: must be 2D or 3D")
 
     def update_image_display(self):
         """Update the QLabel with the current image."""
