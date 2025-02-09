@@ -197,7 +197,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.4"
+VERSION = "2.10.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -896,6 +896,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
         # Set the layout for the main window
         central_widget = QWidget(self)  # Create a central widget
@@ -944,6 +945,12 @@ class AstroEditingSuite(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
+
+    def on_tab_changed(self, index):
+        current_tab = self.tabs.widget(index)
+        # Check if the tab has a 'refresh' method.
+        if hasattr(current_tab, "refresh"):
+            current_tab.refresh()
 
     def open_mosaic_master(self):
         """
@@ -2698,7 +2705,6 @@ class AstroEditingSuite(QMainWindow):
         else:
             print(f"No preview window found for Slot {slot} to remove.")
 
-
     def on_image_changed(self, slot, image, metadata):
         """Update the file name in the status bar and refresh preview if open."""
         file_path = metadata.get('file_path', None)
@@ -4087,6 +4093,10 @@ class ImageManager(QObject):
         self.active_previews = {}  # Track active preview windows by slot
         self.mask_manager = MaskManager(max_slots)  # Add a MaskManager
         self.current_slot = 0  # Default slot
+
+    def get_current_image_and_metadata(self):
+        slot = self.current_slot
+        return self._images[slot], self._metadata[slot]
 
     def get_mask(self, slot=None):
         """
@@ -7099,7 +7109,7 @@ class MosaicMasterDialog(QDialog):
             # Determine the file extension of the original image.
             ext = os.path.splitext(item["path"])[1].lower()
             # If the image is not already FITS or TIFF, convert it.
-            if ext not in ('.fits', '.fit', '.tif', '.tiff'):
+            if ext not in ('.fits', '.fit'):
                 # Create a temporary file with a .fit extension.
                 temp_file = tempfile.NamedTemporaryFile(suffix=".fit", delete=False)
                 temp_file.close()  # Close it so that save_image can write to it.
@@ -13268,11 +13278,22 @@ class XISFViewer(QWidget):
         self.setLayout(main_layout)
         self.setWindowTitle("XISF Liberator V1.2")
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         This method is triggered when the image in ImageManager changes.
         It updates the UI with the new image.
         """
+        if not self.isVisible():
+            return        
         if image is None:
             return
 
@@ -15800,11 +15821,22 @@ class CosmicClarityTab(QWidget):
         else:
             print("No saved Cosmic Clarity folder found in QSettings.")
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return
         if slot == self.image_manager.current_slot:
             self.loaded_image_path = metadata.get('file_path', None)
             self.original_header = metadata.get('original_header', None)
@@ -18018,11 +18050,22 @@ class StatisticalStretchTab(QWidget):
         self.dragging = False
         self.last_pos = QPoint()
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return        
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -18666,11 +18709,22 @@ class StarStretchTab(QWidget):
             self.undoButton.setEnabled(self.image_manager.can_undo())
             self.redoButton.setEnabled(self.image_manager.can_redo())
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return        
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -19690,12 +19744,22 @@ class FullCurvesTab(QWidget):
 
         return super().eventFilter(source, event)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
 
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return        
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -20918,6 +20982,15 @@ class FrequencySeperationTab(QWidget):
         self.on_radius_changed(self.radiusSlider.value())
         self.on_tolerance_changed(self.toleranceSlider.value())
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     # -----------------------------
     # Image Manager Integration
     # -----------------------------
@@ -20926,6 +20999,8 @@ class FrequencySeperationTab(QWidget):
         Slot to handle image changes from ImageManager.
         Updates the FrequencySeperationTab if the change is relevant.
         """
+        if not self.isVisible():
+            return        
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -24226,11 +24301,22 @@ class HaloBGonTab(QWidget):
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return        
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
