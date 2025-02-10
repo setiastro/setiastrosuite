@@ -15836,7 +15836,9 @@ class CosmicClarityTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return
+            return     
+        if image is None:
+            return 
         if slot == self.image_manager.current_slot:
             self.loaded_image_path = metadata.get('file_path', None)
             self.original_header = metadata.get('original_header', None)
@@ -18065,7 +18067,9 @@ class StatisticalStretchTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return        
+            return     
+        if image is None:
+            return       
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -18724,7 +18728,9 @@ class StarStretchTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return        
+            return     
+        if image is None:
+            return     
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -19759,7 +19765,9 @@ class FullCurvesTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return        
+            return     
+        if image is None:
+            return 
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -20997,10 +21005,12 @@ class FrequencySeperationTab(QWidget):
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
-        Updates the FrequencySeperationTab if the change is relevant.
+        Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return        
+            return     
+        if image is None:
+            return      
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -23748,6 +23758,10 @@ class NBtoRGBstarsTab(QWidget):
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return     
+        if image is None:
+            return 
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -24316,7 +24330,9 @@ class HaloBGonTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return        
+            return     
+        if image is None:
+            return      
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -25008,6 +25024,10 @@ class ContinuumSubtractTab(QWidget):
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return     
+        if image is None:
+            return 
         if slot == 0:  # Assuming slot 0 is used for shared images
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
