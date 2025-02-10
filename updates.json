@@ -1,9 +1,9 @@
 {
-  "version": "2.10.5",
+  "version": "2.10.6",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.5/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.5/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.6/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.6/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.6/setiastrosuite_linux"
   },
-  "notes": "Much faster opening and applying changes to files.  Images now render when needed in the active tab instead of opening the image every time for every change in everytab.  New transformations in Mosaic Master: Partial Affine, Affine, Homography, and Spline, further failsafes to prevent transformations from rotating the images too far.  Increased timeout to astrometry.net and defaults to saving all files as fits to astrometry.net for improved web handling.  Bug Fix: Slot Preview autostretch "
+  "notes": "You can now choose which slot is the active slot greatly easing manipulation of your images for processing in SAS.   "
 }
