@@ -163,7 +163,8 @@ from PyQt6.QtGui import (
     QBrush,
     QShortcut,
     QPolygon,
-    QPalette,  
+    QPalette, 
+    QWheelEvent, 
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -197,7 +198,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.4"
+VERSION = "2.10.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -869,13 +870,28 @@ class AstroEditingSuite(QMainWindow):
         self.statusBar = QStatusBar(self)
         self.setStatusBar(self.statusBar)
 
-        # Create the file label to display the current file name in the status bar
+        # File label (left side)
         self.file_name_label = QLabel("No file selected")
-        self.statusBar.addWidget(self.file_name_label, 1)  # Add label to status bar
+        self.statusBar.addWidget(self.file_name_label)  # Adds on the left
 
-        # Dimension label in the status bar
+        # Create a container widget for the active slot label in the center.
+        middleWidget = QWidget()
+        middleLayout = QHBoxLayout(middleWidget)
+        middleLayout.setContentsMargins(0, 0, 0, 0)  # Remove extra margins
+        # Add stretch before and after the active slot label to center it.
+        middleLayout.addStretch(1)
+        self.active_slot_label = QLabel("Active Slot: 0")
+        middleLayout.addWidget(self.active_slot_label)
+        middleLayout.addStretch(1)
+        # Add the middle widget with an expanding stretch factor (here using 1)
+        self.statusBar.addWidget(middleWidget, 1)
+
+        # Dimension label (right side)
         self.dim_label = QLabel("0 x 0")
-        self.statusBar.addWidget(self.dim_label)
+        self.statusBar.addPermanentWidget(self.dim_label)  # Adds on the right
+
+        # Connect the image_manager's signal to update the active slot label.
+        self.image_manager.current_slot_changed.connect(self.update_active_slot_label)
 
         # --------------------
         # Tab Widget
@@ -896,6 +912,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
+        self.tabs.currentChanged.connect(self.on_tab_changed)
 
         # Set the layout for the main window
         central_widget = QWidget(self)  # Create a central widget
@@ -945,6 +962,18 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
 
+    def on_tab_changed(self, index):
+        current_tab = self.tabs.widget(index)
+        # Check if the tab has a 'refresh' method.
+        if hasattr(current_tab, "refresh"):
+            current_tab.refresh()
+
+    def update_active_slot_label(self, slot):
+        # Look up the custom name for this slot; if none exists, fall back to "Slot {slot}"
+        slot_name = self.slot_names.get(slot, f"Slot {slot}")
+        self.active_slot_label.setText(f"Active Slot: {slot_name}")
+
+
     def open_mosaic_master(self):
         """
         Opens a new MosaicMasterDialog (or QMainWindow) where the user can
@@ -956,10 +985,11 @@ class AstroEditingSuite(QMainWindow):
 
     def save_project(self):
         """Save all project data to a single file."""
+        default_dir = self.settings.value("working_directory", "")
         fileName, _ = QFileDialog.getSaveFileName(
             self,
             "Save Project",
-            "",
+            default_dir,
             "Astro Project Files (*.sas)"
         )
         if not fileName:
@@ -995,10 +1025,11 @@ class AstroEditingSuite(QMainWindow):
 
     def open_project(self):
         """Open a project file and repopulate all managers and UI elements."""
+        default_dir = self.settings.value("working_directory", "")
         fileName, _ = QFileDialog.getOpenFileName(
             self,
             "Open Project",
-            "",
+            default_dir,
             "Astro Project Files (*.sas)"
         )
         if not fileName:
@@ -1275,11 +1306,12 @@ class AstroEditingSuite(QMainWindow):
 
     def load_mask(self):
         """Load a mask from a file."""
+        default_dir = self.settings.value("working_directory", "")
         # Open a file dialog to select the mask file
         filename, _ = QFileDialog.getOpenFileName(
             self, 
             "Load Mask", 
-            "", 
+            default_dir, 
             "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
         )
         if not filename:
@@ -1332,6 +1364,7 @@ class AstroEditingSuite(QMainWindow):
 
     def save_mask(self):
         """Save the active mask to a file."""
+        default_dir = self.settings.value("working_directory", "")
         try:
             # Prompt the user to select the mask slot to save
             max_slots = self.mask_manager.max_slots  # Ensure MaskManager has max_slots attribute
@@ -1364,7 +1397,7 @@ class AstroEditingSuite(QMainWindow):
             filename, _ = QFileDialog.getSaveFileName(
                 self, 
                 "Save Mask", 
-                "", 
+                default_dir,
                 "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
             )
             if not filename:
@@ -1870,42 +1903,45 @@ class AstroEditingSuite(QMainWindow):
         dialog.setWindowTitle("Preferences")
         layout = QVBoxLayout(dialog)
         
-        # Display stored settings
+        # Display stored settings using a form layout.
         settings_form = QFormLayout()
         
-        # Add settings fields dynamically
+        # Add settings fields dynamically, including a Working Directory.
         settings_fields = {
             "GraXpert Path": ("graxpert/path", self.settings.value("graxpert/path", "")),
             "StarNet Executable Path": ("starnet/exe_path", self.settings.value("starnet/exe_path", "")),
-            "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", ""))
+            "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", "")),
+            "Working Directory": ("working_directory", self.settings.value("working_directory", ""))
         }
         
-        # Create fields for each setting with folder selection icons
+        # Create fields for each setting with folder or file selection buttons.
         input_fields = {}
         for label, (key, value) in settings_fields.items():
             field_widget = QWidget()
             field_layout = QHBoxLayout(field_widget)
             field_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Text field
+            # Create the QLineEdit with the stored value.
             field = QLineEdit(value)
             input_fields[key] = field
             field_layout.addWidget(field)
             
-            # Selection button
+            # Create a selection button.
             select_button = QPushButton("...")
             select_button.setFixedWidth(30)
+            # For "StarNet Executable Path", use file selection.
             if label == "StarNet Executable Path":
                 select_button.setToolTip(f"Select file for {label}")
-                select_button.clicked.connect(lambda _, f=field: self.select_file(f))  # File selection for StarNet
+                select_button.clicked.connect(lambda _, f=field: self.select_file(f))
             else:
+                # For the other fields (including Working Directory), use folder selection.
                 select_button.setToolTip(f"Select folder for {label}")
-                select_button.clicked.connect(lambda _, f=field: self.select_folder(f))  # Folder selection for others
+                select_button.clicked.connect(lambda _, f=field: self.select_folder(f))
             field_layout.addWidget(select_button)
             
             settings_form.addRow(label, field_widget)
         
-        # Add the other fields without folder selection (e.g., Astrometry API Key, Latitude, etc.)
+        # Add additional fields without folder/file selection.
         additional_fields = {
             "Astrometry API Key": ("astrometry_api_key", self.settings.value("astrometry_api_key", "")),
             "Latitude": ("latitude", self.settings.value("latitude", "")),
@@ -1922,16 +1958,18 @@ class AstroEditingSuite(QMainWindow):
         
         layout.addLayout(settings_form)
         
-        # Add Clear and Save buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Reset | QDialogButtonBox.StandardButton.Cancel)
+        # Add Clear, Save, and Cancel buttons.
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save |
+                                QDialogButtonBox.StandardButton.Reset |
+                                QDialogButtonBox.StandardButton.Cancel)
         
-        # Save button logic
+        # Save button: call your save_preferences method.
         buttons.accepted.connect(lambda: self.save_preferences(input_fields, dialog))
         
-        # Clear button logic
+        # Clear button: call your clear_preferences method.
         buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
         
-        # Close dialog on cancel
+        # Cancel button: simply reject/close the dialog.
         buttons.rejected.connect(dialog.reject)
         
         layout.addWidget(buttons)
@@ -2697,7 +2735,6 @@ class AstroEditingSuite(QMainWindow):
             print(f"Preview window for Slot {slot} has been closed and removed from tracking.")
         else:
             print(f"No preview window found for Slot {slot} to remove.")
-
 
     def on_image_changed(self, slot, image, metadata):
         """Update the file name in the status bar and refresh preview if open."""
@@ -3484,8 +3521,9 @@ class AstroEditingSuite(QMainWindow):
             self.mask_banner.setStyleSheet("background-color: transparent; color: #dcdcdc; font-size: 14px; padding: 5px;")
 
     def open_image(self):
+        default_dir = self.settings.value("working_directory", "")
         """Open an image and load it into the ImageManager."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", 
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", default_dir, 
                                             "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
         if file_path:
@@ -3506,11 +3544,12 @@ class AstroEditingSuite(QMainWindow):
 
     def save_image(self):
         """Save the current image to a selected path."""
+        default_dir = self.settings.value("working_directory", "")
         if self.image_manager.image is not None:
             save_file, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save As",
-                "",
+                default_dir,
                 "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
             )
             
@@ -4070,6 +4109,7 @@ class ImageManager(QObject):
     # - image (np.ndarray): The new image data.
     # - metadata (dict): Associated metadata for the image.
     image_changed = pyqtSignal(int, np.ndarray, dict)
+    current_slot_changed = pyqtSignal(int)    
 
     def __init__(self, max_slots=5):
         """
@@ -4086,7 +4126,11 @@ class ImageManager(QObject):
         self.current_slot = 0  # Default to the first slot
         self.active_previews = {}  # Track active preview windows by slot
         self.mask_manager = MaskManager(max_slots)  # Add a MaskManager
-        self.current_slot = 0  # Default slot
+
+
+    def get_current_image_and_metadata(self):
+        slot = self.current_slot
+        return self._images[slot], self._metadata[slot]
 
     def get_mask(self, slot=None):
         """
@@ -4120,11 +4164,13 @@ class ImageManager(QObject):
     def set_current_slot(self, slot):
         """
         Sets the current active slot if the slot number is valid and has an image.
-        
         :param slot: The slot number to activate.
         """
         if 0 <= slot < self.max_slots and self._images[slot] is not None:
             self.current_slot = slot
+            # Emit the new current_slot_changed signal
+            self.current_slot_changed.emit(slot)
+            # Also emit image_changed so that any UI that listens for image updates will refresh
             self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
             print(f"ImageManager: Current slot set to {slot}.")
         else:
@@ -5124,6 +5170,14 @@ class MaskCreationDialog(QDialog):
         mask_pixmap = self.convert_to_pixmap(mask)
         self.image_label.setPixmap(mask_pixmap)
 
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     # Zoom Methods
     def zoom_in(self):
@@ -7099,7 +7153,7 @@ class MosaicMasterDialog(QDialog):
             # Determine the file extension of the original image.
             ext = os.path.splitext(item["path"])[1].lower()
             # If the image is not already FITS or TIFF, convert it.
-            if ext not in ('.fits', '.fit', '.tif', '.tiff'):
+            if ext not in ('.fits', '.fit'):
                 # Create a temporary file with a .fit extension.
                 temp_file = tempfile.NamedTemporaryFile(suffix=".fit", delete=False)
                 temp_file.close()  # Close it so that save_image can write to it.
@@ -7925,6 +7979,15 @@ class WaveScaleHDRDialog(QDialog):
     # -------------------------------------------------------------------------
     # ZOOM METHODS
     # -------------------------------------------------------------------------
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
     def _zoom_in(self):
         new_zoom = self.zoom_factor * self.zoom_step
         if new_zoom <= self.zoom_max:
@@ -8981,6 +9044,15 @@ class BlemishBlasterDialog(QDialog):
                 f"An error occurred while applying changes:\n{str(e)}"
             )
             print(f"ERROR in apply_changes: {e}")
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         """Zoom in the image by a predefined step."""
@@ -10106,15 +10178,18 @@ class ImagePreview(QWidget):
         self.autostretch_button = QPushButton("AutoStretch")
         self.autostretch_button.clicked.connect(self.apply_autostretch)
 
-        # Create Swap Button (visible for all slots except Slot 0)
-        if self.slot != 0:
-            self.swap_button = QPushButton(f"Swap with Slot 0")
-            self.swap_button.clicked.connect(self.swap_with_slot_zero)
-            swap_layout = QHBoxLayout()
-            swap_layout.addStretch()
-            swap_layout.addWidget(self.swap_button)
-        else:
-            swap_layout = QHBoxLayout()  # Empty layout
+        # Create the "Make Active" Button.
+        # (We disable it if this slot is already active.)
+        self.make_active_button = QPushButton("Make Active")
+        if self.parent() is not None and hasattr(self.parent(), 'image_manager'):
+            current_active_slot = self.parent().image_manager.current_slot
+            if current_active_slot == self.slot:
+                self.make_active_button.setEnabled(False)
+        self.make_active_button.clicked.connect(self.make_slot_active)
+        
+        swap_layout = QHBoxLayout()
+        swap_layout.addStretch()
+        swap_layout.addWidget(self.make_active_button)
 
         # Layout for zoom controls
         zoom_layout = QHBoxLayout()
@@ -10136,37 +10211,55 @@ class ImagePreview(QWidget):
         self._pan_start_x = 0
         self._pan_start_y = 0
 
+    def make_slot_active(self):
+        """Sets this preview's slot as the active slot in the image manager."""
+        if self.parent() is not None and hasattr(self.parent(), 'image_manager'):
+            self.parent().image_manager.set_current_slot(self.slot)
+            self.close()  # Optionally close the preview window after setting the active slot
+        else:
+            QMessageBox.critical(self, "Error", "Parent does not have an image manager.")
+
     def eventFilter(self, source, event):
         """
-        Intercept mouse events on the scroll area's viewport to implement panning.
+        Intercept events on the scroll area's viewport to implement panning and zooming.
         """
         if source == self.scroll_area.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                # When the wheel is scrolled, adjust zoom.
+                if event.angleDelta().y() > 0:
+                    self.adjust_zoom(10)  # Zoom in (increase slider value by 10)
+                else:
+                    self.adjust_zoom(-10)  # Zoom out (decrease slider value by 10)
+                event.accept()
+                return True  # Indicate the event has been handled.
+
             if event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._panning = True
                     self._pan_start_x = event.position().x()
                     self._pan_start_y = event.position().y()
                     self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
-                    return True  # Event handled
+                    return True  # Event handled.
             elif event.type() == QEvent.Type.MouseMove:
                 if self._panning and (event.buttons() & Qt.MouseButton.LeftButton):
                     delta_x = event.position().x() - self._pan_start_x
                     delta_y = event.position().y() - self._pan_start_y
-                    # Adjust scroll bars
+                    # Adjust scroll bars for panning.
                     new_h = self.scroll_area.horizontalScrollBar().value() - int(delta_x)
                     new_v = self.scroll_area.verticalScrollBar().value() - int(delta_y)
                     self.scroll_area.horizontalScrollBar().setValue(new_h)
                     self.scroll_area.verticalScrollBar().setValue(new_v)
-                    # Update the start position
+                    # Update the start position.
                     self._pan_start_x = event.position().x()
                     self._pan_start_y = event.position().y()
-                    return True  # Event handled
+                    return True  # Event handled.
             elif event.type() == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._panning = False
                     self.scroll_area.viewport().setCursor(Qt.CursorShape.ArrowCursor)
-                    return True  # Event handled
+                    return True  # Event handled.
         return super().eventFilter(source, event)
+
 
     def apply_autostretch(self):
         """Applies AutoStretch to the displayed image for visualization."""
@@ -11666,6 +11759,15 @@ class CLAHEDialog(QDialog):
         # Convert QRect to QRectF before setting
         self.preview_scene.setSceneRect(QRectF(pixmap.rect()))
 
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
     def zoom_in(self):
         """
         Zooms in the preview image by 25%.
@@ -12024,6 +12126,15 @@ class MorphologyDialog(QDialog):
         # Update the existing pixmap item
         self.pixmap_item.setPixmap(pixmap)
         self.preview_scene.setSceneRect(QRectF(pixmap.rect()))  # Convert QRect to QRectF
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         """
@@ -13268,11 +13379,22 @@ class XISFViewer(QWidget):
         self.setLayout(main_layout)
         self.setWindowTitle("XISF Liberator V1.2")
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         This method is triggered when the image in ImageManager changes.
         It updates the UI with the new image.
         """
+        if not self.isVisible():
+            return        
         if image is None:
             return
 
@@ -13589,6 +13711,14 @@ class XISFViewer(QWidget):
         self.image_label.setPixmap(pixmap)
         self.image_label.resize(scaled_image.size())
 
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         self.center_image_on_zoom(1.25)
@@ -15605,6 +15735,77 @@ class CosmicClarityTab(QWidget):
         self.setLayout(main_layout)
         self.update_ui_for_mode()
 
+    def update_image_display(self):
+        """
+        Update the displayed image by scaling the stored base pixmap according
+        to the current zoom factor.
+        """
+        if not hasattr(self, 'base_pixmap') or self.base_pixmap is None:
+            print("Base pixmap not available. Please update it first.")
+            return
+
+        # Calculate new dimensions using the current zoom factor.
+        new_width = int(self.base_pixmap.width() * self.zoom_factor)
+        new_height = int(self.base_pixmap.height() * self.zoom_factor)
+        
+        # Scale the base pixmap quickly.
+        scaled_pixmap = self.base_pixmap.scaled(
+            new_width, new_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        self.image_label.setPixmap(scaled_pixmap)
+
+
+        # Optionally, adjust scroll bars to keep the view centered.
+        # (You might reuse your current code for centering.)
+
+
+    def update_base_pixmap(self):
+        """
+        Process self.image (applying autostretch if enabled) and store it as self.base_pixmap.
+        Call this method once after the image is loaded or when processing parameters change.
+        """
+        if self.image is None:
+            return
+
+        display_image = self.image.copy()
+
+        # Apply autostretch if enabled.
+        if self.auto_stretch_button.isChecked():
+            target_median = 0.25
+            if self.is_mono:
+                stretched = stretch_mono_image(
+                    display_image if display_image.ndim == 2 else display_image[:, :, 0],
+                    target_median
+                )
+                display_image = np.stack([stretched] * 3, axis=-1)  # Convert mono to RGB.
+            else:
+                display_image = stretch_color_image(display_image, target_median, linked=False)
+
+        try:
+            display_image_uint8 = (display_image * 255).astype(np.uint8)
+        except Exception as e:
+            print(f"[ERROR] Converting image to uint8: {e}")
+            return
+
+        # Create QImage from the numpy array.
+        if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:
+            height, width, _ = display_image_uint8.shape
+            bytes_per_line = 3 * width
+            qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        elif display_image_uint8.ndim == 2:
+            height, width = display_image_uint8.shape
+            bytes_per_line = width
+            qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+        else:
+            print("[ERROR] Unexpected image format!")
+            return
+
+        self.base_pixmap = QPixmap.fromImage(qimage)
+        print("Base pixmap updated.")
+
     def update_psf_slider_label(self):
         """Update the label text to display the current value of the PSF slider as a non-integer."""
         psf_value = self.psf_slider.value() / 10  # Convert to a float in the range 1.0 - 8.0
@@ -15717,46 +15918,20 @@ class CosmicClarityTab(QWidget):
             print(f"Selected Cosmic Clarity folder: {folder}")
 
     def zoom_in(self):
-        """Zoom in on the image and update the display."""
         self.zoom_factor *= 1.2
-        self.apply_zoom()  # Use apply_zoom to handle zoom correctly
+        self.update_image_display()
 
     def zoom_out(self):
-        """Zoom out on the image and update the display."""
         self.zoom_factor /= 1.2
-        self.apply_zoom()  # Use apply_zoom to handle zoom correctly
+        self.update_image_display()
 
     def fit_to_preview(self):
-        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        if self.image is not None:
-            # Get the width of the scroll area's viewport (preview area)
-            preview_width = self.scroll_area.viewport().width()
-            
-            # Get the original image width from the numpy array
-            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
-            if self.image.ndim == 3:
-                image_width = self.image.shape[1]
-            elif self.image.ndim == 2:
-                image_width = self.image.shape[1]
-            else:
-                print("Unexpected image dimensions!")
-                self.statusLabel.setText("Cannot fit image to preview due to unexpected dimensions.")
-                return
-            
-            # Calculate the required zoom factor to fit the image's width into the preview area
-            new_zoom_factor = preview_width / image_width
-            
-            # Update the zoom factor without enforcing any limits
-            self.zoom_factor = new_zoom_factor
-            
-            # Apply the new zoom factor to update the display
-            self.apply_zoom()
-            
-            # Update the status label to reflect the new zoom level
-        else:
-            print("No image loaded. Cannot fit to preview.")
+        if not hasattr(self, 'base_pixmap') or self.base_pixmap is None:
+            return
+        preview_width = self.scroll_area.viewport().width()
+        self.zoom_factor = preview_width / self.base_pixmap.width()
+        self.update_image_display()
 
-      
 
     def apply_zoom(self):
         """Apply the current zoom level to the image."""
@@ -15800,11 +15975,24 @@ class CosmicClarityTab(QWidget):
         else:
             print("No saved Cosmic Clarity folder found in QSettings.")
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return
+        if image is None:
+            return        
         if slot == self.image_manager.current_slot:
             self.loaded_image_path = metadata.get('file_path', None)
             self.original_header = metadata.get('original_header', None)
@@ -15834,16 +16022,21 @@ class CosmicClarityTab(QWidget):
             self.image = image
 
             # Show the image using the show_image method
-            self.show_image(image)
-
-            # Update the image display (it will account for zoom and other parameters)
+            self.update_base_pixmap()
+            # Now update the display by scaling the base pixmap.
             self.update_image_display()
-
             print(f"CosmicClarityTab: Image updated from ImageManager slot {slot}.")
 
 
 
-
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
 
     def load_image(self):
@@ -16008,72 +16201,6 @@ class CosmicClarityTab(QWidget):
         self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
 
         return True
-
-
-
-    def update_image_display(self, display_width=None, display_height=None):
-        """Update the displayed image according to the current zoom level and autostretch setting."""
-        if self.image is None:
-            print("No image to display.")
-            return
-
-        # Get the current center point of the visible area
-        current_center_x = self.scroll_area.horizontalScrollBar().value() + (self.scroll_area.viewport().width() / 2)
-        current_center_y = self.scroll_area.verticalScrollBar().value() + (self.scroll_area.viewport().height() / 2)
-
-        # Apply autostretch if enabled
-        display_image = self.image.copy()
-        if self.auto_stretch_button.isChecked():
-            target_median = 0.25
-            if self.is_mono:
-                print("Autostretch enabled for mono image.")
-                stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
-                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert mono to RGB for display
-            else:
-                print("Autostretch enabled for color image.")
-                display_image = stretch_color_image(display_image, target_median, linked=False)
-
-        # Convert to QImage for display (Ensure the data is in 8-bit for QImage)
-        print(f"Image dtype before conversion: {display_image.dtype}")
-        display_image_uint8 = (display_image * 255).astype(np.uint8)
-
-        # Debugging the shape of the image
-        print(f"Image shape after conversion to uint8: {display_image_uint8.shape}")
-
-        # Handle mono and RGB images differently
-        if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:
-            print("Detected RGB image.")
-            # RGB image
-            height, width, _ = display_image_uint8.shape
-            bytes_per_line = 3 * width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-        elif display_image_uint8.ndim == 2:  # Grayscale image
-            print("Detected Grayscale image.")
-            height, width = display_image_uint8.shape
-            bytes_per_line = width
-            qimage = QImage(display_image_uint8.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
-        else:
-            print("Unexpected image format!")
-            print(f"Image dimensions: {display_image_uint8.ndim}")
-            print(f"Image shape: {display_image_uint8.shape}")
-            return
-
-        # Calculate the new dimensions based on the zoom factor
-        if display_width is None or display_height is None:
-            display_width = int(width * self.zoom_factor)
-            display_height = int(height * self.zoom_factor)
-
-        # Scale QPixmap and set it on the image label
-        pixmap = QPixmap.fromImage(qimage).scaled(display_width, display_height, Qt.AspectRatioMode.KeepAspectRatio)
-        self.image_label.setPixmap(pixmap)
-
-        # Calculate the new center point after zooming
-        new_center_x = current_center_x * self.zoom_factor
-        new_center_y = current_center_y * self.zoom_factor
-
-        # Adjust scroll bars to keep the view centered on the same area
-        self.scroll_area.horizontalScrollBar().setValue(int(new_center_x - self.scroll_area.viewport().width() / 2))
-        self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
 
 
     def store_processed_image(self, processed_image):
@@ -18018,11 +18145,24 @@ class StatisticalStretchTab(QWidget):
         self.dragging = False
         self.last_pos = QPoint()
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return   
+        if image is None:
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -18248,6 +18388,15 @@ class StatisticalStretchTab(QWidget):
     def hideSpinner(self):
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()    
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         if self.current_pixmap is not None:
@@ -18666,11 +18815,24 @@ class StarStretchTab(QWidget):
             self.undoButton.setEnabled(self.image_manager.can_undo())
             self.redoButton.setEnabled(self.image_manager.can_redo())
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return  
+        if image is None:
+            return              
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -18839,6 +19001,15 @@ class StarStretchTab(QWidget):
     def hideSpinner(self):
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         if self.current_pixmap is not None:
@@ -19690,12 +19861,24 @@ class FullCurvesTab(QWidget):
 
         return super().eventFilter(source, event)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
 
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return
+        if image is None:
+            return                
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -19823,6 +20006,15 @@ class FullCurvesTab(QWidget):
             # If no image is available, clear the label and show a message
             self.imageLabel.clear()
             self.imageLabel.setText('No image loaded.')
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         """
@@ -20918,6 +21110,15 @@ class FrequencySeperationTab(QWidget):
         self.on_radius_changed(self.radiusSlider.value())
         self.on_tolerance_changed(self.toleranceSlider.value())
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     # -----------------------------
     # Image Manager Integration
     # -----------------------------
@@ -20926,6 +21127,10 @@ class FrequencySeperationTab(QWidget):
         Slot to handle image changes from ImageManager.
         Updates the FrequencySeperationTab if the change is relevant.
         """
+        if not self.isVisible():
+            return   
+        if image is None:
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -21090,6 +21295,16 @@ class FrequencySeperationTab(QWidget):
     # -----------------------------
     # Zooming
     # -----------------------------
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
     def zoom_in(self):
         self.zoom_factor *= 1.25
         self.update_previews()
@@ -23234,12 +23449,14 @@ class PerfectPalettePickerTab(QWidget):
 
         return header
 
-
-
-
-
-
-
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         """
@@ -23668,11 +23885,24 @@ class NBtoRGBstarsTab(QWidget):
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return       
+        if image is None:
+            return         
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -23888,6 +24118,15 @@ class NBtoRGBstarsTab(QWidget):
                 self.fileLabel.setText('Save canceled.')
         else:
             self.fileLabel.setText("No combined image to save.")
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         if self.zoom_factor < 20.0:  # Set a maximum zoom limit (e.g., 500%)
@@ -24226,11 +24465,24 @@ class HaloBGonTab(QWidget):
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return   
+        if image is None:
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -24304,6 +24556,15 @@ class HaloBGonTab(QWidget):
             self.reductionLabel.setText(f"Reduction Amount: {labels[value]}")
         else:
             self.reductionLabel.setText("Reduction Amount: Unknown")
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoomIn(self):
         self.zoom_factor *= 1.2  # Increase zoom by 20%
@@ -24917,11 +25178,24 @@ class ContinuumSubtractTab(QWidget):
         self.zoomInButton.setEnabled(False)
         self.zoomOutButton.setEnabled(False)
 
+    def refresh(self):
+        if self.image_manager:
+            # You might have a way to retrieve the current image and metadata.
+            # For example, if your image_manager stores the current image,
+            # you could do something like:
+            current_slot = self.image_manager.current_slot
+            image, metadata = self.image_manager.get_current_image_and_metadata()
+            self.on_image_changed(current_slot, image, metadata)
+
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
+        if not self.isVisible():
+            return     
+        if image is None:
+            return           
         if slot == 0:  # Assuming slot 0 is used for shared images
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -25009,6 +25283,15 @@ class ContinuumSubtractTab(QWidget):
 
     def update_status_label(self, message):
         self.statusLabel.setText(message)
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoom_in(self):
         if self.zoom_factor < 5.0:  # Maximum 500% zoom
