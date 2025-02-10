@@ -197,7 +197,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.5"
+VERSION = "2.10.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -869,13 +869,28 @@ class AstroEditingSuite(QMainWindow):
         self.statusBar = QStatusBar(self)
         self.setStatusBar(self.statusBar)
 
-        # Create the file label to display the current file name in the status bar
+        # File label (left side)
         self.file_name_label = QLabel("No file selected")
-        self.statusBar.addWidget(self.file_name_label, 1)  # Add label to status bar
+        self.statusBar.addWidget(self.file_name_label)  # Adds on the left
 
-        # Dimension label in the status bar
+        # Create a container widget for the active slot label in the center.
+        middleWidget = QWidget()
+        middleLayout = QHBoxLayout(middleWidget)
+        middleLayout.setContentsMargins(0, 0, 0, 0)  # Remove extra margins
+        # Add stretch before and after the active slot label to center it.
+        middleLayout.addStretch(1)
+        self.active_slot_label = QLabel("Active Slot: 0")
+        middleLayout.addWidget(self.active_slot_label)
+        middleLayout.addStretch(1)
+        # Add the middle widget with an expanding stretch factor (here using 1)
+        self.statusBar.addWidget(middleWidget, 1)
+
+        # Dimension label (right side)
         self.dim_label = QLabel("0 x 0")
-        self.statusBar.addWidget(self.dim_label)
+        self.statusBar.addPermanentWidget(self.dim_label)  # Adds on the right
+
+        # Connect the image_manager's signal to update the active slot label.
+        self.image_manager.current_slot_changed.connect(self.update_active_slot_label)
 
         # --------------------
         # Tab Widget
@@ -951,6 +966,11 @@ class AstroEditingSuite(QMainWindow):
         # Check if the tab has a 'refresh' method.
         if hasattr(current_tab, "refresh"):
             current_tab.refresh()
+
+    def update_active_slot_label(self, slot):
+        # Look up the custom name for this slot; if none exists, fall back to "Slot {slot}"
+        slot_name = self.slot_names.get(slot, f"Slot {slot}")
+        self.active_slot_label.setText(f"Active Slot: {slot_name}")
 
     def open_mosaic_master(self):
         """
@@ -4076,6 +4096,7 @@ class ImageManager(QObject):
     # - image (np.ndarray): The new image data.
     # - metadata (dict): Associated metadata for the image.
     image_changed = pyqtSignal(int, np.ndarray, dict)
+    current_slot_changed = pyqtSignal(int)    
 
     def __init__(self, max_slots=5):
         """
@@ -4092,7 +4113,7 @@ class ImageManager(QObject):
         self.current_slot = 0  # Default to the first slot
         self.active_previews = {}  # Track active preview windows by slot
         self.mask_manager = MaskManager(max_slots)  # Add a MaskManager
-        self.current_slot = 0  # Default slot
+
 
     def get_current_image_and_metadata(self):
         slot = self.current_slot
@@ -4130,11 +4151,13 @@ class ImageManager(QObject):
     def set_current_slot(self, slot):
         """
         Sets the current active slot if the slot number is valid and has an image.
-        
         :param slot: The slot number to activate.
         """
         if 0 <= slot < self.max_slots and self._images[slot] is not None:
             self.current_slot = slot
+            # Emit the new current_slot_changed signal
+            self.current_slot_changed.emit(slot)
+            # Also emit image_changed so that any UI that listens for image updates will refresh
             self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
             print(f"ImageManager: Current slot set to {slot}.")
         else:
@@ -10116,15 +10139,18 @@ class ImagePreview(QWidget):
         self.autostretch_button = QPushButton("AutoStretch")
         self.autostretch_button.clicked.connect(self.apply_autostretch)
 
-        # Create Swap Button (visible for all slots except Slot 0)
-        if self.slot != 0:
-            self.swap_button = QPushButton(f"Swap with Slot 0")
-            self.swap_button.clicked.connect(self.swap_with_slot_zero)
-            swap_layout = QHBoxLayout()
-            swap_layout.addStretch()
-            swap_layout.addWidget(self.swap_button)
-        else:
-            swap_layout = QHBoxLayout()  # Empty layout
+        # Create the "Make Active" Button.
+        # (We disable it if this slot is already active.)
+        self.make_active_button = QPushButton("Make Active")
+        if self.parent() is not None and hasattr(self.parent(), 'image_manager'):
+            current_active_slot = self.parent().image_manager.current_slot
+            if current_active_slot == self.slot:
+                self.make_active_button.setEnabled(False)
+        self.make_active_button.clicked.connect(self.make_slot_active)
+        
+        swap_layout = QHBoxLayout()
+        swap_layout.addStretch()
+        swap_layout.addWidget(self.make_active_button)
 
         # Layout for zoom controls
         zoom_layout = QHBoxLayout()
@@ -10145,6 +10171,14 @@ class ImagePreview(QWidget):
         self._panning = False
         self._pan_start_x = 0
         self._pan_start_y = 0
+
+    def make_slot_active(self):
+        """Sets this preview's slot as the active slot in the image manager."""
+        if self.parent() is not None and hasattr(self.parent(), 'image_manager'):
+            self.parent().image_manager.set_current_slot(self.slot)
+            self.close()  # Optionally close the preview window after setting the active slot
+        else:
+            QMessageBox.critical(self, "Error", "Parent does not have an image manager.")
 
     def eventFilter(self, source, event):
         """
