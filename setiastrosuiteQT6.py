@@ -246,6 +246,9 @@ if hasattr(sys, '_MEIPASS'):
     pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')   
     histogram_path = os.path.join(sys._MEIPASS, 'histogram.png') 
     mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')
+    rescale_path = os.path.join(sys._MEIPASS, 'rescale.png')
+    staralign_path = os.path.join(sys._MEIPASS, 'staralign.png')
+    mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -291,6 +294,9 @@ else:
     pixelmath_path = 'pixelmath.png'
     histogram_path = 'histogram.png'
     mosaic_path = 'mosaic.png'
+    rescale_path = 'rescale.png'
+    staralign_path = 'staralign.png'
+    mask_path = 'maskapply.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -611,7 +617,12 @@ class AstroEditingSuite(QMainWindow):
         # Add to Functions menu
         geometry_menu.addAction(rotate_counterclockwise_action)
 
-
+        #rescale
+        rescale_action = QAction("Rescale", self)
+        rescale_action.setIcon(QIcon(rescale_path))
+        rescale_action.setStatusTip("Rescale the current image by a custom factor")
+        rescale_action.triggered.connect(self.rescale_image)
+        geometry_menu.addAction(rescale_action)
 
         # --------------------
         # Slot Menu
@@ -715,6 +726,12 @@ class AstroEditingSuite(QMainWindow):
         mosaic_master_action.triggered.connect(self.open_mosaic_master)
 
         mosaic_menu.addAction(mosaic_master_action)
+
+        # Stellar Alignment Action (added to Mosaic menu and toolbar)
+        stellar_align_action = QAction(QIcon(staralign_path), "Stellar Alignment", self)
+        stellar_align_action.setStatusTip("Align the target image to the source image using star alignment")
+        stellar_align_action.triggered.connect(self.stellar_alignment)
+        mosaic_menu.addAction(stellar_align_action)
 
         # --------------------
         # Toolbar
@@ -849,8 +866,17 @@ class AstroEditingSuite(QMainWindow):
         geometrybar.addAction(flip_vertical_action)        
         geometrybar.addAction(rotate_clockwise_action)
         geometrybar.addAction(rotate_counterclockwise_action)    
-        geometrybar.addAction(mosaic_master_action)    
+        geometrybar.addAction(rescale_action)
 
+        # --------------------
+        # Mosaic Toolbar
+        # --------------------        
+        mosaictoolbar = QToolBar("Mosaic Toolbar")
+        mosaictoolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)        
+        mosaictoolbar.addAction(mosaic_master_action)    
+        mosaictoolbar.addAction(stellar_align_action)
+        
         # --------------------
         # Mask Toolbar
         # --------------------
@@ -863,6 +889,71 @@ class AstroEditingSuite(QMainWindow):
         mask_toolbar.addAction(apply_mask_action)
         mask_toolbar.addAction(remove_mask_action)
         
+        # Create a toolbar for slots and dock it on the left side.
+        self.slot_toolbar = QToolBar("Slot Toolbar", self)
+        self.slot_toolbar.setAllowedAreas(Qt.ToolBarArea.LeftToolBarArea)
+        self.slot_toolbar.setOrientation(Qt.Orientation.Vertical)  # Vertical layout
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.slot_toolbar)
+
+        # Create a button for each slot
+        for slot in range(self.image_manager.max_slots):
+            # Create a QToolButton for this slot.
+            button = QToolButton()
+            
+            # Retrieve the icon path using getattr. This will look for an attribute
+            # like 'slot0_path', 'slot1_path', etc., in your module, defaulting to 'slot0.png'
+            slot_icon_path = getattr(sys.modules[__name__], f'slot{slot}_path', 'slot0.png')
+            
+            # Set the icon and optionally an icon size
+            button.setIcon(QIcon(slot_icon_path))
+            button.setIconSize(QSize(32, 32))  # Adjust the size as needed
+            
+            # Set the slot text and style (text below the icon)
+            button.setText(self.slot_names[slot])
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            
+            # Connect the normal (left-click) signal.
+            button.clicked.connect(lambda checked, s=slot: self.set_active_slot(s))
+            
+            # Enable the custom context menu.
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(lambda pos, s=slot: self.show_slot_context_menu(pos, s))
+            
+            # Add the button to the toolbar and store a reference.
+            self.slot_toolbar.addWidget(button)
+            self.slot_actions[slot] = button
+
+
+        # --- Add a dummy separator button with the mask icon ---
+
+        separator_button = QToolButton()
+        separator_button.setIcon(QIcon(mask_path))
+        separator_button.setIconSize(QSize(64, 64))
+        separator_button.setEnabled(False)  # Disable so it doesn't respond to clicks.
+        separator_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.slot_toolbar.addWidget(separator_button)
+
+        # --- Create mask slot buttons ---
+        for slot in range(5):  # Assuming 5 mask slots (0-4)
+            button = QToolButton()
+            mask_slot_name = self.mask_slot_names.get(slot, f"Mask Slot {slot}")
+            button.setText(mask_slot_name)
+            # Optionally, set an icon for mask slots:
+            # button.setIcon(QIcon("mask_icon.png"))
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            
+            # Left-click: apply the mask in that slot.
+            button.clicked.connect(lambda checked, s=slot: self.apply_mask_from_slot(s))
+            
+            # Right-click: open a context menu with "Preview Mask Slot" and "Rename Mask Slot".
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(lambda pos, s=slot: self.show_mask_slot_context_menu(pos, s))
+            
+            self.slot_toolbar.addWidget(button)
+            self.mask_slot_actions[slot] = button            
+
+        # Highlight the default active slot.
+        self.update_slot_toolbar_highlight()
 
         # --------------------
         # Status Bar
@@ -961,6 +1052,200 @@ class AstroEditingSuite(QMainWindow):
         self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
+        self.update_slot_toolbar_highlight()
+
+    def show_slot_context_menu(self, pos, slot):
+        """
+        Shows a context menu for the image slot button with options to open a preview.
+        (You can expand this to include more actions if needed.)
+        """
+        button = self.slot_actions.get(slot)
+        if not button:
+            return
+
+        menu = QMenu(button)
+        action_show_preview = menu.addAction("Show Slot Preview")
+        global_pos = button.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        if selected_action == action_show_preview:
+            self.open_preview_window(slot)
+
+    def open_preview_window(self, slot):
+        """Opens a separate preview window for the specified image slot."""
+        # Validate slot range and image availability.
+        if slot < 0 or slot >= self.image_manager.max_slots:
+            QMessageBox.warning(self, "Invalid Slot", f"Slot {slot} is out of range.")
+            return
+
+        image = self.image_manager._images[slot]
+        if image is None:
+            QMessageBox.warning(self, "No Image", f"Slot {slot} does not contain an image.")
+            return
+
+        # Check if a preview is already open.
+        if slot in self.preview_windows:
+            existing_window = self.preview_windows[slot]
+            existing_window.raise_()
+            existing_window.activateWindow()
+            return
+
+        # Create and show a new preview window.
+        image_copy = image.copy()
+        preview = ImagePreview(image_data=image_copy, slot=slot, parent=self)
+        self.preview_windows[slot] = preview
+        preview.closed.connect(self.on_preview_closed)
+        preview.show()
+
+    def update_mask_slot_toolbar_highlight(self):
+        """
+        Loops through the mask slot buttons and applies a blue border to any slot that contains a mask.
+        """
+        for slot, button in self.mask_slot_actions.items():
+            mask = self.mask_manager.get_mask(slot)
+            if mask is not None:
+                # Blue border indicates a mask is saved in this slot.
+                button.setStyleSheet("border: 2px solid blue;")
+            else:
+                # Clear any border if the slot is empty.
+                button.setStyleSheet("")
+
+
+    def connect_mask_manager_signals(self):
+        self.mask_manager.mask_changed.connect(lambda slot, mask: self.update_mask_slot_toolbar_highlight())
+        self.mask_manager.applied_mask_changed.connect(lambda slot, mask: self.update_mask_slot_toolbar_highlight())
+
+    def show_mask_slot_context_menu(self, pos, slot):
+        """
+        Shows a context menu for a mask slot button with options to preview or rename.
+        """
+        button = self.mask_slot_actions.get(slot)
+        if not button:
+            return
+
+        menu = QMenu(button)
+        action_preview = menu.addAction("Preview Mask Slot")
+        action_rename = menu.addAction("Rename Mask Slot")
+        global_pos = button.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        if selected_action == action_preview:
+            self.preview_mask_slot(slot)
+        elif selected_action == action_rename:
+            self.rename_mask_slot_by_context(slot)
+
+    def rename_mask_slot_by_context(self, slot):
+        """
+        Prompts the user to rename a mask slot (given by slot number) and updates the UI.
+        """
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Mask Slot", f"Enter new name for mask slot {slot} (no spaces):"
+        )
+        if not ok or not new_name:
+            return
+        if " " in new_name:
+            QMessageBox.warning(self, "Invalid Name", "The name cannot contain spaces.")
+            return
+
+        self.mask_slot_names[slot] = new_name
+        if slot in self.mask_slot_actions:
+            self.mask_slot_actions[slot].setText(new_name)
+            self.mask_slot_actions[slot].setStatusTip(f"Apply or preview mask for {new_name}")
+        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
+
+    def show_slot_context_menu(self, pos, slot):
+        """
+        Shows a context menu for the slot button, with options to show the slot preview or rename the slot.
+        """
+        # Retrieve the corresponding button.
+        button = self.slot_actions.get(slot)
+        if not button:
+            return
+
+        # Create a QMenu for this button.
+        menu = QMenu(button)
+        
+        # Add an action for "Show Slot Preview".
+        action_show_preview = menu.addAction("Show Slot Preview")
+        
+        # Add an action for "Rename".
+        action_rename = menu.addAction("Rename")
+        
+        # Map the position (which is relative to the button) to global coordinates.
+        global_pos = button.mapToGlobal(pos)
+        
+        # Execute the menu.
+        selected_action = menu.exec(global_pos)
+        
+        # Call the appropriate method based on the user's choice.
+        if selected_action == action_show_preview:
+            self.open_preview_window(slot)
+        elif selected_action == action_rename:
+            self.rename_slot_by_context(slot)
+
+    def rename_slot_by_context(self, slot):
+        """
+        Prompts the user to enter a new name for the specified slot and updates the UI.
+        """
+        # Prompt for the new name for this slot.
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Slot", f"Enter new name for slot {slot} (no spaces):"
+        )
+        if not ok or not new_name:
+            return
+
+        # Validate that the new name contains no spaces.
+        if " " in new_name:
+            QMessageBox.warning(self, "Invalid Name", "The name cannot contain spaces.")
+            return
+
+        # Update the custom name in our dictionary.
+        self.slot_names[slot] = new_name
+
+        # Update the corresponding QToolButton's text and status tip.
+        if slot in self.slot_actions:
+            self.slot_actions[slot].setText(new_name)
+            self.slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
+
+        # If there is an open preview window for this slot, update its title.
+        if slot in self.preview_windows:
+            self.preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
+
+        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
+
+
+    def stellar_alignment(self):
+        dialog = StellarAlignmentDialog(self, self.settings, self.image_manager)
+        dialog.show()
+
+    def update_slot_toolbar_highlight(self):
+        """
+        Update the slot toolbar so that:
+        - The active slot gets a distinct border (e.g., blue) regardless of occupancy.
+        - Non-active slots that are occupied get a green border.
+        - Unoccupied non-active slots have no border.
+        """
+        active_slot = self.image_manager.current_slot
+        for slot, button in self.slot_actions.items():
+            if button is not None:
+                if slot == active_slot:
+                    # Active slot: highlight with blue border.
+                    button.setStyleSheet("border: 2px solid green; background-color: yellow; color: black;")
+                else:
+                    # For non-active slots:
+                    if self.image_manager._images.get(slot) is not None:
+                        # Occupied slot: green border.
+                        button.setStyleSheet("border: 2px solid blue;")
+                    else:
+                        # Unoccupied: clear style.
+                        button.setStyleSheet("")
+
+
+    def set_active_slot(self, slot):
+        """Set the specified slot as active and update the slot toolbar highlight."""
+        self.image_manager.set_current_slot(slot)
+        # Optionally, update other UI elements (such as an "Active Slot" label)
+        self.update_slot_toolbar_highlight()
+
 
     def on_tab_changed(self, index):
         current_tab = self.tabs.widget(index)
@@ -1286,6 +1571,22 @@ class AstroEditingSuite(QMainWindow):
 
         print(f"Mask from Slot {selected_slot} flagged for application.")
 
+    def apply_mask_from_slot(self, slot):
+        """
+        Applies the mask stored in the given mask slot.
+        Updates the UI (e.g. mask banner) to reflect the applied mask.
+        """
+        mask = self.mask_manager.get_mask(slot)
+        if mask is None:
+            QMessageBox.warning(self, "No Mask", f"No mask is saved in slot {slot}.")
+            return
+
+        # Apply the mask from the specified slot.
+        self.mask_manager.apply_mask_from_slot(slot)
+        # Optionally, update any UI elements (for example, a banner) to show the applied mask.
+        self.update_mask_banner(slot, self.mask_manager.get_applied_mask())
+        print(f"Mask from Slot {slot} flagged for application.")
+
 
     def remove_mask(self):
         """Remove the active mask and update the UI."""
@@ -1444,6 +1745,78 @@ class AstroEditingSuite(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save mask:\n{e}")
             print(f"AstroEditingSuite: Failed to save mask: {e}")
+
+    def rescale_image(self):
+        """
+        Rescales the current image by a user-defined scaling factor using OpenCV.
+        The image is expected to be stored as a 32-bit floating point numpy array.
+        For example, a factor of 0.5 scales down the image to 50% of its original size,
+        while 2 scales it up to 200%.
+        """
+        try:
+            # Ensure that an image is loaded.
+            if self.image_manager.image is None:
+                QMessageBox.warning(self, "No Image Loaded", "Please load an image before rescaling.")
+                return
+
+            # Prompt the user for a scaling factor.
+            factor, ok = QInputDialog.getDouble(
+                self,
+                "Rescale Image",
+                "Enter scaling factor (e.g., 0.5 for 50%, 2 for 200%):",
+                1.0,    # default value
+                0.1,    # minimum value
+                10.0,   # maximum value
+                2       # number of decimals
+            )
+            if not ok:
+                return
+
+            # Retrieve a copy of the current image.
+            current_image = self.image_manager.image.copy()
+
+            # Determine new dimensions based on the scaling factor.
+            # current_image.shape is assumed to be (height, width) for grayscale or (height, width, channels) for RGB.
+            height, width = current_image.shape[:2]
+            new_width = int(width * factor)
+            new_height = int(height * factor)
+
+            # Import cv2 and use cv2.resize with the LANCZOS4 interpolation method.
+            import cv2
+            resized_image = cv2.resize(
+                current_image,
+                (new_width, new_height),
+                interpolation=cv2.INTER_LANCZOS4
+            )
+
+            # Prepare metadata (append a description note about rescaling).
+            metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
+            metadata['description'] = metadata.get('description', "") + f" | Rescaled by factor {factor}"
+
+            # Push the current state onto the undo stack.
+            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
+                (current_image.copy(), metadata.copy())
+            )
+            # Clear the redo stack since a new action invalidates the redo history.
+            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
+
+            # Update the ImageManager with the rescaled image.
+            self.image_manager.set_image(new_image=resized_image, metadata=metadata)
+            self.image_manager.image_changed.emit(
+                self.image_manager.current_slot,
+                resized_image,
+                metadata
+            )
+
+            QMessageBox.information(
+                self,
+                "Image Rescaled",
+                f"The image has been successfully rescaled by a factor of {factor}."
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to rescale image:\n{e}")
+            print(f"Error in rescale_image: {e}")
 
             
     def flip_horizontal(self):
@@ -2652,6 +3025,7 @@ class AstroEditingSuite(QMainWindow):
                     # Emit image_changed signal
                     self.image_manager.image_changed.emit(target_slot_num, copied_image, copied_metadata)
                     print(f"Copied data assigned to Image Slot {target_slot_num}.")
+                    self.update_slot_toolbar_highlight()
                 elif target_type == "Mask":
                     # Ensure mask is single-channel and normalized
                     if copied_image.ndim == 3 and copied_image.shape[2] > 1:
@@ -2741,6 +3115,7 @@ class AstroEditingSuite(QMainWindow):
         file_path = metadata.get('file_path', None)
         if file_path:
             self.file_name_label.setText(os.path.basename(file_path))  # Update the label with file name
+            self.update_slot_toolbar_highlight()
         else:
             self.file_name_label.setText("No file selected")
 
@@ -2748,6 +3123,7 @@ class AstroEditingSuite(QMainWindow):
         if slot in self.preview_windows:
             preview_window = self.preview_windows[slot]
             preview_window.update_image_data(image.copy())
+            self.update_slot_toolbar_highlight()
             print(f"Preview window for Slot {slot} updated with new image.")
 
      
@@ -3537,6 +3913,7 @@ class AstroEditingSuite(QMainWindow):
                     'is_mono': is_mono
                 }
                 self.image_manager.add_image(self.image_manager.current_slot, image, metadata)  # Make sure to specify the slot here
+                self.update_slot_toolbar_highlight()
                 print(f"Image {file_path} loaded successfully.")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
@@ -3844,13 +4221,13 @@ class CopySlotDialog(QDialog):
 class CropTool(QDialog):
     """A cropping tool using QGraphicsView for better rectangle handling."""
     crop_applied = pyqtSignal(object)
-
     # Class-level variable to store the previous crop rectangle
     previous_crop_rect = None
 
     def __init__(self, image_manager, image_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         self.setGeometry(150, 150, 800, 600)  # Initial size
 
         self.image_manager = image_manager
@@ -3890,6 +4267,7 @@ class CropTool(QDialog):
 
         # Load and display the image
         self.load_image()
+        # Install the event filter on the QGraphicsView's viewport to handle drawing
         self.graphics_view.viewport().installEventFilter(self)
 
     def load_image(self):
@@ -3917,8 +4295,19 @@ class CropTool(QDialog):
 
         pixmap = QPixmap.fromImage(q_image)
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
+        self.scene.clear()
         self.scene.addItem(self.pixmap_item)
+        # Fit the image in view while keeping the aspect ratio.
         self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def resizeEvent(self, event):
+        """
+        When the CropTool dialog is resized, re-fit the pixmap in the QGraphicsView.
+        This ensures that mouse mapping via mapToScene works correctly on the resized view.
+        """
+        super().resizeEvent(event)
+        if self.pixmap_item is not None:
+            self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def batch_crop_all_slots(self):
         """Apply the current crop rectangle to all images in the ImageManager."""
@@ -4162,19 +4551,16 @@ class ImageManager(QObject):
         self.mask_manager.clear_mask(slot)        
 
     def set_current_slot(self, slot):
-        """
-        Sets the current active slot if the slot number is valid and has an image.
-        :param slot: The slot number to activate.
-        """
-        if 0 <= slot < self.max_slots and self._images[slot] is not None:
+        if 0 <= slot < self.max_slots:
             self.current_slot = slot
-            # Emit the new current_slot_changed signal
             self.current_slot_changed.emit(slot)
-            # Also emit image_changed so that any UI that listens for image updates will refresh
-            self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
+            # Use a non-empty placeholder if the slot is empty
+            image_to_emit = self._images[slot] if self._images[slot] is not None and self._images[slot].size > 0 else np.zeros((1, 1), dtype=np.uint8)
+            self.image_changed.emit(slot, image_to_emit, self._metadata[slot])
             print(f"ImageManager: Current slot set to {slot}.")
         else:
-            print(f"ImageManager: Slot {slot} is invalid or empty.")
+            print(f"ImageManager: Slot {slot} is out of range.")
+
 
     def add_image(self, slot, image, metadata):
         """
@@ -4537,6 +4923,16 @@ class MaskSlotPreviewDialog(QDialog):
                 QImage.Format.Format_Grayscale8
             )
         return QPixmap.fromImage(q_image)
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
 
     # Zoom Methods
     def zoom_in(self):
@@ -5338,6 +5734,16 @@ class MaskPreviewDialog(QDialog):
             )
         return QPixmap.fromImage(q_image)
 
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
+
     # Zoom Methods
     def zoom_in(self):
         """Zoom in on the mask."""
@@ -5414,12 +5820,10 @@ class MaskPreviewDialog(QDialog):
             0,
             False
         )
-
-        if not ok:  # User canceled the dialog
+        if not ok:
             return
 
         if choice == "Save to File":
-            # Save to a file
             filename, _ = QFileDialog.getSaveFileName(
                 self, "Save Mask", "", "Images (*.png *.tiff *.fits)"
             )
@@ -5428,8 +5832,7 @@ class MaskPreviewDialog(QDialog):
                 QMessageBox.information(self, "Mask Saved", f"Mask saved to {filename}.")
                 self.accept()
         elif choice == "Save to Mask Slot":
-            # Save to a mask slot
-            # Ensure that the parent has a mask_manager with max_slots and set_mask method
+            # Traverse parent hierarchy until we find the main window with a mask_manager.
             parent = self.parent()
             while parent and not hasattr(parent, 'mask_manager'):
                 parent = parent.parent()
@@ -5444,10 +5847,14 @@ class MaskPreviewDialog(QDialog):
                 )
                 if ok:
                     parent.mask_manager.set_mask(slot, self.mask)
+                    # ** Update the mask slot toolbar so that the button for this slot shows a blue border **
+                    if hasattr(parent, 'update_mask_slot_toolbar_highlight'):
+                        parent.update_mask_slot_toolbar_highlight()
                     QMessageBox.information(self, "Mask Saved", f"Mask saved to Slot {slot}.")
                     self.accept()
             else:
                 QMessageBox.warning(self, "No Mask Manager", "Parent does not have a mask_manager.")
+
 
     def save_image(self, mask, filename):
         """
@@ -7333,6 +7740,533 @@ class MosaicMasterDialog(QDialog):
         except Exception as e:
             print(f"Error updating FITS with WCS: {e}")
 
+class StellarAlignmentDialog(QDialog):
+    def __init__(self, parent, settings, image_manager):
+        """
+        Parameters:
+          parent: reference to the main window (AstroEditingSuite) so that helper methods
+                  (e.g. detect_stars, estimate_transform_from_triangles) can be called.
+          settings: QSettings instance (for working directory, etc.)
+          image_manager: the ImageManager instance.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Stellar Alignment")
+        self.settings = settings
+        self.image_manager = image_manager
+        self.parent_window = parent  # for calling helper methods from the main window
+        self.stellar_source = None
+        self.stellar_target = None
+        self.aligned_image = None
+        self.autostretch_enabled = False  # Default: No autostretch
+        self.initUI()
+
+    def initUI(self):
+        main_layout = QHBoxLayout(self)  # Use horizontal layout for side-by-side arrangement
+
+        # ------------------------
+        # Left Panel (Selection Controls)
+        # ------------------------
+        controls_layout = QVBoxLayout()
+
+        # ------------------------
+        # Source Image Group
+        # ------------------------
+        source_group = QGroupBox("Source Image (Reference)")
+        source_layout = QVBoxLayout()
+
+        # Radio buttons for selection type.
+        source_radio_layout = QHBoxLayout()
+        self.source_from_file_radio = QRadioButton("From File")
+        self.source_from_slot_radio = QRadioButton("From Slot")
+        self.source_from_file_radio.setChecked(True)
+        source_radio_layout.addWidget(self.source_from_file_radio)
+        source_radio_layout.addWidget(self.source_from_slot_radio)
+        source_layout.addLayout(source_radio_layout)
+
+        # File selection controls for source.
+        file_source_layout = QHBoxLayout()
+        self.source_file_button = QPushButton("Select from File")
+        self.source_file_button.clicked.connect(self.select_source_file)
+        self.source_file_label = QLabel("No file selected")
+        file_source_layout.addWidget(self.source_file_button)
+        file_source_layout.addWidget(self.source_file_label)
+        source_layout.addLayout(file_source_layout)
+
+        # Slot selection controls for source.
+        slot_source_layout = QHBoxLayout()
+        self.source_slot_combo = QComboBox()
+        for i in range(self.image_manager.max_slots):
+            slot_name = self.parent_window.slot_names.get(i, f"Slot {i}") if hasattr(self.parent_window, 'slot_names') else f"Slot {i}"
+            self.source_slot_combo.addItem(slot_name, i)
+        self.source_slot_button = QPushButton("Load from Slot")
+        self.source_slot_button.clicked.connect(self.load_source_from_slot)
+        slot_source_layout.addWidget(self.source_slot_combo)
+        slot_source_layout.addWidget(self.source_slot_button)
+        source_layout.addLayout(slot_source_layout)
+
+        source_group.setLayout(source_layout)
+        controls_layout.addWidget(source_group)
+
+        # ------------------------
+        # Target Image Group
+        # ------------------------
+        target_group = QGroupBox("Target Image (To be Aligned)")
+        target_layout = QVBoxLayout()
+
+        # Radio buttons for selection type.
+        target_radio_layout = QHBoxLayout()
+        self.target_from_file_radio = QRadioButton("From File")
+        self.target_from_slot_radio = QRadioButton("From Slot")
+        self.target_from_file_radio.setChecked(True)
+        target_radio_layout.addWidget(self.target_from_file_radio)
+        target_radio_layout.addWidget(self.target_from_slot_radio)
+        target_layout.addLayout(target_radio_layout)
+
+        # File selection controls for target.
+        file_target_layout = QHBoxLayout()
+        self.target_file_button = QPushButton("Select from File")
+        self.target_file_button.clicked.connect(self.select_target_file)
+        self.target_file_label = QLabel("No file selected")
+        file_target_layout.addWidget(self.target_file_button)
+        file_target_layout.addWidget(self.target_file_label)
+        target_layout.addLayout(file_target_layout)
+
+        # Slot selection controls for target.
+        slot_target_layout = QHBoxLayout()
+        self.target_slot_combo = QComboBox()
+        for i in range(self.image_manager.max_slots):
+            slot_name = self.parent_window.slot_names.get(i, f"Slot {i}") if hasattr(self.parent_window, 'slot_names') else f"Slot {i}"
+            self.target_slot_combo.addItem(slot_name, i)
+        self.target_slot_button = QPushButton("Load from Slot")
+        self.target_slot_button.clicked.connect(self.load_target_from_slot)
+        slot_target_layout.addWidget(self.target_slot_combo)
+        slot_target_layout.addWidget(self.target_slot_button)
+        target_layout.addLayout(slot_target_layout)
+
+        target_group.setLayout(target_layout)
+        controls_layout.addWidget(target_group)
+
+        # ------------------------
+        # Run Alignment Button
+        # ------------------------
+        self.run_alignment_button = QPushButton("Run Alignment")
+        self.run_alignment_button.clicked.connect(self.run_alignment)
+        controls_layout.addWidget(self.run_alignment_button)
+
+        # ------------------------
+        # Status Label
+        # ------------------------
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        controls_layout.addWidget(self.status_label)
+
+        main_layout.addLayout(controls_layout)
+
+        # ------------------------
+        # Right Panel (Result Preview)
+        # ------------------------
+        result_layout = QVBoxLayout()
+        result_group = QGroupBox("Aligned Image")
+
+        # Preview label
+        self.result_preview_label = QLabel()
+        self.result_preview_label.setFixedSize(400, 400)
+        self.result_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        result_layout.addWidget(self.result_preview_label)
+
+        # AutoStretch Button
+        self.autostretch_button = QPushButton("AutoStretch: OFF")
+        self.autostretch_button.clicked.connect(self.toggle_autostretch)
+        result_layout.addWidget(self.autostretch_button)
+
+        # Push to Active Slot Button
+        self.push_active_button = QPushButton("Push to Active Slot")
+        self.push_active_button.clicked.connect(self.push_aligned_to_active)
+        result_layout.addWidget(self.push_active_button)
+
+        result_group.setLayout(result_layout)
+        main_layout.addWidget(result_group)
+
+        self.setLayout(main_layout)
+
+    def toggle_autostretch(self):
+        self.autostretch_enabled = not self.autostretch_enabled
+        if self.autostretch_enabled:
+            self.apply_autostretch()
+        else:
+            self.stretched_image = self.aligned_image  # Reset to original image if stretch is disabled
+
+        self.update_preview(self.result_preview_label, self.stretched_image)
+
+    def apply_autostretch(self):
+        # Determine if the aligned image is mono or color
+        if len(self.aligned_image.shape) == 2:  # Mono image
+            self.stretched_image = stretch_mono_image(self.aligned_image, target_median=0.25, normalize=True)
+        else:  # Color image
+            self.stretched_image = stretch_color_image(self.aligned_image, target_median=0.25, linked=False, normalize=False)
+
+    def update_preview(self, label, image):
+        """
+        Updates the QLabel to display a preview of the given image with optional autostretch.
+        """
+        if self.autostretch_enabled:
+            image = np.clip(image * 255 / np.max(image), 0, 255).astype(np.uint8)  # Auto-stretch
+
+        if image.ndim == 3 and image.shape[2] == 3:
+            h, w, _ = image.shape
+            qimg = QImage(image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        elif image.ndim == 2:
+            h, w = image.shape
+            qimg = QImage(image.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            return
+        scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(QPixmap.fromImage(scaled))
+
+
+
+    def select_source_file(self):
+        default_dir = self.settings.value("working_directory", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Source Image", 
+            default_dir,
+            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+        )
+        if path:
+            image, header, bit_depth, is_mono = load_image(path)
+            if image is None:
+                QMessageBox.warning(self, "Error", "Failed to load source image.")
+                return
+            if image.ndim == 2:
+                image = np.stack([image]*3, axis=-1)
+            self.stellar_source = image
+            self.source_file_label.setText(path)
+            self.update_preview(self.source_preview_label, image)
+
+    def select_target_file(self):
+        default_dir = self.settings.value("working_directory", "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Target Image", 
+            default_dir,
+            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+        )
+        if path:
+            image, header, bit_depth, is_mono = load_image(path)
+            if image is None:
+                QMessageBox.warning(self, "Error", "Failed to load target image.")
+                return
+            if image.ndim == 2:
+                image = np.stack([image]*3, axis=-1)
+            self.stellar_target = image
+            self.target_file_label.setText(path)
+            self.update_preview(self.target_preview_label, image)
+
+    def load_source_from_slot(self):
+        index = self.source_slot_combo.currentData()
+        image = self.image_manager._images.get(index)
+        if image is None:
+            QMessageBox.warning(self, "Error", f"Slot {index} is empty.")
+            return
+        if image.ndim == 2:
+            image = np.stack([image]*3, axis=-1)
+        self.stellar_source = image
+        self.source_file_label.setText(f"Loaded from Slot {index}")
+
+    def load_target_from_slot(self):
+        index = self.target_slot_combo.currentData()
+        image = self.image_manager._images.get(index)
+        if image is None:
+            QMessageBox.warning(self, "Error", f"Slot {index} is empty.")
+            return
+        if image.ndim == 2:
+            image = np.stack([image]*3, axis=-1)
+        self.stellar_target = image
+        self.target_file_label.setText(f"Loaded from Slot {index}")
+
+    def update_preview(self, label, image):
+        """
+        Update a QLabel to display a preview of the given image.
+        For display purposes, convert to 8-bit if needed.
+        """
+        # For display only, convert float32 in [0,1] to 8-bit.
+        if image.dtype == np.float32:
+            disp = np.clip(image * 255, 0, 255).astype(np.uint8)
+        else:
+            disp = image
+        if disp.ndim == 3 and disp.shape[2] == 3:
+            h, w, _ = disp.shape
+            qimg = QImage(disp.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        elif disp.ndim == 2:
+            h, w = disp.shape
+            qimg = QImage(disp.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            return
+        scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        label.setPixmap(QPixmap.fromImage(scaled))
+
+    def run_alignment(self):
+        """
+        Uses the selected source and target images to compute an affine transform
+        that aligns the target image to the source image. It uses the entire images
+        for star detection (i.e. does not check for overlap) and then warps the target
+        image to the source image's dimensions.
+        """
+        # If "From Slot" radio is checked but no image is loaded, load automatically.
+        if self.source_from_slot_radio.isChecked() and self.stellar_source is None:
+            self.load_source_from_slot()
+        if self.target_from_slot_radio.isChecked() and self.stellar_target is None:
+            self.load_target_from_slot()
+                
+        if self.stellar_source is None:
+            QMessageBox.warning(self, "Error", "Please select a source image.")
+            return
+        if self.stellar_target is None:
+            QMessageBox.warning(self, "Error", "Please select a target image.")
+            return
+
+        source_img = self.stellar_source
+        target_img = self.stellar_target
+
+        # Use the source image dimensions as the reference.
+        H, W = source_img.shape[:2]
+        
+        # Instead of calling parent's detect_stars, call our own method.
+        source_stars = self.detect_stars(source_img, max_stars=25)
+        target_stars = self.detect_stars(target_img, max_stars=25)
+        if len(source_stars) < 3 or len(target_stars) < 3:
+            QMessageBox.warning(self, "Alignment Error", "Not enough stars detected for alignment.")
+            return
+
+        # Estimate the affine transform using triangle matching.
+        best_matrix, best_inliers = self.estimate_transform_from_triangles(
+            [(s[0], s[1]) for s in source_stars],
+            [(s[0], s[1]) for s in target_stars],
+            method="affine"
+        )
+        if best_matrix is None:
+            QMessageBox.warning(self, "Alignment Error", "Failed to compute alignment transform.")
+            return
+
+        # Warp the target image to align with the source.
+        warped_target = cv2.warpAffine(target_img, best_matrix[:2], (W, H), flags=cv2.INTER_LINEAR)
+
+        # Create an all-black canvas with 3 channels of the same size as the source.
+        canvas = np.zeros((H, W, 3), dtype=warped_target.dtype)
+        canvas[:] = warped_target  # Copy the warped image into the canvas.
+
+        self.aligned_image = canvas
+        self.update_preview(self.result_preview_label, canvas)
+        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} inliers.")
+        # Show transformation details.
+        self.show_transform_info(best_matrix)
+
+    def detect_stars(self, image2d, max_stars=25):
+        # If the image has 3 channels, convert it to grayscale.
+        if image2d.ndim == 3 and image2d.shape[2] == 3:
+            # A simple average conversion; you could use a weighted conversion if desired.
+            image2d = np.mean(image2d, axis=2)
+            
+
+        mean_val, median_val, std_val = sigma_clipped_stats(image2d, sigma=3.0)
+        daofind = DAOStarFinder(threshold=3 * std_val, fwhm=3.0)
+        sources = daofind(image2d - median_val)
+        if sources is None or len(sources) == 0:
+            return []
+        x_coords = sources['xcentroid'].data
+        y_coords = sources['ycentroid'].data
+        flux = sources['flux'].data
+        # Sort stars by brightness (flux) and take the top ones.
+        sorted_indices = np.argsort(-flux)
+        top_indices = sorted_indices[:max_stars]
+        stars = [(x_coords[i], y_coords[i], flux[i]) for i in top_indices]
+        return stars
+
+    def estimate_transform_from_triangles(self, mosaic_stars, new_stars, method="affine"):
+        mosaic_signatures = self.build_triangle_signatures(mosaic_stars)
+        new_signatures = self.build_triangle_signatures(new_stars)
+        print(f"🔹 Found {len(mosaic_signatures)} unique mosaic triangles")
+        print(f"🔹 Found {len(new_signatures)} unique new image triangles")
+        best_inliers = 0
+        best_matrix = None
+
+        total_signatures = len(new_signatures)
+        processed_signatures = 0
+        processed_candidates = 0
+
+        mosaic_x = [pt[0] for pt in mosaic_stars]
+        mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
+
+        for target_sig, new_triplets in new_signatures.items():
+            processed_signatures += 1
+            if processed_signatures % 100 == 0 or processed_signatures == total_signatures:
+                self.status_label.setText(f"Checking signature {processed_signatures}/{total_signatures}...")
+                QApplication.processEvents()
+
+            closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
+            if closest_match is None:
+                continue
+            mosaic_triplets = mosaic_signatures[closest_match]
+            for new_tri in new_triplets:
+                new_points = np.float32([new_stars[i] for i in new_tri])
+                for mosaic_tri in mosaic_triplets:
+                    processed_candidates += 1
+                    self.status_label.setText(f"Checked {processed_candidates} triangle candidates")
+                    QApplication.processEvents()
+                    
+                    if method == "partial_affine":
+                        matrix, _ = cv2.estimateAffinePartial2D(
+                            new_points.reshape(-1, 1, 2),
+                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
+                            method=cv2.LMEDS
+                        )
+                    else:  # method == "affine" or default
+                        matrix, _ = cv2.estimateAffine2D(
+                            new_points.reshape(-1, 1, 2),
+                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
+                            method=cv2.LMEDS
+                        )
+                    if matrix is None:
+                        continue
+
+                    full_mat = np.eye(3, dtype=np.float32)
+                    full_mat[:2] = matrix
+
+                    # Failsafe: scaling check.
+                    A = full_mat[:2, :2]
+                    scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
+                    scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
+                    scale = (scale1 + scale2) / 2.0
+                    if scale > 1.25 or scale < 0.8:
+                        continue
+
+                    # Failsafe: translation check.
+                    t = full_mat[:2, 2]
+                    trans_threshold = (mosaic_width / 3.0) if mosaic_width > 0 else 100.0
+                    if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
+                        continue
+
+                    # Failsafe: rotation angle check.
+                    # Compute the rotation angle (in radians) from the matrix.
+                    # Here we use arctan2 on the first column (assuming a near-rotation+uniform scale).
+                    angle = np.arctan2(A[1, 0], A[0, 0])
+                    if abs(angle) > (np.pi / 4):  # 45 degrees ≈ 0.7854 radians.
+                        continue
+
+                    # Count inliers.
+                    inliers_count = 0
+                    for (x, y) in new_stars:
+                        src_pt = np.array([x, y, 1], dtype=np.float32)
+                        dst_pt = full_mat @ src_pt
+                        for (mx, my) in mosaic_stars:
+                            if math.hypot(dst_pt[0] - mx, dst_pt[1] - my) < 3.0:
+                                inliers_count += 1
+                                break
+
+                    if inliers_count > best_inliers:
+                        best_inliers = inliers_count
+                        best_matrix = full_mat
+
+        summary = f"Triangle alignment complete: Checked {processed_candidates} candidates; best transform had {best_inliers} inliers."
+        print(summary)
+        self.status_label.setText(summary)
+        QApplication.processEvents()
+        return best_matrix, best_inliers
+
+    def build_triangle_signatures(self, stars):
+        signature_map = {}
+        for combo in itertools.combinations(range(len(stars)), 3):
+            i, j, k = combo
+            p1, p2, p3 = stars[i], stars[j], stars[k]
+            sides = [
+                (p2[0]-p1[0])**2 + (p2[1]-p1[1])**2,
+                (p3[0]-p2[0])**2 + (p3[1]-p2[1])**2,
+                (p1[0]-p3[0])**2 + (p1[1]-p3[1])**2
+            ]
+            sides.sort()
+            min_side = sides[0]
+            norm_sides = tuple(round(s / min_side, 3) for s in sides)
+            signature_map.setdefault(norm_sides, []).append(combo)
+        return signature_map
+
+    def find_closest_signature(self, target_sig, signature_dict, threshold=0.02):
+        for sig in signature_dict.keys():
+            if np.allclose(sig, target_sig, atol=threshold):
+                return sig
+        return None
+
+    def show_transform_info(self, matrix):
+        """
+        Decomposes the 3x3 affine matrix and displays its translation, scaling,
+        rotation (in degrees), and skew (shear) in a pop-up dialog.
+        """
+        # Assuming matrix is of the form:
+        # [[a, b, tx],
+        #  [c, d, ty],
+        #  [0, 0, 1]]
+        a, b, tx = matrix[0]
+        c, d, ty = matrix[1]
+
+        # Compute translation directly.
+        translation = (tx, ty)
+
+        # Compute scale in x as the length of the first column.
+        scale_x = np.sqrt(a * a + c * c)
+        # The rotation angle (in degrees) is the arctan of (c/a)
+        rotation_rad = np.arctan2(c, a)
+        rotation_deg = np.degrees(rotation_rad)
+
+        # Compute shear (skew). One common formula is:
+        shear = (a * b + c * d) / (a * a + c * c)
+        # Compute scale_y using the formula:
+        # det(A) = a*d - b*c = scale_x * scale_y  => scale_y = det / scale_x
+        det = a * d - b * c
+        scale_y = det / scale_x
+
+        # Alternatively, you can compute scale_y with a method that accounts for shear:
+        # scale_y_alt = np.sqrt(b * b + d * d - shear * shear * (a * a + c * c))
+        # (Usually the two values should be similar for well-behaved transforms.)
+
+        info_text = (
+            f"Transformation Matrix:\n\n"
+            f"[{a:.3f}  {b:.3f}  {tx:.3f}]\n"
+            f"[{c:.3f}  {d:.3f}  {ty:.3f}]\n"
+            f"[0.000  0.000  1.000]\n\n"
+            f"Translation: (tx, ty) = ({tx:.3f}, {ty:.3f})\n"
+            f"Scaling: scale_x = {scale_x:.3f}, scale_y = {scale_y:.3f}\n"
+            f"Rotation: {rotation_deg:.2f}°\n"
+            f"Skew (shear): {shear:.3f}\n"
+        )
+
+        # Create a dialog to display the transformation details.
+        info_dialog = QDialog(self)
+        info_dialog.setWindowTitle("Transformation Matrix Details")
+        layout = QVBoxLayout(info_dialog)
+
+        text_edit = QTextEdit(info_dialog)
+        text_edit.setReadOnly(True)
+        text_edit.setText(info_text)
+        layout.addWidget(text_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, info_dialog)
+        button_box.accepted.connect(info_dialog.accept)
+        layout.addWidget(button_box)
+
+        info_dialog.show()
+
+    def push_aligned_to_active(self):
+        """
+        Push the aligned image (if available) to the active slot in the image manager.
+        """
+        if self.aligned_image is None:
+            QMessageBox.warning(self, "Error", "No aligned image available. Run alignment first.")
+            return
+        self.image_manager.set_image(new_image=self.aligned_image, metadata={"description": "Stellar aligned image"})
+        self.image_manager.image_changed.emit(self.image_manager.current_slot, self.aligned_image, {"description": "Stellar aligned image"})
+        QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
+        self.accept()
+
 class HDRWorker(QObject):
     """
     Worker class to perform WaveScale HDRation in a separate thread.
@@ -9113,6 +10047,7 @@ class GradientRemovalDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle("Gradient Removal")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
         self.image = image.copy()  # Original image (float32, 0-1)
         self.exclusion_polygons = []  # List of polygons (each polygon is a list of QPoint)
         self.drawing = False
@@ -9136,7 +10071,6 @@ class GradientRemovalDialog(QDialog):
         scale_w = max_width / original_width
         scale_h = max_height / original_height
         scale = min(scale_w, scale_h, 1.0)  # Prevent upscaling if image is smaller
-
         self.scale_factor = scale
 
         scaled_width = int(original_width * scale)
@@ -9150,7 +10084,6 @@ class GradientRemovalDialog(QDialog):
             # Color
             display_image = (self.image * 255).astype(np.uint8)
 
-
         # Resize to fit the max display size
         display_image = cv2.resize(
             display_image,
@@ -9160,7 +10093,6 @@ class GradientRemovalDialog(QDialog):
 
         # Convert to QImage
         if len(display_image.shape) == 2:
-            # Grayscale
             q_img = QImage(
                 display_image.data,
                 scaled_width,
@@ -9169,7 +10101,6 @@ class GradientRemovalDialog(QDialog):
                 QImage.Format.Format_Grayscale8,
             )
         else:
-            # Color
             q_img = QImage(
                 display_image.data,
                 scaled_width,
@@ -9192,28 +10123,33 @@ class GradientRemovalDialog(QDialog):
         # Set up controls
         self.setup_controls()
 
-        # Set up layout
+        # Create main layout
         main_layout = QHBoxLayout()
-        main_layout.addWidget(self.label)
 
-        # Controls layout
+        # Add image label with stretch factor 1 (expanding)
+        main_layout.addWidget(self.label, 1)
+
+        # Create a widget to hold controls and fix its width
+        controls_widget = QWidget()
         controls_layout = QVBoxLayout()
         controls_layout.addWidget(self.controls_groupbox)
         controls_layout.addStretch(1)
-
-        # Add a QLabel to display the current step
+        # Create a status label to display current step and add it
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         controls_layout.addWidget(self.status_label)
+        controls_widget.setLayout(controls_layout)
+        controls_widget.setFixedWidth(300)  # Fixed width for the controls
 
-
-        main_layout.addLayout(controls_layout)
+        # Add the controls widget to the main layout (no stretch factor)
+        main_layout.addWidget(controls_widget, 0)
 
         self.setLayout(main_layout)
         self.setMinimumSize(1000, 700)
 
         # Initialize thread as None (if using threading)
         self.thread = None
+
 
     def setup_controls(self):
         """
@@ -9317,33 +10253,44 @@ class GradientRemovalDialog(QDialog):
         self.label.setPixmap(self.stretched_pixmap)
 
     def update_selection(self):
-        """
-        Updates the pixmap with all finalized polygons and the current polygon being drawn.
-        """
-        # Use the stretched pixmap if available; otherwise, use the base pixmap
+        # Use the stretched_pixmap if available; otherwise use base_pixmap.
         if hasattr(self, "stretched_pixmap") and self.stretched_pixmap:
-            self.pixmap = self.stretched_pixmap.copy()
+            original = self.stretched_pixmap
         else:
-            self.pixmap = self.base_pixmap.copy()
-
+            original = self.base_pixmap
+        
+        # Get the current size of the label.
+        label_size = self.label.size()
+        # Scale the original pixmap to the label's size while preserving the aspect ratio.
+        scaled_pixmap = original.scaled(label_size, Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation)
+        # Make a copy so we can draw on it.
+        self.pixmap = QPixmap(scaled_pixmap)
+        
+        # Compute scale factors based on the original pixmap size.
+        orig_width, orig_height = original.width(), original.height()
+        new_width, new_height = self.pixmap.width(), self.pixmap.height()
+        scale_x = new_width / orig_width
+        scale_y = new_height / orig_height
+        
         painter = QPainter(self.pixmap)
-
-        # Draw all finalized exclusion polygons in semi-transparent green
+        # Draw all finalized exclusion polygons, scaling each point.
         pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine)
-        brush = QColor(0, 255, 0, 50)  # Semi-transparent
+        brush = QColor(0, 255, 0, 50)  # semi-transparent green
         painter.setPen(pen)
         painter.setBrush(brush)
         for polygon in self.exclusion_polygons:
-            painter.drawPolygon(polygon)
-
-        # If currently drawing, draw the current polygon outline in red
+            scaled_poly = QPolygon([QPoint(int(pt.x() * scale_x), int(pt.y() * scale_y)) for pt in polygon])
+            painter.drawPolygon(scaled_poly)
+        
+        # If a polygon is being drawn, draw its outline in red.
         if self.drawing and len(self.current_polygon) > 1:
             pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            temp_polygon = QPolygon(self.current_polygon)
-            painter.drawPolyline(temp_polygon)
-
+            scaled_poly = QPolygon([QPoint(int(pt.x() * scale_x), int(pt.y() * scale_y)) for pt in self.current_polygon])
+            painter.drawPolyline(scaled_poly)
+        
         painter.end()
         self.label.setPixmap(self.pixmap)
 
@@ -9355,6 +10302,9 @@ class GradientRemovalDialog(QDialog):
         self.current_polygon = []  # Clear any currently drawn polygon
         self.update_selection()  # Redraw the pixmap
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_selection()
 
 
     def update_num_sample_points(self, value):
@@ -9372,29 +10322,63 @@ class GradientRemovalDialog(QDialog):
     def mouse_press_event(self, event):
         """
         Handles the mouse press event to initiate drawing.
+        Converts the event's position (in label coordinates) to base image coordinates.
         """
         if event.button() == Qt.MouseButton.LeftButton:
+            # The label's current pixmap is the scaled (displayed) image.
+            displayed = self.label.pixmap()
+            if displayed is not None:
+                ratio_x = self.base_pixmap.width() / displayed.width()
+                ratio_y = self.base_pixmap.height() / displayed.height()
+            else:
+                ratio_x = ratio_y = 1.0
+            # Map the mouse position to base coordinates.
+            base_point = QPoint(int(event.pos().x() * ratio_x),
+                                int(event.pos().y() * ratio_y))
             self.drawing = True
-            self.current_polygon = [event.pos()]
+            self.current_polygon = [base_point]
             self.update_selection()
 
     def mouse_move_event(self, event):
         """
         Handles the mouse move event to update the current polygon being drawn.
+        Converts the event's position from label coordinates to base image coordinates.
         """
         if self.drawing:
-            self.current_polygon.append(event.pos())
+            displayed = self.label.pixmap()
+            if displayed is not None:
+                ratio_x = self.base_pixmap.width() / displayed.width()
+                ratio_y = self.base_pixmap.height() / displayed.height()
+            else:
+                ratio_x = ratio_y = 1.0
+            base_point = QPoint(int(event.pos().x() * ratio_x),
+                                int(event.pos().y() * ratio_y))
+            self.current_polygon.append(base_point)
             self.update_selection()
 
     def mouse_release_event(self, event):
         """
         Handles the mouse release event to finalize the polygon.
+        Converts the event's position from label coordinates to base image coordinates.
         """
         if event.button() == Qt.MouseButton.LeftButton and self.drawing:
+            # Optionally, update with the final point.
+            displayed = self.label.pixmap()
+            if displayed is not None:
+                ratio_x = self.base_pixmap.width() / displayed.width()
+                ratio_y = self.base_pixmap.height() / displayed.height()
+            else:
+                ratio_x = ratio_y = 1.0
+            base_point = QPoint(int(event.pos().x() * ratio_x),
+                                int(event.pos().y() * ratio_y))
+            self.current_polygon.append(base_point)
             self.drawing = False
+            # Store the polygon (which is in base coordinates)
             self.exclusion_polygons.append(QPolygon(self.current_polygon))
             self.current_polygon = []
             self.update_selection()
+
+
 
     def process_image(self):
         """
@@ -11096,6 +12080,16 @@ class AddStarsDialog(QDialog):
             return QPixmap()
 
         return QPixmap.fromImage(q_image)
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
 
     def zoom_in(self):
         """Zoom in on the preview image."""
@@ -15075,6 +16069,14 @@ class BlinkTab(QWidget):
                 (self.preview_label.height() - self.scroll_area.viewport().height()) // 2
             )
 
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
 
     def zoom_in(self):
@@ -15778,11 +16780,12 @@ class CosmicClarityTab(QWidget):
             if self.is_mono:
                 stretched = stretch_mono_image(
                     display_image if display_image.ndim == 2 else display_image[:, :, 0],
-                    target_median
+                    target_median,
+                    normalize=True
                 )
-                display_image = np.stack([stretched] * 3, axis=-1)  # Convert mono to RGB.
+                display_image = np.stack([stretched] * 3, axis=-1)
             else:
-                display_image = stretch_color_image(display_image, target_median, linked=False)
+                display_image = stretch_color_image(display_image, target_median, linked=False, normalize=True)
 
         try:
             display_image_uint8 = (display_image * 255).astype(np.uint8)
@@ -16121,82 +17124,32 @@ class CosmicClarityTab(QWidget):
         v_scroll.setValue((v_scroll.maximum() + v_scroll.minimum()) // 2)
 
     def show_image(self, image=None):
-        """Display the loaded image or a specified image, preserving zoom and scroll position."""
-        if image is None:
-            image = self.image
+        """
+        Display the loaded image by updating the base pixmap (which applies autostretch)
+        and then updating the display using that pixmap.
+        """
+        # Use the passed image if provided; otherwise use self.image.
+        if image is not None:
+            self.image = image
 
-        if image is None:
+        if self.image is None:
             print("[ERROR] No image to display.")
             QMessageBox.warning(self, "No Image", "No image data available to display.")
             return False
 
-        # Save the current scroll position if it exists
+        # Save the current scroll position so it can be restored.
         current_scroll_position = (
             self.scroll_area.horizontalScrollBar().value(),
             self.scroll_area.verticalScrollBar().value()
         )
 
-        # Stretch and display the image
-        display_image = image.copy()
-        target_median = 0.25
+        # Update the base pixmap (this applies autostretch if the auto_stretch_button is checked)
+        self.update_base_pixmap()
+        
+        # Now update the display using the base pixmap.
+        self.update_image_display()
 
-        # Determine if the image is mono based on dimensions
-        is_mono = display_image.ndim == 2 or (display_image.ndim == 3 and display_image.shape[2] == 1)
-
-        if self.auto_stretch_button.isChecked():
-            try:
-                if is_mono:
-                    print("Processing mono image for display...")
-                    # Stretch mono image and convert to RGB
-                    stretched_mono = stretch_mono_image(display_image if display_image.ndim == 2 else display_image[:, :, 0], target_median)
-                    display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert mono to RGB for display
-                else:
-                    print("Processing color image for display...")
-                    display_image = stretch_color_image(display_image, target_median, linked=False)
-            except Exception as e:
-                print(f"[ERROR] Error during image stretching: {e}")
-                QMessageBox.critical(self, "Error", f"Error stretching image for display:\n{e}")
-                return False
-        else:
-            print("AutoStretch is disabled.")
-
-        # Convert to QImage for display
-        try:
-            display_image_uint8 = (display_image * 255).astype(np.uint8)
-        except Exception as e:
-            print(f"[ERROR] Error converting image to uint8: {e}")
-            QMessageBox.critical(self, "Error", f"Error processing image for display:\n{e}")
-            return False
-
-        print(f"Image shape after conversion to uint8: {display_image_uint8.shape}")
-
-        try:
-            if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:  # RGB image
-                height, width, _ = display_image_uint8.shape
-                bytes_per_line = 3 * width
-                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            elif display_image_uint8.ndim == 2:  # Grayscale image
-                height, width = display_image_uint8.shape
-                bytes_per_line = width
-                qimage = QImage(display_image_uint8.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
-            else:
-                print("[ERROR] Unexpected image format!")
-                return False
-        except Exception as e:
-            print(f"[ERROR] Error creating QImage: {e}")
-            return False
-
-        # Create QPixmap from QImage
-        pixmap = QPixmap.fromImage(qimage)
-        if pixmap.isNull():
-            print("[ERROR] Failed to convert QImage to QPixmap.")
-            return False
-
-        self.image_label.setPixmap(pixmap)
-        self.image_label.repaint()
-        self.image_label.update()
-
-        # Restore the previous scroll position
+        # Restore the scroll position.
         self.scroll_area.horizontalScrollBar().setValue(current_scroll_position[0])
         self.scroll_area.verticalScrollBar().setValue(current_scroll_position[1])
 
@@ -16232,13 +17185,15 @@ class CosmicClarityTab(QWidget):
 
 
     def toggle_auto_stretch(self, checked):
-        if self.image is None:
-            QMessageBox.warning(self, "No Image", "No image loaded to apply autostretch.")
-            return             
-        """Toggle autostretch and apply it to the current image display."""
+        """Toggle autostretch and update the display."""
         self.autostretch_enabled = checked
         self.auto_stretch_button.setText("AutoStretch (On)" if checked else "AutoStretch (Off)")
-        self.update_image_display()  # Redraw with autostretch if enabled
+        # Recalculate the base pixmap using the new autostretch setting.
+        self.update_base_pixmap()
+        # Then update the displayed image.
+        self.update_image_display()
+
+
 
     def save_input_image(self, file_path):
         """Save the current image to the specified path in TIF format."""
@@ -21847,6 +22802,16 @@ class CombinedPreviewWindow(QWidget):
     # -----------------------------
     # Zoom
     # -----------------------------
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
+
     def zoom_in(self):
         self.zoom_factor *= 1.2
         self.updatePreview()
