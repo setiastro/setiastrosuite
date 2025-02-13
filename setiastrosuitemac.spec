@@ -42,6 +42,8 @@ a = Analysis(
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
+        ('rescale.png', '.'),  
+        ('staralign.png', '.'),       
         ('LExtract.png', '.'),
         ('LInsert.png', '.'),
         ('slot1.png', '.'),
