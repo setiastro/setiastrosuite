@@ -30656,6 +30656,7 @@ class MainWindow(QMainWindow):
         self.show_names = False  # Boolean to toggle showing names on the main image
         self.max_results = 100  # Default maximum number of query results     
         self.current_tool = None  # Track the active annotation tool
+        self.header = Header()
         self.marker_style = "Circle" 
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
             
@@ -32219,7 +32220,6 @@ class MainWindow(QMainWindow):
         # Check if the ASTAP executable is set in settings.
         astap_exe = self.settings.value("astap/exe_path", "", type=str)
         if not astap_exe or not os.path.exists(astap_exe):
-            # Determine the file filter based on the platform.
             import sys
             if sys.platform.startswith("win"):
                 executable_filter = "Executables (*.exe);;All Files (*)"
@@ -32234,10 +32234,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
             else:
                 QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
-                self.blind_solve_image()
-                return
+                return None
 
-        # Normalize the loaded image (using your existing stretch_image method).
+        # Normalize the loaded image.
         normalized = self.stretch_image(self.image_data)
         
         # Save the normalized image to a temporary FITS file.
@@ -32247,7 +32246,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
             return
 
-
+        # Run ASTAP on the temporary file.
         process = QProcess(self)
         args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
         print("Running ASTAP with arguments:", args)
@@ -32276,33 +32275,91 @@ class MainWindow(QMainWindow):
             self.blind_solve_image()
             return
 
-        # Retrieve the solved header from the temporary FITS file.
+        # --- Retrieve the initial solved header from the temporary FITS file ---
         try:
             with fits.open(tmp_path, memmap=False) as hdul:
                 solved_header = dict(hdul[0].header)
-            # Remove problematic keys.
             for key in ["COMMENT", "HISTORY", "END"]:
                 solved_header.pop(key, None)
-            # Convert expected numeric keywords.
-            for key in {"CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"}:
-                if key in solved_header:
-                    try:
-                        solved_header[key] = float(solved_header[key])
-                    except ValueError:
-                        print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
-            if "WCSAXES" in solved_header:
-                try:
-                    solved_header["WCSAXES"] = int(float(solved_header["WCSAXES"]))
-                except ValueError:
-                    print(f"Warning: Could not convert WCSAXES value '{solved_header['WCSAXES']}' to int.")
+            print("Initial solved header retrieved from temporary FITS file:")
+            for key, value in solved_header.items():
+                print(f"{key} = {value}")
         except Exception as e:
             QMessageBox.critical(self, "Plate Solve", f"Error reading solved header: {e}")
             os.remove(tmp_path)
             self.blind_solve_image()
             return
 
+        # --- Check for a .wcs file and merge its header if present ---
+        wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
+        if os.path.exists(wcs_path):
+            try:
+                import re
+                wcs_header = {}
+                with open(wcs_path, "r") as f:
+                    text = f.read()
+                    # Matches a FITS header keyword and its value (with an optional comment).
+                    pattern = r"(\w+)\s*=\s*('?[^/']*'?)[\s/]"
+                    for match in re.finditer(pattern, text):
+                        key = match.group(1).strip().upper()
+                        val = match.group(2).strip()
+                        if val.startswith("'") and val.endswith("'"):
+                            val = val[1:-1].strip()
+                        wcs_header[key] = val
+                wcs_header.pop("END", None)
+                print("WCS header retrieved from .wcs file:")
+                for key, value in wcs_header.items():
+                    print(f"{key} = {value}")
+                # Merge the parsed WCS header into the solved header.
+                solved_header.update(wcs_header)
+            except Exception as e:
+                print("Error reading .wcs file:", e)
+        else:
+            print("No .wcs file found; using header from temporary FITS.")
+
+        # --- If loaded from a slot, merge the original file path from slot metadata ---
+        if getattr(self, "_from_slot", False) and hasattr(self, "_slot_meta"):
+            if "file_path" not in solved_header and "file_path" in self._slot_meta:
+                solved_header["file_path"] = self._slot_meta["file_path"]
+                print("Merged file_path from slot metadata into solved header.")
+
+        # --- Add any missing required WCS keywords ---
+        required_keys = {
+            "CTYPE1": "RA---TAN",
+            "CTYPE2": "DEC--TAN",
+            "RADECSYS": "ICRS",
+            "WCSAXES": 2,
+            # CRVAL1, CRVAL2, CRPIX1, CRPIX2 are ideally provided by ASTAP.
+        }
+        for key, default in required_keys.items():
+            if key not in solved_header:
+                solved_header[key] = default
+                print(f"Added missing key {key} with default value {default}.")
+
+        # --- Convert keys that are expected to be numeric from strings to numbers ---
+        expected_numeric_keys = {
+            "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CROTA1", "CROTA2",
+            "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2", "WCSAXES"
+        }
+        for key in expected_numeric_keys:
+            if key in solved_header:
+                try:
+                    # For keys that should be integers, you can use int(float(...)) if necessary.
+                    solved_header[key] = float(solved_header[key])
+                except ValueError:
+                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+
+        # --- Ensure integer keywords are stored as integers ---
+        for key in ["WCSAXES", "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3"]:
+            if key in solved_header:
+                try:
+                    solved_header[key] = int(float(solved_header[key]))
+                except ValueError:
+                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to int.")
+
+
         os.remove(tmp_path)
-        print("ASTAP plate solving successful. Solved header:")
+        print("ASTAP plate solving successful. Final solved header:")
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
@@ -32314,8 +32371,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
             return
-        
+
         return solved_header
+
 
     def save_temp_fits_image(self, normalized_image, image_path: str):
         """
@@ -32794,19 +32852,49 @@ class MainWindow(QMainWindow):
         self.update_green_box()
 
 
+    def compute_pixscale(self):
+        """
+        Computes the pixel scale (arcsec/pixel) from the header's CD keywords.
+        """
+        try:
+            cd1_1 = float(self.header.get('CD1_1', 0))
+            cd1_2 = float(self.header.get('CD1_2', 0))
+            # Calculate scale in degrees per pixel and convert to arcsec.
+            pixscale = math.sqrt(cd1_1**2 + cd1_2**2) * 3600.0
+            print("Calculated pixscale from header:", pixscale)
+            return pixscale
+        except Exception as e:
+            print("Error calculating pixscale:", e)
+            return None
+
+    def get_defined_radius(self):
+        """
+        Returns the radius (in arcminutes) for the current circle.
+        If self.pixscale is None, attempt to calculate it manually.
+        """
+        if self.pixscale is None:
+            self.pixscale = self.compute_pixscale()
+            if self.pixscale is None:
+                print("Warning: Could not compute pixscale from header.")
+                return None
+
+        # The circle_radius is in pixels; convert to arcminutes.
+        return float((self.circle_radius * self.pixscale) / 3600.0)
+
     def update_circle_data(self):
         """Updates the status based on the circle's center and radius."""
-        
         if self.circle_center and self.circle_radius > 0:
+            # Make sure we have a valid pixscale.
             if self.pixscale is None:
-                print("Warning: Pixscale is None. Cannot calculate radius in arcminutes.")
-                self.status_label.setText("No pixscale available for radius calculation.")
-                return
+                self.pixscale = self.compute_pixscale()
+                if self.pixscale is None:
+                    self.status_label.setText("No pixscale available for radius calculation.")
+                    print("Warning: Pixscale is None. Cannot calculate radius in arcminutes.")
+                    return
 
-            # Convert circle center to RA/Dec and radius to arcminutes
+            # Convert circle center to RA/Dec and radius to arcminutes.
             ra, dec = self.calculate_ra_dec_from_pixel(self.circle_center.x(), self.circle_center.y())
-            radius_arcmin = self.circle_radius * self.pixscale / 60.0  # Convert to arcminutes
-            
+            radius_arcmin = self.circle_radius * self.pixscale / 60.0  # from arcsec to arcmin
             self.status_label.setText(
                 f"Circle set at center RA={ra:.6f}, Dec={dec:.6f}, radius={radius_arcmin:.2f} arcmin"
             )
@@ -33234,7 +33322,8 @@ class MainWindow(QMainWindow):
         """Force a blind solve on the currently loaded image."""
         dialog.accept()  # Close the settings dialog
         self.prompt_blind_solve()  # Call the blind solve function
-        
+
+
 def extract_wcs_data(file_path):
     try:
         # Open the FITS file with minimal validation to ignore potential errors in non-essential parts
