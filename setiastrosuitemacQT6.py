@@ -7944,6 +7944,16 @@ class MosaicMasterDialog(QDialog):
                 except ValueError:
                     print(f"Warning: Could not convert {key} value '{solved_header[key]}' to int.")
 
+        # --- Compute CROTA1 and CROTA2 if not present ---
+        if 'CROTA1' not in solved_header or 'CROTA2' not in solved_header:
+            if 'CD1_1' in solved_header and 'CD1_2' in solved_header:
+                rotation = math.degrees(math.atan2(solved_header['CD1_2'], solved_header['CD1_1']))
+                solved_header['CROTA1'] = rotation
+                solved_header['CROTA2'] = rotation
+                print(f"Computed CROTA1 and CROTA2 as {rotation:.2f} degrees.")
+            else:
+                print("CD matrix elements not available; cannot compute CROTA values.")
+
         try:
             os.remove(tmp_path)
         except Exception as e:
@@ -9187,6 +9197,16 @@ class PlateSolver(QDialog):
                 except ValueError:
                     print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
 
+        # --- Compute CROTA1 and CROTA2 if not present ---
+        if 'CROTA1' not in solved_header or 'CROTA2' not in solved_header:
+            if 'CD1_1' in solved_header and 'CD1_2' in solved_header:
+                rotation = math.degrees(math.atan2(solved_header['CD1_2'], solved_header['CD1_1']))
+                solved_header['CROTA1'] = rotation
+                solved_header['CROTA2'] = rotation
+                print(f"Computed CROTA1 and CROTA2 as {rotation:.2f} degrees.")
+            else:
+                print("CD matrix elements not available; cannot compute CROTA values.")
+
 
         print("Final solved header to be used:")
         for key, value in solved_header.items():
@@ -9608,7 +9628,7 @@ class PlateSolver(QDialog):
         """
         print("Updating metadata/FITS header... (this is a placeholder)")
         # TODO: Implement metadata update logic here.
-
+        
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
