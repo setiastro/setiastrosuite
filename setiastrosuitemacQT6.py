@@ -27,16 +27,19 @@ import time
 from datetime import datetime
 import pywt
 from io import BytesIO
+import re
 
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
+from astropy.table import Table, vstack
 
 
 from astropy.wcs.utils import skycoord_to_pixel
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 import itertools
+from astropy.io.fits import Header
 
 # Reproject for WCS-based alignment
 try:
@@ -143,7 +146,8 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QListWidget,
-    QListWidgetItem
+    QListWidgetItem,
+    QProgressDialog
 )
 
 # ----- QtGui -----
@@ -198,7 +202,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.7"
+VERSION = "2.10.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -249,7 +253,9 @@ if hasattr(sys, '_MEIPASS'):
     mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')
     rescale_path = os.path.join(sys._MEIPASS, 'rescale.png')
     staralign_path = os.path.join(sys._MEIPASS, 'staralign.png')
-    mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')    
+    mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')  
+    platesolve_path = os.path.join(sys._MEIPASS, 'platesolve.png')
+    psf_path = os.path.join(sys._MEIPASS, 'psf.png')      
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -298,6 +304,8 @@ else:
     rescale_path = 'rescale.png'
     staralign_path = 'staralign.png'
     mask_path = 'maskapply.png'
+    platesolve_path = 'platesolve.png'
+    psf_path = 'psf.png'    
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -733,6 +741,17 @@ class AstroEditingSuite(QMainWindow):
         stellar_align_action.triggered.connect(self.stellar_alignment)
         mosaic_menu.addAction(stellar_align_action)
 
+        plate_solver_action = QAction(QIcon(platesolve_path), "Plate Solver", self)
+        plate_solver_action.setStatusTip("Perform plate solving on an image")
+        plate_solver_action.triggered.connect(self.launch_plate_solver)
+        mosaic_menu.addAction(plate_solver_action)      
+
+        # PSF Viewer Action (New!)
+        psf_viewer_action = QAction(QIcon(psf_path), "PSF Viewer", self)
+        psf_viewer_action.setStatusTip("View PSF histograms and star statistics")
+        psf_viewer_action.triggered.connect(self.psf_viewer)
+        mosaic_menu.addAction(psf_viewer_action)          
+
         # --------------------
         # Toolbar
         # --------------------
@@ -876,6 +895,8 @@ class AstroEditingSuite(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)        
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
+        mosaictoolbar.addAction(plate_solver_action)
+        mosaictoolbar.addAction(psf_viewer_action)        
         
         # --------------------
         # Mask Toolbar
@@ -1049,7 +1070,7 @@ class AstroEditingSuite(QMainWindow):
         # Window Properties
         # --------------------
         self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
-        self.setGeometry(100, 100, 1000, 700)  # Set window size as needed
+        self.setGeometry(100, 100, 800, 600)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
@@ -1217,6 +1238,51 @@ class AstroEditingSuite(QMainWindow):
         dialog = StellarAlignmentDialog(self, self.settings, self.image_manager)
         dialog.show()
 
+    def launch_plate_solver(self):
+        # Instantiate and run the PlateSolver dialog.
+        solver = PlateSolver(self.settings, self)
+        solver.show()  # The PlateSolver dialog handles the full process
+
+    def psf_viewer(self):
+        """
+        Create and show the PSFViewer dialog using the current image from the image manager.
+        """
+        # Check if a PSFViewer dialog is already open; if so, bring it to the front.
+        if (hasattr(self, 'psf_viewer_dialog') and 
+                self.psf_viewer_dialog is not None and 
+                self.psf_viewer_dialog.isVisible()):
+            self.psf_viewer_dialog.raise_()
+            self.psf_viewer_dialog.activateWindow()
+            return
+
+        # Get the image from slot 0.
+        img = self.image_manager._images.get(0, None)
+        if img is None:
+            QMessageBox.warning(self, "No Image", "Slot 0 does not contain an image.")
+            return
+
+        # If the image is grayscale, replicate to 3 channels.
+        if img.ndim == 2:
+            img = np.stack([img] * 3, axis=-1)
+
+        # Create the PSFViewer dialog.
+        self.psf_viewer_dialog = PSFViewer(img, self)
+
+        # Define a helper function to update the PSFViewer when slot 0 changes.
+        def update_psf(slot, image, metadata):
+            if slot == 0:
+                if image is None:
+                    return
+                if image.ndim == 2:
+                    image = np.stack([image] * 3, axis=-1)
+                self.psf_viewer_dialog.updateImage(image)
+
+        # Connect the image_changed signal.
+        self.image_manager.image_changed.connect(update_psf)
+
+        self.psf_viewer_dialog.show()
+
+
     def update_slot_toolbar_highlight(self):
         """
         Update the slot toolbar so that:
@@ -1265,7 +1331,8 @@ class AstroEditingSuite(QMainWindow):
         add multiple images, star-align them, and create a large mosaic.
         """
         # Create the mosaic master window if not already created, or just each time:
-        mosaic_window = MosaicMasterDialog(parent=self, image_manager=self.image_manager)
+        mosaic_window = MosaicMasterDialog(self.settings, parent=self, image_manager=self.image_manager)
+
         mosaic_window.show()
 
     def save_project(self):
@@ -2279,10 +2346,12 @@ class AstroEditingSuite(QMainWindow):
         # Display stored settings using a form layout.
         settings_form = QFormLayout()
         
-        # Add settings fields dynamically, including a Working Directory.
+        # Add settings fields dynamically.
+        # For folder selection (or file selection) use the button method below.
         settings_fields = {
             "GraXpert Path": ("graxpert/path", self.settings.value("graxpert/path", "")),
             "StarNet Executable Path": ("starnet/exe_path", self.settings.value("starnet/exe_path", "")),
+            "ASTAP Executable Path": ("astap/exe_path", self.settings.value("astap/exe_path", "")),
             "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", "")),
             "Working Directory": ("working_directory", self.settings.value("working_directory", ""))
         }
@@ -2302,12 +2371,12 @@ class AstroEditingSuite(QMainWindow):
             # Create a selection button.
             select_button = QPushButton("...")
             select_button.setFixedWidth(30)
-            # For "StarNet Executable Path", use file selection.
-            if label == "StarNet Executable Path":
+            # For executable paths, use file selection.
+            if label in ["StarNet Executable Path", "ASTAP Executable Path"]:
                 select_button.setToolTip(f"Select file for {label}")
                 select_button.clicked.connect(lambda _, f=field: self.select_file(f))
             else:
-                # For the other fields (including Working Directory), use folder selection.
+                # For the other fields, use folder selection.
                 select_button.setToolTip(f"Select folder for {label}")
                 select_button.clicked.connect(lambda _, f=field: self.select_folder(f))
             field_layout.addWidget(select_button)
@@ -2371,7 +2440,6 @@ class AstroEditingSuite(QMainWindow):
                 self.settings.remove(key)
                 input_fields[key].clear()
             QMessageBox.information(self, "Preferences Cleared", "All settings have been reset.")
-
 
 
     def open_crop_tool(self):
@@ -3438,8 +3506,8 @@ class AstroEditingSuite(QMainWindow):
         # Step 11: Update ImageManager with Starless Image
         print("Updating ImageManager with the starless image.")
         dialog.append_text("Updating ImageManager with the starless image.\n")
-        self.image_manager.update_image(
-            updated_image=starless_rgb,
+        self.image_manager.set_image(
+            starless_rgb,
             metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
         )
         QMessageBox.information(self, "Success", "Starless image updated successfully.")
@@ -4228,7 +4296,7 @@ class CropTool(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-        self.setGeometry(150, 150, 800, 600)  # Initial size
+        self.setGeometry(100, 100, 800, 600)  # Initial size
 
         self.image_manager = image_manager
         self.original_image_data = image_data.copy()  # Keep a copy of the original image
@@ -6527,8 +6595,9 @@ class MosaicPreviewWindow(QDialog):
 # MosaicMasterDialog with blending/normalization integrated
 # --------------------------------------------------
 class MosaicMasterDialog(QDialog):
-    def __init__(self, parent=None, image_manager=None):
+    def __init__(self, settings: QSettings, parent=None, image_manager=None):
         super().__init__(parent)
+        self.settings = settings
         self.image_manager = image_manager
         self.setWindowTitle("Mosaic Master")
         self.resize(600, 400)
@@ -6536,6 +6605,7 @@ class MosaicMasterDialog(QDialog):
         self.final_mosaic = None
         self.weight_mosaic = None
         self.wcs_metadata = None  # To store mosaic WCS header
+        self.astap_exe = self.settings.value("astap/exe_path", "", type=str)
         # Variables to store stretching parameters:
         self.stretch_original_mins = []
         self.stretch_original_medians = []
@@ -6757,24 +6827,58 @@ class MosaicMasterDialog(QDialog):
         QApplication.processEvents()
 
         # Step 1: Force blind solve if requested.
+        # Determine which images to process:
         force_blind = self.forceBlindCheckBox.isChecked()
         if force_blind:
-            for item in self.loaded_images:
-                self.status_label.setText(f"Force blind solving {item['path']}...")
-                QApplication.processEvents()
-                self.perform_blind_solve(item)
+            images_to_process = self.loaded_images
         else:
-            unsolved_images = [item for item in self.loaded_images if item["wcs"] is None]
-            for item in unsolved_images:
-                self.status_label.setText(f"Blind solving {item['path']}...")
-                QApplication.processEvents()
-                self.perform_blind_solve(item)
+            images_to_process = [item for item in self.loaded_images if item.get("wcs") is None]
 
-        # Step 2: Get all images with valid WCS.
-        wcs_items = [x for x in self.loaded_images if x["wcs"] is not None]
-        if not wcs_items:
-            print("No images have WCS, skipping WCS alignment.")
-            return
+        for item in images_to_process:
+            # Before attempting ASTAP, check if the ASTAP executable is set.
+            if not self.astap_exe or not os.path.exists(self.astap_exe):
+                # Determine filter based on platform.
+                if sys.platform.startswith("win"):
+                    executable_filter = "Executables (*.exe);;All Files (*)"
+                else:
+                    executable_filter = "Executables (astap);;All Files (*)"
+                new_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Select ASTAP Executable",
+                    "",
+                    executable_filter
+                )
+                if new_path:
+                    self.astap_exe = new_path
+                    self.settings.setValue("astap/exe_path", self.astap_exe)
+                    QMessageBox.information(self, "Mosaic Master", "ASTAP path updated successfully.")
+                else:
+                    QMessageBox.warning(self, "Mosaic Master", "ASTAP path not provided. Falling back to blind solve.")
+                    solved_header = self.perform_blind_solve(item)
+                    if solved_header:
+                        item["wcs"] = WCS(solved_header)
+                    continue  # Move to next image
+
+            self.status_label.setText(f"Attempting ASTAP solve for {item['path']}...")
+            QApplication.processEvents()
+            solved_header = self.attempt_astap_solve(item)
+            if solved_header is None:
+                self.status_label.setText(f"ASTAP failed for {item['path']}. Falling back to blind solve...")
+                QApplication.processEvents()
+                solved_header = self.perform_blind_solve(item)
+            else:
+                self.status_label.setText(f"Plate solve successful using ASTAP for {item['path']}.")
+            if solved_header:
+                item["wcs"] = WCS(solved_header)
+            else:
+                print(f"Plate solving failed for {item['path']}.")
+
+
+            # Step 2: Get all images with valid WCS.
+            wcs_items = [x for x in self.loaded_images if x["wcs"] is not None]
+            if not wcs_items:
+                print("No images have WCS, skipping WCS alignment.")
+                return
 
         # Use the first image's WCS as reference and compute the mosaic bounding box.
         reference_wcs = wcs_items[0]["wcs"].deepcopy()
@@ -7527,7 +7631,6 @@ class MosaicMasterDialog(QDialog):
 
 
     # ---------- Blind Solve via Astrometry.net ----------
-    # ---------- Blind Solve via Astrometry.net ----------
     def perform_blind_solve(self, item):
         """
         Performs a blind solve using Astrometry.net and constructs the WCS header directly.
@@ -7739,6 +7842,281 @@ class MosaicMasterDialog(QDialog):
                 print("Updated header keys:", hdul_verify[0].header.keys())
         except Exception as e:
             print(f"Error updating FITS with WCS: {e}")
+
+    # ---------- Blind Solve via ASTAP ----------
+    def attempt_astap_solve(self, item):
+        """
+        Attempt to plate-solve the image using ASTAP.
+        Returns a solved header (as a dict) on success or None on failure.
+        """
+        # Normalize the image (using MosaicMaster's stretch_image)
+        normalized_image = self.stretch_image(item["image"])
+        
+        # Save normalized image to a temporary FITS file.
+        try:
+            tmp_path = self.save_temp_fits_image(normalized_image, item["path"])
+        except Exception as e:
+            print("Failed to save temporary FITS file:", e)
+            return None
+
+        # Run ASTAP on the temporary file.
+        process = QProcess(self)
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        print("Running ASTAP with arguments:", args)
+        process.start(self.astap_exe, args)
+        if not process.waitForStarted(5000):
+            print("Failed to start ASTAP process:", process.errorString())
+            os.remove(tmp_path)
+            return None
+        if not process.waitForFinished(300000):  # wait up to 5 minutes
+            print("ASTAP process timed out.")
+            os.remove(tmp_path)
+            return None
+
+        exit_code = process.exitCode()
+        stdout = process.readAllStandardOutput().data().decode()
+        stderr = process.readAllStandardError().data().decode()
+        print("ASTAP exit code:", exit_code)
+        print("ASTAP STDOUT:\n", stdout)
+        print("ASTAP STDERR:\n", stderr)
+
+        if exit_code != 0:
+            try:
+                os.remove(tmp_path)
+            except Exception as e:
+                print("Error removing temporary file:", e)
+            return None
+
+        # Retrieve updated header from the temporary file.
+        try:
+            with fits.open(tmp_path, memmap=False) as hdul:
+                solved_header = dict(hdul[0].header)
+            # Remove problematic keywords.
+            solved_header.pop("COMMENT", None)
+            solved_header.pop("HISTORY", None)
+        except Exception as e:
+            print("Error reading solved header:", e)
+            os.remove(tmp_path)
+            return None
+
+        # Check for a .wcs file and merge its contents.
+        wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
+        if os.path.exists(wcs_path):
+            try:
+                with open(wcs_path, "r") as f:
+                    content = f.read()
+                pattern = r"(\w+)\s*=\s*('?[^/']*'?)[\s/]"
+                for match in re.finditer(pattern, content):
+                    key = match.group(1).strip().upper()
+                    val = match.group(2).strip()
+                    if val.startswith("'") and val.endswith("'"):
+                        val = val[1:-1].strip()
+                    solved_header[key] = val
+            except Exception as e:
+                print("Error reading .wcs file:", e)
+            finally:
+                try:
+                    os.remove(wcs_path)
+                except Exception as e:
+                    print("Error removing .wcs file:", e)
+        
+        # Remove END keyword if present.
+        solved_header.pop("END", None)
+        for keyword in ["RANGE_LOW", "RANGE_HIGH"]:
+            solved_header.pop(keyword, None)  
+        solved_header.pop("HISTORY", None)          
+
+        # --- Ensure required WCS keys are present with proper numeric types ---
+        expected_float_keys = {"CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"}
+        expected_int_keys = {"NAXIS", "WCSAXES"}
+
+        for key in expected_float_keys:
+            if key in solved_header:
+                try:
+                    solved_header[key] = float(solved_header[key])
+                except ValueError:
+                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+
+        for key in expected_int_keys:
+            if key in solved_header:
+                try:
+                    solved_header[key] = int(float(solved_header[key]))  # Use float first in case it is a string like "2.0"
+                except ValueError:
+                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to int.")
+
+        try:
+            os.remove(tmp_path)
+        except Exception as e:
+            print("Error removing temporary file:", e)
+        
+        print("ASTAP plate solving successful. Solved header:")
+        for key, value in solved_header.items():
+            print(f"{key} = {value}")
+        return solved_header
+
+    def save_temp_fits_image(self, normalized_image, image_path: str):
+        """
+        Save the normalized_image as a FITS file to a temporary file.
+        
+        If the original image is FITS, this method retrieves the stored metadata
+        from the ImageManager and passes it directly to save_image().
+        If not, it generates a minimal header.
+        
+        Returns the path to the temporary FITS file.
+        """
+        # Always save as FITS.
+        selected_format = "fits"
+        bit_depth = "32-bit floating point"
+        is_mono = (normalized_image.ndim == 2 or 
+                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+        
+        # If the original image is FITS, try to get its stored metadata.
+        original_header = None
+        if image_path.lower().endswith((".fits", ".fit")):
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                # Use the metadata from the current slot.
+                _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                # Assume that meta already contains a proper 'original_header'
+                # (or the entire meta is the header).
+                original_header = meta.get("original_header", None)
+            # If nothing is stored, fall back to creating a minimal header.
+            if original_header is None:
+                print("No stored FITS header found; creating a minimal header.")
+                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        else:
+            # For non-FITS images, generate a minimal header.
+            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        
+        # Create a temporary filename.
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        
+        try:
+            # Call your global save_image() exactly as in AstroEditingSuite.
+            save_image(
+                img_array=normalized_image,
+                filename=tmp_path,
+                original_format=selected_format,
+                bit_depth=bit_depth,
+                original_header=original_header,
+                is_mono=is_mono
+                # (image_meta and file_meta can be omitted if not needed)
+            )
+            print(f"Temporary normalized FITS saved to: {tmp_path}")
+        except Exception as e:
+            print("Error saving temporary FITS file using save_image():", e)
+            raise e
+        return tmp_path
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image in [0,1].
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # If the image is 2D or has one channel, convert to 3-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)
+
+        image = image.astype(np.float32).copy()
+        stretched_image = image.copy()
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        target_median = 0.02
+
+        for c in range(3):
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+            stretched_image[..., c] -= channel_min
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+        self.was_single_channel = was_single_channel
+        return stretched_image
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch using stored parameters.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        image = image.astype(np.float32).copy()
+
+        if image.ndim == 2:
+            channel_median = np.median(image)
+            original_median = original_medians[0]
+            original_min = original_mins[0]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image
+                denominator = channel_median * (original_median + image - 1) - original_median * image
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image = numerator / denominator
+            else:
+                print("Channel median or original median is zero. Skipping unstretch.")
+            image += original_min
+            image = np.clip(image, 0, 1)
+            return image
+
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+            image[..., c] += original_min
+
+        image = np.clip(image, 0, 1)
+        if was_single_channel and image.ndim == 3:
+            image = np.mean(image, axis=2, keepdims=True)
+        return image
+
 
 class StellarAlignmentDialog(QDialog):
     def __init__(self, parent, settings, image_manager):
@@ -8266,6 +8644,1397 @@ class StellarAlignmentDialog(QDialog):
         self.image_manager.image_changed.emit(self.image_manager.current_slot, self.aligned_image, {"description": "Stellar aligned image"})
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
+
+class PlateSolver(QDialog):
+    """
+    A dialog class to handle plate solving.
+    
+    This class lets the user choose either an image file or a slot image,
+    then attempts to run ASTAP on the image (if the ASTAP executable is available),
+    falls back to astrometry.net if needed, and finally updates the image metadata/FITS header.
+    """
+    def __init__(self, settings: QSettings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Plate Solver")
+        self.setMinimumWidth(400)
+        self.astap_exe = self.settings.value("astap/exe_path", "", type=str)
+        self.starnet_exe = self.settings.value("starnet/exe_path", "", type=str)
+        self.debug_mode = False
+        
+        self.image_path = ""  # Will hold the selected image path
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Instruction Label
+        instr_label = QLabel("Select an image source for plate solving:")
+        layout.addWidget(instr_label)
+        
+        # Selection mode combo box (Slot shown first by default)
+        self.mode_combo = QComboBox()
+        # Reorder items so that "Slot" is default.
+        self.mode_combo.addItems(["Slot", "File"])
+        self.mode_combo.currentIndexChanged.connect(self.change_mode)
+        layout.addWidget(self.mode_combo)
+        
+        # Stacked widget to hold different UIs
+        self.stacked = QStackedWidget()
+        layout.addWidget(self.stacked)
+        
+        # Page 0: Slot selection UI
+        slot_page = QWidget()
+        slot_layout = QVBoxLayout(slot_page)
+        slot_instr = QLabel("Select a slot from which to use the image:")
+        slot_layout.addWidget(slot_instr)
+        self.slot_combo = QComboBox()
+        # Populate with slot names from parent if available
+        if self.parent() and hasattr(self.parent(), "slot_names"):
+            # Assume slot_names is a dict: {slot_index: "Slot N"}
+            for index, name in self.parent().slot_names.items():
+                self.slot_combo.addItem(name, index)
+        else:
+            self.slot_combo.addItems(["Slot 0", "Slot 1", "Slot 2"])
+        slot_layout.addWidget(self.slot_combo)
+        self.choose_slot_btn = QPushButton("Select Slot")
+        self.choose_slot_btn.clicked.connect(self.choose_slot)
+        slot_layout.addWidget(self.choose_slot_btn)
+        self.slot_status_label = QLabel("No slot selected.")
+        slot_layout.addWidget(self.slot_status_label)
+        self.stacked.addWidget(slot_page)
+        
+        # Page 1: File selection UI
+        file_page = QWidget()
+        file_layout = QVBoxLayout(file_page)
+        self.choose_file_btn = QPushButton("Choose Image File")
+        self.choose_file_btn.clicked.connect(self.choose_file)
+        file_layout.addWidget(self.choose_file_btn)
+        self.file_status_label = QLabel("No file selected.")
+        file_layout.addWidget(self.file_status_label)
+        self.stacked.addWidget(file_page)
+
+        # Add a dedicated status label for overall status messages.
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)        
+
+        # Solve button
+        self.solve_btn = QPushButton("Start Plate Solving")
+        self.solve_btn.clicked.connect(self.start_plate_solving)
+        layout.addWidget(self.solve_btn)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        layout.addWidget(close_btn)
+        
+        # Set the default mode to Slot (index 0)
+        self.mode_combo.setCurrentIndex(0)
+        self.stacked.setCurrentIndex(0)
+        self.image_path = ""
+
+    def change_mode(self, index):
+        """Change the stacked widget page based on the selection mode."""
+        self.stacked.setCurrentIndex(index)
+        # Clear any previous selection status
+        if index == 0:  # Slot mode
+            self.slot_status_label.setText("No slot selected.")
+            self.image_path = ""
+        elif index == 1:  # File mode
+            self.file_status_label.setText("No file selected.")
+            self.image_path = ""
+
+    def choose_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Image for Plate Solving",
+            "", "Image Files (*.fits *.png *.tiff *.jpg *.jpeg);;All Files (*)"
+        )
+        if file_path:
+            self.image_path = file_path
+            self.file_status_label.setText(f"Selected: {os.path.basename(file_path)}")
+        else:
+            self.file_status_label.setText("No file selected.")
+
+    def choose_slot(self):
+        """Select an image from a slot."""
+        # Check if parent's image_manager is available
+        if not (self.parent() and hasattr(self.parent(), "image_manager")):
+            QMessageBox.warning(self, "Slot Selection", "Slot images are not available.")
+            return
+
+        slot_index = self.slot_combo.currentData()
+        img_manager = self.parent().image_manager
+        image = img_manager._images.get(slot_index, None)
+
+        # Check if there is image data in the slot.
+        if image is not None and hasattr(image, "size") and image.size > 0:
+            metadata = img_manager._metadata.get(slot_index, {})
+            # Set flag to indicate that we're using slot data.
+            self._from_slot = True
+            # Use the stored file path if available; otherwise, store a dummy value.
+            if "file_path" in metadata and metadata["file_path"]:
+                self.image_path = metadata["file_path"]
+            else:
+                self.image_path = f"slot:{slot_index}"
+            self.slot_status_label.setText(
+                f"Selected: {self.parent().slot_names.get(slot_index, f'Slot {slot_index}')}"
+            )
+            # Save slot metadata for later merging.
+            self._slot_meta = metadata
+        else:
+            self.slot_status_label.setText("No image in the selected slot.")
+            QMessageBox.warning(self, "Slot Selection", "No image available in the selected slot.")
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image in [0,1].
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # If the image is 2D or has one channel, convert to 3-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)
+
+        image = image.astype(np.float32).copy()
+        stretched_image = image.copy()
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        target_median = 0.02
+
+        for c in range(3):
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+            stretched_image[..., c] -= channel_min
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+        self.was_single_channel = was_single_channel
+        return stretched_image
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch using stored parameters.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        image = image.astype(np.float32).copy()
+
+        if image.ndim == 2:
+            channel_median = np.median(image)
+            original_median = original_medians[0]
+            original_min = original_mins[0]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image
+                denominator = channel_median * (original_median + image - 1) - original_median * image
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image = numerator / denominator
+            else:
+                print("Channel median or original median is zero. Skipping unstretch.")
+            image += original_min
+            image = np.clip(image, 0, 1)
+            return image
+
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+            image[..., c] += original_min
+
+        image = np.clip(image, 0, 1)
+        if was_single_channel and image.ndim == 3:
+            image = np.mean(image, axis=2, keepdims=True)
+        return image
+
+    def start_plate_solving(self):
+        if not self.image_path:
+            QMessageBox.warning(self, "Plate Solver", "Please select an image source first.")
+            return
+
+        # Determine the appropriate filter for the ASTAP executable.
+        if sys.platform.startswith("win"):
+            executable_filter = "Executables (*.exe);;All Files (*)"
+        else:
+            executable_filter = "Executables (astap);;All Files (*)"
+
+        # Check if ASTAP path is set and valid.
+        if not self.astap_exe or not os.path.exists(self.astap_exe):
+            # Prompt the user to locate the ASTAP executable.
+            new_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select ASTAP Executable",
+                "",
+                executable_filter
+            )
+            if new_path:
+                self.astap_exe = new_path
+                # Save the new ASTAP path in settings.
+                self.settings.setValue("astap/exe_path", self.astap_exe)
+                QMessageBox.information(self, "Plate Solver", "ASTAP path updated successfully.")
+            else:
+                # If no ASTAP is provided, skip directly to blind solving via astrometry.net.
+                QMessageBox.information(self, "Plate Solver", "ASTAP executable not provided; falling back to astrometry.net blind solve.")
+                solved = self.run_astrometry_net(self.image_path)
+                if solved:
+                    QMessageBox.information(self, "Plate Solve", "Plate solve successful using astrometry.net!")
+                    self.update_metadata()
+                    self.accept()
+                else:
+                    QMessageBox.critical(self, "Plate Solve", "Plate solve failed with astrometry.net.")
+                return
+
+        # Try ASTAP first.
+        self.update_status("Running ASTAP plate solving...")
+        solved = self.run_astap(self.image_path)
+        if solved:
+            QMessageBox.information(self, "Plate Solve", "Plate solve successful using ASTAP!")
+            self.accept()
+            return
+        else:
+            QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Trying astrometry.net...")
+
+        # Fall back to astrometry.net.
+        solved = self.run_astrometry_net(self.image_path)
+        if solved:
+            QMessageBox.information(self, "Plate Solve", "Plate solve successful using astrometry.net!")
+            self.update_metadata()
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Plate Solve", "Plate solve failed with both ASTAP and astrometry.net.")
+
+    def update_status(self, message: str):
+        """Update the status label on the current page."""
+        index = self.stacked.currentIndex()
+        if index == 0:
+            self.file_status_label.setText(message)
+        else:
+            self.slot_status_label.setText(message)
+
+    def save_temp_fits_image(self, normalized_image, image_path: str):
+        """
+        Save the normalized_image as a FITS file to a temporary file.
+        
+        If the original image is FITS, this method retrieves the stored metadata
+        from the ImageManager and passes it directly to save_image().
+        If not, it generates a minimal header.
+        
+        Returns the path to the temporary FITS file.
+        """
+        # Always save as FITS.
+        selected_format = "fits"
+        bit_depth = "32-bit floating point"
+        is_mono = (normalized_image.ndim == 2 or 
+                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+        
+        # If the original image is FITS, try to get its stored metadata.
+        original_header = None
+        if image_path.lower().endswith((".fits", ".fit")):
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                # Use the metadata from the current slot.
+                _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                # Assume that meta already contains a proper 'original_header'
+                # (or the entire meta is the header).
+                original_header = meta.get("original_header", None)
+            # If nothing is stored, fall back to creating a minimal header.
+            if original_header is None:
+                print("No stored FITS header found; creating a minimal header.")
+                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        else:
+            # For non-FITS images, generate a minimal header.
+            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        
+        # Create a temporary filename.
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        
+        try:
+            # Call your global save_image() exactly as in AstroEditingSuite.
+            save_image(
+                img_array=normalized_image,
+                filename=tmp_path,
+                original_format=selected_format,
+                bit_depth=bit_depth,
+                original_header=original_header,
+                is_mono=is_mono
+                # (image_meta and file_meta can be omitted if not needed)
+            )
+            print(f"Temporary normalized FITS saved to: {tmp_path}")
+        except Exception as e:
+            print("Error saving temporary FITS file using save_image():", e)
+            raise e
+        return tmp_path
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
+
+    def run_astap(self, image_path: str) -> bool:
+        """
+        Loads the image data and metadata based on the user's selection:
+        - If the user selected a slot (self._from_slot is True), retrieve the image and metadata
+            from the ImageManager.
+        - Otherwise, use the global load_image() method to load from a file.
+        
+        The image is normalized using stretch_image(), saved as a temporary FITS file (via
+        save_temp_fits_image()), and ASTAP is run on that temporary file.
+        
+        If ASTAP is successful, the updated (solved) header is retrieved and:
+        1. The metadata dictionary for the current slot is updated with the solved header.
+        2. If the image was loaded from file (i.e. not a slot) and is a FITS file, the original
+            file is updated with the new header.
+        3. The user is prompted to save a new FITS file with the solved header.
+        
+        Returns True if ASTAP exits with exit code 0.
+        """
+        if getattr(self, "debug_mode", False):
+            print("DEBUG MODE: Skipping ASTAP processing.")
+            return False
+        # --- Load image data and header ---
+        if getattr(self, "_from_slot", False):
+            # Use data from the ImageManager.
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                image_data, meta = self.parent().image_manager.get_current_image_and_metadata()
+                if image_data is None:
+                    print("No image data found in the selected slot.")
+                    return False
+                original_header = meta.get("original_header", meta)
+                # Save slot metadata for later merging.
+                self._slot_meta = meta
+                print("Using image data and metadata from slot.")
+            else:
+                print("No ImageManager found in parent!")
+                return False
+        else:
+            # Load from file using the global load_image() method.
+            image_data, original_header, bit_depth, is_mono = load_image(image_path)
+            if image_data is None:
+                print("Failed to load image from file.")
+                return False
+            print("Loaded image data and header from file.")
+
+        # Keep a copy of the original image data (unsqueezed) for saving the new FITS.
+        original_image_data = image_data.copy()
+
+        image_data = image_data.astype(np.float32)
+
+        # --- Normalize the image ---
+        normalized_image = self.stretch_image(image_data)
+
+        # --- Save normalized image to a temporary FITS file ---
+        try:
+            tmp_path = self.save_temp_fits_image(normalized_image, image_path)
+        except Exception as e:
+            print("Failed to save temporary FITS file:", e)
+            return False
+
+        # --- Run ASTAP on the temporary file ---
+        process = QProcess(self)
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        print("Running ASTAP with arguments:", args)
+        process.start(self.astap_exe, args)
+        if not process.waitForStarted(5000):
+            print("Failed to start ASTAP process:", process.errorString())
+            return False
+        if not process.waitForFinished(300000):  # wait up to 5 minutes
+            print("ASTAP process timed out.")
+            return False
+
+        exit_code = process.exitCode()
+        stdout = process.readAllStandardOutput().data().decode()
+        stderr = process.readAllStandardError().data().decode()
+        print("ASTAP exit code:", exit_code)
+        print("ASTAP STDOUT:\n", stdout)
+        print("ASTAP STDERR:\n", stderr)
+
+        if exit_code != 0:
+            try:
+                os.remove(tmp_path)
+            except Exception as e:
+                print("Error removing temporary file:", e)
+            return False
+
+        # --- Retrieve updated header data from the temporary file ---
+        try:
+            with fits.open(tmp_path, memmap=False) as hdul:
+                solved_header = dict(hdul[0].header)
+            # Remove problematic COMMENT and HISTORY keys.
+            solved_header.pop("COMMENT", None)
+            solved_header.pop("HISTORY", None)
+            solved_header.pop("END", None)
+
+            print("Initial solved header retrieved from temporary FITS file:")
+            for key, value in solved_header.items():
+                print(f"{key} = {value}")
+        except Exception as e:
+            print("Error reading updated FITS header after ASTAP:", e)
+            return False
+
+        try:
+            with fits.open(tmp_path, memmap=False) as hdul:
+                solved_header = dict(hdul[0].header)
+            # Remove problematic COMMENT and HISTORY keys.
+            solved_header.pop("COMMENT", None)
+            solved_header.pop("HISTORY", None)
+            solved_header.pop("END", None)
+
+            print("Initial solved header retrieved from temporary FITS file:")
+            for key, value in solved_header.items():
+                print(f"{key} = {value}")
+        except Exception as e:
+            print("Error reading updated FITS header after ASTAP:", e)
+            return False
+
+        # --- Check for a .wcs file and merge its header if present ---
+        wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
+        if os.path.exists(wcs_path):
+            try:
+                wcs_header = {}
+                with open(wcs_path, "r") as f:
+                    text = f.read()
+                    # Regular expression to match a FITS header keyword and its value.
+                    # It assumes a format like: KEY  =  value / comment
+                    pattern = r"(\w+)\s*=\s*('?[^/']*'?)[\s/]"
+                    for match in re.finditer(pattern, text):
+                        key = match.group(1).strip().upper()
+                        val = match.group(2).strip()
+                        if val.startswith("'") and val.endswith("'"):
+                            val = val[1:-1].strip()
+                        wcs_header[key] = val
+                wcs_header.pop("END", None)        
+                print("WCS header retrieved from .wcs file:")
+                for key, value in wcs_header.items():
+                    print(f"{key} = {value}")
+                # Merge the parsed WCS header into the solved header.
+                solved_header.update(wcs_header)
+            except Exception as e:
+                print("Error reading .wcs file:", e)
+        else:
+            print("No .wcs file found; using header from temporary FITS.")
+
+        # --- If loaded from a slot, merge the original file path from slot metadata ---
+        if getattr(self, "_from_slot", False) and hasattr(self, "_slot_meta"):
+            if "file_path" not in solved_header and "file_path" in self._slot_meta:
+                solved_header["file_path"] = self._slot_meta["file_path"]
+                print("Merged file_path from slot metadata into solved header.")
+
+        required_keys = {
+            "CTYPE1": "RA---TAN",
+            "CTYPE2": "DEC--TAN",
+            "RADECSYS": "ICRS",
+            "WCSAXES": 2,
+            # CRVAL1, CRVAL2, CRPIX1, CRPIX2: ideally provided by ASTAP's INI file.
+        }
+        for key, default in required_keys.items():
+            if key not in solved_header:
+                solved_header[key] = default
+                print(f"Added missing key {key} with default value {default}.")
+
+        # --- Ensure required WCS keys are present with proper numeric types ---
+        expected_numeric_keys = {
+            "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CROTA1", "CROTA2",
+            "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2", "WCSAXES"
+        }
+        for key in expected_numeric_keys:
+            if key in solved_header:
+                try:
+                    # Convert the value to float. If it's meant to be an integer (like WCSAXES),
+                    # you can use int(float(...)) if needed.
+                    solved_header[key] = float(solved_header[key])
+                except ValueError:
+                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+
+
+        print("Final solved header to be used:")
+        for key, value in solved_header.items():
+            print(f"{key} = {value}")
+
+        # --- Directly update the metadata dictionary for the current slot ---
+        if self.parent() and hasattr(self.parent(), "image_manager"):
+            try:
+                current_slot = self.parent().image_manager.current_slot
+                self.parent().image_manager._metadata[current_slot].update(solved_header)
+                print("ImageManager metadata for slot", current_slot, "updated with solved header.")
+            except Exception as e:
+                print("Error updating ImageManager metadata with solved data:", e)
+                return False
+        else:
+            print("No parent ImageManager found; cannot update solved metadata.")
+            return False
+
+        # --- If the image was loaded from file (not a slot) and is a FITS file, update that file with the new header ---
+        if not getattr(self, "_from_slot", False) and image_path.lower().endswith((".fits", ".fit")):
+            try:
+                with fits.open(image_path, mode="update", memmap=False) as hdul:
+                    hdr = hdul[0].header
+                    # Remove problematic keys before updating.
+                    solved_header.pop("COMMENT", None)
+                    solved_header.pop("HISTORY", None)
+                    for key, value in solved_header.items():
+                        hdr[key] = value
+                    hdul.flush()
+                print("Original FITS file updated with solved header (inline).")
+            except Exception as e:
+                print("Error updating original FITS file with solved header:", e)
+                # Optionally, do not treat this as fatal.
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Plate-Solved FITS", "", "FITS files (*.fits *.fit)")
+        if save_path:
+            try:
+                # Determine if the image is mono.
+                if original_image_data.ndim == 2 or (original_image_data.ndim == 3 and original_image_data.shape[2] == 1):
+                    is_mono = True
+                else:
+                    is_mono = False
+                # Save the original image data with the solved header.
+                save_image(
+                    img_array=original_image_data,
+                    filename=save_path,
+                    original_format="fits",
+                    bit_depth="32-bit floating point",
+                    original_header=solved_header,
+                    is_mono=is_mono
+                )
+                print("Plate-solved FITS file saved to:", save_path)
+                QMessageBox.information(self, "Save Successful", f"Plate-solved FITS file saved to:\n{save_path}")
+            except Exception as e:
+                print("Error saving plate-solved FITS file:", e)
+                QMessageBox.critical(self, "Save Error", f"Failed to save plate-solved FITS file:\n{e}")
+            # --- Prompt the user to open the newly saved FITS file ---
+            reply = QMessageBox.question(
+                self, 
+                "Open Plate Solved FITS?", 
+                "Do you want to open the newly saved plate-solved FITS file?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    # Load the newly saved FITS file using the global load_image() method.
+                    new_image, new_header, new_bit_depth, new_is_mono = load_image(save_path)
+                    if new_image is None:
+                        QMessageBox.warning(self, "Load Error", "Failed to load the plate-solved FITS image.")
+                    else:
+                        # Build a metadata dictionary as in your AstroEditingSuite.
+                        metadata = {
+                            'file_path': save_path,
+                            'original_header': new_header,
+                            'bit_depth': new_bit_depth,
+                            'is_mono': new_is_mono
+                        }
+                        # Add the new image and metadata to the ImageManager in the current slot.
+                        self.parent().image_manager.add_image(self.parent().image_manager.current_slot, new_image, metadata)
+                        print("Plate-solved FITS image loaded and added to ImageManager.")
+                except Exception as e:
+                    print("Error loading plate-solved FITS file:", e)
+                    QMessageBox.critical(self, "Load Error", f"Failed to load the plate-solved FITS image:\n{e}")
+            else:
+                print("User chose not to open the plate-solved FITS file.")
+                    
+        # --- Clean up temporary files ---
+        try:
+            os.remove(tmp_path)
+        except Exception as e:
+            print("Error removing temporary file:", e)
+        try:
+            if os.path.exists(wcs_path):
+                os.remove(wcs_path)
+        except Exception as e:
+            print("Error removing INI file:", e)
+
+        return True
+
+    def run_astrometry_net(self, image_path: str):
+        """
+        Performs a blind solve via Astrometry.net following these steps:
+        1. Log in to Astrometry.net using an API key.
+        2. Upload the image (converting it to FITS if necessary).
+        3. Poll for a job ID.
+        4. Poll for calibration data.
+        5. Construct a WCS header from the calibration data.
+        6. If the image was originally FITS, update that file with the new header.
+        7. Store the WCS in the item dictionary.
+        
+        Returns the constructed WCS header (a FITS Header) on success, or False on failure.
+        """
+        # Build an item dictionary from the image data.
+        if getattr(self, "_from_slot", False):
+            # Retrieve from ImageManager.
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                image_data, meta = self.parent().image_manager.get_current_image_and_metadata()
+                if image_data is None:
+                    print("No image data found in the selected slot.")
+                    return False
+                original_header = meta.get("original_header", meta)
+                item = {
+                    "path": meta.get("file_path", image_path),
+                    "image": image_data,
+                    "is_mono": meta.get("is_mono", False)
+                }
+                self._slot_meta = meta  # Save slot metadata for later merging.
+                print("Using image data and metadata from slot for blind solve.")
+            else:
+                print("No ImageManager found in parent!")
+                return False
+        else:
+            # Load from file using load_image().
+            image_data, original_header, bit_depth, is_mono = load_image(image_path)
+            if image_data is None:
+                print("Failed to load image from file.")
+                return False
+            item = {
+                "path": image_path,
+                "image": image_data,
+                "is_mono": is_mono
+            }
+            print("Loaded image data and header from file for blind solve.")
+
+        # --- Begin blind solve loop ---
+        while True:
+            self.status_label.setText("Status: Logging in to Astrometry.net...")
+            QApplication.processEvents()
+            api_key = load_api_key()
+            if not api_key:
+                api_key, ok = QInputDialog.getText(self, "Enter API Key", "Please enter your Astrometry.net API key:")
+                if ok and api_key:
+                    save_api_key(api_key)
+                else:
+                    QMessageBox.warning(self, "API Key Required", "Blind solve canceled (no API key).")
+                    return False
+
+            session_key = self.login_to_astrometry(api_key)
+            if session_key is None:
+                if QMessageBox.question(self, "Login Failed",
+                                        "Could not log in to Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return False
+
+            self.status_label.setText("Status: Uploading image to Astrometry.net...")
+            QApplication.processEvents()
+
+            # Determine file extension.
+            ext = os.path.splitext(item["path"])[1].lower()
+            if ext not in ('.fits', '.fit'):
+                # Convert non-FITS image to a temporary FITS file.
+                temp_file = tempfile.NamedTemporaryFile(suffix=".fit", delete=False)
+                temp_file.close()  # Close so save_image can write.
+                try:
+                    minimal_header = generate_minimal_fits_header(item["image"])
+                    save_image(
+                        img_array=item["image"],
+                        filename=temp_file.name,
+                        original_format="fit",
+                        bit_depth="16-bit",
+                        original_header=minimal_header,
+                        is_mono=item.get("is_mono", False)
+                    )
+                except Exception as e:
+                    QMessageBox.critical(self, "Conversion Error", f"Failed to convert image to FITS:\n{e}")
+                    return False
+                upload_path = temp_file.name
+            else:
+                upload_path = item["path"]
+
+            subid = self.upload_image_to_astrometry(upload_path, session_key)
+            if not subid:
+                if QMessageBox.question(self, "Upload Failed",
+                                        "Image upload failed or no subid returned. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return False
+
+            self.status_label.setText("Status: Waiting for job ID...")
+            QApplication.processEvents()
+            job_id = self.poll_submission_status(subid)
+            if not job_id:
+                if QMessageBox.question(self, "Blind Solve Failed",
+                                        "Failed to retrieve job ID from Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return False
+
+            self.status_label.setText("Status: Retrieving calibration data...")
+            QApplication.processEvents()
+            calibration_data = self.poll_calibration_data(job_id)
+            if not calibration_data:
+                if QMessageBox.question(self, "Blind Solve Failed",
+                                        "Calibration data did not arrive from Astrometry.net. Try again?",
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+                    continue
+                else:
+                    return False
+
+            # If a temporary file was created (for non-FITS images), remove it.
+            if ext not in ('.fits', '.fit', '.tif', '.tiff'):
+                try:
+                    os.remove(upload_path)
+                except Exception as e:
+                    print("Could not remove temporary file:", e)
+            break  # Exit loop once all steps succeed.
+
+        # --- Construct the WCS header ---
+        wcs_header = self.construct_wcs_header(calibration_data, item["image"].shape)
+        if item["path"].lower().endswith(('.fits', '.fit')):
+            self.update_fits_with_wcs(item["path"], calibration_data, wcs_header)
+        self.status_label.setText("Blind Solve Complete: Astrometric solution applied successfully.")
+        # Store the WCS in the item.
+        item["wcs"] = WCS(wcs_header)
+
+        # --- (Optional) Update the metadata of the slot if applicable ---
+        if getattr(self, "_from_slot", False) and hasattr(self, "_slot_meta"):
+            if "file_path" not in wcs_header and "file_path" in self._slot_meta:
+                wcs_header["file_path"] = self._slot_meta["file_path"]
+            # Directly update the metadata dictionary for the current slot.
+            self.parent().image_manager._metadata[self.parent().image_manager.current_slot].update(wcs_header)
+            print("ImageManager metadata for current slot updated with solved header.")
+
+        # --- Now prompt the user to save the new plate-solved FITS file ---
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Plate-Solved FITS", "", "FITS files (*.fits *.fit)")
+        if save_path:
+            try:
+                if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):
+                    is_mono = True
+                else:
+                    is_mono = False
+                # Save the original (unsqueezed) image data with the solved header.
+                save_image(
+                    img_array=image_data,
+                    filename=save_path,
+                    original_format="fits",
+                    bit_depth="32-bit floating point",
+                    original_header=wcs_header,
+                    is_mono=is_mono
+                )
+                print("Plate-solved FITS file saved to:", save_path)
+                QMessageBox.information(self, "Save Successful", f"Plate-solved FITS file saved to:\n{save_path}")
+            except Exception as e:
+                print("Error saving plate-solved FITS file:", e)
+                QMessageBox.critical(self, "Save Error", f"Failed to save plate-solved FITS file:\n{e}")
+        else:
+            print("User cancelled saving the plate-solved FITS file.")
+
+        # --- Prompt the user to open the new plate-solved FITS file ---
+        reply = QMessageBox.question(
+            self,
+            "Open Plate Solved FITS?",
+            "Do you want to open the newly saved plate-solved FITS file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                new_image, new_header, new_bit_depth, new_is_mono = load_image(save_path)
+                if new_image is None:
+                    QMessageBox.warning(self, "Load Error", "Failed to load the plate-solved FITS image.")
+                else:
+                    metadata = {
+                        'file_path': save_path,
+                        'original_header': new_header,
+                        'bit_depth': new_bit_depth,
+                        'is_mono': new_is_mono
+                    }
+                    self.parent().image_manager.add_image(self.parent().image_manager.current_slot, new_image, metadata)
+                    print("Plate-solved FITS image loaded and added to ImageManager.")
+            except Exception as e:
+                print("Error loading plate-solved FITS file:", e)
+                QMessageBox.critical(self, "Load Error", f"Failed to load the plate-solved FITS image:\n{e}")
+        else:
+            print("User chose not to open the plate-solved FITS file.")
+
+        return wcs_header
+
+    def login_to_astrometry(self, api_key):
+        url = ASTROMETRY_API_URL + "login"
+        data = {'request-json': json.dumps({"apikey": api_key})}
+        response = robust_api_request("POST", url, data=data, prompt_on_failure=True)
+        if response and response.get("status") == "success":
+            return response["session"]
+        print("Login failed after multiple attempts.")
+        QMessageBox.critical(self, "Login Failed", "Could not log in to Astrometry.net. Check your API key or internet connection.")
+        return None
+
+    def upload_image_to_astrometry(self, image_path, session_key):
+        url = ASTROMETRY_API_URL + "upload"
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            data = {
+                'request-json': json.dumps({
+                    "publicly_visible": "y",
+                    "allow_modifications": "d",
+                    "session": session_key,
+                    "allow_commercial_use": "d"
+                })
+            }
+            response = robust_api_request("POST", url, data=data, files=files)
+        if response and response.get("status") == "success":
+            return response["subid"]
+        QMessageBox.critical(self, "Upload Failed", "Image upload failed after multiple attempts.")
+        return None
+
+    def poll_submission_status(self, subid):
+        url = ASTROMETRY_API_URL + f"submissions/{subid}"
+        for attempt in range(90):  # up to ~15 minutes
+            response = robust_api_request("GET", url)
+            if response:
+                jobs = response.get("jobs", [])
+                if jobs and jobs[0] is not None:
+                    return jobs[0]
+            print(f"Polling attempt {attempt+1}: Job ID not ready yet.")
+            time.sleep(10)
+        QMessageBox.critical(self, "Blind Solve Failed", "Failed to retrieve job ID from Astrometry.net after multiple attempts.")
+        return None
+
+    def poll_calibration_data(self, job_id):
+        url = ASTROMETRY_API_URL + f"jobs/{job_id}/calibration/"
+        for attempt in range(90):
+            response = robust_api_request("GET", url)
+            if response and 'ra' in response and 'dec' in response:
+                print("Calibration data retrieved:", response)
+                return response
+            print(f"Calibration data not available yet (attempt {attempt+1})")
+            time.sleep(10)
+        QMessageBox.critical(self, "Blind Solve Failed", "Calibration data did not complete in the expected timeframe.")
+        return None
+
+    def construct_wcs_header(self, calibration_data, image_shape):
+        h = fits.Header()
+        h['CTYPE1'] = 'RA---TAN'
+        h['CTYPE2'] = 'DEC--TAN'
+        h['CRPIX1'] = image_shape[1] / 2
+        h['CRPIX2'] = image_shape[0] / 2
+        h['CRVAL1'] = calibration_data['ra']
+        h['CRVAL2'] = calibration_data['dec']
+        scale = calibration_data['pixscale'] / 3600.0  # degrees/pixel
+        orientation = math.radians(calibration_data['orientation'])
+        h['CD1_1'] = -scale * np.cos(orientation)
+        h['CD1_2'] = scale * np.sin(orientation)
+        h['CD2_1'] = -scale * np.sin(orientation)
+        h['CD2_2'] = -scale * np.cos(orientation)
+        h['RADECSYS'] = 'ICRS'
+        h['WCSAXES'] = 2
+        print("Generated WCS header from calibration data.")
+        return h
+
+    def update_fits_with_wcs(self, filepath, calibration_data, wcs_header):
+        if not filepath.lower().endswith(('.fits','.fit')):
+            print("Not a FITS, skipping WCS update.")
+            return
+        try:
+            with fits.open(filepath, mode='update') as hdul:
+                hdr = hdul[0].header
+                if 'NAXIS3' in hdr:
+                    del hdr['NAXIS3']
+                hdr['NAXIS'] = 2
+                hdr['CTYPE1'] = 'RA---TAN'
+                hdr['CTYPE2'] = 'DEC--TAN'
+                hdr['CRVAL1'] = calibration_data['ra']
+                hdr['CRVAL2'] = calibration_data['dec']
+                # Determine H and W based on the data's dimensionality.
+                if hdul[0].data.ndim == 3:
+                    # Assume data are stored as (channels, height, width)
+                    _, H, W = hdul[0].data.shape
+                else:
+                    H, W = hdul[0].data.shape[:2]
+                hdr['CRPIX1'] = W/2.0
+                hdr['CRPIX2'] = H/2.0
+                scale = calibration_data['pixscale']/3600.0
+                orientation = math.radians(calibration_data.get('orientation', 0.0))
+                hdr['CD1_1'] = -scale * np.cos(orientation)
+                hdr['CD1_2'] = scale * np.sin(orientation)
+                hdr['CD2_1'] = -scale * np.sin(orientation)
+                hdr['CD2_2'] = -scale * np.cos(orientation)
+                hdr['WCSAXES'] = 2
+                hdr['RADECSYS'] = 'ICRS'
+                hdul.flush()
+                print("WCS updated in FITS.")
+            # Re-open to verify changes:
+            with fits.open(filepath) as hdul_verify:
+                print("Updated header keys:", hdul_verify[0].header.keys())
+        except Exception as e:
+            print(f"Error updating FITS with WCS: {e}")
+
+    def update_metadata(self):
+        """
+        Placeholder method to update the metadata or FITS header
+        with the plate solving results.
+        Extend this method to:
+          - Read the .wcs or .ini output files from the plate solver
+          - Update the image metadata accordingly.
+        """
+        print("Updating metadata/FITS header... (this is a placeholder)")
+        # TODO: Implement metadata update logic here.
+
+class PSFViewer(QDialog):
+    def __init__(self, image, parent=None):
+        """
+        Initialize the PSF Viewer dialog.
+        Prompts the user for a mode (Quick or Detailed) before computing the star catalog.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("PSF Viewer")
+        self.image = image
+        self.zoom_factor = 1.0
+        self.log_scale = False
+        self.histogram_mode = 'PSF'  # Can be toggled later
+        # Prompt the user for mode.
+        mode, ok = QInputDialog.getItem(
+            self,
+            "Select Mode",
+            "Select PSF catalog mode:",
+            ["Quick", "Detailed"],
+            0,
+            False
+        )
+        if ok:
+            self.mode = mode
+        else:
+            self.mode = "Quick"
+        
+        # Compute the star catalog based on the chosen mode.
+        if self.mode == "Quick":
+            self.compute_star_catalog_quick()
+        else:
+            self.compute_star_catalog_detailed()
+        
+        self.initUI()
+
+    def updateImage(self, new_image):
+        """
+        Update the current image, recompute the star catalog,
+        and redraw the histogram.
+        """
+        self.image = new_image
+        self.compute_star_catalog()
+        self.drawHistogram()
+
+    def compute_star_catalog_quick(self):
+        """
+        Run DAOStarFinder for FWHM values from 2.5, then 3, 4, ..., 10,
+        update a progress dialog, and combine results. If a star is detected
+        at multiple FWHM values, merge the detections by taking the median of
+        the FWHM values (e.g. if detected at 2 and 3, use 2.5; if detected at
+        2, 3, and 4, use 3). Duplicate stars (by x,y centroid) are merged.
+        
+        Note: DAOStarFinder returns various parameters for each star (e.g., 
+        xcentroid, ycentroid, sharpness, roundness1, npix, sky, peak, flux). 
+        Here we record the detection FWHM value in the column 'fwhm_used'.
+        """
+        # Build the list of FWHM values: start with 2.5, then 3, 4, ..., 10.
+        fwhm_list = [2.5] + list(range(3, 11))
+        total_steps = len(fwhm_list)
+
+        # Create a progress dialog with a range from 0 to total_steps.
+        progress = QProgressDialog("Computing star catalog...", "Cancel", 0, total_steps, self)
+        progress.setWindowTitle("Please Wait")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        all_stars = []
+        
+        # Convert image to grayscale if necessary.
+        if self.image.ndim == 3:
+            image_gray = np.mean(self.image, axis=2)
+        else:
+            image_gray = self.image
+
+        # Estimate background statistics.
+        mean, median, std = sigma_clipped_stats(image_gray)
+        
+        # Loop over each FWHM value.
+        for i, fwhm in enumerate(fwhm_list):
+            progress.setLabelText(f"Processing FWHM = {fwhm}...")
+            QApplication.processEvents()  # Allow UI to update.
+
+            daofind = DAOStarFinder(fwhm=float(fwhm), threshold=5.0 * std)
+            stars = daofind(image_gray - median)
+            if stars is not None and len(stars) > 0:
+                # Record the detection FWHM value.
+                stars['fwhm_used'] = np.full(len(stars), fwhm)
+                all_stars.append(stars)
+            
+            progress.setValue(i + 1)
+            if progress.wasCanceled():
+                progress.close()
+                return
+
+        progress.close()
+
+        if all_stars:
+            # Combine all detections into one table.
+            star_catalog = vstack(all_stars)
+            # Group stars by rounded x,y centroids.
+            grouped = {}
+            for star in star_catalog:
+                key = (round(star['xcentroid'], 1), round(star['ycentroid'], 1))
+                if key not in grouped:
+                    grouped[key] = []
+                # Convert the Row to a dictionary for easier merging.
+                grouped[key].append(dict(star))
+            
+            merged_entries = []
+            for key, group in grouped.items():
+                if len(group) == 1:
+                    # Only one detection; use it as-is.
+                    merged_entries.append(group[0])
+                else:
+                    # Merge detections: compute the median of the fwhm_used values.
+                    fwhm_values = [entry['fwhm_used'] for entry in group]
+                    median_fwhm = float(np.median(fwhm_values))
+                    # Choose one entry (here, the first) and update its fwhm_used.
+                    merged_entry = group[0].copy()
+                    merged_entry['fwhm_used'] = median_fwhm
+                    merged_entries.append(merged_entry)
+            # Create the final star catalog table from the merged entries.
+            self.star_catalog = Table(rows=merged_entries)
+        else:
+            self.star_catalog = None
+
+
+
+    def compute_star_catalog_detailed(self):
+        """
+        Run DAOStarFinder for FWHM values ranging from 2.1 to 10.0 in increments of 0.1,
+        update a progress dialog, and combine results. If a star is detected at multiple FWHM values,
+        merge the detections by computing the median of the fwhm_used values.
+        
+        Extra information provided by DAOStarFinder (e.g., sharpness, roundness1, npix, sky, peak, flux)
+        is retained. Duplicate detections (grouped by rounded x and y centroids) are merged.
+        """
+        # Create an array of FWHM values from 2.1 to 10.0 (inclusive) in steps of 0.1.
+        fwhm_values = np.arange(2.0, 10.01, 0.1)
+        
+        # Create a progress dialog.
+        progress = QProgressDialog("Computing star catalog...", "Cancel", 0, len(fwhm_values), self)
+        progress.setWindowTitle("Please Wait")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        all_stars = []
+        
+        # Convert image to grayscale if necessary.
+        if self.image.ndim == 3:
+            image_gray = np.mean(self.image, axis=2)
+        else:
+            image_gray = self.image
+
+        # Estimate background statistics.
+        mean, median, std = sigma_clipped_stats(image_gray)
+        
+        # Loop over each FWHM value.
+        for i, fwhm in enumerate(fwhm_values):
+            progress.setLabelText(f"Processing FWHM = {fwhm:.1f}...")
+            QApplication.processEvents()  # Update the UI.
+
+            daofind = DAOStarFinder(fwhm=float(fwhm), threshold=5.0 * std)
+            stars = daofind(image_gray - median)
+            if stars is not None and len(stars) > 0:
+                # Record the detection FWHM value.
+                stars['fwhm_used'] = np.full(len(stars), fwhm)
+                all_stars.append(stars)
+
+            progress.setValue(i + 1)
+            if progress.wasCanceled():
+                progress.close()
+                return
+
+        progress.close()
+
+        if all_stars:
+            # Combine all detections into one table.
+            star_catalog = vstack(all_stars)
+            # Group stars by rounded x and y centroids.
+            grouped = {}
+            for star in star_catalog:
+                key = (round(star['xcentroid'], 1), round(star['ycentroid'], 1))
+                if key not in grouped:
+                    grouped[key] = []
+                grouped[key].append(dict(star))  # Convert Row to dict.
+            
+            merged_entries = []
+            for key, group in grouped.items():
+                if len(group) == 1:
+                    # Only one detection; use it as is.
+                    merged_entries.append(group[0])
+                else:
+                    # Merge detections: compute the median fwhm_used value.
+                    fwhm_values_list = [entry['fwhm_used'] for entry in group]
+                    median_fwhm = float(np.median(fwhm_values_list))
+                    # Use the first entry as the base and update its fwhm_used.
+                    merged_entry = group[0].copy()
+                    merged_entry['fwhm_used'] = median_fwhm
+                    merged_entries.append(merged_entry)
+            
+            # Create the final star catalog from the merged entries.
+            self.star_catalog = Table(rows=merged_entries)
+        else:
+            self.star_catalog = None
+
+
+
+
+    def initUI(self):
+        main_layout = QVBoxLayout(self)
+        
+        # Top layout holds the histogram display and the statistics table.
+        top_layout = QHBoxLayout()
+
+        # Scroll area for histogram
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setFixedSize(520, 310)
+        self.scroll_area.setWidgetResizable(False)
+        self.hist_label = QLabel(self)
+        self.hist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setWidget(self.hist_label)
+        top_layout.addWidget(self.scroll_area)
+
+        # Statistics table (4 rows: Min, Max, Median, StdDev)
+        self.stats_table = QTableWidget(self)
+        self.stats_table.setRowCount(4)
+        # We use 1 column (can update header text later)
+        self.stats_table.setColumnCount(1)
+        self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
+        self.stats_table.setFixedWidth(360)
+        top_layout.addWidget(self.stats_table)
+
+        main_layout.addLayout(top_layout)
+
+        # Controls layout: Zoom slider, Log scale toggle, and a histogram mode toggle.
+        controls_layout = QHBoxLayout()
+        
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.zoom_slider.setRange(50, 1000)  # 50% to 1000%
+        self.zoom_slider.setValue(100)       # Default: 100%
+        self.zoom_slider.setTickInterval(10)
+        self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.zoom_slider.valueChanged.connect(self.updateZoom)
+        controls_layout.addWidget(QLabel("Zoom:"))
+        controls_layout.addWidget(self.zoom_slider)
+        
+        self.log_toggle_button = QPushButton("Toggle Log X-Axis", self)
+        self.log_toggle_button.setCheckable(True)
+        self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
+        self.log_toggle_button.toggled.connect(self.toggleLogScale)
+        controls_layout.addWidget(self.log_toggle_button)
+        
+        # Button to switch between PSF and Flux histograms.
+        self.mode_toggle_button = QPushButton("Show Flux Histogram", self)
+        self.mode_toggle_button.setToolTip("Switch between PSF (FWHM) and Flux histograms.")
+        self.mode_toggle_button.clicked.connect(self.toggleHistogramMode)
+        controls_layout.addWidget(self.mode_toggle_button)
+        
+        main_layout.addLayout(controls_layout)
+        
+        # Close button
+        close_btn = QPushButton("Close", self)
+        close_btn.clicked.connect(self.accept)
+        main_layout.addWidget(close_btn)
+        
+        self.setLayout(main_layout)
+        
+        # Draw initial histogram
+        self.drawHistogram()
+
+    def updateZoom(self, value):
+        self.zoom_factor = value / 100.0
+        self.drawHistogram()
+
+    def toggleLogScale(self, checked):
+        self.log_scale = checked
+        self.drawHistogram()
+
+    def toggleHistogramMode(self):
+        """
+        Toggle between displaying a histogram of PSF (FWHM) values and flux values.
+        """
+        if self.histogram_mode == 'PSF':
+            self.histogram_mode = 'Flux'
+            self.mode_toggle_button.setText("Show PSF Histogram")
+        else:
+            self.histogram_mode = 'PSF'
+            self.mode_toggle_button.setText("Show Flux Histogram")
+        self.drawHistogram()
+
+    def drawHistogram(self):
+        """
+        Draws the histogram of either PSF (FWHM used) or flux values from the star catalog.
+        """
+        # Create a pixmap for drawing.
+        base_width = 512
+        height = 300
+        width = int(base_width * self.zoom_factor)
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.white)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        bin_count = 50  # Adjust number of bins as desired
+        
+        # Determine the data to histogram:
+        if self.star_catalog is None or len(self.star_catalog) == 0:
+            data = np.array([])
+        else:
+            if self.histogram_mode == 'PSF':
+                # Use the 'fwhm_used' column (should be between 2 and 10)
+                data = np.array(self.star_catalog['fwhm_used'])
+                # Set bin range to cover 0 to 10.
+                bin_edges = np.linspace(0, 10, bin_count + 1)
+            else:
+                # Use the 'flux' column; let bins span the range of flux.
+                data = np.array(self.star_catalog['flux'])
+                if data.size > 0:
+                    bin_edges = np.linspace(data.min(), data.max(), bin_count + 1)
+                else:
+                    bin_edges = np.linspace(0, 1, bin_count + 1)
+        
+        # For log-scale x-axis, adjust the bin edges.
+        if self.log_scale:
+            # Avoid zero for log scale.
+            eps = 1e-4
+            # Ensure the lower bound is not below eps.
+            lower = max(bin_edges[0], eps)
+            upper = bin_edges[-1]
+            bin_edges = np.logspace(np.log10(lower), np.log10(upper), bin_count + 1)
+            def x_pos(val):
+                return int((np.log10(val) - np.log10(lower)) / (np.log10(upper) - np.log10(lower)) * width)
+        else:
+            def x_pos(val):
+                return int((val - bin_edges[0]) / (bin_edges[-1] - bin_edges[0]) * width)
+        
+        # Compute histogram counts.
+        if data.size > 0:
+            hist, _ = np.histogram(data, bins=bin_edges)
+            # Normalize for display.
+            if hist.max() > 0:
+                hist = hist.astype(np.float32) / hist.max()
+            else:
+                hist = hist.astype(np.float32)
+        else:
+            hist = np.zeros(bin_count)
+        
+        # Draw histogram bars.
+        painter.setPen(QPen(Qt.GlobalColor.black))
+        for i in range(bin_count):
+            x0 = x_pos(bin_edges[i])
+            x1 = x_pos(bin_edges[i+1])
+            bar_width = max(x1 - x0, 1)
+            bar_height = hist[i] * height
+            painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
+        
+        # Draw x-axis.
+        painter.setPen(QPen(Qt.GlobalColor.black, 2))
+        painter.drawLine(0, height - 1, width, height - 1)
+        
+        # Draw tick marks and labels.
+        painter.setFont(QFont("Arial", 10))
+        if self.log_scale:
+            tick_values = np.logspace(np.log10(bin_edges[0]), np.log10(bin_edges[-1]), 6)
+            for tick in tick_values:
+                x = x_pos(tick)
+                painter.drawLine(x, height - 1, x, height - 6)
+                painter.drawText(x - 15, height - 10, f"{tick:.3f}")
+        else:
+            tick_values = np.linspace(bin_edges[0], bin_edges[-1], 6)
+            for tick in tick_values:
+                x = x_pos(tick)
+                painter.drawLine(x, height - 1, x, height - 6)
+                painter.drawText(x - 15, height - 10, f"{tick:.2f}")
+        
+        painter.end()
+        self.hist_label.setPixmap(pixmap)
+        self.hist_label.resize(pixmap.size())
+        
+        # Update the statistics table.
+        self.updateStatistics()
+
+    def updateStatistics(self):
+        """
+        Compute and update summary statistics (Min, Max, Median, StdDev) for each numeric column
+        in the star catalog (excluding id, xcentroid, ycentroid, mag, daofind_mag). The table columns
+        are reordered so that 'fwhm_used' appears first.
+        """
+        if self.star_catalog is None or len(self.star_catalog) == 0:
+            colnames = []
+        else:
+            # Get all column names.
+            all_cols = self.star_catalog.colnames
+            # Columns to remove.
+            skip_cols = ['id', 'xcentroid', 'ycentroid', 'mag', 'daofind_mag']
+            # Filter out the unwanted columns.
+            colnames = [col for col in all_cols if col not in skip_cols]
+            # If 'fwhm_used' is present, move it to the front.
+            if 'fwhm_used' in colnames:
+                colnames.remove('fwhm_used')
+                colnames.insert(0, 'fwhm_used')
+
+        # Update the table to have one column per desired parameter.
+        self.stats_table.setColumnCount(len(colnames))
+        self.stats_table.setHorizontalHeaderLabels(colnames)
+        self.stats_table.setRowCount(4)
+        self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
+
+        # For each column, compute and display the statistics.
+        for col_index, col in enumerate(colnames):
+            try:
+                col_data = np.array(self.star_catalog[col], dtype=float)
+                min_val = np.min(col_data)
+                max_val = np.max(col_data)
+                med_val = np.median(col_data)
+                std_val = np.std(col_data)
+            except Exception:
+                min_val = max_val = med_val = std_val = 0.0
+
+            for row_index, val in enumerate([min_val, max_val, med_val, std_val]):
+                item = QTableWidgetItem(f"{val:.3f}")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.stats_table.setItem(row_index, col_index, item)
+
 
 class HDRWorker(QObject):
     """
@@ -12185,7 +13954,7 @@ class BackgroundNeutralizationDialog(QDialog):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("Background Neutralization")
-        self.setGeometry(150, 150, 800, 600)  # Set appropriate size
+        self.setGeometry(100, 100, 800, 600)  # Set appropriate size
         self.initUI()
         self.selection_rect_item = None  # To store the QGraphicsRectItem
 
@@ -12525,7 +14294,7 @@ class CLAHEDialog(QDialog):
         self.image_manager = image_manager
         self.mask_manager = mask_manager
         self.setWindowTitle("CLAHE")
-        self.setGeometry(200, 200, 800, 600)  # Increased size for better layout
+        self.setGeometry(100, 100, 800, 600)  # Increased size for better layout
         self.initUI()
         self.current_zoom = 1.0  # Initial zoom level
 
@@ -12872,7 +14641,7 @@ class MorphologyDialog(QDialog):
         self.image_manager = image_manager
         self.mask_manager = mask_manager
         self.setWindowTitle("Morphological Operations")
-        self.setGeometry(200, 200, 800, 600)  # Increased size for better layout
+        self.setGeometry(100, 100, 800, 600)  # Increased size for better layout
         self.initUI()
         self.current_zoom = 1.0  # Initial zoom level
 
@@ -13239,7 +15008,7 @@ class WhiteBalanceDialog(QDialog):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("White Balance")
-        self.setGeometry(200, 200, 800, 500)  # Adjusted size to remove preview area
+        self.setGeometry(100, 100, 800, 500)  # Adjusted size to remove preview area
         self.initUI()
 
     def initUI(self):
@@ -14385,40 +16154,51 @@ class XISFViewer(QWidget):
     def on_image_changed(self, slot, image, metadata):
         """
         This method is triggered when the image in ImageManager changes.
-        It updates the UI with the new image.
+        It updates the UI with the new image only if the changed slot is the active slot.
         """
         if not self.isVisible():
             return        
         if image is None:
             return
 
-        # Clear the previous content before updating
+        # Only update if the changed slot is the active slot.
+        if slot != self.image_manager.current_slot:
+            return
+
+        # Clear the previous content before updating.
         self.image_label.clear()
-        self.metadata_tree.clear()  # Clear previous metadata display
+        self.metadata_tree.clear()
 
-        # Ensure the image is a numpy array if it is not already
+        # Ensure the image is a numpy array.
         if not isinstance(image, np.ndarray):
-            image = np.array(image)  # Convert to numpy array if needed
-
-        # Update the image data and metadata
+            image = np.array(image)
+        
+        # Update internal image data and metadata.
         self.image_data = image
         self.original_header = metadata.get('original_header', None)
         self.is_mono = metadata.get('is_mono', False)
 
-        # Extract file path from metadata and pass to display_metadata
+        # Display metadata if available.
         file_path = metadata.get('file_path', None)
         if file_path:
-            self.display_metadata(file_path)  # Pass the file path to display_metadata
+            self.display_metadata(file_path)
 
-        # Determine if the image is mono or color
-        im_data = self.image_data
+        # If the image is mono, ensure it's in 3-channel RGB format for display.
         if self.is_mono:
-            # If the image is mono, skip squeezing as it should be 2D
-            if len(im_data.shape) == 3 and im_data.shape[2] == 1:
-                im_data = np.squeeze(im_data, axis=2)  # Remove the singleton channel dimension
+            # If image has a singleton third dimension, remove it.
+            if len(image.shape) == 3 and image.shape[2] == 1:
+                image = np.squeeze(image, axis=2)
+            # Convert a 2D mono image to 3-channel RGB.
+            if image.ndim == 2:
+                image = np.stack([image] * 3, axis=-1)
 
-        # Convert to the appropriate display format and update the display
+        self.image_data = image
+
+        # Update the display using display_image(), which handles scaling and autostretch.
         self.display_image()
+
+        print(f"XISFViewer: Image updated from ImageManager slot {slot}.")
+
 
 
     def load_logo(self):
@@ -16767,9 +18547,11 @@ class CosmicClarityTab(QWidget):
     def update_base_pixmap(self):
         """
         Process self.image (applying autostretch if enabled) and store it as self.base_pixmap.
-        Call this method once after the image is loaded or when processing parameters change.
+        If self.image is empty or not as expected, it skips processing.
         """
-        if self.image is None:
+        if self.image is None or self.image.size == 0:
+            print("[WARNING] No image available to update base pixmap.")
+            self.base_pixmap = None
             return
 
         display_image = self.image.copy()
@@ -16777,15 +18559,27 @@ class CosmicClarityTab(QWidget):
         # Apply autostretch if enabled.
         if self.auto_stretch_button.isChecked():
             target_median = 0.25
-            if self.is_mono:
-                stretched = stretch_mono_image(
-                    display_image if display_image.ndim == 2 else display_image[:, :, 0],
-                    target_median,
-                    normalize=True
-                )
-                display_image = np.stack([stretched] * 3, axis=-1)
+            # Check if we have a color image (expecting 3 channels).
+            if display_image.ndim < 3 or display_image.shape[2] != 3:
+                # If it's not a 3-channel image, treat it as grayscale.
+                try:
+                    stretched = stretch_mono_image(
+                        display_image if display_image.ndim == 2 else display_image[:, :, 0],
+                        target_median,
+                        normalize=True
+                    )
+                    # Convert grayscale to 3-channel for display.
+                    display_image = np.stack([stretched] * 3, axis=-1)
+                except Exception as e:
+                    print(f"[ERROR] Failed to stretch mono image: {e}")
+                    return
             else:
-                display_image = stretch_color_image(display_image, target_median, linked=False, normalize=True)
+                # If we have a color image, proceed.
+                try:
+                    display_image = stretch_color_image(display_image, target_median, linked=False, normalize=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed to stretch color image: {e}")
+                    return
 
         try:
             display_image_uint8 = (display_image * 255).astype(np.uint8)
@@ -16793,7 +18587,7 @@ class CosmicClarityTab(QWidget):
             print(f"[ERROR] Converting image to uint8: {e}")
             return
 
-        # Create QImage from the numpy array.
+        # Create a QImage from the numpy array.
         if display_image_uint8.ndim == 3 and display_image_uint8.shape[2] == 3:
             height, width, _ = display_image_uint8.shape
             bytes_per_line = 3 * width
@@ -23423,10 +25217,6 @@ class PerfectPalettePickerTab(QWidget):
         # Add the thumbnails widget to the layout
         right_layout.addWidget(thumbs_widget, stretch=0)
 
-        # Save button
-        save_button = QPushButton("Save Combined Image", self)
-        save_button.clicked.connect(self.save_image)
-        right_layout.addWidget(save_button)
 
         # Status label
         self.status_label = QLabel("", self)
@@ -27440,6 +29230,15 @@ def stretch_mono_image(image, target_median, normalize=False, apply_curves=False
 
 
 def stretch_color_image(image, target_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0):
+    # If image is 2D or has only one channel, treat it as mono.
+    if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+        # Squeeze to 2D if needed.
+        mono = image.squeeze()
+        mono_stretched = stretch_mono_image(mono, target_median, normalize=normalize, apply_curves=apply_curves, curves_boost=curves_boost)
+        # Replicate into 3 channels.
+        return np.stack([mono_stretched] * 3, axis=-1)
+
+    # Otherwise, assume image is a full-color image with 3 channels.
     if linked:
         combined_median = np.median(image)
         combined_std = np.std(image)
@@ -27462,6 +29261,7 @@ def stretch_color_image(image, target_median, linked=True, normalize=False, appl
         stretched_image = stretched_image / np.max(stretched_image)
     
     return np.clip(stretched_image, 0, 1)
+
 
 
 def apply_curves_adjustment(image, target_median, curves_boost):
@@ -28847,7 +30647,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("What's In My Image")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 800, 600)
         # Track the theme status
         self.is_dark_mode = True
         self.metadata = {}
@@ -30319,6 +32119,31 @@ class MainWindow(QMainWindow):
             self.perform_blind_solve()
 
     def perform_blind_solve(self):
+        """
+        First attempts to plate-solve the loaded image using ASTAP.
+        If that fails, falls back to performing a blind solve via Astrometry.net.
+        Updates the WCS (self.wcs) and header (self.header) accordingly.
+        """
+        # --- First, try ASTAP plate solve ---
+        self.status_label.setText("Status: Attempting ASTAP plate solve...")
+        QApplication.processEvents()
+        solved_header = self.plate_solve_image()  # This method should try to solve via ASTAP and return a header (or None).
+        if solved_header is not None:
+            self.status_label.setText("ASTAP plate solve succeeded.")
+            try:
+                # Update self.header with the solved header data.
+                self.header.update(solved_header)
+                # Reinitialize the WCS from the new header.
+                self.wcs = WCS(self.header, naxis=2, relax=True)
+                QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
+            except Exception as e:
+                QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from ASTAP solution: {e}")
+            return
+
+        # --- If ASTAP plate solve failed, fall back to blind solve via Astrometry.net ---
+        self.status_label.setText("Status: ASTAP failed. Proceeding with blind solve via Astrometry.net...")
+        QApplication.processEvents()
+
         # Load or prompt for API key
         api_key = load_api_key()
         if not api_key:
@@ -30380,6 +32205,280 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Blind Solve Failed.")
             QMessageBox.critical(self, "Blind Solve Failed", f"An error occurred: {str(e)}")
 
+    def plate_solve_image(self):
+        """
+        Attempts to plate-solve the loaded image using ASTAP.
+        If no ASTAP executable is set (or the user cancels its selection),
+        it falls back to blind solving via Astrometry.net.
+        On success, the method updates self.header and initializes self.wcs.
+        """
+        if not hasattr(self, 'image_path') or not self.image_path:
+            QMessageBox.warning(self, "Plate Solve", "No image loaded.")
+            return
+
+        # Check if the ASTAP executable is set in settings.
+        astap_exe = self.settings.value("astap/exe_path", "", type=str)
+        if not astap_exe or not os.path.exists(astap_exe):
+            # Determine the file filter based on the platform.
+            import sys
+            if sys.platform.startswith("win"):
+                executable_filter = "Executables (*.exe);;All Files (*)"
+            else:
+                executable_filter = "Executables (astap);;All Files (*)"
+            new_path, _ = QFileDialog.getOpenFileName(
+                self, "Select ASTAP Executable", "", executable_filter
+            )
+            if new_path:
+                astap_exe = new_path
+                self.settings.setValue("astap/exe_path", astap_exe)
+                QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
+            else:
+                QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
+                self.blind_solve_image()
+                return
+
+        # Normalize the loaded image (using your existing stretch_image method).
+        normalized = self.stretch_image(self.image_data)
+        
+        # Save the normalized image to a temporary FITS file.
+        try:
+            tmp_path = self.save_temp_fits_image(normalized, self.image_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
+            return
+
+
+        process = QProcess(self)
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        print("Running ASTAP with arguments:", args)
+        process.start(astap_exe, args)
+        if not process.waitForStarted(5000):
+            QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
+            os.remove(tmp_path)
+            self.blind_solve_image()
+            return
+        if not process.waitForFinished(300000):
+            QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
+            os.remove(tmp_path)
+            self.blind_solve_image()
+            return
+
+        exit_code = process.exitCode()
+        stdout = process.readAllStandardOutput().data().decode()
+        stderr = process.readAllStandardError().data().decode()
+        print("ASTAP exit code:", exit_code)
+        print("ASTAP STDOUT:\n", stdout)
+        print("ASTAP STDERR:\n", stderr)
+        
+        if exit_code != 0:
+            os.remove(tmp_path)
+            QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
+            self.blind_solve_image()
+            return
+
+        # Retrieve the solved header from the temporary FITS file.
+        try:
+            with fits.open(tmp_path, memmap=False) as hdul:
+                solved_header = dict(hdul[0].header)
+            # Remove problematic keys.
+            for key in ["COMMENT", "HISTORY", "END"]:
+                solved_header.pop(key, None)
+            # Convert expected numeric keywords.
+            for key in {"CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"}:
+                if key in solved_header:
+                    try:
+                        solved_header[key] = float(solved_header[key])
+                    except ValueError:
+                        print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+            if "WCSAXES" in solved_header:
+                try:
+                    solved_header["WCSAXES"] = int(float(solved_header["WCSAXES"]))
+                except ValueError:
+                    print(f"Warning: Could not convert WCSAXES value '{solved_header['WCSAXES']}' to int.")
+        except Exception as e:
+            QMessageBox.critical(self, "Plate Solve", f"Error reading solved header: {e}")
+            os.remove(tmp_path)
+            self.blind_solve_image()
+            return
+
+        os.remove(tmp_path)
+        print("ASTAP plate solving successful. Solved header:")
+        for key, value in solved_header.items():
+            print(f"{key} = {value}")
+
+        # Update the main image header and reinitialize WCS.
+        self.header.update(solved_header)
+        try:
+            self.wcs = WCS(self.header, naxis=2, relax=True)
+            QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
+        except Exception as e:
+            QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
+            return
+        
+        return solved_header
+
+    def save_temp_fits_image(self, normalized_image, image_path: str):
+        """
+        Save the normalized_image as a FITS file to a temporary file.
+        
+        If the original image is FITS, this method retrieves the stored metadata
+        from the ImageManager and passes it directly to save_image().
+        If not, it generates a minimal header.
+        
+        Returns the path to the temporary FITS file.
+        """
+        # Always save as FITS.
+        selected_format = "fits"
+        bit_depth = "32-bit floating point"
+        is_mono = (normalized_image.ndim == 2 or 
+                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+        
+        # If the original image is FITS, try to get its stored metadata.
+        original_header = None
+        if image_path.lower().endswith((".fits", ".fit")):
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                # Use the metadata from the current slot.
+                _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                # Assume that meta already contains a proper 'original_header'
+                # (or the entire meta is the header).
+                original_header = meta.get("original_header", None)
+            # If nothing is stored, fall back to creating a minimal header.
+            if original_header is None:
+                print("No stored FITS header found; creating a minimal header.")
+                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        else:
+            # For non-FITS images, generate a minimal header.
+            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        
+        # Create a temporary filename.
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        
+        try:
+            # Call your global save_image() exactly as in AstroEditingSuite.
+            save_image(
+                img_array=normalized_image,
+                filename=tmp_path,
+                original_format=selected_format,
+                bit_depth=bit_depth,
+                original_header=original_header,
+                is_mono=is_mono
+                # (image_meta and file_meta can be omitted if not needed)
+            )
+            print(f"Temporary normalized FITS saved to: {tmp_path}")
+        except Exception as e:
+            print("Error saving temporary FITS file using save_image():", e)
+            raise e
+        return tmp_path
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image in [0,1].
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # If the image is 2D or has one channel, convert to 3-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)
+
+        image = image.astype(np.float32).copy()
+        stretched_image = image.copy()
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        target_median = 0.02
+
+        for c in range(3):
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+            stretched_image[..., c] -= channel_min
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+        self.was_single_channel = was_single_channel
+        return stretched_image
+
+    def unstretch_image(self, image):
+        """
+        Undo the unlinked linear stretch using stored parameters.
+        Returns the unstretched image.
+        """
+        original_mins = self.stretch_original_mins
+        original_medians = self.stretch_original_medians
+        was_single_channel = self.was_single_channel
+
+        image = image.astype(np.float32).copy()
+
+        if image.ndim == 2:
+            channel_median = np.median(image)
+            original_median = original_medians[0]
+            original_min = original_mins[0]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image
+                denominator = channel_median * (original_median + image - 1) - original_median * image
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image = numerator / denominator
+            else:
+                print("Channel median or original median is zero. Skipping unstretch.")
+            image += original_min
+            image = np.clip(image, 0, 1)
+            return image
+
+        for c in range(3):
+            channel_median = np.median(image[..., c])
+            original_median = original_medians[c]
+            original_min = original_mins[c]
+            if channel_median != 0 and original_median != 0:
+                numerator = (channel_median - 1) * original_median * image[..., c]
+                denominator = (
+                    channel_median * (original_median + image[..., c] - 1)
+                    - original_median * image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median or original median is zero. Skipping unstretch.")
+            image[..., c] += original_min
+
+        image = np.clip(image, 0, 1)
+        if was_single_channel and image.ndim == 3:
+            image = np.mean(image, axis=2, keepdims=True)
+        return image
 
     def retrieve_and_apply_wcs(self, job_id):
         """Download the wcs.fits file from Astrometry.net, extract WCS header data, and apply it."""
@@ -31135,8 +33234,7 @@ class MainWindow(QMainWindow):
         """Force a blind solve on the currently loaded image."""
         dialog.accept()  # Close the settings dialog
         self.prompt_blind_solve()  # Call the blind solve function
-
-
+        
 def extract_wcs_data(file_path):
     try:
         # Open the FITS file with minimal validation to ignore potential errors in non-essential parts
