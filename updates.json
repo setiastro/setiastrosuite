@@ -1,9 +1,9 @@
 {
-  "version": "2.10.7",
+  "version": "2.10.8",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.7/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.7/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.7/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_linux"
   },
-  "notes": "Stellar Alignment, Working Directory, Resize Geometry, and new slot toolbar (click to make active slot, right click for preview and renaming) "
+  "notes": "ASTAP integration with Mosaic Master, Plate Solver, and Whats In My Image.  New Function: Plate Solver, PSF Viewer.  Bug Fixes: Corrected a crash that was happening when switching slots "
 }
