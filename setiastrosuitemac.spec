@@ -39,6 +39,8 @@ a = Analysis(
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
         ('wrench_icon.png', '.'), 
+        ('platesolve.png', '.'),
+        ('psf.png', '.'),        
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
