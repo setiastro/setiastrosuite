@@ -1,9 +1,9 @@
 {
-  "version": "2.10.8",
+  "version": "2.10.9",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.8/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.9/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.9/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.9/setiastrosuite_linux"
   },
-  "notes": "ASTAP integration with Mosaic Master, Plate Solver, and Whats In My Image.  New Function: Plate Solver, PSF Viewer.  Bug Fixes: Corrected a crash that was happening when switching slots "
+  "notes": "Batch Plate Solve with ASTAP, Fixed XISF to FITS issues, Allows multiple file selections for Mosaic Master "
 }
