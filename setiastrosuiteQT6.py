@@ -202,7 +202,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.8"
+VERSION = "2.10.9"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -6692,32 +6692,33 @@ class MosaicMasterDialog(QDialog):
 
     # ---------- Add / Remove ----------
     def add_image(self):
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Add Image",
+            "Add Image(s)",
             "",
             "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
-        if path:
-            arr, header, bitdepth, ismono = load_image(path)
-            wcs_obj = get_wcs_from_header(header) if header else None
-            d = {
-                "path": path,
-                "image": arr,
-                "header": header,
-                "wcs": wcs_obj,
-                "bit_depth": bitdepth,
-                "is_mono": ismono,
-                "transform": None
-            }
-            self.loaded_images.append(d)
+        if paths:
+            for path in paths:
+                arr, header, bitdepth, ismono = load_image(path)
+                wcs_obj = get_wcs_from_header(header) if header else None
+                d = {
+                    "path": path,
+                    "image": arr,
+                    "header": header,
+                    "wcs": wcs_obj,
+                    "bit_depth": bitdepth,
+                    "is_mono": ismono,
+                    "transform": None
+                }
+                self.loaded_images.append(d)
 
-            text = os.path.basename(path)
-            if wcs_obj is not None:
-                text += " [WCS]"
-            item = QListWidgetItem(text)
-            item.setToolTip(path)
-            self.images_list.addItem(item)
+                text = os.path.basename(path)
+                if wcs_obj is not None:
+                    text += " [WCS]"
+                item = QListWidgetItem(text)
+                item.setToolTip(path)
+                self.images_list.addItem(item)
             self.update_status()
 
 
@@ -8732,6 +8733,11 @@ class PlateSolver(QDialog):
         self.solve_btn = QPushButton("Start Plate Solving")
         self.solve_btn.clicked.connect(self.start_plate_solving)
         layout.addWidget(self.solve_btn)
+
+        # --- NEW: Batch Plate Solve button ---
+        self.batch_solve_btn = QPushButton("Batch Plate Solve with ASTAP")
+        self.batch_solve_btn.clicked.connect(self.openBatchPlateSolver)
+        layout.addWidget(self.batch_solve_btn)        
         
         # Close button
         close_btn = QPushButton("Close")
@@ -8742,6 +8748,11 @@ class PlateSolver(QDialog):
         self.mode_combo.setCurrentIndex(0)
         self.stacked.setCurrentIndex(0)
         self.image_path = ""
+
+    def openBatchPlateSolver(self):
+        # Directly create an instance of BatchPlateSolverDialog
+        dialog = BatchPlateSolverDialog(self.settings, parent=self)
+        dialog.show()
 
     def change_mode(self, index):
         """Change the stacked widget page based on the selection mode."""
@@ -9022,7 +9033,7 @@ class PlateSolver(QDialog):
 
         return header
 
-    def run_astap(self, image_path: str) -> bool:
+    def run_astap(self, image_path: str, update_manager=True) -> bool:
         """
         Loads the image data and metadata based on the user's selection:
         - If the user selected a slot (self._from_slot is True), retrieve the image and metadata
@@ -9213,17 +9224,20 @@ class PlateSolver(QDialog):
             print(f"{key} = {value}")
 
         # --- Directly update the metadata dictionary for the current slot ---
-        if self.parent() and hasattr(self.parent(), "image_manager"):
-            try:
-                current_slot = self.parent().image_manager.current_slot
-                self.parent().image_manager._metadata[current_slot].update(solved_header)
-                print("ImageManager metadata for slot", current_slot, "updated with solved header.")
-            except Exception as e:
-                print("Error updating ImageManager metadata with solved data:", e)
+        if update_manager:
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                try:
+                    current_slot = self.parent().image_manager.current_slot
+                    self.parent().image_manager._metadata[current_slot].update(solved_header)
+                    print("ImageManager metadata for slot", current_slot, "updated with solved header.")
+                except Exception as e:
+                    print("Error updating ImageManager metadata with solved data:", e)
+                    return False
+            else:
+                print("No parent ImageManager found; cannot update solved metadata.")
                 return False
         else:
-            print("No parent ImageManager found; cannot update solved metadata.")
-            return False
+            print("Batch mode: Skipping image manager metadata update.")
 
         # --- If the image was loaded from file (not a slot) and is a FITS file, update that file with the new header ---
         if not getattr(self, "_from_slot", False) and image_path.lower().endswith((".fits", ".fit")):
@@ -9628,6 +9642,369 @@ class PlateSolver(QDialog):
         """
         print("Updating metadata/FITS header... (this is a placeholder)")
         # TODO: Implement metadata update logic here.
+
+class BatchPlateSolverDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Batch Plate Solve")
+        self.setMinimumWidth(500)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        self.inputDirLineEdit = QLineEdit()
+        self.outputDirLineEdit = QLineEdit()
+        inputBrowseButton = QPushButton("Browse Input Directory")
+        outputBrowseButton = QPushButton("Browse Output Directory")
+        self.startButton = QPushButton("Start Batch Plate Solve")
+        self.statusTextEdit = QTextEdit()
+        self.statusTextEdit.setReadOnly(True)
+        
+        layout.addWidget(QLabel("Input Directory:"))
+        layout.addWidget(self.inputDirLineEdit)
+        layout.addWidget(inputBrowseButton)
+        layout.addWidget(QLabel("Output Directory:"))
+        layout.addWidget(self.outputDirLineEdit)
+        layout.addWidget(outputBrowseButton)
+        layout.addWidget(self.startButton)
+        layout.addWidget(QLabel("Status:"))
+        layout.addWidget(self.statusTextEdit)
+        
+        inputBrowseButton.clicked.connect(self.browseInputDir)
+        outputBrowseButton.clicked.connect(self.browseOutputDir)
+        self.startButton.clicked.connect(self.startBatchPlateSolve)
+        
+    def browseInputDir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Input Directory")
+        if directory:
+            self.inputDirLineEdit.setText(directory)
+        
+    def browseOutputDir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if directory:
+            self.outputDirLineEdit.setText(directory)
+            
+    def logStatus(self, message):
+        self.statusTextEdit.append(message)
+        QApplication.processEvents()
+        
+    def run_astap_batch(self, image_path: str):
+        """
+        Batch-mode version of ASTAP processing.
+        This method loads an image, normalizes it, saves a temporary FITS file,
+        runs ASTAP, retrieves the solved header, and returns it.
+        It does not update any ImageManager or prompt the user.
+        """
+        # Load image from file
+        image_data, original_header, bit_depth, is_mono = load_image(image_path)
+        if image_data is None:
+            self.logStatus(f"Failed to load image from file: {image_path}")
+            return False
+
+        # Keep a copy of original image data if needed later.
+        original_image_data = image_data.copy()
+
+        image_data = image_data.astype(np.float32)
+        # Normalize image (using your existing stretch_image method)
+        normalized_image = image_data
+
+        # Save temporary FITS file
+        try:
+            tmp_path = self.save_temp_fits_image(normalized_image, image_path)
+        except Exception as e:
+            self.logStatus(f"Failed to save temporary FITS file: {e}")
+            return False
+
+        # Run ASTAP on temporary file
+        astap_exe = self.settings.value("astap/exe_path", "", type=str)
+        if not astap_exe or not os.path.exists(astap_exe):
+            self.logStatus("ASTAP executable not found.")
+            return False
+
+        process = QProcess(self)
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        self.logStatus(f"Running ASTAP with arguments: {args}")
+        process.start(astap_exe, args)
+        if not process.waitForStarted(5000):
+            self.logStatus("Failed to start ASTAP process: " + process.errorString())
+            return False
+        if not process.waitForFinished(300000):
+            self.logStatus("ASTAP process timed out.")
+            return False
+
+        exit_code = process.exitCode()
+        stdout = process.readAllStandardOutput().data().decode()
+        stderr = process.readAllStandardError().data().decode()
+        self.logStatus(f"ASTAP exit code: {exit_code}")
+        self.logStatus("ASTAP STDOUT: " + stdout)
+        self.logStatus("ASTAP STDERR: " + stderr)
+        if exit_code != 0:
+            try:
+                os.remove(tmp_path)
+            except Exception as e:
+                self.logStatus("Error removing temporary file: " + str(e))
+            return False
+
+        # Retrieve solved header from temporary FITS file
+        try:
+            with fits.open(tmp_path, memmap=False) as hdul:
+                solved_header = dict(hdul[0].header)
+            for key in ["COMMENT", "HISTORY", "END"]:
+                solved_header.pop(key, None)
+            self.logStatus("Initial solved header retrieved:")
+            for key, value in solved_header.items():
+                self.logStatus(f"{key} = {value}")
+        except Exception as e:
+            self.logStatus("Error reading solved header after ASTAP: " + str(e))
+            return False
+
+        # Check for a corresponding .wcs file and merge its header if present.
+        wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
+        if os.path.exists(wcs_path):
+            try:
+                wcs_header = {}
+                with open(wcs_path, "r") as f:
+                    text = f.read()
+                    pattern = r"(\w+)\s*=\s*('?[^/']*'?)[\s/]"
+                    for match in re.finditer(pattern, text):
+                        key = match.group(1).strip().upper()
+                        val = match.group(2).strip()
+                        if val.startswith("'") and val.endswith("'"):
+                            val = val[1:-1].strip()
+                        wcs_header[key] = val
+                wcs_header.pop("END", None)
+                self.logStatus("WCS header retrieved from .wcs file:")
+                for key, value in wcs_header.items():
+                    self.logStatus(f"{key} = {value}")
+                solved_header.update(wcs_header)
+            except Exception as e:
+                self.logStatus("Error reading .wcs file: " + str(e))
+        else:
+            self.logStatus("No .wcs file found; using header from temporary FITS.")
+
+        # Add missing required keys
+        required_keys = {
+            "CTYPE1": "RA---TAN",
+            "CTYPE2": "DEC--TAN",
+            "RADECSYS": "ICRS",
+            "WCSAXES": 2,
+        }
+        for key, default in required_keys.items():
+            if key not in solved_header:
+                solved_header[key] = default
+                self.logStatus(f"Added missing key {key} with default value {default}.")
+
+        # Convert expected numeric keys
+        expected_numeric_keys = {
+            "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CROTA1", "CROTA2",
+            "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2", "WCSAXES"
+        }
+        for key in expected_numeric_keys:
+            if key in solved_header:
+                try:
+                    solved_header[key] = float(solved_header[key])
+                except ValueError:
+                    self.logStatus(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+
+        # Compute CROTA1 and CROTA2 if missing
+        if 'CROTA1' not in solved_header or 'CROTA2' not in solved_header:
+            if 'CD1_1' in solved_header and 'CD1_2' in solved_header:
+                rotation = math.degrees(math.atan2(solved_header['CD1_2'], solved_header['CD1_1']))
+                solved_header['CROTA1'] = rotation
+                solved_header['CROTA2'] = rotation
+                self.logStatus(f"Computed CROTA1 and CROTA2 as {rotation:.2f} degrees.")
+            else:
+                self.logStatus("CD matrix elements not available; cannot compute CROTA values.")
+
+        self.logStatus("Final solved header:")
+        for key, value in solved_header.items():
+            self.logStatus(f"{key} = {value}")
+
+        try:
+            os.remove(tmp_path)
+        except Exception as e:
+            self.logStatus("Error removing temporary file: " + str(e))
+        try:
+            if os.path.exists(wcs_path):
+                os.remove(wcs_path)
+        except Exception as e:
+            self.logStatus("Error removing .wcs file: " + str(e))
+        return solved_header
+
+    def stretch_image(self, image):
+        """
+        Perform an unlinked linear stretch on the image.
+        Each channel is stretched independently by subtracting its own minimum,
+        recording its own median, and applying the stretch formula.
+        Returns the stretched image in [0,1].
+        """
+        was_single_channel = False  # Flag to check if image was single-channel
+
+        # If the image is 2D or has one channel, convert to 3-channel
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            was_single_channel = True
+            image = np.stack([image] * 3, axis=-1)
+
+        image = image.astype(np.float32).copy()
+        stretched_image = image.copy()
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        target_median = 0.02
+
+        for c in range(3):
+            channel_min = np.min(stretched_image[..., c])
+            self.stretch_original_mins.append(channel_min)
+            stretched_image[..., c] -= channel_min
+            channel_median = np.median(stretched_image[..., c])
+            self.stretch_original_medians.append(channel_median)
+            if channel_median != 0:
+                numerator = (channel_median - 1) * target_median * stretched_image[..., c]
+                denominator = (
+                    channel_median * (target_median + stretched_image[..., c] - 1)
+                    - target_median * stretched_image[..., c]
+                )
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                stretched_image[..., c] = numerator / denominator
+            else:
+                print(f"Channel {c} - Median is zero. Skipping stretch.")
+
+        stretched_image = np.clip(stretched_image, 0.0, 1.0)
+        self.was_single_channel = was_single_channel
+        return stretched_image
+
+    def save_temp_fits_image(self, normalized_image, image_path: str):
+        """
+        Save the normalized_image as a FITS file to a temporary file.
+        
+        If the original image is FITS, this method retrieves the stored metadata
+        from the ImageManager and passes it directly to save_image().
+        If not, it generates a minimal header.
+        
+        Returns the path to the temporary FITS file.
+        """
+        # Always save as FITS.
+        selected_format = "fits"
+        bit_depth = "32-bit floating point"
+        is_mono = (normalized_image.ndim == 2 or 
+                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+        
+        # If the original image is FITS, try to get its stored metadata.
+        original_header = None
+        if image_path.lower().endswith((".fits", ".fit")):
+            # In single-image mode, an ImageManager might be available.
+            if self.parent() and hasattr(self.parent(), "image_manager"):
+                _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                original_header = meta.get("original_header", None)
+            else:
+                # In batch mode, no ImageManager is available; try reading the header directly.
+                try:
+                    with fits.open(image_path, memmap=False) as hdul:
+                        original_header = dict(hdul[0].header)
+                    print("Original FITS header loaded from file.")
+                except Exception as e:
+                    print("Failed to load header from FITS file; creating a minimal header. Error:", e)
+            if original_header is None:
+                print("No stored FITS header found; creating a minimal header.")
+                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        else:
+            # For non-FITS images, generate a minimal header.
+            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+        
+        # Create a temporary filename.
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp_file.name
+        tmp_file.close()
+        
+        try:
+            # Call your global save_image() exactly as in AstroEditingSuite.
+            save_image(
+                img_array=normalized_image,
+                filename=tmp_path,
+                original_format=selected_format,
+                bit_depth=bit_depth,
+                original_header=original_header,
+                is_mono=is_mono
+                # (image_meta and file_meta can be omitted if not needed)
+            )
+            print(f"Temporary normalized FITS saved to: {tmp_path}")
+        except Exception as e:
+            print("Error saving temporary FITS file using save_image():", e)
+            raise e
+        return tmp_path
+
+    def create_minimal_fits_header(self, img_array, is_mono=False):
+        """
+        Creates a minimal FITS header when the original header is missing.
+        """
+        from astropy.io.fits import Header
+
+        header = Header()
+        header['SIMPLE'] = (True, 'Standard FITS file')
+        header['BITPIX'] = -32  # 32-bit floating-point data
+        header['NAXIS'] = 2 if is_mono else 3
+        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
+        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        if not is_mono:
+            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
+        header['BZERO'] = 0.0  # No offset
+        header['BSCALE'] = 1.0  # No scaling
+        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
+        return header
+
+
+    def startBatchPlateSolve(self):
+        inputDir = self.inputDirLineEdit.text().strip()
+        outputDir = self.outputDirLineEdit.text().strip()
+        if not inputDir or not outputDir:
+            QMessageBox.warning(self, "Missing Directories", "Please select both input and output directories.")
+            return
+        
+        acceptable_exts = ['.xisf', '.fits', '.fit', '.tif', '.tiff', '.png', '.jpg', '.jpeg']
+        files = [os.path.join(inputDir, f) for f in os.listdir(inputDir)
+                 if os.path.splitext(f)[1].lower() in acceptable_exts]
+        
+        if not files:
+            QMessageBox.information(self, "No Files", "No acceptable image files found in the input directory.")
+            return
+        
+        self.logStatus(f"Found {len(files)} files. Starting batch processing...")
+        
+        for file in files:
+            self.logStatus(f"Processing: {file}")
+            try:
+                # Load image data
+                image_data, original_header, bit_depth, is_mono = load_image(file)
+                if image_data is None:
+                    self.logStatus(f"Failed to load image: {file}")
+                    continue
+
+                # Run our batch ASTAP routine (which does not update the ImageManager)
+                solved_header = self.run_astap_batch(file)
+                if not solved_header:
+                    self.logStatus(f"Plate solving failed for: {file}")
+                    continue
+                
+                base_name = os.path.splitext(os.path.basename(file))[0]
+                output_file = os.path.join(outputDir, base_name + "_plate_solved.fits")
+                
+                # Save the image with the solved header
+                save_image(
+                    img_array=image_data,
+                    filename=output_file,
+                    original_format="fits",
+                    bit_depth="32-bit floating point",
+                    original_header=solved_header,
+                    is_mono=is_mono
+                )
+                self.logStatus(f"Saved plate-solved image to: {output_file}")
+            except Exception as e:
+                self.logStatus(f"Error processing {file}: {e}")
+        
+        self.logStatus("Batch plate solving completed.")
+
 
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
@@ -29031,66 +29408,170 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             if not filename.lower().endswith(f".{original_format}"):
                 filename = filename.rsplit('.', 1)[0] + f".{original_format}"
 
-            if original_header is not None:
-                # Convert original_header (dictionary) to astropy Header object
-                fits_header = fits.Header()
-                for key, value in original_header.items():
-                    fits_header[key] = value
-                fits_header['BSCALE'] = 1.0  # Scaling factor
-                fits_header['BZERO'] = 0.0   # Offset for brightness    
+            # Decide whether to rebuild the header from XISF metadata.
+            def header_has_only_xisf(header_dict):
+                # Return True if all keys in header_dict start with 'XISF:'
+                return all(key.upper().startswith("XISF:") for key in header_dict.keys())
 
-                # Handle mono (2D) images
-                if is_mono or img_array.ndim == 2:
-                    # If the image is 3D but marked as mono, assume channels are identical and take one channel.
-                    if img_array.ndim == 3:
-                        print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
-                        img_array = img_array[..., 0]  # Now img_array is 2D.
-                    if bit_depth == "16-bit":
-                        img_array_fits = (img_array * 65535).astype(np.uint16)
-                    elif bit_depth == "32-bit unsigned":
-                        bzero = fits_header.get('BZERO', 0)
-                        bscale = fits_header.get('BSCALE', 1)
-                        img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
-                    else:  # 32-bit float
-                        img_array_fits = img_array.astype(np.float32)
-
-                    # Update header for a 2D (grayscale) image
-                    fits_header['NAXIS'] = 2
-                    fits_header['NAXIS1'] = img_array.shape[1]  # Width
-                    fits_header['NAXIS2'] = img_array.shape[0]  # Height
-                    fits_header.pop('NAXIS3', None)  # Remove if present
-
-                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
-
-                # Handle RGB (3D) images
-                else:
-                    img_array_transposed = np.transpose(img_array, (2, 0, 1))  # Channels, Height, Width
-                    if bit_depth == "16-bit":
-                        img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
-                    elif bit_depth == "32-bit unsigned":
-                        bzero = fits_header.get('BZERO', 0)
-                        bscale = fits_header.get('BSCALE', 1)
-                        img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
-                        fits_header['BITPIX'] = -32
-                    else:  # Default to 32-bit float
-                        img_array_fits = img_array_transposed.astype(np.float32)
-
-                    # Update header for a 3D (RGB) image
-                    fits_header['NAXIS'] = 3
-                    fits_header['NAXIS1'] = img_array_transposed.shape[2]  # Width
-                    fits_header['NAXIS2'] = img_array_transposed.shape[1]  # Height
-                    fits_header['NAXIS3'] = img_array_transposed.shape[0]  # Channels
-
-                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
-
-                # Write the FITS file
-                try:
-                    hdu.writeto(filename, overwrite=True)
-                    print(f"Saved as {original_format.upper()} to: {filename}")
-                except Exception as e:
-                    print(f"Error saving FITS file: {e}")
+            use_rebuild = False
+            if original_header is not None and isinstance(original_header, dict):
+                if header_has_only_xisf(original_header):
+                    use_rebuild = True
+                    print("Original header contains only XISF metadata. Rebuilding FITS header from image_meta.")
             else:
-                raise ValueError("Original header is required for FITS format!")
+                # If no original header exists, we must rebuild.
+                use_rebuild = True
+                print("No original header available; rebuilding minimal FITS header.")
+
+            # If rebuilding, use the XISF viewer logic:
+            if use_rebuild:
+                header = fits.Header()
+                crval1, crval2 = None, None
+
+                # Define the list of WCS keywords we care about.
+                wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+                                "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+
+                if image_meta and 'FITSKeywords' in image_meta:
+                    for keyword, values in image_meta['FITSKeywords'].items():
+                        for entry in values:
+                            if 'value' in entry:
+                                value = entry['value']
+                                if keyword in wcs_keywords:
+                                    try:
+                                        value = int(value)
+                                    except ValueError:
+                                        try:
+                                            value = float(value)
+                                        except Exception:
+                                            pass
+                                header[keyword] = value
+
+                # Manually add WCS information if missing.
+                if 'CTYPE1' not in header:
+                    header['CTYPE1'] = 'RA---TAN'
+                if 'CTYPE2' not in header:
+                    header['CTYPE2'] = 'DEC--TAN'
+
+                # Add the -SIP suffix if SIP coefficients are present.
+                if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+                    header['CTYPE1'] = 'RA---TAN-SIP'
+                    header['CTYPE2'] = 'DEC--TAN-SIP'
+
+                # Set default reference pixel (center of the image).
+                if 'CRPIX1' not in header:
+                    header['CRPIX1'] = img_array.shape[1] / 2  # X center
+                if 'CRPIX2' not in header:
+                    header['CRPIX2'] = img_array.shape[0] / 2  # Y center
+
+                # Retrieve RA and DEC if available.
+                if image_meta and 'FITSKeywords' in image_meta:
+                    if 'RA' in image_meta['FITSKeywords']:
+                        crval1 = float(image_meta['FITSKeywords']['RA'][0]['value'])
+                    if 'DEC' in image_meta['FITSKeywords']:
+                        crval2 = float(image_meta['FITSKeywords']['DEC'][0]['value'])
+                if crval1 is not None and crval2 is not None:
+                    header['CRVAL1'] = crval1
+                    header['CRVAL2'] = crval2
+                else:
+                    print("RA and DEC values not found in FITS Keywords.")
+
+                # Calculate pixel scale if focal length and pixel size are available.
+                if image_meta and 'FITSKeywords' in image_meta and \
+                'FOCALLEN' in image_meta['FITSKeywords'] and 'XPIXSZ' in image_meta['FITSKeywords']:
+                    focal_length = float(image_meta['FITSKeywords']['FOCALLEN'][0]['value'])
+                    pixel_size = float(image_meta['FITSKeywords']['XPIXSZ'][0]['value'])
+                    pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
+                    header['CDELT1'] = -pixel_scale / 3600.0
+                    header['CDELT2'] = pixel_scale / 3600.0
+                else:
+                    header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
+                    header['CDELT2'] = 2.77778e-4
+
+                # Populate CD matrix using the XISF LinearTransformationMatrix if available.
+                if image_meta and 'XISFProperties' in image_meta and \
+                'PCL:AstrometricSolution:LinearTransformationMatrix' in image_meta['XISFProperties']:
+                    linear_transform = image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                    header['CD1_1'] = linear_transform[0][0]
+                    header['CD1_2'] = linear_transform[0][1]
+                    header['CD2_1'] = linear_transform[1][0]
+                    header['CD2_2'] = linear_transform[1][1]
+                else:
+                    header['CD1_1'] = header['CDELT1']
+                    header['CD1_2'] = 0.0
+                    header['CD2_1'] = 0.0
+                    header['CD2_2'] = header['CDELT2']
+
+                # Duplicate the mono image to create a 3-channel image if necessary.
+                if is_mono:
+                    image_data_fits = np.stack([img_array[:, :, 0]] * 3, axis=-1)
+                    image_data_fits = np.transpose(image_data_fits, (2, 0, 1))
+                    header['NAXIS'] = 3
+                    header['NAXIS3'] = 3
+                else:
+                    image_data_fits = np.transpose(img_array, (2, 0, 1))
+                    header['NAXIS'] = 3
+                    header['NAXIS3'] = 3
+
+            else:
+                # Otherwise, use the provided original header.
+                if original_header is not None and isinstance(original_header, dict):
+                    valid_header = {}
+                    for key, value in original_header.items():
+                        if not key.upper().startswith("XISF:"):
+                            valid_header[key] = value
+                    header = fits.Header()
+                    for key, value in valid_header.items():
+                        try:
+                            header[key] = value
+                        except Exception as e:
+                            print(f"Skipping key {key} due to error: {e}")
+                else:
+                    raise ValueError("Original header is required for FITS format!")
+
+            header['BSCALE'] = 1.0
+            header['BZERO'] = 0.0
+
+            # Now update the header with image dimensions:
+            if is_mono or img_array.ndim == 2:
+                if img_array.ndim == 3:
+                    print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
+                    img_array = img_array[..., 0]
+                if bit_depth == "16-bit":
+                    img_array_fits = (img_array * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = header.get('BZERO', 0)
+                    bscale = header.get('BSCALE', 1)
+                    img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
+                else:
+                    img_array_fits = img_array.astype(np.float32)
+                header['NAXIS'] = 2
+                header['NAXIS1'] = img_array.shape[1]
+                header['NAXIS2'] = img_array.shape[0]
+                header.pop('NAXIS3', None)
+                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+            else:
+                img_array_transposed = np.transpose(img_array, (2, 0, 1))
+                if bit_depth == "16-bit":
+                    img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = header.get('BZERO', 0)
+                    bscale = header.get('BSCALE', 1)
+                    img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
+                    header['BITPIX'] = -32
+                else:
+                    img_array_fits = img_array_transposed.astype(np.float32)
+                header['NAXIS'] = 3
+                header['NAXIS1'] = img_array_transposed.shape[2]
+                header['NAXIS2'] = img_array_transposed.shape[1]
+                header['NAXIS3'] = img_array_transposed.shape[0]
+                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+
+            try:
+                hdu.writeto(filename, overwrite=True)
+                print(f"Saved FITS image with metadata to: {filename}")
+            except Exception as e:
+                print(f"Error saving FITS file: {e}")
 
         elif original_format in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
             # Save as FITS file with metadata
