@@ -30,7 +30,9 @@ from io import BytesIO
 import re
 from scipy.spatial import Delaunay, KDTree
 import random
-sys.stdout.reconfigure(encoding='utf-8')
+if sys.stdout is not None:
+    sys.stdout.reconfigure(encoding='utf-8')
+
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
@@ -204,7 +206,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.10"
+VERSION = "2.10.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -8666,7 +8668,7 @@ class StellarAlignmentDialog(QDialog):
             self, 
             "Select Source Image", 
             default_dir,
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+            "Images (*.fits *.fit *.xisf *.tif *.tiff *.png *.jpg);;All Files (*)"
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
@@ -8677,7 +8679,7 @@ class StellarAlignmentDialog(QDialog):
                 image = np.stack([image]*3, axis=-1)
             self.stellar_source = image
             self.source_file_label.setText(path)
-            self.update_preview(self.source_preview_label, image)
+
 
     def select_target_file(self):
         default_dir = self.settings.value("working_directory", "")
@@ -8685,7 +8687,7 @@ class StellarAlignmentDialog(QDialog):
             self, 
             "Select Target Image", 
             default_dir,
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+            "Images (*.fits *.fit *.xisf *.tif *.tiff *.png *.jpg);;All Files (*)"
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
@@ -8696,7 +8698,7 @@ class StellarAlignmentDialog(QDialog):
                 image = np.stack([image]*3, axis=-1)
             self.stellar_target = image
             self.target_file_label.setText(path)
-            self.update_preview(self.target_preview_label, image)
+
 
     def load_source_from_slot(self):
         index = self.source_slot_combo.currentData()
@@ -8741,6 +8743,49 @@ class StellarAlignmentDialog(QDialog):
         scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(QPixmap.fromImage(scaled))
 
+    def select_corner_stars(self, stars, image_shape, margin=0.15):
+        """
+        Selects stars that are near the corners (or edges) of the image.
+        stars: list of tuples (x, y, flux, cell_id)
+        image_shape: (H, W)
+        margin: fractional distance from the border
+        """
+        H, W = image_shape
+        selected = []
+        for star in stars:
+            x, y, _, _ = star
+            # Choose stars near left/right and top/bottom margins.
+            if (x < margin * W or x > (1 - margin) * W) and (y < margin * H or y > (1 - margin) * H):
+                selected.append((x, y))
+        return selected
+
+    def thin_plate_spline_warp(self, src_points, tgt_points, image):
+        """
+        Applies a thin plate spline warp from tgt_points -> src_points.
+        Both src_points and tgt_points should be lists of (x, y) coordinates.
+        image: the image to warp (e.g. the affine-aligned target)
+        """
+        # Convert to the shape required by OpenCV: (N,1,2) as float32.
+        src_pts = np.array(src_points, dtype=np.float32).reshape(-1, 1, 2)
+        tgt_pts = np.array(tgt_points, dtype=np.float32).reshape(-1, 1, 2)
+        
+        # Create a Thin Plate Spline (TPS) shape transformer.
+        tps = cv2.createThinPlateSplineShapeTransformer()
+        
+        # Build the list of matches. Each match tells the transformer
+        # which source point corresponds to which target point.
+        matches = []
+        for i in range(len(src_points)):
+            # DMatch: queryIdx, trainIdx, distance (set distance=0)
+            matches.append(cv2.DMatch(i, i, 0))
+        
+        # Estimate the TPS transformation.
+        tps.estimateTransformation(src_pts, tgt_pts, matches)
+        
+        # Warp the image using the estimated TPS transformation.
+        warped = tps.warpImage(image)
+        return warped
+
     # -----------------------------
     # Run Alignment – Uses RANSAC/Delaunay Approach with Progress Updates
     # -----------------------------
@@ -8774,7 +8819,7 @@ class StellarAlignmentDialog(QDialog):
             QMessageBox.warning(self, "Alignment Error", "Failed to compute alignment transform.")
             return
 
-        self.status_label.setText("Warping target image...")
+        self.status_label.setText("Warping target image with affine transform...")
         QApplication.processEvents()
         inv_transform = cv2.invertAffineTransform(best_matrix[:2])
         warped_target = cv2.warpAffine(target_img, inv_transform, (W, H), flags=cv2.INTER_LINEAR)
@@ -8782,9 +8827,32 @@ class StellarAlignmentDialog(QDialog):
         canvas[:] = warped_target
         self.aligned_image = canvas
         self.update_preview(self.result_preview_label, canvas)
-        self.status_label.setText("Alignment complete.")
-        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} inliers.")
+
+        # --- Begin TPS Refinement ---
+        self.status_label.setText("Refining alignment with Thin Plate Splines...")
+        QApplication.processEvents()
+        # For TPS, we select control points from both images.
+        # Here we choose stars near the corners.
+        src_ctrl_pts = self.select_corner_stars(source_stars, (H, W), margin=0.15)
+        tgt_ctrl_pts = self.select_corner_stars(target_stars, (H, W), margin=0.15)
+
+        # Ensure we have a matching number of points.
+        num_ctrl = min(len(src_ctrl_pts), len(tgt_ctrl_pts))
+        if num_ctrl < 3:
+            self.status_label.setText("Not enough corner control points for TPS; skipping TPS refinement.")
+        else:
+            src_ctrl_pts = src_ctrl_pts[:num_ctrl]
+            tgt_ctrl_pts = tgt_ctrl_pts[:num_ctrl]
+            # Apply TPS to the affine-aligned image.
+            refined_image = self.thin_plate_spline_warp(src_ctrl_pts, tgt_ctrl_pts, canvas)
+            self.aligned_image = refined_image
+            self.update_preview(self.result_preview_label, refined_image)
+            self.status_label.setText("Alignment complete with TPS refinement.")
+        # --- End TPS Refinement ---
+
+        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} affine inliers.")
         self.show_transform_info(best_matrix)
+
 
     def show_transform_info(self, matrix):
         """
@@ -8969,7 +9037,7 @@ class PlateSolver(QDialog):
     def choose_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Image for Plate Solving",
-            "", "Image Files (*.fits *.png *.tiff *.jpg *.jpeg);;All Files (*)"
+            "", "Image Files (*.fit *.fits *.png *.tif *.tiff *.xisf *.jpg *.jpeg);;All Files (*)"
         )
         if file_path:
             self.image_path = file_path
@@ -27173,9 +27241,9 @@ class NBtoRGBstarsTab(QWidget):
         self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
-        self.saveButton = QPushButton('Save Combined Image', self)
-        self.saveButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveButton)
+        self.pushButton = QPushButton('Push to Active Slot', self)
+        self.pushButton.clicked.connect(self.pushToActiveSlot)
+        left_layout.addWidget(self.pushButton)
 
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
@@ -27269,6 +27337,46 @@ class NBtoRGBstarsTab(QWidget):
 
             print(f"NBtoRGBstarsTab: Image updated from ImageManager slot {slot}.")
 
+    def pushToActiveSlot(self):
+        """
+        Pushes the current combined image to the active slot in the ImageManager,
+        along with the associated metadata.
+        """
+        if self.combined_image is None:
+            QMessageBox.warning(self, "Warning", "No combined image available to push.")
+            return
+
+        # Prepare metadata for the combined image.
+        metadata = {
+            'file_path': self.ha_filename if self.ha_image is not None else "Combined Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': self.bit_depth if self.bit_depth else "Unknown",
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'ha_to_oii_ratio': self.haToOiiRatioSlider.value() / 100.0,
+                'enable_star_stretch': self.starStretchCheckBox.isChecked(),
+                'stretch_factor': self.stretchSlider.value() / 100.0
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
+                'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
+                'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
+                'OSC': self.osc_filename if self.osc_image is not None else "Not Provided"
+            }
+        }
+
+        # Update the active slot in the ImageManager.
+        if self.image_manager:
+            try:
+                self.image_manager.set_image(self.combined_image, metadata=metadata)
+                QMessageBox.information(self, "Success", "Combined image pushed to active slot.")
+                print("NBtoRGBstarsTab: Combined image pushed to ImageManager active slot.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot push the combined image.")
 
 
     def createRatioSlider(self, label_text, default_value):
