@@ -2366,7 +2366,7 @@ class AstroEditingSuite(QMainWindow):
             field_layout.setContentsMargins(0, 0, 0, 0)
             
             # Create the QLineEdit with the stored value.
-            field = QLineEdit(value)
+            field = QLineEdit(str(value))
             input_fields[key] = field
             field_layout.addWidget(field)
             
@@ -2396,7 +2396,7 @@ class AstroEditingSuite(QMainWindow):
             "Minimum Altitude": ("min_altitude", self.settings.value("min_altitude", ""))
         }
         for label, (key, value) in additional_fields.items():
-            field = QLineEdit(value)
+            field = QLineEdit(str(value))
             settings_form.addRow(label, field)
             input_fields[key] = field
         
