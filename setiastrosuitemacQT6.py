@@ -204,7 +204,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.10"
+VERSION = "2.10.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -4686,6 +4686,17 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, self._metadata[slot])
         print(f"ImageManager: Image set for slot {slot} via property setter.")
 
+    def get_slot_name(self, slot):
+        """
+        Returns the display name for a given slot.
+        If a slot has been renamed (stored under "slot_name" in metadata), that name is returned.
+        Otherwise, it returns "Slot X" (using 1-indexed numbering for display).
+        """
+        metadata = self._metadata.get(slot, {})
+        if 'slot_name' in metadata:
+            return metadata['slot_name']
+        else:
+            return f"Slot {slot + 1}"
 
 
     def set_metadata(self, metadata):
@@ -8655,7 +8666,7 @@ class StellarAlignmentDialog(QDialog):
             self, 
             "Select Source Image", 
             default_dir,
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+            "Images (*.fits *.fit *.xisf *.tif *.tiff *.png *.jpg);;All Files (*)"
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
@@ -8666,7 +8677,7 @@ class StellarAlignmentDialog(QDialog):
                 image = np.stack([image]*3, axis=-1)
             self.stellar_source = image
             self.source_file_label.setText(path)
-            self.update_preview(self.source_preview_label, image)
+
 
     def select_target_file(self):
         default_dir = self.settings.value("working_directory", "")
@@ -8674,7 +8685,7 @@ class StellarAlignmentDialog(QDialog):
             self, 
             "Select Target Image", 
             default_dir,
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All Files (*)"
+            "Images (*.fits *.fit *.xisf *.tif *.tiff *.png *.jpg);;All Files (*)"
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
@@ -8685,7 +8696,7 @@ class StellarAlignmentDialog(QDialog):
                 image = np.stack([image]*3, axis=-1)
             self.stellar_target = image
             self.target_file_label.setText(path)
-            self.update_preview(self.target_preview_label, image)
+
 
     def load_source_from_slot(self):
         index = self.source_slot_combo.currentData()
@@ -8730,6 +8741,49 @@ class StellarAlignmentDialog(QDialog):
         scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(QPixmap.fromImage(scaled))
 
+    def select_corner_stars(self, stars, image_shape, margin=0.15):
+        """
+        Selects stars that are near the corners (or edges) of the image.
+        stars: list of tuples (x, y, flux, cell_id)
+        image_shape: (H, W)
+        margin: fractional distance from the border
+        """
+        H, W = image_shape
+        selected = []
+        for star in stars:
+            x, y, _, _ = star
+            # Choose stars near left/right and top/bottom margins.
+            if (x < margin * W or x > (1 - margin) * W) and (y < margin * H or y > (1 - margin) * H):
+                selected.append((x, y))
+        return selected
+
+    def thin_plate_spline_warp(self, src_points, tgt_points, image):
+        """
+        Applies a thin plate spline warp from tgt_points -> src_points.
+        Both src_points and tgt_points should be lists of (x, y) coordinates.
+        image: the image to warp (e.g. the affine-aligned target)
+        """
+        # Convert to the shape required by OpenCV: (N,1,2) as float32.
+        src_pts = np.array(src_points, dtype=np.float32).reshape(-1, 1, 2)
+        tgt_pts = np.array(tgt_points, dtype=np.float32).reshape(-1, 1, 2)
+        
+        # Create a Thin Plate Spline (TPS) shape transformer.
+        tps = cv2.createThinPlateSplineShapeTransformer()
+        
+        # Build the list of matches. Each match tells the transformer
+        # which source point corresponds to which target point.
+        matches = []
+        for i in range(len(src_points)):
+            # DMatch: queryIdx, trainIdx, distance (set distance=0)
+            matches.append(cv2.DMatch(i, i, 0))
+        
+        # Estimate the TPS transformation.
+        tps.estimateTransformation(src_pts, tgt_pts, matches)
+        
+        # Warp the image using the estimated TPS transformation.
+        warped = tps.warpImage(image)
+        return warped
+
     # -----------------------------
     # Run Alignment – Uses RANSAC/Delaunay Approach with Progress Updates
     # -----------------------------
@@ -8763,7 +8817,7 @@ class StellarAlignmentDialog(QDialog):
             QMessageBox.warning(self, "Alignment Error", "Failed to compute alignment transform.")
             return
 
-        self.status_label.setText("Warping target image...")
+        self.status_label.setText("Warping target image with affine transform...")
         QApplication.processEvents()
         inv_transform = cv2.invertAffineTransform(best_matrix[:2])
         warped_target = cv2.warpAffine(target_img, inv_transform, (W, H), flags=cv2.INTER_LINEAR)
@@ -8771,9 +8825,32 @@ class StellarAlignmentDialog(QDialog):
         canvas[:] = warped_target
         self.aligned_image = canvas
         self.update_preview(self.result_preview_label, canvas)
-        self.status_label.setText("Alignment complete.")
-        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} inliers.")
+
+        # --- Begin TPS Refinement ---
+        self.status_label.setText("Refining alignment with Thin Plate Splines...")
+        QApplication.processEvents()
+        # For TPS, we select control points from both images.
+        # Here we choose stars near the corners.
+        src_ctrl_pts = self.select_corner_stars(source_stars, (H, W), margin=0.15)
+        tgt_ctrl_pts = self.select_corner_stars(target_stars, (H, W), margin=0.15)
+
+        # Ensure we have a matching number of points.
+        num_ctrl = min(len(src_ctrl_pts), len(tgt_ctrl_pts))
+        if num_ctrl < 3:
+            self.status_label.setText("Not enough corner control points for TPS; skipping TPS refinement.")
+        else:
+            src_ctrl_pts = src_ctrl_pts[:num_ctrl]
+            tgt_ctrl_pts = tgt_ctrl_pts[:num_ctrl]
+            # Apply TPS to the affine-aligned image.
+            refined_image = self.thin_plate_spline_warp(src_ctrl_pts, tgt_ctrl_pts, canvas)
+            self.aligned_image = refined_image
+            self.update_preview(self.result_preview_label, refined_image)
+            self.status_label.setText("Alignment complete with TPS refinement.")
+        # --- End TPS Refinement ---
+
+        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} affine inliers.")
         self.show_transform_info(best_matrix)
+
 
     def show_transform_info(self, matrix):
         """
@@ -8958,7 +9035,7 @@ class PlateSolver(QDialog):
     def choose_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Image for Plate Solving",
-            "", "Image Files (*.fits *.png *.tiff *.jpg *.jpeg);;All Files (*)"
+            "", "Image Files (*.fit *.fits *.png *.tif *.tiff *.xisf *.jpg *.jpeg);;All Files (*)"
         )
         if file_path:
             self.image_path = file_path
@@ -10195,6 +10272,7 @@ class BatchPlateSolverDialog(QDialog):
         
         self.logStatus("Batch plate solving completed.")
 
+
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
@@ -10235,7 +10313,7 @@ class PSFViewer(QDialog):
         and redraw the histogram.
         """
         self.image = new_image
-        self.compute_star_catalog()
+        self.compute_star_catalog_quick()
         self.drawHistogram()
 
     def compute_star_catalog_quick(self):
@@ -27055,7 +27133,6 @@ class PerfectPalettePickerTab(QWidget):
         self.cleanup_preview_windows()
         event.accept()
 
-
 class NBtoRGBstarsTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -27162,9 +27239,9 @@ class NBtoRGBstarsTab(QWidget):
         self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
-        self.saveButton = QPushButton('Save Combined Image', self)
-        self.saveButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveButton)
+        self.pushButton = QPushButton('Push to Active Slot', self)
+        self.pushButton.clicked.connect(self.pushToActiveSlot)
+        left_layout.addWidget(self.pushButton)
 
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
@@ -27258,6 +27335,46 @@ class NBtoRGBstarsTab(QWidget):
 
             print(f"NBtoRGBstarsTab: Image updated from ImageManager slot {slot}.")
 
+    def pushToActiveSlot(self):
+        """
+        Pushes the current combined image to the active slot in the ImageManager,
+        along with the associated metadata.
+        """
+        if self.combined_image is None:
+            QMessageBox.warning(self, "Warning", "No combined image available to push.")
+            return
+
+        # Prepare metadata for the combined image.
+        metadata = {
+            'file_path': self.ha_filename if self.ha_image is not None else "Combined Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': self.bit_depth if self.bit_depth else "Unknown",
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'ha_to_oii_ratio': self.haToOiiRatioSlider.value() / 100.0,
+                'enable_star_stretch': self.starStretchCheckBox.isChecked(),
+                'stretch_factor': self.stretchSlider.value() / 100.0
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
+                'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
+                'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
+                'OSC': self.osc_filename if self.osc_image is not None else "Not Provided"
+            }
+        }
+
+        # Update the active slot in the ImageManager.
+        if self.image_manager:
+            try:
+                self.image_manager.set_image(self.combined_image, metadata=metadata)
+                QMessageBox.information(self, "Success", "Combined image pushed to active slot.")
+                print("NBtoRGBstarsTab: Combined image pushed to ImageManager active slot.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot push the combined image.")
 
 
     def createRatioSlider(self, label_text, default_value):
@@ -29595,66 +29712,170 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             if not filename.lower().endswith(f".{original_format}"):
                 filename = filename.rsplit('.', 1)[0] + f".{original_format}"
 
-            if original_header is not None:
-                # Convert original_header (dictionary) to astropy Header object
-                fits_header = fits.Header()
-                for key, value in original_header.items():
-                    fits_header[key] = value
-                fits_header['BSCALE'] = 1.0  # Scaling factor
-                fits_header['BZERO'] = 0.0   # Offset for brightness    
+            # Decide whether to rebuild the header from XISF metadata.
+            def header_has_only_xisf(header_dict):
+                # Return True if all keys in header_dict start with 'XISF:'
+                return all(key.upper().startswith("XISF:") for key in header_dict.keys())
 
-                # Handle mono (2D) images
-                if is_mono or img_array.ndim == 2:
-                    # If the image is 3D but marked as mono, assume channels are identical and take one channel.
-                    if img_array.ndim == 3:
-                        print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
-                        img_array = img_array[..., 0]  # Now img_array is 2D.
-                    if bit_depth == "16-bit":
-                        img_array_fits = (img_array * 65535).astype(np.uint16)
-                    elif bit_depth == "32-bit unsigned":
-                        bzero = fits_header.get('BZERO', 0)
-                        bscale = fits_header.get('BSCALE', 1)
-                        img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
-                    else:  # 32-bit float
-                        img_array_fits = img_array.astype(np.float32)
-
-                    # Update header for a 2D (grayscale) image
-                    fits_header['NAXIS'] = 2
-                    fits_header['NAXIS1'] = img_array.shape[1]  # Width
-                    fits_header['NAXIS2'] = img_array.shape[0]  # Height
-                    fits_header.pop('NAXIS3', None)  # Remove if present
-
-                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
-
-                # Handle RGB (3D) images
-                else:
-                    img_array_transposed = np.transpose(img_array, (2, 0, 1))  # Channels, Height, Width
-                    if bit_depth == "16-bit":
-                        img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
-                    elif bit_depth == "32-bit unsigned":
-                        bzero = fits_header.get('BZERO', 0)
-                        bscale = fits_header.get('BSCALE', 1)
-                        img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
-                        fits_header['BITPIX'] = -32
-                    else:  # Default to 32-bit float
-                        img_array_fits = img_array_transposed.astype(np.float32)
-
-                    # Update header for a 3D (RGB) image
-                    fits_header['NAXIS'] = 3
-                    fits_header['NAXIS1'] = img_array_transposed.shape[2]  # Width
-                    fits_header['NAXIS2'] = img_array_transposed.shape[1]  # Height
-                    fits_header['NAXIS3'] = img_array_transposed.shape[0]  # Channels
-
-                    hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
-
-                # Write the FITS file
-                try:
-                    hdu.writeto(filename, overwrite=True)
-                    print(f"Saved as {original_format.upper()} to: {filename}")
-                except Exception as e:
-                    print(f"Error saving FITS file: {e}")
+            use_rebuild = False
+            if original_header is not None and isinstance(original_header, dict):
+                if header_has_only_xisf(original_header):
+                    use_rebuild = True
+                    print("Original header contains only XISF metadata. Rebuilding FITS header from image_meta.")
             else:
-                raise ValueError("Original header is required for FITS format!")
+                # If no original header exists, we must rebuild.
+                use_rebuild = True
+                print("No original header available; rebuilding minimal FITS header.")
+
+            # If rebuilding, use the XISF viewer logic:
+            if use_rebuild:
+                header = fits.Header()
+                crval1, crval2 = None, None
+
+                # Define the list of WCS keywords we care about.
+                wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+                                "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+
+                if image_meta and 'FITSKeywords' in image_meta:
+                    for keyword, values in image_meta['FITSKeywords'].items():
+                        for entry in values:
+                            if 'value' in entry:
+                                value = entry['value']
+                                if keyword in wcs_keywords:
+                                    try:
+                                        value = int(value)
+                                    except ValueError:
+                                        try:
+                                            value = float(value)
+                                        except Exception:
+                                            pass
+                                header[keyword] = value
+
+                # Manually add WCS information if missing.
+                if 'CTYPE1' not in header:
+                    header['CTYPE1'] = 'RA---TAN'
+                if 'CTYPE2' not in header:
+                    header['CTYPE2'] = 'DEC--TAN'
+
+                # Add the -SIP suffix if SIP coefficients are present.
+                if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
+                    header['CTYPE1'] = 'RA---TAN-SIP'
+                    header['CTYPE2'] = 'DEC--TAN-SIP'
+
+                # Set default reference pixel (center of the image).
+                if 'CRPIX1' not in header:
+                    header['CRPIX1'] = img_array.shape[1] / 2  # X center
+                if 'CRPIX2' not in header:
+                    header['CRPIX2'] = img_array.shape[0] / 2  # Y center
+
+                # Retrieve RA and DEC if available.
+                if image_meta and 'FITSKeywords' in image_meta:
+                    if 'RA' in image_meta['FITSKeywords']:
+                        crval1 = float(image_meta['FITSKeywords']['RA'][0]['value'])
+                    if 'DEC' in image_meta['FITSKeywords']:
+                        crval2 = float(image_meta['FITSKeywords']['DEC'][0]['value'])
+                if crval1 is not None and crval2 is not None:
+                    header['CRVAL1'] = crval1
+                    header['CRVAL2'] = crval2
+                else:
+                    print("RA and DEC values not found in FITS Keywords.")
+
+                # Calculate pixel scale if focal length and pixel size are available.
+                if image_meta and 'FITSKeywords' in image_meta and \
+                'FOCALLEN' in image_meta['FITSKeywords'] and 'XPIXSZ' in image_meta['FITSKeywords']:
+                    focal_length = float(image_meta['FITSKeywords']['FOCALLEN'][0]['value'])
+                    pixel_size = float(image_meta['FITSKeywords']['XPIXSZ'][0]['value'])
+                    pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
+                    header['CDELT1'] = -pixel_scale / 3600.0
+                    header['CDELT2'] = pixel_scale / 3600.0
+                else:
+                    header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
+                    header['CDELT2'] = 2.77778e-4
+
+                # Populate CD matrix using the XISF LinearTransformationMatrix if available.
+                if image_meta and 'XISFProperties' in image_meta and \
+                'PCL:AstrometricSolution:LinearTransformationMatrix' in image_meta['XISFProperties']:
+                    linear_transform = image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                    header['CD1_1'] = linear_transform[0][0]
+                    header['CD1_2'] = linear_transform[0][1]
+                    header['CD2_1'] = linear_transform[1][0]
+                    header['CD2_2'] = linear_transform[1][1]
+                else:
+                    header['CD1_1'] = header['CDELT1']
+                    header['CD1_2'] = 0.0
+                    header['CD2_1'] = 0.0
+                    header['CD2_2'] = header['CDELT2']
+
+                # Duplicate the mono image to create a 3-channel image if necessary.
+                if is_mono:
+                    image_data_fits = np.stack([img_array[:, :, 0]] * 3, axis=-1)
+                    image_data_fits = np.transpose(image_data_fits, (2, 0, 1))
+                    header['NAXIS'] = 3
+                    header['NAXIS3'] = 3
+                else:
+                    image_data_fits = np.transpose(img_array, (2, 0, 1))
+                    header['NAXIS'] = 3
+                    header['NAXIS3'] = 3
+
+            else:
+                # Otherwise, use the provided original header.
+                if original_header is not None and isinstance(original_header, dict):
+                    valid_header = {}
+                    for key, value in original_header.items():
+                        if not key.upper().startswith("XISF:"):
+                            valid_header[key] = value
+                    header = fits.Header()
+                    for key, value in valid_header.items():
+                        try:
+                            header[key] = value
+                        except Exception as e:
+                            print(f"Skipping key {key} due to error: {e}")
+                else:
+                    raise ValueError("Original header is required for FITS format!")
+
+            header['BSCALE'] = 1.0
+            header['BZERO'] = 0.0
+
+            # Now update the header with image dimensions:
+            if is_mono or img_array.ndim == 2:
+                if img_array.ndim == 3:
+                    print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
+                    img_array = img_array[..., 0]
+                if bit_depth == "16-bit":
+                    img_array_fits = (img_array * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = header.get('BZERO', 0)
+                    bscale = header.get('BSCALE', 1)
+                    img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
+                else:
+                    img_array_fits = img_array.astype(np.float32)
+                header['NAXIS'] = 2
+                header['NAXIS1'] = img_array.shape[1]
+                header['NAXIS2'] = img_array.shape[0]
+                header.pop('NAXIS3', None)
+                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+            else:
+                img_array_transposed = np.transpose(img_array, (2, 0, 1))
+                if bit_depth == "16-bit":
+                    img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
+                elif bit_depth == "32-bit unsigned":
+                    bzero = header.get('BZERO', 0)
+                    bscale = header.get('BSCALE', 1)
+                    img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
+                    header['BITPIX'] = -32
+                else:
+                    img_array_fits = img_array_transposed.astype(np.float32)
+                header['NAXIS'] = 3
+                header['NAXIS1'] = img_array_transposed.shape[2]
+                header['NAXIS2'] = img_array_transposed.shape[1]
+                header['NAXIS3'] = img_array_transposed.shape[0]
+                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+
+            try:
+                hdu.writeto(filename, overwrite=True)
+                print(f"Saved FITS image with metadata to: {filename}")
+            except Exception as e:
+                print(f"Error saving FITS file: {e}")
 
         elif original_format in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
             # Save as FITS file with metadata
