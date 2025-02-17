@@ -30,7 +30,7 @@ from io import BytesIO
 import re
 from scipy.spatial import Delaunay, KDTree
 import random
-
+sys.stdout.reconfigure(encoding='utf-8')
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
@@ -1018,7 +1018,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
         self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
-        self.tabs.addTab(PerfectPalettePickerTab(image_manager=self.image_manager), "Perfect Palette Picker")
+        self.tabs.addTab(PerfectPalettePickerTab(image_manager=self.image_manager, parent=self), "Perfect Palette Picker")
         self.tabs.addTab(NBtoRGBstarsTab(image_manager=self.image_manager), "NB to RGB Stars")
         self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
         self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
@@ -1076,22 +1076,6 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
-
-    def show_slot_context_menu(self, pos, slot):
-        """
-        Shows a context menu for the image slot button with options to open a preview.
-        (You can expand this to include more actions if needed.)
-        """
-        button = self.slot_actions.get(slot)
-        if not button:
-            return
-
-        menu = QMenu(button)
-        action_show_preview = menu.addAction("Show Slot Preview")
-        global_pos = button.mapToGlobal(pos)
-        selected_action = menu.exec(global_pos)
-        if selected_action == action_show_preview:
-            self.open_preview_window(slot)
 
     def open_preview_window(self, slot):
         """Opens a separate preview window for the specified image slot."""
@@ -4702,6 +4686,17 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, self._metadata[slot])
         print(f"ImageManager: Image set for slot {slot} via property setter.")
 
+    def get_slot_name(self, slot):
+        """
+        Returns the display name for a given slot.
+        If a slot has been renamed (stored under "slot_name" in metadata), that name is returned.
+        Otherwise, it returns "Slot X" (using 1-indexed numbering for display).
+        """
+        metadata = self._metadata.get(slot, {})
+        if 'slot_name' in metadata:
+            return metadata['slot_name']
+        else:
+            return f"Slot {slot + 1}"
 
 
     def set_metadata(self, metadata):
@@ -10252,7 +10247,7 @@ class PSFViewer(QDialog):
         and redraw the histogram.
         """
         self.image = new_image
-        self.compute_star_catalog()
+        self.compute_star_catalog_quick()
         self.drawHistogram()
 
     def compute_star_catalog_quick(self):
@@ -25597,9 +25592,10 @@ class PerfectPalettePickerTab(QWidget):
     Perfect Palette Picker Tab for Seti Astro Suite.
     Creates 12 popular NB palettes from Ha/OIII/SII or OSC channels.
     """
-    def __init__(self, image_manager=None):
-        super().__init__()
+    def __init__(self, image_manager=None, parent=None):
+        super().__init__(parent)
         self.image_manager = image_manager  # Reference to the ImageManager
+        self.parent_window = parent
         self.initUI()
         self.ha_image = None
         self.oiii_image = None
@@ -25981,68 +25977,64 @@ class PerfectPalettePickerTab(QWidget):
             print(f"An unexpected error occurred while loading {image_type} image: {e}")
 
     def load_image_from_slot(self, image_type):
-        """
-        Handles loading an image from a slot.
-        
-        Parameters:
-            image_type (str): The type of image to load.
-        
-        Returns:
-            tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
-        """
         if not self.image_manager:
             QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
             print("ImageManager is not initialized. Cannot load image from slot.")
             return None
-        
-        # Retrieve available slots
-        available_slots = [
-            f"Slot {i}" for i in range(1, self.image_manager.max_slots + 1)
-            if self.image_manager._images.get(i, None) is not None
-        ]
-        
-        if not available_slots:
-            QMessageBox.warning(self, "No Available Slots", "No slots contain images. Please add images to slots first.")
-            print("No available slots contain images.")
-            return None
-        
+
+        # Build the list using the parent's slot_names dictionary.
+        available_slots = []
+        # Access parent's slot_names dictionary.
+        slot_names = self.parent_window.slot_names if self.parent_window else {}
+        for i in range(self.image_manager.max_slots):
+            slot_name = slot_names.get(i, f"Slot {i+1}")
+            available_slots.append(slot_name)
+
         slot_choice, ok = QInputDialog.getItem(
             self,
             f"Select Slot for {image_type} Image",
-            "Choose a slot containing the image:",
+            "Choose a slot:",
             available_slots,
             editable=False
         )
-        
+
         if not ok or not slot_choice:
             QMessageBox.warning(self, "Cancelled", f"{image_type} image loading cancelled.")
             print(f"{image_type} image loading cancelled by the user.")
             return None
-        
-        # Extract slot number
-        target_slot_num = int(slot_choice.split()[-1])
+
+        # Find the slot index that matches the chosen display name.
+        target_slot_num = None
+        for i in range(self.image_manager.max_slots):
+            current_name = slot_names.get(i, f"Slot {i+1}")
+            if current_name == slot_choice:
+                target_slot_num = i
+                break
+
+        if target_slot_num is None:
+            QMessageBox.critical(self, "Error", f"Invalid slot selection: {slot_choice}")
+            print(f"Error: Could not map slot name '{slot_choice}' to a slot number.")
+            return None
+
         image = self.image_manager._images.get(target_slot_num, None)
-        
         if image is None:
             QMessageBox.warning(self, "Empty Slot", f"{slot_choice} does not contain an image.")
             print(f"{slot_choice} is empty. Cannot load {image_type} image.")
             return None
-        
+
         print(f"{image_type} image selected from {slot_choice}.")
-        
-        # Retrieve metadata from ImageManager._metadata
+
+        # Retrieve metadata.
         metadata = self.image_manager._metadata.get(target_slot_num, {})
         original_header = metadata.get('header', None)
         bit_depth = metadata.get('bit_depth', "Unknown")
         is_mono = metadata.get('is_mono', False)
         file_path = metadata.get('file_path', None)
-        
-        if image is None:
-            QMessageBox.critical(self, "Error", f"Failed to load {image_type} image from {slot_choice}.")
-            print(f"Failed to load {image_type} image from slot {slot_choice}.")
-            return None
-        
+
         return image, original_header, bit_depth, is_mono, file_path
+
+
+
 
     def load_image_from_file(self, image_type):
         """
