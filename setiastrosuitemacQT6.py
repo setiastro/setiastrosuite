@@ -28,6 +28,8 @@ from datetime import datetime
 import pywt
 from io import BytesIO
 import re
+from scipy.spatial import Delaunay, KDTree
+import random
 
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
@@ -202,7 +204,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.9"
+VERSION = "2.10.10"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -6875,11 +6877,13 @@ class MosaicMasterDialog(QDialog):
                 print(f"Plate solving failed for {item['path']}.")
 
 
-            # Step 2: Get all images with valid WCS.
-            wcs_items = [x for x in self.loaded_images if x["wcs"] is not None]
-            if not wcs_items:
-                print("No images have WCS, skipping WCS alignment.")
-                return
+        # After processing, get all images with valid WCS.
+        wcs_items = [x for x in self.loaded_images if x.get("wcs") is not None]
+        if not wcs_items:
+            print("No images have WCS, skipping WCS alignment.")
+            self.spinnerMovie.stop()
+            self.spinnerLabel.hide()
+            return
 
         # Use the first image's WCS as reference and compute the mosaic bounding box.
         reference_wcs = wcs_items[0]["wcs"].deepcopy()
@@ -6937,42 +6941,99 @@ class MosaicMasterDialog(QDialog):
             QApplication.processEvents()
 
             # --- Stellar Alignment ---
+            # --- Stellar Alignment ---
             if not first_image:
-                mosaic_gray = self.final_mosaic if self.final_mosaic.ndim == 2 else np.mean(self.final_mosaic, axis=-1)
                 transform_method = self.transform_combo.currentText()
+                # Use the current mosaic as reference.
+                mosaic_gray = self.final_mosaic if self.final_mosaic.ndim == 2 else np.mean(self.final_mosaic, axis=-1)
+                print("Mosaic gray shape:", mosaic_gray.shape)
                 
-                # Always compute the affine transform first.
-                affine_transform, best_inliers = self.star_refine_alignment_triangle(reproj_red, mosaic_gray, return_matrix=True)
-                if affine_transform is not None:
-                    affine_aligned = cv2.warpAffine(reprojected, affine_transform[:2], (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
-                else:
-                    affine_aligned = reprojected
-                    self.status_label.setText("Affine transform not found; using reprojected image.")
+                self.status_label.setText("Detecting stars in overlap region...")
+                QApplication.processEvents()
+                
+                overlap_mask = (mosaic_gray > 0) & (reproj_red > 0)
+
+
+                # Detect stars (with flux) in the masked regions.
+                mosaic_star_list = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=100)
+                new_star_list = self.detect_stars(np.where(overlap_mask, reproj_red, 0), max_stars=100)
+                
+                print("New star list count:", len(new_star_list))
+                print("Mosaic star list count:", len(mosaic_star_list))
+                
+                self.status_label.setText(f"Overlap stars: new image: {len(new_star_list)}; mosaic: {len(mosaic_star_list)} detected.")
+                QApplication.processEvents()
+                
+                print("New star list count:", len(new_star_list))
+                print("Mosaic star list count:", len(mosaic_star_list))
+                if new_star_list:
+                    new_xs = [s[0] for s in new_star_list]
+                    new_ys = [s[1] for s in new_star_list]
+                    print("New stars X range: {:.2f} to {:.2f}".format(min(new_xs), max(new_xs)))
+                    print("New stars Y range: {:.2f} to {:.2f}".format(min(new_ys), max(new_ys)))
+                if mosaic_star_list:
+                    mosaic_xs = [s[0] for s in mosaic_star_list]
+                    mosaic_ys = [s[1] for s in mosaic_star_list]
+                    print("Mosaic stars X range: {:.2f} to {:.2f}".format(min(mosaic_xs), max(mosaic_xs)))
+                    print("Mosaic stars Y range: {:.2f} to {:.2f}".format(min(mosaic_ys), max(mosaic_ys)))
+                
+                self.status_label.setText(f"Overlap stars: new image: {len(new_star_list)}; mosaic: {len(mosaic_star_list)} detected.")
+                QApplication.processEvents()
+                
+                self.status_label.setText("Running RANSAC for initial affine alignment...")
+                QApplication.processEvents()
+                transform_matrix, inliers = self.estimate_transform_ransac(new_star_list, mosaic_star_list)
+                
+                if transform_matrix is not None:
+                    print("Computed affine transform matrix:\n", transform_matrix)
+                    print("Number of inliers:", inliers)
+                    # Compute the effective scale from the transform.
+                    A = transform_matrix[:2, :2]
+                    scale1 = np.linalg.norm(A[:, 0])
+                    scale2 = np.linalg.norm(A[:, 1])
+                    print("Computed scales: {:.6f}, {:.6f}".format(scale1, scale2))
+                    
+                    self.status_label.setText(f"Affine alignment: {inliers} inliers found. Warping image...")
                     QApplication.processEvents()
-                    affine_transform = np.eye(3, dtype=np.float32)
-                
+                    # Try warping with the computed transform (no inversion)
+                    affine_aligned = cv2.warpAffine(reprojected, transform_matrix[:2], (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
+                    print("Affine aligned image shape:", affine_aligned.shape)
+                    print("Affine aligned image mean:", np.mean(affine_aligned))
+                    aligned = affine_aligned
+                else:
+                    self.status_label.setText("Affine transform not found; using reprojected image.")
+                    print("No affine transform found; falling back to reprojected image.")
+                    QApplication.processEvents()
+                    transform_matrix = np.eye(3, dtype=np.float32)
+                    affine_aligned = reprojected
+                    aligned = affine_aligned
+
                 # If the user selected a refined method, further refine the alignment.
                 if transform_method in ["Homography Transform", "Spline Based Transform"]:
                     self.status_label.setText(f"Starting refined alignment using {transform_method}...")
+                    print("Refined alignment using method:", transform_method)
                     QApplication.processEvents()                    
                     refined_result = self.refined_alignment(affine_aligned, mosaic_gray, method=transform_method)
                     if refined_result is not None:
-                        # refined_result now returns (warped_image, inlier_count)
-                        
                         aligned, best_inliers2 = refined_result
                         self.status_label.setText(f"Refined alignment succeeded with {best_inliers2} inliers.")
+                        print("Refined alignment inliers:", best_inliers2)
                     else:
-                        # If refinement fails, fall back to the affine result.
                         self.status_label.setText("Refined alignment failed; falling back to affine alignment.")
+                        print("Refined alignment failed; using affine alignment.")
                         aligned = affine_aligned
                 else:
                     aligned = affine_aligned
-                
+
                 gray_aligned = aligned[..., 0] if aligned.ndim == 3 else aligned
+                print("Final aligned image shape:", aligned.shape)
             else:
                 aligned = reprojected
                 gray_aligned = np.mean(aligned, axis=-1) if not itm["is_mono"] else aligned[..., 0]
                 first_image = False
+
+
+
 
             # Compute weight mask from the grayscale aligned image.
             binary_mask = (gray_aligned > 0).astype(np.uint8)
@@ -7334,6 +7395,150 @@ class MosaicMasterDialog(QDialog):
             self.status_label.setText(f"TPS transform estimation failed: {e}")
             return None, 0
 
+
+
+    # -----------------------------
+    # RANSAC with Delaunay Triangulation for Alignment
+    # -----------------------------
+    @staticmethod
+    def compute_triangle_invariant(tri_points):
+        # tri_points: 3x2 array
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1]/sides[0], sides[2]/sides[0])
+
+    @staticmethod
+    def build_triangle_dict(coords):
+        """
+        coords: Nx2 array of (x,y) coordinates.
+        Returns a dict mapping rounded invariant to list of triangles (vertex indices).
+        """
+        tri = Delaunay(coords)
+        tri_dict = {}
+        for simplex in tri.simplices:
+            pts = coords[simplex]  # 3x2 array
+            inv = StellarAlignmentDialog.compute_triangle_invariant(pts)
+            if inv is None:
+                continue
+            inv_key = (round(inv[0], 2), round(inv[1], 2))
+            tri_dict.setdefault(inv_key, []).append(simplex)
+        return tri_dict
+
+    @staticmethod
+    def match_triangles(src_dict, tgt_dict, tol=0.1):
+        matches = []
+        for inv_src, src_tris in src_dict.items():
+            for inv_tgt, tgt_tris in tgt_dict.items():
+                if abs(inv_src[0] - inv_tgt[0]) < tol and abs(inv_src[1] - inv_tgt[1]) < tol:
+                    for s in src_tris:
+                        for t in tgt_tris:
+                            matches.append((s, t))
+        return matches
+
+    @staticmethod
+    def ransac_affine(src_coords, tgt_coords, matches, ransac_iter=500, inlier_thresh=3.0, norm_trans_thresh=0.33, update_callback=None):
+        best_inliers = 0
+        best_transform = None
+        tgt_tree = KDTree(tgt_coords)
+        total = ransac_iter
+        for i in range(ransac_iter):
+            src_tri, tgt_tri = random.choice(matches)
+            pts_src = np.float32([src_coords[j] for j in src_tri])
+            pts_tgt = np.float32([tgt_coords[j] for j in tgt_tri])
+            transform, _ = cv2.estimateAffine2D(
+                pts_src.reshape(-1, 1, 2), pts_tgt.reshape(-1, 1, 2),
+                method=cv2.LMEDS)
+            if transform is None:
+                continue
+            full_mat = np.eye(3, dtype=np.float32)
+            full_mat[:2] = transform
+            
+            # Failsafe: scaling check.
+            A = full_mat[:2, :2]
+            scale1 = np.linalg.norm(A[:, 0])
+            scale2 = np.linalg.norm(A[:, 1])
+            scale = (scale1 + scale2) / 2.0
+            if scale > 1.25 or scale < 0.8:
+                continue
+            
+            # Failsafe: translation check.
+            t = full_mat[:2, 2]
+            if abs(t[0]) > norm_trans_thresh or abs(t[1]) > norm_trans_thresh:
+                continue
+            
+            # Failsafe: rotation angle check.
+            angle = np.arctan2(A[1, 0], A[0, 0])
+            if abs(angle) > (np.pi / 4):
+                continue
+            
+            src_aug = np.hstack([src_coords, np.ones((src_coords.shape[0], 1))])
+            transformed = (transform @ src_aug.T).T
+            inliers = 0
+            for pt in transformed:
+                dist, _ = tgt_tree.query(pt)
+                if dist < inlier_thresh:
+                    inliers += 1
+            if inliers > best_inliers:
+                best_inliers = inliers
+                best_transform = np.eye(3, dtype=np.float32)
+                best_transform[:2] = transform
+
+            if update_callback is not None and (i % 10 == 0 or i == total - 1):
+                progress = int(100 * i / total)
+                update_callback(f"RANSAC progress: {progress}% (Best inliers: {best_inliers})")
+                QApplication.processEvents()
+        return best_transform, best_inliers
+    
+    def estimate_transform_ransac(self, source_stars, target_stars):
+        # Extract (x,y) from 4-tuples.
+        src_coords = np.array([[s[0], s[1]] for s in source_stars])
+        tgt_coords = np.array([[s[0], s[1]] for s in target_stars])
+        
+        # Compute a normalization factor based on the source coordinate range.
+        range_x = np.max(src_coords[:, 0]) - np.min(src_coords[:, 0])
+        range_y = np.max(src_coords[:, 1]) - np.min(src_coords[:, 1])
+        norm_factor = max(range_x, range_y)
+        if norm_factor == 0:
+            norm_factor = 1.0
+        print("Normalization factor:", norm_factor)
+        
+        # Normalize coordinates.
+        src_norm = src_coords / norm_factor
+        tgt_norm = tgt_coords / norm_factor
+
+        self.status_label.setText("Computing Delaunay triangulation (normalized)...")
+        QApplication.processEvents()
+        src_tri_dict = self.build_triangle_dict(src_norm)
+        tgt_tri_dict = self.build_triangle_dict(tgt_norm)
+        self.status_label.setText("Matching triangles (normalized)...")
+        QApplication.processEvents()
+        matches = self.match_triangles(src_tri_dict, tgt_tri_dict, tol=0.1)
+        if len(matches) == 0:
+            self.status_label.setText("No triangle matches found!")
+            return None, 0
+        self.status_label.setText(f"Found {len(matches)} candidate triangle matches. Running RANSAC...")
+        QApplication.processEvents()
+        update_callback = lambda msg: self.status_label.setText(msg)
+        best_transform_norm, best_inliers = self.ransac_affine(src_norm, tgt_norm, matches, ransac_iter=1000, inlier_thresh=3.0, update_callback=update_callback)
+        
+        if best_transform_norm is None:
+            return None, best_inliers
+
+        # Unnormalize the transform.
+        # If T_norm is:
+        #    y_norm = A_norm * x_norm + t_norm
+        # and x_norm = x / norm_factor, then
+        #    y = norm_factor * y_norm = A_norm * x + norm_factor * t_norm.
+        # Thus, T_full = [A_norm, norm_factor * t_norm].
+        best_transform = np.eye(3, dtype=np.float32)
+        best_transform[:2, :2] = best_transform_norm[:2, :2]
+        best_transform[:2, 2] = best_transform_norm[:2, 2] * norm_factor
+        print("Unnormalized transform matrix:\n", best_transform)
+        return best_transform, best_inliers
 
 
 
@@ -8127,8 +8332,7 @@ class MosaicMasterDialog(QDialog):
         if was_single_channel and image.ndim == 3:
             image = np.mean(image, axis=2, keepdims=True)
         return image
-
-
+      
 class StellarAlignmentDialog(QDialog):
     def __init__(self, parent, settings, image_manager):
         """
@@ -8312,8 +8516,155 @@ class StellarAlignmentDialog(QDialog):
         scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(QPixmap.fromImage(scaled))
 
+    def detect_stars_by_grid(self, image, stars_per_region=4):
+        # Convert to grayscale if needed.
+        if image.ndim == 3 and image.shape[2] == 3:
+            image_gray = np.mean(image, axis=2)
+        else:
+            image_gray = image
 
+        H, W = image_gray.shape
+        grid_rows, grid_cols = 3, 3
+        cell_height, cell_width = H // grid_rows, W // grid_cols
 
+        all_selected_stars = []
+
+        # Precompute global statistics once.
+        mean_val, median_val, std_val = sigma_clipped_stats(image_gray, sigma=3.0)
+        daofind = DAOStarFinder(threshold=3 * std_val, fwhm=3.0)
+        sources = daofind(image_gray - median_val)
+        if sources is None or len(sources) == 0:
+            return []
+
+        x_coords = sources['xcentroid'].data
+        y_coords = sources['ycentroid'].data
+        flux = sources['flux'].data
+        regions_used = 0
+        # Package stars together (initially as 3-element tuples).
+        stars = list(zip(x_coords, y_coords, flux))
+
+        for i in range(grid_rows):
+            for j in range(grid_cols):
+                x_min = j * cell_width
+                x_max = (j+1) * cell_width if j < grid_cols - 1 else W
+                y_min = i * cell_height
+                y_max = (i+1) * cell_height if i < grid_rows - 1 else H
+
+                # Select stars in this region and attach the cell ID.
+                cell_stars = [
+                    (star[0], star[1], star[2], (i, j))
+                    for star in stars
+                    if (x_min <= star[0] < x_max and y_min <= star[1] < y_max)
+                ]
+                # Sort by brightness (flux) descending.
+                cell_stars.sort(key=lambda s: s[2], reverse=True)
+                if cell_stars:
+                    regions_used += 1
+                all_selected_stars.extend(cell_stars[:stars_per_region])
+                # Update status for this region:
+                self.status_label.setText(f"Region ({i},{j}): Found {len(cell_stars)} stars.")
+                QApplication.processEvents()             
+
+        # Optionally, remove duplicates and sort by brightness globally.
+        all_selected_stars = list(set(all_selected_stars))
+        all_selected_stars.sort(key=lambda s: s[2], reverse=True)
+        return all_selected_stars
+
+    # -----------------------------
+    # RANSAC with Delaunay Triangulation for Alignment
+    # -----------------------------
+    @staticmethod
+    def compute_triangle_invariant(tri_points):
+        # tri_points: 3x2 array
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1]/sides[0], sides[2]/sides[0])
+
+    @staticmethod
+    def build_triangle_dict(coords):
+        """
+        coords: Nx2 array of (x,y) coordinates.
+        Returns a dict mapping rounded invariant to list of triangles (vertex indices).
+        """
+        tri = Delaunay(coords)
+        tri_dict = {}
+        for simplex in tri.simplices:
+            pts = coords[simplex]  # 3x2 array
+            inv = StellarAlignmentDialog.compute_triangle_invariant(pts)
+            if inv is None:
+                continue
+            inv_key = (round(inv[0], 2), round(inv[1], 2))
+            tri_dict.setdefault(inv_key, []).append(simplex)
+        return tri_dict
+
+    @staticmethod
+    def match_triangles(src_dict, tgt_dict, tol=0.1):
+        matches = []
+        for inv_src, src_tris in src_dict.items():
+            for inv_tgt, tgt_tris in tgt_dict.items():
+                if abs(inv_src[0] - inv_tgt[0]) < tol and abs(inv_src[1] - inv_tgt[1]) < tol:
+                    for s in src_tris:
+                        for t in tgt_tris:
+                            matches.append((s, t))
+        return matches
+
+    @staticmethod
+    def ransac_affine(src_coords, tgt_coords, matches, ransac_iter=500, inlier_thresh=3.0, update_callback=None):
+        best_inliers = 0
+        best_transform = None
+        tgt_tree = KDTree(tgt_coords)
+        total = ransac_iter
+        for i in range(ransac_iter):
+            src_tri, tgt_tri = random.choice(matches)
+            pts_src = np.float32([src_coords[j] for j in src_tri])
+            pts_tgt = np.float32([tgt_coords[j] for j in tgt_tri])
+            transform, _ = cv2.estimateAffine2D(pts_src.reshape(-1,1,2), pts_tgt.reshape(-1,1,2), method=cv2.LMEDS)
+            if transform is None:
+                continue
+            src_aug = np.hstack([src_coords, np.ones((src_coords.shape[0], 1))])
+            transformed = (transform @ src_aug.T).T
+            inliers = 0
+            for pt in transformed:
+                dist, _ = tgt_tree.query(pt)
+                if dist < inlier_thresh:
+                    inliers += 1
+            if inliers > best_inliers:
+                best_inliers = inliers
+                best_transform = np.eye(3, dtype=np.float32)
+                best_transform[:2] = transform
+
+            # Update progress if a callback is provided.
+            if update_callback is not None and (i % 10 == 0 or i == total - 1):
+                progress = int(100 * i / total)
+                update_callback(f"RANSAC progress: {progress}% (Best inliers: {best_inliers})")
+                QApplication.processEvents()
+        return best_transform, best_inliers
+    
+    def estimate_transform_ransac(self, source_stars, target_stars):
+        # Extract (x,y) from 4-tuples.
+        src_coords = np.array([[s[0], s[1]] for s in source_stars])
+        tgt_coords = np.array([[s[0], s[1]] for s in target_stars])
+        self.status_label.setText("Computing Delaunay triangulation...")
+        QApplication.processEvents()
+        src_tri_dict = self.build_triangle_dict(src_coords)
+        tgt_tri_dict = self.build_triangle_dict(tgt_coords)
+        self.status_label.setText("Matching triangles...")
+        QApplication.processEvents()
+        matches = self.match_triangles(src_tri_dict, tgt_tri_dict, tol=0.1)
+        if len(matches) == 0:
+            self.status_label.setText("No triangle matches found!")
+            return None, 0
+        self.status_label.setText(f"Found {len(matches)} candidate triangle matches. Running RANSAC...")
+        QApplication.processEvents()
+        # Provide a callback to update status during RANSAC.
+        update_callback = lambda msg: self.status_label.setText(msg)
+        best_transform, best_inliers = self.ransac_affine(src_coords, tgt_coords, matches, ransac_iter=1000, inlier_thresh=3.0, update_callback=update_callback)
+        return best_transform, best_inliers
+    
     def select_source_file(self):
         default_dir = self.settings.value("working_directory", "")
         path, _ = QFileDialog.getOpenFileName(
@@ -8395,19 +8746,14 @@ class StellarAlignmentDialog(QDialog):
         scaled = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(QPixmap.fromImage(scaled))
 
+    # -----------------------------
+    # Run Alignment – Uses RANSAC/Delaunay Approach with Progress Updates
+    # -----------------------------
     def run_alignment(self):
-        """
-        Uses the selected source and target images to compute an affine transform
-        that aligns the target image to the source image. It uses the entire images
-        for star detection (i.e. does not check for overlap) and then warps the target
-        image to the source image's dimensions.
-        """
-        # If "From Slot" radio is checked but no image is loaded, load automatically.
         if self.source_from_slot_radio.isChecked() and self.stellar_source is None:
             self.load_source_from_slot()
         if self.target_from_slot_radio.isChecked() and self.stellar_target is None:
             self.load_target_from_slot()
-                
         if self.stellar_source is None:
             QMessageBox.warning(self, "Error", "Please select a source image.")
             return
@@ -8417,173 +8763,33 @@ class StellarAlignmentDialog(QDialog):
 
         source_img = self.stellar_source
         target_img = self.stellar_target
-
-        # Use the source image dimensions as the reference.
         H, W = source_img.shape[:2]
-        
-        # Instead of calling parent's detect_stars, call our own method.
-        source_stars = self.detect_stars(source_img, max_stars=25)
-        target_stars = self.detect_stars(target_img, max_stars=25)
+        self.status_label.setText("Detecting stars...")
+        QApplication.processEvents()
+        source_stars = self.detect_stars_by_grid(source_img, stars_per_region=20)
+        target_stars = self.detect_stars_by_grid(target_img, stars_per_region=20)
         if len(source_stars) < 3 or len(target_stars) < 3:
             QMessageBox.warning(self, "Alignment Error", "Not enough stars detected for alignment.")
             return
 
-        # Estimate the affine transform using triangle matching.
-        best_matrix, best_inliers = self.estimate_transform_from_triangles(
-            [(s[0], s[1]) for s in source_stars],
-            [(s[0], s[1]) for s in target_stars],
-            method="affine"
-        )
+        self.status_label.setText("Running RANSAC for alignment...")
+        QApplication.processEvents()
+        best_matrix, best_inliers = self.estimate_transform_ransac(source_stars, target_stars)
         if best_matrix is None:
             QMessageBox.warning(self, "Alignment Error", "Failed to compute alignment transform.")
             return
 
-        # Warp the target image to align with the source.
-        warped_target = cv2.warpAffine(target_img, best_matrix[:2], (W, H), flags=cv2.INTER_LINEAR)
-
-        # Create an all-black canvas with 3 channels of the same size as the source.
+        self.status_label.setText("Warping target image...")
+        QApplication.processEvents()
+        inv_transform = cv2.invertAffineTransform(best_matrix[:2])
+        warped_target = cv2.warpAffine(target_img, inv_transform, (W, H), flags=cv2.INTER_LINEAR)
         canvas = np.zeros((H, W, 3), dtype=warped_target.dtype)
-        canvas[:] = warped_target  # Copy the warped image into the canvas.
-
+        canvas[:] = warped_target
         self.aligned_image = canvas
         self.update_preview(self.result_preview_label, canvas)
+        self.status_label.setText("Alignment complete.")
         QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} inliers.")
-        # Show transformation details.
         self.show_transform_info(best_matrix)
-
-    def detect_stars(self, image2d, max_stars=25):
-        # If the image has 3 channels, convert it to grayscale.
-        if image2d.ndim == 3 and image2d.shape[2] == 3:
-            # A simple average conversion; you could use a weighted conversion if desired.
-            image2d = np.mean(image2d, axis=2)
-            
-
-        mean_val, median_val, std_val = sigma_clipped_stats(image2d, sigma=3.0)
-        daofind = DAOStarFinder(threshold=3 * std_val, fwhm=3.0)
-        sources = daofind(image2d - median_val)
-        if sources is None or len(sources) == 0:
-            return []
-        x_coords = sources['xcentroid'].data
-        y_coords = sources['ycentroid'].data
-        flux = sources['flux'].data
-        # Sort stars by brightness (flux) and take the top ones.
-        sorted_indices = np.argsort(-flux)
-        top_indices = sorted_indices[:max_stars]
-        stars = [(x_coords[i], y_coords[i], flux[i]) for i in top_indices]
-        return stars
-
-    def estimate_transform_from_triangles(self, mosaic_stars, new_stars, method="affine"):
-        mosaic_signatures = self.build_triangle_signatures(mosaic_stars)
-        new_signatures = self.build_triangle_signatures(new_stars)
-        print(f"🔹 Found {len(mosaic_signatures)} unique mosaic triangles")
-        print(f"🔹 Found {len(new_signatures)} unique new image triangles")
-        best_inliers = 0
-        best_matrix = None
-
-        total_signatures = len(new_signatures)
-        processed_signatures = 0
-        processed_candidates = 0
-
-        mosaic_x = [pt[0] for pt in mosaic_stars]
-        mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
-
-        for target_sig, new_triplets in new_signatures.items():
-            processed_signatures += 1
-            if processed_signatures % 100 == 0 or processed_signatures == total_signatures:
-                self.status_label.setText(f"Checking signature {processed_signatures}/{total_signatures}...")
-                QApplication.processEvents()
-
-            closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
-            if closest_match is None:
-                continue
-            mosaic_triplets = mosaic_signatures[closest_match]
-            for new_tri in new_triplets:
-                new_points = np.float32([new_stars[i] for i in new_tri])
-                for mosaic_tri in mosaic_triplets:
-                    processed_candidates += 1
-                    self.status_label.setText(f"Checked {processed_candidates} triangle candidates")
-                    QApplication.processEvents()
-                    
-                    if method == "partial_affine":
-                        matrix, _ = cv2.estimateAffinePartial2D(
-                            new_points.reshape(-1, 1, 2),
-                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
-                            method=cv2.LMEDS
-                        )
-                    else:  # method == "affine" or default
-                        matrix, _ = cv2.estimateAffine2D(
-                            new_points.reshape(-1, 1, 2),
-                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
-                            method=cv2.LMEDS
-                        )
-                    if matrix is None:
-                        continue
-
-                    full_mat = np.eye(3, dtype=np.float32)
-                    full_mat[:2] = matrix
-
-                    # Failsafe: scaling check.
-                    A = full_mat[:2, :2]
-                    scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
-                    scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
-                    scale = (scale1 + scale2) / 2.0
-                    if scale > 1.25 or scale < 0.8:
-                        continue
-
-                    # Failsafe: translation check.
-                    t = full_mat[:2, 2]
-                    trans_threshold = (mosaic_width / 3.0) if mosaic_width > 0 else 100.0
-                    if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
-                        continue
-
-                    # Failsafe: rotation angle check.
-                    # Compute the rotation angle (in radians) from the matrix.
-                    # Here we use arctan2 on the first column (assuming a near-rotation+uniform scale).
-                    angle = np.arctan2(A[1, 0], A[0, 0])
-                    if abs(angle) > (np.pi / 4):  # 45 degrees ≈ 0.7854 radians.
-                        continue
-
-                    # Count inliers.
-                    inliers_count = 0
-                    for (x, y) in new_stars:
-                        src_pt = np.array([x, y, 1], dtype=np.float32)
-                        dst_pt = full_mat @ src_pt
-                        for (mx, my) in mosaic_stars:
-                            if math.hypot(dst_pt[0] - mx, dst_pt[1] - my) < 3.0:
-                                inliers_count += 1
-                                break
-
-                    if inliers_count > best_inliers:
-                        best_inliers = inliers_count
-                        best_matrix = full_mat
-
-        summary = f"Triangle alignment complete: Checked {processed_candidates} candidates; best transform had {best_inliers} inliers."
-        print(summary)
-        self.status_label.setText(summary)
-        QApplication.processEvents()
-        return best_matrix, best_inliers
-
-    def build_triangle_signatures(self, stars):
-        signature_map = {}
-        for combo in itertools.combinations(range(len(stars)), 3):
-            i, j, k = combo
-            p1, p2, p3 = stars[i], stars[j], stars[k]
-            sides = [
-                (p2[0]-p1[0])**2 + (p2[1]-p1[1])**2,
-                (p3[0]-p2[0])**2 + (p3[1]-p2[1])**2,
-                (p1[0]-p3[0])**2 + (p1[1]-p3[1])**2
-            ]
-            sides.sort()
-            min_side = sides[0]
-            norm_sides = tuple(round(s / min_side, 3) for s in sides)
-            signature_map.setdefault(norm_sides, []).append(combo)
-        return signature_map
-
-    def find_closest_signature(self, target_sig, signature_dict, threshold=0.02):
-        for sig in signature_dict.keys():
-            if np.allclose(sig, target_sig, atol=threshold):
-                return sig
-        return None
 
     def show_transform_info(self, matrix):
         """
@@ -10004,7 +10210,7 @@ class BatchPlateSolverDialog(QDialog):
                 self.logStatus(f"Error processing {file}: {e}")
         
         self.logStatus("Batch plate solving completed.")
-        
+
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
