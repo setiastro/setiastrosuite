@@ -1,9 +1,9 @@
 {
-  "version": "2.10.10",
+  "version": "2.10.11",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.10/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.10/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.10/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_linux"
   },
-  "notes": "Much improved Stellar Alignment and Mosaic Master using many more stars in a fraction of the time. Employed RANSAC with Delaunay triangulation. Bug Fix: Crash when trying to use Mosaic Master on a previously WCS solved image "
+  "notes": "Various Bug Fixes across multiple tabs.  Improved Stellar Alignment with Thin Plate Splines as a final step after affine transformation "
 }
