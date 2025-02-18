@@ -169,6 +169,7 @@ from PyQt6.QtGui import (
     QBrush,
     QShortcut,
     QPolygon,
+    QPolygonF,
     QPalette, 
     QWheelEvent, 
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
@@ -12496,79 +12497,53 @@ class GradientRemovalDialog(QDialog):
         scaled_width = int(original_width * scale)
         scaled_height = int(original_height * scale)
 
-        # Scale the image for display
-        if len(self.image.shape) == 2:
-            # Grayscale
-            display_image = (self.image * 255).astype(np.uint8)
-        else:
-            # Color
-            display_image = (self.image * 255).astype(np.uint8)
-
-        # Resize to fit the max display size
-        display_image = cv2.resize(
-            display_image,
-            (scaled_width, scaled_height),
-            interpolation=cv2.INTER_AREA,
-        )
+        # Prepare display image (same for grayscale or color)
+        display_image = (self.image * 255).astype(np.uint8)
+        display_image = cv2.resize(display_image, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
 
         # Convert to QImage
-        if len(display_image.shape) == 2:
-            q_img = QImage(
-                display_image.data,
-                scaled_width,
-                scaled_height,
-                display_image.strides[0],
-                QImage.Format.Format_Grayscale8,
-            )
+        if display_image.ndim == 2:
+            q_img = QImage(display_image.data, scaled_width, scaled_height,
+                           display_image.strides[0], QImage.Format.Format_Grayscale8)
         else:
-            q_img = QImage(
-                display_image.data,
-                scaled_width,
-                scaled_height,
-                display_image.strides[0],
-                QImage.Format.Format_RGB888,
-            )
+            q_img = QImage(display_image.data, scaled_width, scaled_height,
+                           display_image.strides[0], QImage.Format.Format_RGB888)
 
-        self.base_pixmap = QPixmap.fromImage(q_img)
-        self.pixmap = self.base_pixmap.copy()
+        # Set up QGraphicsScene and QGraphicsView for consistent coordinate mapping
+        self.scene = QGraphicsScene(self)
+        self.pixmap_item = QGraphicsPixmapItem(QPixmap.fromImage(q_img))
+        self.scene.addItem(self.pixmap_item)
 
-        # Set up QLabel to display the image
-        self.label = QLabel(self)
-        self.label.setPixmap(self.pixmap)
-        self.label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.label.mousePressEvent = self.mouse_press_event
-        self.label.mouseMoveEvent = self.mouse_move_event
-        self.label.mouseReleaseEvent = self.mouse_release_event
+        self.view = QGraphicsView(self.scene, self)
+        self.view.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.view.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.view.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.view.viewport().installEventFilter(self)  # Install event filter on the viewport
 
-        # Set up controls
+        # Set up controls (you can leave your setup_controls() largely unchanged)
         self.setup_controls()
 
-        # Create main layout
+        # Layout
         main_layout = QHBoxLayout()
-
-        # Add image label with stretch factor 1 (expanding)
-        main_layout.addWidget(self.label, 1)
-
-        # Create a widget to hold controls and fix its width
+        main_layout.addWidget(self.view, 1)
         controls_widget = QWidget()
         controls_layout = QVBoxLayout()
         controls_layout.addWidget(self.controls_groupbox)
         controls_layout.addStretch(1)
-        # Create a status label to display current step and add it
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         controls_layout.addWidget(self.status_label)
         controls_widget.setLayout(controls_layout)
-        controls_widget.setFixedWidth(300)  # Fixed width for the controls
-
-        # Add the controls widget to the main layout (no stretch factor)
+        controls_widget.setFixedWidth(300)
         main_layout.addWidget(controls_widget, 0)
-
         self.setLayout(main_layout)
         self.setMinimumSize(1000, 700)
 
-        # Initialize thread as None (if using threading)
+        # For later use, we keep the original (full-resolution) image and store a scaling factor.
+        # Here, self.display_scale is used to display the image. When processing, you work with self.image.
         self.thread = None
+        self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        QTimer.singleShot(0, lambda: self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio))
 
 
     def setup_controls(self):
@@ -12672,58 +12647,96 @@ class GradientRemovalDialog(QDialog):
         self.stretched_pixmap = QPixmap.fromImage(q_img)  # Save the stretched pixmap
         self.label.setPixmap(self.stretched_pixmap)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+
+    def eventFilter(self, source, event):
+        if source is self.view.viewport():
+            if event.type() == QEvent.Type.KeyPress:
+                # Finalize current polygon on Enter key
+                if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                    if self.current_polygon:
+                        self.exclusion_polygons.append(self.current_polygon.copy())
+                        self.current_polygon = []
+                        self.update_selection()
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.drawing = True
+                    # Map the mouse position directly to scene coordinates
+                    scene_point = self.view.mapToScene(event.pos())
+                    self.current_polygon = [scene_point]
+                    self.update_selection()
+                    return True
+            elif event.type() == QEvent.Type.MouseMove:
+                if self.drawing:
+                    scene_point = self.view.mapToScene(event.pos())
+                    self.current_polygon.append(scene_point)
+                    self.update_selection()
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton and self.drawing:
+                    self.drawing = False
+                    scene_point = self.view.mapToScene(event.pos())
+                    self.current_polygon.append(scene_point)
+                    # Finalize polygon automatically (or wait for Enter if you prefer)
+                    self.exclusion_polygons.append(self.current_polygon.copy())
+                    self.current_polygon = []
+                    self.update_selection()
+                    return True
+        return super().eventFilter(source, event)
+
     def update_selection(self):
-        # Use the stretched_pixmap if available; otherwise use base_pixmap.
-        if hasattr(self, "stretched_pixmap") and self.stretched_pixmap:
-            original = self.stretched_pixmap
-        else:
-            original = self.base_pixmap
-        
-        # Get the current size of the label.
-        label_size = self.label.size()
-        # Scale the original pixmap to the label's size while preserving the aspect ratio.
-        scaled_pixmap = original.scaled(label_size, Qt.AspectRatioMode.KeepAspectRatio,
-                                        Qt.TransformationMode.SmoothTransformation)
-        # Make a copy so we can draw on it.
-        self.pixmap = QPixmap(scaled_pixmap)
-        
-        # Compute scale factors based on the original pixmap size.
-        orig_width, orig_height = original.width(), original.height()
-        new_width, new_height = self.pixmap.width(), self.pixmap.height()
-        scale_x = new_width / orig_width
-        scale_y = new_height / orig_height
-        
-        painter = QPainter(self.pixmap)
-        # Draw all finalized exclusion polygons, scaling each point.
-        pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine)
-        brush = QColor(0, 255, 0, 50)  # semi-transparent green
-        painter.setPen(pen)
-        painter.setBrush(brush)
+        """
+        Redraws the pixmap with the exclusion polygons overlaid.
+        The polygons are stored in scene coordinates.
+        """
+        # Start by resetting the pixmap item to the original display image.
+        # (Since we're working in scene coordinates, we don't need to re-scale manually.)
+        self.pixmap_item.setPixmap(self.pixmap_item.pixmap())
+
+        # Create an overlay pixmap
+        overlay = QPixmap(self.pixmap_item.pixmap().size())
+        overlay.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(overlay)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw finalized polygons in green (semi-transparent)
+        QPen_pen = QPen(QColor(0, 255, 0), 2)
+        QPen_brush = QColor(0, 255, 0, 50)
+        painter.setPen(QPen_pen)
+        painter.setBrush(QPen_brush)
         for polygon in self.exclusion_polygons:
-            scaled_poly = QPolygon([QPoint(int(pt.x() * scale_x), int(pt.y() * scale_y)) for pt in polygon])
-            painter.drawPolygon(scaled_poly)
-        
-        # If a polygon is being drawn, draw its outline in red.
+            # Convert list of QPointF to QPolygonF and draw it
+            poly = QPolygonF(polygon)
+            painter.drawPolygon(poly)
+
+        # Draw current (in-progress) polygon in red dashed outline
         if self.drawing and len(self.current_polygon) > 1:
             pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            scaled_poly = QPolygon([QPoint(int(pt.x() * scale_x), int(pt.y() * scale_y)) for pt in self.current_polygon])
-            painter.drawPolyline(scaled_poly)
-        
+            poly = QPolygonF(self.current_polygon)
+            painter.drawPolyline(poly)
+
         painter.end()
-        self.label.setPixmap(self.pixmap)
+
+        # Create a new QGraphicsPixmapItem for the overlay and add it on top of the image.
+        # Remove any existing overlay items.
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsPixmapItem) and item != self.pixmap_item:
+                self.scene.removeItem(item)
+        overlay_item = QGraphicsPixmapItem(overlay)
+        overlay_item.setZValue(1)  # Ensure it is on top
+        self.scene.addItem(overlay_item)
+
 
     def clear_exclusion_areas(self):
-        """
-        Clears all drawn exclusion polygons and updates the preview.
-        """
-        self.exclusion_polygons = []  # Clear the list of polygons
-        self.current_polygon = []  # Clear any currently drawn polygon
-        self.update_selection()  # Redraw the pixmap
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
+        """Clears all drawn exclusion polygons."""
+        self.exclusion_polygons = []
+        self.current_polygon = []
         self.update_selection()
 
 
