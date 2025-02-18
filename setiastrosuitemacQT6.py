@@ -204,7 +204,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.11"
+VERSION = "2.10.12"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -6431,65 +6431,6 @@ def generate_minimal_fits_header(image):
     header['COMMENT'] = "Minimal header generated for blind solve"
     return header
 
-def estimate_transform_from_triangles(mosaic_stars, new_stars):
-    """
-    A naive approach:
-    1) Build triangle signatures in mosaic_stars.
-    2) Build triangle signatures in new_stars.
-    3) For each matching signature, compute candidate transform, count inliers.
-    4) Return best transform matrix.
-    """
-    mosaic_signatures = build_triangle_signatures(mosaic_stars)
-    new_signatures    = build_triangle_signatures(new_stars)
-
-    best_inliers = 0
-    best_matrix = None
-
-    # For each signature in 'new_signatures', check if it exists in 'mosaic_signatures'
-    for sig, new_triplets in new_signatures.items():
-        if sig not in mosaic_signatures:
-            continue
-        mosaic_triplets = mosaic_signatures[sig]
-
-        # We have a possible triangle match
-        for new_tri in new_triplets:
-            # new_tri is (i1,i2,i3) in new_stars
-            new_points = np.float32([new_stars[i] for i in new_tri])
-
-            for mosaic_tri in mosaic_triplets:
-                # mosaic_tri is (j1,j2,j3) in mosaic_stars
-                mosaic_points = np.float32([mosaic_stars[j] for j in mosaic_tri])
-
-                # Estimate affine transform from new_points -> mosaic_points
-                matrix, _ = cv2.estimateAffinePartial2D(
-                    new_points.reshape(-1, 1, 2),
-                    mosaic_points.reshape(-1, 1, 2),
-                    method=cv2.LMEDS
-                )
-                if matrix is None:
-                    continue
-                # Build a 3x3 for easier usage
-                full_mat = np.eye(3, dtype=np.float32)
-                full_mat[:2] = matrix
-
-                # Count how many 'new_stars' are inliers under this transform
-                inliers_count = 0
-                for (x,y) in new_stars:
-                    src_pt = np.array([x,y,1], dtype=np.float32)
-                    dst_pt = full_mat @ src_pt
-                    # Compare to nearest mosaic star or do distance threshold
-                    # For simplicity, let's do a distance threshold to ANY mosaic star
-                    for (mx,my) in mosaic_stars:
-                        dist = math.hypot(dst_pt[0]-mx, dst_pt[1]-my)
-                        if dist < 3.0: # within 3 pixels => match
-                            inliers_count += 1
-                            break
-
-                if inliers_count > best_inliers:
-                    best_inliers = inliers_count
-                    best_matrix  = full_mat
-
-    return best_matrix, best_inliers
 
 class MosaicPreviewWindow(QDialog):
     def __init__(self, image_array, title="", parent=None):
@@ -6587,6 +6528,94 @@ class MosaicPreviewWindow(QDialog):
         super().resizeEvent(event)
         self.display_image(self.image_array)
 
+class MosaicSettingsDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Mosaic Master Settings")
+        self.initUI()
+
+    def initUI(self):
+        layout = QFormLayout(self)
+
+        # Number of Stars to Attempt to Use
+        self.starCountSpin = QSpinBox()
+        self.starCountSpin.setRange(1, 1000)
+        self.starCountSpin.setValue(self.settings.value("mosaic/num_stars", 150, type=int))
+        layout.addRow("Number of Stars:", self.starCountSpin)
+
+        # Translation Max Tolerance
+        self.transTolSpin = QDoubleSpinBox()
+        self.transTolSpin.setRange(0.0, 10.0)
+        self.transTolSpin.setDecimals(3)
+        self.transTolSpin.setValue(self.settings.value("mosaic/translation_max_tolerance", 3.0, type=float))
+        layout.addRow("Translation Max Tolerance:", self.transTolSpin)
+
+        # Scale Min Tolerance
+        self.scaleMinSpin = QDoubleSpinBox()
+        self.scaleMinSpin.setRange(0.0, 10.0)
+        self.scaleMinSpin.setDecimals(3)
+        self.scaleMinSpin.setValue(self.settings.value("mosaic/scale_min_tolerance", 0.8, type=float))
+        layout.addRow("Scale Min Tolerance:", self.scaleMinSpin)
+
+        # Scale Max Tolerance
+        self.scaleMaxSpin = QDoubleSpinBox()
+        self.scaleMaxSpin.setRange(0.0, 10.0)
+        self.scaleMaxSpin.setDecimals(3)
+        self.scaleMaxSpin.setValue(self.settings.value("mosaic/scale_max_tolerance", 1.25, type=float))
+        layout.addRow("Scale Max Tolerance:", self.scaleMaxSpin)
+
+        # Rotation Max Tolerance
+        self.rotationMaxSpin = QDoubleSpinBox()
+        self.rotationMaxSpin.setRange(0.0, 180.0)
+        self.rotationMaxSpin.setDecimals(2)
+        self.rotationMaxSpin.setValue(self.settings.value("mosaic/rotation_max_tolerance", 45.0, type=float))
+        layout.addRow("Rotation Max Tolerance (°):", self.rotationMaxSpin)
+
+        # Skew Max Tolerance (dot product of normalized columns; 0 means orthogonal)
+        self.skewMaxSpin = QDoubleSpinBox()
+        self.skewMaxSpin.setRange(0.0, 1.0)
+        self.skewMaxSpin.setDecimals(3)
+        self.skewMaxSpin.setSingleStep(0.01)
+        self.skewMaxSpin.setValue(self.settings.value("mosaic/skew_max_tolerance", 0.1, type=float))
+        layout.addRow("Skew Max Tolerance:", self.skewMaxSpin)
+
+        # FWHM for Star Detection
+        self.fwhmSpin = QDoubleSpinBox()
+        self.fwhmSpin.setRange(0.0, 20.0)
+        self.fwhmSpin.setDecimals(2)
+        self.fwhmSpin.setValue(self.settings.value("mosaic/star_fwhm", 3.0, type=float))
+        layout.addRow("FWHM for Star Detection:", self.fwhmSpin)
+
+        # Sigma for Star Detection
+        self.sigmaSpin = QDoubleSpinBox()
+        self.sigmaSpin.setRange(0.0, 10.0)
+        self.sigmaSpin.setDecimals(2)
+        self.sigmaSpin.setValue(self.settings.value("mosaic/star_sigma", 3.0, type=float))
+        layout.addRow("Sigma for Star Detection:", self.sigmaSpin)
+
+        self.polyDegreeSpin = QSpinBox()
+        self.polyDegreeSpin.setRange(1, 6)
+        self.polyDegreeSpin.setValue(self.settings.value("mosaic/poly_degree", 3, type=int))
+        layout.addRow("Polynomial Degree:", self.polyDegreeSpin)
+
+
+        buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttonBox.accepted.connect(self.accept)
+        buttonBox.rejected.connect(self.reject)
+        layout.addRow(buttonBox)
+
+    def accept(self):
+        # Save the values to QSettings
+        self.settings.setValue("mosaic/num_stars", self.starCountSpin.value())
+        self.settings.setValue("mosaic/translation_max_tolerance", self.transTolSpin.value())
+        self.settings.setValue("mosaic/scale_min_tolerance", self.scaleMinSpin.value())
+        self.settings.setValue("mosaic/scale_max_tolerance", self.scaleMaxSpin.value())
+        self.settings.setValue("mosaic/rotation_max_tolerance", self.rotationMaxSpin.value())
+        self.settings.setValue("mosaic/skew_max_tolerance", self.skewMaxSpin.value())
+        self.settings.setValue("mosaic/star_fwhm", self.fwhmSpin.value())
+        self.settings.setValue("mosaic/star_sigma", self.sigmaSpin.value())
+        super().accept()
 
 # --------------------------------------------------
 # MosaicMasterDialog with blending/normalization integrated
@@ -6619,7 +6648,7 @@ class MosaicMasterDialog(QDialog):
             "....Partial Affine - Great for Images with Translation, Rotation, and Scaling Needs\n"
             "....Affine - Great for Images that also have skew distortions\n"
             "....Homography - Great for Images that also have lens or perspective distortion\n"
-            "....Spline - Most computationally expensive.  Great for local distortions\n"
+            "....Polynomial Warp - Useful in large mosaics to bend the images together\n"
             "3) Align & Create Mosaic\n"
             "4) Save to Image Manager"
         )
@@ -6655,6 +6684,15 @@ class MosaicMasterDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+        # Add the wrench button for settings.
+        wrench_btn = QPushButton()
+        wrench_btn.setIcon(QIcon(wrench_path))
+        wrench_btn.setToolTip("Mosaic Settings")
+        wrench_btn.clicked.connect(self.openSettings)
+        btn_layout.addWidget(wrench_btn)
+
+        layout.addLayout(btn_layout)
+
         # Checkbox for forcing blind solve
         self.forceBlindCheckBox = QCheckBox("Force Blind Solve (ignore existing WCS)")
         layout.addWidget(self.forceBlindCheckBox)
@@ -6664,7 +6702,7 @@ class MosaicMasterDialog(QDialog):
             "Partial Affine Transform",
             "Affine Transform",
             "Homography Transform",
-            "Spline Based Transform"
+            "Polynomial Warp Based Transform"
         ])
         # Set the default selection to "Affine Transform" (index 1)
         self.transform_combo.setCurrentIndex(1)
@@ -6686,6 +6724,11 @@ class MosaicMasterDialog(QDialog):
         layout.addWidget(self.spinnerLabel)
 
         self.setLayout(layout)
+
+    def openSettings(self):
+        dlg = MosaicSettingsDialog(self.settings, self)
+        if dlg.exec():
+            self.status_label.setText("Mosaic settings updated.")
 
     # ---------- Add / Remove ----------
     def add_image(self):
@@ -6937,6 +6980,7 @@ class MosaicMasterDialog(QDialog):
 
             # --- Stellar Alignment ---
             # --- Stellar Alignment ---
+            num_stars = self.settings.value("mosaic/num_stars", 150, type=int)
             if not first_image:
                 transform_method = self.transform_combo.currentText()
                 # Use the current mosaic as reference.
@@ -6950,8 +6994,8 @@ class MosaicMasterDialog(QDialog):
 
 
                 # Detect stars (with flux) in the masked regions.
-                mosaic_star_list = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=100)
-                new_star_list = self.detect_stars(np.where(overlap_mask, reproj_red, 0), max_stars=100)
+                mosaic_star_list = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=num_stars)
+                new_star_list = self.detect_stars(np.where(overlap_mask, reproj_red, 0), max_stars=num_stars)
                 
                 print("New star list count:", len(new_star_list))
                 print("Mosaic star list count:", len(mosaic_star_list))
@@ -6977,7 +7021,7 @@ class MosaicMasterDialog(QDialog):
                 
                 self.status_label.setText("Running RANSAC for initial affine alignment...")
                 QApplication.processEvents()
-                transform_matrix, inliers = self.estimate_transform_ransac(new_star_list, mosaic_star_list)
+                transform_matrix, inliers = self.estimate_transform_ransac(new_star_list, mosaic_star_list, mosaic_width)
                 
                 if transform_matrix is not None:
                     print("Computed affine transform matrix:\n", transform_matrix)
@@ -7004,7 +7048,7 @@ class MosaicMasterDialog(QDialog):
                     aligned = affine_aligned
 
                 # If the user selected a refined method, further refine the alignment.
-                if transform_method in ["Homography Transform", "Spline Based Transform"]:
+                if transform_method in ["Homography Transform", "Polynomial Warp Based Transform"]:
                     self.status_label.setText(f"Starting refined alignment using {transform_method}...")
                     print("Refined alignment using method:", transform_method)
                     QApplication.processEvents()                    
@@ -7075,69 +7119,6 @@ class MosaicMasterDialog(QDialog):
 
         
     # ---------- Star alignment using triangle matching ----------
-    def star_refine_alignment_triangle(self, new_img, mosaic_img, return_matrix=False):
-        """
-        Affine star alignment routine using triangle matching.
-        This routine always computes an affine (or partial affine) transform
-        based on the candidate overlap region.
-        
-        Returns:
-        - If return_matrix is True: (affine_transform, inlier_count)
-        - Otherwise, returns the warped image.
-        """
-        if not OPENCV_AVAILABLE:
-            print("No cv2 available, skipping star refine.")
-            return new_img if not return_matrix else (None, 0)
-
-        self.status_label.setText("Star refine: Extracting overlapping region...")
-        QApplication.processEvents()
-
-        # Compute overlap mask.
-        overlap_mask = (mosaic_img > 0) & (new_img > 0)
-        if np.count_nonzero(overlap_mask) < 500:
-            print("Star refine: No sufficient overlap found.")
-            return new_img if not return_matrix else (None, 0)
-
-        # Detect stars (with flux) in the masked regions.
-        mosaic_stars = self.detect_stars(np.where(overlap_mask, mosaic_img, 0), max_stars=25)
-        new_stars = self.detect_stars(np.where(overlap_mask, new_img, 0), max_stars=25)
-        print(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
-        self.status_label.setText(f"Star refine: {len(mosaic_stars)} ref stars, {len(new_stars)} new stars.")
-        QApplication.processEvents()
-
-        if len(mosaic_stars) < 3 or len(new_stars) < 3:
-            print("Not enough overlap stars for triangle alignment; skipping.")
-            return new_img if not return_matrix else (None, 0)
-
-        # Choose method flag based solely on affine options.
-        transform_method = self.transform_combo.currentText()
-        if transform_method == "Partial Affine Transform":
-            method_flag = "partial_affine"
-        else:
-            method_flag = "affine"  # Treat all non-partial as full affine.
-        
-        best_matrix, best_inliers = self.estimate_transform_from_triangles(
-            [(s[0], s[1]) for s in mosaic_stars],
-            [(s[0], s[1]) for s in new_stars],
-            method=method_flag
-        )
-
-        if best_matrix is None:
-            print("No transform found.")
-            return new_img if not return_matrix else (None, 0)
-
-        self.status_label.setText(f"Star refine: {best_inliers} inliers found, applying warp...")
-        QApplication.processEvents()
-        if return_matrix:
-            return best_matrix, best_inliers
-        else:
-            H, W = mosaic_img.shape[:2]
-            warped = cv2.warpAffine(new_img, best_matrix[:2], (W, H), flags=cv2.INTER_LINEAR)
-            print(f"Transform complete: {best_inliers} inliers, warped shape={warped.shape}")
-            self.status_label.setText("Star refine complete.")
-            QApplication.processEvents()
-            return warped
-
 
     def refined_alignment(self, affine_aligned, mosaic_img, method="Homography Transform"):
         """
@@ -7148,10 +7129,11 @@ class MosaicMasterDialog(QDialog):
         
         Returns:
         - For "Homography Transform": (warped_image, inlier_count)
-        - For "Spline Based Transform": (warped_image, inlier_count)
+        - For "Polynomial Warp Based Transform": (warped_image, inlier_count)
         - If refinement fails, returns None.
         """
         print("\n--- Starting Refined Alignment ---")
+        poly_degree = self.settings.value("mosaic/poly_degree", 3, type=int)
         self.status_label.setText("Refinement: Converting images to grayscale...")
         QApplication.processEvents()
         
@@ -7176,8 +7158,8 @@ class MosaicMasterDialog(QDialog):
         self.status_label.setText("Refinement: Detecting stars in mosaic and affine-aligned images...")
         QApplication.processEvents()
         # Increase max_stars to 50 for debugging purposes.
-        mosaic_stars_masked = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=100)
-        new_stars_aligned = self.detect_stars(np.where(overlap_mask, affine_aligned_gray, 0), max_stars=100)
+        mosaic_stars_masked = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=200)
+        new_stars_aligned = self.detect_stars(np.where(overlap_mask, affine_aligned_gray, 0), max_stars=200)
 
         # Debug: Print out the star lists.
         print("Mosaic stars (refined alignment):")
@@ -7222,134 +7204,111 @@ class MosaicMasterDialog(QDialog):
                                                 (affine_aligned.shape[1], affine_aligned.shape[0]),
                                                 flags=cv2.INTER_LINEAR)
             return (warped_image, inliers)
-        elif method == "Spline Based Transform":
-            self.status_label.setText("Refinement: Computing TPS transform...")
+        elif method == "Polynomial Warp Based Transform":
+            self.status_label.setText("Refinement: Computing Polynomial Warp based transform...")
             QApplication.processEvents()
-            tps, inliers = self.estimate_spline_transform_from_stars(mosaic_stars_masked, new_stars_aligned)
-            if tps is None:
-                self.status_label.setText("Refinement: TPS estimation failed.")
+            # Extract control points from matches.
+            src_pts = np.float32([match[0][:2] for match in matches])
+            dst_pts = np.float32([match[1][:2] for match in matches])
+            # Call the static Polynomial Warp warp function.
+            try:
+                warped_image = MosaicMasterDialog.poly_warp(affine_aligned, src_pts, dst_pts, degree=poly_degree, status_label=self.status_label)
+                inliers = len(matches)
+                self.status_label.setText(f"Refinement: Polynomial Warp warp applied with {inliers} matched points.")
+                return (warped_image, inliers)
+            except Exception as e:
+                self.status_label.setText(f"Refinement: Polynomial Warp warp failed: {e}")
                 return None
-            self.status_label.setText("Refinement: TPS computed. Warping image...")
-            QApplication.processEvents()
-            warped_image = tps.warpImage(affine_aligned)
-            return (warped_image, inliers)
         else:
             self.status_label.setText("Refinement: Unexpected transformation method.")
             return None
 
-                    
-    def build_triangle_signatures(self, stars):
-        signature_map = {}
-        for combo in itertools.combinations(range(len(stars)), 3):
-            i, j, k = combo
-            p1, p2, p3 = stars[i], stars[j], stars[k]
-            sides = [
-                (p2[0]-p1[0])**2 + (p2[1]-p1[1])**2,
-                (p3[0]-p2[0])**2 + (p3[1]-p2[1])**2,
-                (p1[0]-p3[0])**2 + (p1[1]-p3[1])**2
-            ]
-            sides.sort()
-            min_side = sides[0]
-            norm_sides = tuple(round(s / min_side, 3) for s in sides)
-            signature_map.setdefault(norm_sides, []).append(combo)
-        return signature_map
+    @staticmethod
+    def poly_warp(image, src_pts, dst_pts, degree=3, status_label=None):
+        """
+        Warp `image` using a polynomial transformation of the specified degree.
+        
+        The transformation is defined as:
+        u = sum_{i+j<=degree} a_{ij} * x^i * y^j
+        v = sum_{i+j<=degree} b_{ij} * x^i * y^j
+        
+        where the coefficients are solved via least squares using the control points.
+        
+        Parameters:
+        image: Input image.
+        src_pts: numpy array of shape (N,2) with control points in the source image.
+        dst_pts: numpy array of shape (N,2) with corresponding control points in the destination.
+        degree: Degree of the polynomial transformation (allowed 1 to 6, default=3).
+        status_label: If provided, a Qt widget where progress messages are displayed.
+        
+        Returns:
+        The warped image.
+        """
+        h, w = image.shape[:2]
+        
+        # Function to build the design matrix for points given a degree.
+        def build_design_matrix(pts, degree):
+            # pts: (N,2) array, where each row is (x, y)
+            N = pts.shape[0]
+            terms = []
+            x = pts[:, 0]
+            y = pts[:, 1]
+            # Loop over exponents i and j with i+j <= degree.
+            for i in range(degree + 1):
+                for j in range(degree + 1 - i):
+                    terms.append((x**i) * (y**j))
+            X = np.vstack(terms).T  # shape: (N, number_of_terms)
+            return X
 
-    def find_closest_signature(self, target_sig, signature_dict, threshold=0.02):
-        for sig in signature_dict.keys():
-            if np.allclose(sig, target_sig, atol=threshold):
-                return sig
-        return None
+        # Build the design matrix for the control points.
+        if status_label is not None:
+            status_label.setText("Polynomial warp: Building design matrix for control points...")
+            QApplication.processEvents()
+        X = build_design_matrix(src_pts, degree)
+        
+        # Destination coordinates.
+        U = dst_pts[:, 0]
+        V = dst_pts[:, 1]
+        
+        if status_label is not None:
+            status_label.setText("Polynomial warp: Solving for polynomial coefficients...")
+            QApplication.processEvents()
+        
+        # Solve the least-squares problem.
+        coeffs_u, _, _, _ = np.linalg.lstsq(X, U, rcond=None)
+        coeffs_v, _, _, _ = np.linalg.lstsq(X, V, rcond=None)
+        
+        if status_label is not None:
+            status_label.setText("Polynomial warp: Computing full mapping for image...")
+            QApplication.processEvents()
+        
+        # Build a full grid of coordinates.
+        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+        flat_x = grid_x.ravel()
+        flat_y = grid_y.ravel()
+        pts_full = np.vstack([flat_x, flat_y]).T  # shape: (h*w, 2)
+        
+        # Build design matrix for the full grid.
+        X_full = build_design_matrix(pts_full, degree)
+        
+        # Evaluate the polynomial mappings.
+        map_u = np.dot(X_full, coeffs_u).reshape(h, w).astype(np.float32)
+        map_v = np.dot(X_full, coeffs_v).reshape(h, w).astype(np.float32)
+        
+        if status_label is not None:
+            status_label.setText("Polynomial warp: Full mapping computed. Remapping image...")
+            QApplication.processEvents()
+        
+        # Remap the image.
+        warped = cv2.remap(image, map_u, map_v, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        
+        if status_label is not None:
+            status_label.setText("Polynomial warp: Image warped.")
+            QApplication.processEvents()
+        
+        return warped
 
-    def estimate_transform_from_triangles(self, mosaic_stars, new_stars, method="affine"):
-        mosaic_signatures = self.build_triangle_signatures(mosaic_stars)
-        new_signatures = self.build_triangle_signatures(new_stars)
-        print(f"🔹 Found {len(mosaic_signatures)} unique mosaic triangles")
-        print(f"🔹 Found {len(new_signatures)} unique new image triangles")
-        best_inliers = 0
-        best_matrix = None
 
-        total_signatures = len(new_signatures)
-        processed_signatures = 0
-        processed_candidates = 0
-
-        mosaic_x = [pt[0] for pt in mosaic_stars]
-        mosaic_width = max(mosaic_x) - min(mosaic_x) if mosaic_x else 0
-
-        for target_sig, new_triplets in new_signatures.items():
-            processed_signatures += 1
-            if processed_signatures % 100 == 0 or processed_signatures == total_signatures:
-                self.status_label.setText(f"Checking signature {processed_signatures}/{total_signatures}...")
-                QApplication.processEvents()
-
-            closest_match = self.find_closest_signature(target_sig, mosaic_signatures, threshold=0.02)
-            if closest_match is None:
-                continue
-            mosaic_triplets = mosaic_signatures[closest_match]
-            for new_tri in new_triplets:
-                new_points = np.float32([new_stars[i] for i in new_tri])
-                for mosaic_tri in mosaic_triplets:
-                    processed_candidates += 1
-                    self.status_label.setText(f"Checked {processed_candidates} triangle candidates")
-                    QApplication.processEvents()
-                    
-                    if method == "partial_affine":
-                        matrix, _ = cv2.estimateAffinePartial2D(
-                            new_points.reshape(-1, 1, 2),
-                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
-                            method=cv2.LMEDS
-                        )
-                    else:  # method == "affine" or default
-                        matrix, _ = cv2.estimateAffine2D(
-                            new_points.reshape(-1, 1, 2),
-                            np.float32([mosaic_stars[j] for j in mosaic_tri]).reshape(-1, 1, 2),
-                            method=cv2.LMEDS
-                        )
-                    if matrix is None:
-                        continue
-
-                    full_mat = np.eye(3, dtype=np.float32)
-                    full_mat[:2] = matrix
-
-                    # Failsafe: scaling check.
-                    A = full_mat[:2, :2]
-                    scale1 = np.sqrt(A[0, 0]**2 + A[1, 0]**2)
-                    scale2 = np.sqrt(A[0, 1]**2 + A[1, 1]**2)
-                    scale = (scale1 + scale2) / 2.0
-                    if scale > 1.25 or scale < 0.8:
-                        continue
-
-                    # Failsafe: translation check.
-                    t = full_mat[:2, 2]
-                    trans_threshold = (mosaic_width / 3.0) if mosaic_width > 0 else 100.0
-                    if abs(t[0]) > trans_threshold or abs(t[1]) > trans_threshold:
-                        continue
-
-                    # Failsafe: rotation angle check.
-                    # Compute the rotation angle (in radians) from the matrix.
-                    # Here we use arctan2 on the first column (assuming a near-rotation+uniform scale).
-                    angle = np.arctan2(A[1, 0], A[0, 0])
-                    if abs(angle) > (np.pi / 4):  # 45 degrees ≈ 0.7854 radians.
-                        continue
-
-                    # Count inliers.
-                    inliers_count = 0
-                    for (x, y) in new_stars:
-                        src_pt = np.array([x, y, 1], dtype=np.float32)
-                        dst_pt = full_mat @ src_pt
-                        for (mx, my) in mosaic_stars:
-                            if math.hypot(dst_pt[0] - mx, dst_pt[1] - my) < 3.0:
-                                inliers_count += 1
-                                break
-
-                    if inliers_count > best_inliers:
-                        best_inliers = inliers_count
-                        best_matrix = full_mat
-
-        summary = f"Triangle alignment complete: Checked {processed_candidates} candidates; best transform had {best_inliers} inliers."
-        print(summary)
-        self.status_label.setText(summary)
-        QApplication.processEvents()
-        return best_matrix, best_inliers
 
     def estimate_homography_from_stars(self, mosaic_stars, new_stars):
         self.status_label.setText("Matching stars for homography...")
@@ -7366,31 +7325,6 @@ class MosaicMasterDialog(QDialog):
         inliers = int(np.count_nonzero(mask)) if mask is not None else 0
         self.status_label.setText(f"Homography computed with {inliers} inliers.")
         return H, inliers
-
-
-
-    def estimate_spline_transform_from_stars(self, mosaic_stars, new_stars):
-        self.status_label.setText("Matching stars for TPS transform...")
-        QApplication.processEvents()
-        if len(mosaic_stars) < 3 or len(new_stars) < 3:
-            self.status_label.setText("Not enough stars for TPS.")
-            return None, 0
-        n = min(len(mosaic_stars), len(new_stars))
-        # Extract only the (x,y) coordinates from each star.
-        src_pts = np.float32([s[:2] for s in new_stars[:n]]).reshape(n, 1, 2)
-        dst_pts = np.float32([s[:2] for s in mosaic_stars[:n]]).reshape(n, 1, 2)
-        matches = [cv2.DMatch(i, i, 0) for i in range(n)]
-        try:
-            tps = cv2.createThinPlateSplineShapeTransformer()
-            tps.estimateTransformation(src_pts, dst_pts, matches)
-            inliers = n  # For simplicity, count all as inliers.
-            self.status_label.setText("TPS transform estimated successfully.")
-            return tps, inliers
-        except Exception as e:
-            self.status_label.setText(f"TPS transform estimation failed: {e}")
-            return None, 0
-
-
 
     # -----------------------------
     # RANSAC with Delaunay Triangulation for Alignment
@@ -7435,7 +7369,25 @@ class MosaicMasterDialog(QDialog):
         return matches
 
     @staticmethod
-    def ransac_affine(src_coords, tgt_coords, matches, ransac_iter=500, inlier_thresh=3.0, norm_trans_thresh=0.33, update_callback=None):
+    def ransac_affine(src_coords, tgt_coords, matches, image_width, settings, ransac_iter=500, inlier_thresh=3.0, norm_trans_thresh=0.2, update_callback=None):
+        """
+        Runs RANSAC to estimate an affine transform between source and target star coordinates.
+        Failsafe checks for translation, scale, rotation, and skew use values from the provided QSettings.
+        
+        The translation tolerance is a percentage of the image width.
+        """
+        # Retrieve settings values.
+        translation_tolerance_percent = settings.value("mosaic/translation_max_tolerance", 0.1, type=float)
+        # Compute the absolute translation tolerance in pixels.
+        translation_tolerance = translation_tolerance_percent * image_width
+
+        scale_min = settings.value("mosaic/scale_min_tolerance", 0.8, type=float)
+        scale_max = settings.value("mosaic/scale_max_tolerance", 1.25, type=float)
+        rotation_max_deg = settings.value("mosaic/rotation_max_tolerance", 45.0, type=float)
+        rotation_tolerance = np.radians(rotation_max_deg)
+        skew_max = settings.value("mosaic/skew_max_tolerance", 0.1, type=float)  # default: 0.1
+
+
         best_inliers = 0
         best_transform = None
         tgt_tree = KDTree(tgt_coords)
@@ -7457,19 +7409,27 @@ class MosaicMasterDialog(QDialog):
             scale1 = np.linalg.norm(A[:, 0])
             scale2 = np.linalg.norm(A[:, 1])
             scale = (scale1 + scale2) / 2.0
-            if scale > 1.25 or scale < 0.8:
+            if scale > scale_max or scale < scale_min:
                 continue
             
             # Failsafe: translation check.
             t = full_mat[:2, 2]
-            if abs(t[0]) > norm_trans_thresh or abs(t[1]) > norm_trans_thresh:
+            if abs(t[0]) > translation_tolerance or abs(t[1]) > translation_tolerance:
                 continue
             
             # Failsafe: rotation angle check.
             angle = np.arctan2(A[1, 0], A[0, 0])
-            if abs(angle) > (np.pi / 4):
+            if abs(angle) > rotation_tolerance: #(np.pi / 4):
                 continue
             
+            # Failsafe: skew check.
+            # For a pure rotation plus uniform scale, the columns of A should be orthogonal.
+            v1 = A[:, 0] / (np.linalg.norm(A[:, 0]) + 1e-8)
+            v2 = A[:, 1] / (np.linalg.norm(A[:, 1]) + 1e-8)
+            skew = abs(np.dot(v1, v2))  # 0 means perfectly orthogonal.
+            if skew > skew_max:
+                continue
+
             src_aug = np.hstack([src_coords, np.ones((src_coords.shape[0], 1))])
             transformed = (transform @ src_aug.T).T
             inliers = 0
@@ -7488,7 +7448,7 @@ class MosaicMasterDialog(QDialog):
                 QApplication.processEvents()
         return best_transform, best_inliers
     
-    def estimate_transform_ransac(self, source_stars, target_stars):
+    def estimate_transform_ransac(self, source_stars, target_stars, mosaic_width):
         # Extract (x,y) from 4-tuples.
         src_coords = np.array([[s[0], s[1]] for s in source_stars])
         tgt_coords = np.array([[s[0], s[1]] for s in target_stars])
@@ -7518,7 +7478,7 @@ class MosaicMasterDialog(QDialog):
         self.status_label.setText(f"Found {len(matches)} candidate triangle matches. Running RANSAC...")
         QApplication.processEvents()
         update_callback = lambda msg: self.status_label.setText(msg)
-        best_transform_norm, best_inliers = self.ransac_affine(src_norm, tgt_norm, matches, ransac_iter=1000, inlier_thresh=3.0, update_callback=update_callback)
+        best_transform_norm, best_inliers = self.ransac_affine(src_norm, tgt_norm, matches, image_width=mosaic_width, settings=self.settings, ransac_iter=1000, inlier_thresh=3.0, update_callback=update_callback)
         
         if best_transform_norm is None:
             return None, best_inliers
@@ -7547,19 +7507,25 @@ class MosaicMasterDialog(QDialog):
         return (arr * 255).clip(0, 255).astype(np.uint8)
 
     def detect_stars(self, image2d, max_stars=25):
+        # Retrieve user-defined values for sigma and fwhm.
+        sigma_val = self.settings.value("mosaic/star_sigma", 3.0, type=float)
+        fwhm_val = self.settings.value("mosaic/star_fwhm", 3.0, type=float)
+        
         mean_val, median_val, std_val = sigma_clipped_stats(image2d, sigma=3.0)
-        daofind = DAOStarFinder(threshold=3 * std_val, fwhm=3.0)
+        # Use the user-defined fwhm and scale the threshold by the standard deviation.
+        daofind = DAOStarFinder(threshold=sigma_val * std_val, fwhm=fwhm_val)
         sources = daofind(image2d - median_val)
         if sources is None or len(sources) == 0:
             return []
         x_coords = sources['xcentroid'].data
         y_coords = sources['ycentroid'].data
         flux = sources['flux'].data
-        # Sort stars by brightness (flux) and take the top ones.
+        # Sort stars by brightness (flux) and select the top ones.
         sorted_indices = np.argsort(-flux)
         top_indices = sorted_indices[:max_stars]
         stars = [(x_coords[i], y_coords[i], flux[i]) for i in top_indices]
         return stars
+
 
     def match_stars(self, new_stars, mosaic_stars, distance_thresh=10.0, flux_thresh=0.2):
         """
@@ -8160,6 +8126,18 @@ class MosaicMasterDialog(QDialog):
         except Exception as e:
             print("Error removing temporary file:", e)
         
+        if item["path"].lower().endswith((".fits", ".fit")):
+            try:
+                with fits.open(item["path"], mode="update", memmap=False) as hdul:
+                    header = hdul[0].header
+                    # Update the original header with the solved header.
+                    for key, value in solved_header.items():
+                        header[key] = value
+                    hdul.flush()  # Write changes back to disk.
+                print("Updated original FITS header with new WCS solution.")
+            except Exception as e:
+                print("Error updating original FITS header:", e)
+
         print("ASTAP plate solving successful. Solved header:")
         for key, value in solved_header.items():
             print(f"{key} = {value}")
@@ -16823,10 +16801,6 @@ class XISFViewer(QWidget):
         if not self.isVisible():
             return        
         if image is None:
-            return
-
-        # Only update if the changed slot is the active slot.
-        if slot != self.image_manager.current_slot:
             return
 
         # Clear the previous content before updating.
