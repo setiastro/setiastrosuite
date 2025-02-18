@@ -1,9 +1,9 @@
 {
-  "version": "2.10.11",
+  "version": "2.10.12",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.11/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_linux"
   },
-  "notes": "Various Bug Fixes across multiple tabs.  Improved Stellar Alignment with Thin Plate Splines as a final step after affine transformation "
+  "notes": "User defined variables now for tuning Mosaic Master along with Polynomial warping for better large mosaic fits.  Few Bug fixes "
 }
