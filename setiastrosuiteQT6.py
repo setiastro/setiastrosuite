@@ -1343,7 +1343,9 @@ class AstroEditingSuite(QMainWindow):
             "metadata": self.image_manager._metadata,   # dictionary {slot: metadata dict}
             # Save custom slot names
             "slot_names": self.slot_names,
-            
+            # Undo/Redo stacks
+            "undo_stacks": self.image_manager._undo_stacks,
+            "redo_stacks": self.image_manager._redo_stacks,            
             # MaskManager data
             "masks": self.mask_manager._masks,          # dictionary {slot: mask array}
             "applied_mask_slot": self.mask_manager.applied_mask_slot,
@@ -1388,6 +1390,13 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager._images = project_data["images"]
             self.image_manager._metadata = project_data["metadata"]
             self.image_manager.current_slot = project_data.get("current_slot", 0)
+            # Restore undo/redo stacks if available
+            self.image_manager._undo_stacks = project_data.get(
+                "undo_stacks", {i: [] for i in range(self.image_manager.max_slots)}
+            )
+            self.image_manager._redo_stacks = project_data.get(
+                "redo_stacks", {i: [] for i in range(self.image_manager.max_slots)}
+            )            
         else:
             QMessageBox.warning(self, "Project Data", "No image data found in project file.")
 
