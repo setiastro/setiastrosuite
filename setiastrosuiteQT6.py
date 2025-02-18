@@ -12613,10 +12613,15 @@ class GradientRemovalDialog(QDialog):
         """
         Applies auto-stretch to the displayed image without affecting the original image.
         """
-        stretched_image = self.stretch_image(self.image)  # Stretch the original image for display
+        # Stretch the original image for display
+        stretched_image = self.stretch_image(self.image)
 
-        # Scale the stretched image for display
-        scaled_height, scaled_width = self.pixmap.height(), self.pixmap.width()
+        # Get the current pixmap size from the pixmap_item.
+        current_pixmap = self.pixmap_item.pixmap()
+        scaled_width = current_pixmap.width()
+        scaled_height = current_pixmap.height()
+
+        # Prepare display image (convert from float32 [0,1] to uint8)
         display_image = (stretched_image * 255).astype(np.uint8)
 
         # Resize for display
@@ -12626,9 +12631,8 @@ class GradientRemovalDialog(QDialog):
             interpolation=cv2.INTER_AREA,
         )
 
-        # Convert to QImage
-        if len(display_image.shape) == 2:
-            # Grayscale
+        # Convert to QImage based on whether image is grayscale or color
+        if display_image.ndim == 2:
             q_img = QImage(
                 display_image.data,
                 scaled_width,
@@ -12637,7 +12641,6 @@ class GradientRemovalDialog(QDialog):
                 QImage.Format.Format_Grayscale8,
             )
         else:
-            # Color
             q_img = QImage(
                 display_image.data,
                 scaled_width,
@@ -12647,8 +12650,10 @@ class GradientRemovalDialog(QDialog):
             )
 
         # Update the pixmap with the stretched image
-        self.stretched_pixmap = QPixmap.fromImage(q_img)  # Save the stretched pixmap
-        self.label.setPixmap(self.stretched_pixmap)
+        stretched_pixmap = QPixmap.fromImage(q_img)
+        self.pixmap_item.setPixmap(stretched_pixmap)
+        # Optionally, re-fit the view:
+        self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
