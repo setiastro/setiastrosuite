@@ -8748,32 +8748,6 @@ class StellarAlignmentDialog(QDialog):
                 selected.append((x, y))
         return selected
 
-    def thin_plate_spline_warp(self, src_points, tgt_points, image):
-        """
-        Applies a thin plate spline warp from tgt_points -> src_points.
-        Both src_points and tgt_points should be lists of (x, y) coordinates.
-        image: the image to warp (e.g. the affine-aligned target)
-        """
-        # Convert to the shape required by OpenCV: (N,1,2) as float32.
-        src_pts = np.array(src_points, dtype=np.float32).reshape(-1, 1, 2)
-        tgt_pts = np.array(tgt_points, dtype=np.float32).reshape(-1, 1, 2)
-        
-        # Create a Thin Plate Spline (TPS) shape transformer.
-        tps = cv2.createThinPlateSplineShapeTransformer()
-        
-        # Build the list of matches. Each match tells the transformer
-        # which source point corresponds to which target point.
-        matches = []
-        for i in range(len(src_points)):
-            # DMatch: queryIdx, trainIdx, distance (set distance=0)
-            matches.append(cv2.DMatch(i, i, 0))
-        
-        # Estimate the TPS transformation.
-        tps.estimateTransformation(src_pts, tgt_pts, matches)
-        
-        # Warp the image using the estimated TPS transformation.
-        warped = tps.warpImage(image)
-        return warped
 
     # -----------------------------
     # Run Alignment – Uses RANSAC/Delaunay Approach with Progress Updates
@@ -8817,28 +8791,46 @@ class StellarAlignmentDialog(QDialog):
         self.aligned_image = canvas
         self.update_preview(self.result_preview_label, canvas)
 
-        # --- Begin TPS Refinement ---
-        self.status_label.setText("Refining alignment with Thin Plate Splines...")
+        # --- Begin Homography Refinement (TPS block is commented out) ---
+        self.status_label.setText("Refining alignment with Homography Transform...")
         QApplication.processEvents()
-        # For TPS, we select control points from both images.
-        # Here we choose stars near the corners.
-        src_ctrl_pts = self.select_corner_stars(source_stars, (H, W), margin=0.15)
-        tgt_ctrl_pts = self.select_corner_stars(target_stars, (H, W), margin=0.15)
-
-        # Ensure we have a matching number of points.
+        # Redetect stars in the overlap region from both the mosaic (affine result) and source.
+        mosaic_gray = np.mean(canvas, axis=-1) if canvas.ndim == 3 else canvas
+        # Use the current mosaic as the target for refinement.
+        # (Note: self.final_mosaic may not have been updated; using canvas as the affine result.)
+        overlap_mask = (mosaic_gray > 0)  # simple mask; you can refine this as needed.
+        mosaic_stars_refined = self.detect_stars_by_grid(np.where(overlap_mask, mosaic_gray, 0), stars_per_region=50)
+        new_stars_refined = self.detect_stars_by_grid(np.where(overlap_mask, mosaic_gray, 0), stars_per_region=50)
+        
+        self.status_label.setText(f"Refinement: Detected {len(mosaic_stars_refined)} mosaic stars and {len(new_stars_refined)} new stars.")
+        QApplication.processEvents()
+        
+        src_ctrl_pts = self.select_corner_stars(new_stars_refined, (H, W), margin=0.15)
+        tgt_ctrl_pts = self.select_corner_stars(mosaic_stars_refined, (H, W), margin=0.15)
         num_ctrl = min(len(src_ctrl_pts), len(tgt_ctrl_pts))
         if num_ctrl < 3:
-            self.status_label.setText("Not enough corner control points for TPS; skipping TPS refinement.")
+            self.status_label.setText("Not enough corner control points for homography refinement; skipping refinement.")
+            refined_image = canvas
         else:
             src_ctrl_pts = src_ctrl_pts[:num_ctrl]
             tgt_ctrl_pts = tgt_ctrl_pts[:num_ctrl]
-            # Apply TPS to the affine-aligned image.
-            refined_image = self.thin_plate_spline_warp(src_ctrl_pts, tgt_ctrl_pts, canvas)
-            self.aligned_image = refined_image
-            self.update_preview(self.result_preview_label, refined_image)
-            self.status_label.setText("Alignment complete with TPS refinement.")
-        # --- End TPS Refinement ---
+            self.status_label.setText("Computing homography from refined stars...")
+            QApplication.processEvents()
+            H_refined, mask = cv2.findHomography(np.float32(src_ctrl_pts).reshape(-1,1,2),
+                                                 np.float32(tgt_ctrl_pts).reshape(-1,1,2),
+                                                 cv2.RANSAC, 5.0)
+            if H_refined is None:
+                self.status_label.setText("Homography estimation failed; using affine result.")
+                refined_image = canvas
+            else:
+                inliers = int(np.count_nonzero(mask)) if mask is not None else 0
+                self.status_label.setText(f"Homography computed with {inliers} inliers. Warping image...")
+                QApplication.processEvents()
+                refined_image = cv2.warpPerspective(canvas, H_refined, (W, H), flags=cv2.INTER_LINEAR)
+        # --- End Homography Refinement ---
 
+        self.aligned_image = refined_image
+        self.update_preview(self.result_preview_label, refined_image)
         QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} affine inliers.")
         self.show_transform_info(best_matrix)
 
