@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_submodules
 photutils_submodules = collect_submodules('photutils')
 
 a = Analysis(
-    ['setiastrosuitelinux.py'],
+    ['setiastrosuite_linuxlegacy.py'],
     pathex=[],
     binaries=[],
     datas=[('/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/CITATION', 'astroquery'), 
@@ -37,6 +37,8 @@ a = Analysis(
     ('flipvertical.png', '.'),
     ('rotateclockwise.png', '.'),
     ('rotatecounterclockwise.png', '.'),
+    ('platesolve.png', '.'),
+    ('psf.png', '.'),    
     ('rescale.png', '.'),
     ('staralign.png', '.'),
     ('maskcreate.png', '.'),
@@ -64,7 +66,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='setiastrosuitelinux',
+    name='setiastrosuite_linuxlegacy',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
