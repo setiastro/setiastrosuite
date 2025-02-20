@@ -1,9 +1,9 @@
 {
-  "version": "2.10.12",
+  "version": "2.10.13",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.12/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.13/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.13/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.10.13/setiastrosuite_linux"
   },
-  "notes": "User defined variables now for tuning Mosaic Master along with Polynomial warping for better large mosaic fits.  Few Bug fixes "
+  "notes": "Maintenance update for various bug fixes "
 }
