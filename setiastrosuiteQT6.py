@@ -208,7 +208,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.12"
+VERSION = "2.10.13"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1268,7 +1268,7 @@ class AstroEditingSuite(QMainWindow):
                 self.psf_viewer_dialog.updateImage(image)
 
         # Connect the image_changed signal.
-        self.image_manager.image_changed.connect(update_psf)
+        #self.image_manager.image_changed.connect(update_psf)
 
         self.psf_viewer_dialog.show()
 
@@ -10267,6 +10267,7 @@ class PSFViewer(QDialog):
         self.image = image
         self.zoom_factor = 1.0
         self.log_scale = False
+        self.star_catalog = None
         self.histogram_mode = 'PSF'  # Can be toggled later
         # Prompt the user for mode.
         mode, ok = QInputDialog.getItem(
@@ -10566,6 +10567,7 @@ class PSFViewer(QDialog):
         # Determine the data to histogram:
         if self.star_catalog is None or len(self.star_catalog) == 0:
             data = np.array([])
+            bin_edges = np.linspace(0, 1, bin_count + 1)
         else:
             if self.histogram_mode == 'PSF':
                 # Use the 'fwhm_used' column (should be between 2 and 10)
@@ -11332,9 +11334,9 @@ class WaveScaleHDRDialog(QDialog):
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
         if event.angleDelta().y() > 0:
-            self.zoom_in()
+            self._zoom_in()
         else:
-            self.zoom_out()
+            self._zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
@@ -19219,22 +19221,19 @@ class CosmicClarityTab(QWidget):
         # Apply autostretch if enabled.
         if self.auto_stretch_button.isChecked():
             target_median = 0.25
-            # Check if we have a color image (expecting 3 channels).
-            if display_image.ndim < 3 or display_image.shape[2] != 3:
-                # If it's not a 3-channel image, treat it as grayscale.
+            # Check image dimensions to decide whether it's mono or color.
+            if display_image.ndim < 3 or (display_image.ndim == 3 and display_image.shape[2] != 3):
+                # Treat as grayscale: if image is 3D but not 3 channels, pick one channel
                 try:
-                    stretched = stretch_mono_image(
-                        display_image if display_image.ndim == 2 else display_image[:, :, 0],
-                        target_median,
-                        normalize=True
-                    )
+                    mono_source = display_image if display_image.ndim == 2 else display_image[:, :, 0]
+                    stretched = stretch_mono_image(mono_source, target_median, normalize=True)
                     # Convert grayscale to 3-channel for display.
                     display_image = np.stack([stretched] * 3, axis=-1)
                 except Exception as e:
                     print(f"[ERROR] Failed to stretch mono image: {e}")
                     return
             else:
-                # If we have a color image, proceed.
+                # Color image with three channels.
                 try:
                     display_image = stretch_color_image(display_image, target_median, linked=False, normalize=True)
                 except Exception as e:
@@ -20500,17 +20499,40 @@ class PreviewDialog(QDialog):
         target_median = 0.25  # Target median for stretching
 
         if self.autostretch_enabled:
-            if self.is_mono:  # Apply mono stretch
-                # Directly use the 2D array for mono images
-                stretched_mono = stretch_mono_image(self.np_image, target_median)  # Mono image is 2D
-                display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
-            else:  # Apply color stretch
-                display_image = stretch_color_image(self.np_image, target_median, linked=False)
+            # Check the dimensions of self.np_image instead of relying on is_mono.
+            if self.np_image.ndim < 3:
+                # 2D array: grayscale image.
+                try:
+                    stretched = stretch_mono_image(self.np_image, target_median)
+                    display_image = np.stack([stretched] * 3, axis=-1)  # Convert to RGB for display.
+                except Exception as e:
+                    print(f"[ERROR] Failed to stretch mono image: {e}")
+                    return
+            elif self.np_image.ndim == 3 and self.np_image.shape[2] == 1:
+                # 3D array but with one channel.
+                try:
+                    mono = np.squeeze(self.np_image, axis=-1)
+                    stretched = stretch_mono_image(mono, target_median)
+                    display_image = np.stack([stretched] * 3, axis=-1)
+                except Exception as e:
+                    print(f"[ERROR] Failed to stretch single-channel image: {e}")
+                    return
+            elif self.np_image.ndim == 3 and self.np_image.shape[2] == 3:
+                # Color image.
+                try:
+                    display_image = stretch_color_image(self.np_image, target_median, linked=False)
+                except Exception as e:
+                    print(f"[ERROR] Failed to stretch color image: {e}")
+                    return
+            else:
+                print("[ERROR] Unexpected image shape during autostretch!")
+                return
         else:
             display_image = self.np_image  # Use original image if autostretch is off
 
-        # Convert and display the QImage
+        # Convert and display the QImage.
         self.display_qimage(display_image)
+
 
 
     def undo_last_process(self):
