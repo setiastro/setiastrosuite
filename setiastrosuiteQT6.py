@@ -3239,6 +3239,8 @@ class AstroEditingSuite(QMainWindow):
         Removes stars from the current image using StarNet and generates a stars-only image.
         Supports Windows, macOS, and Linux platforms.
         """
+        # Refresh the StarNet executable path from preferences.
+        self.starnet_exe_path = self.settings.value("starnet/exe_path", "")
 
         print("Starting star removal process...")
 
@@ -21493,7 +21495,7 @@ class StatisticalStretchTab(QWidget):
         # Buttons (Undo and Preview Stretch)
         button_layout = QHBoxLayout()
 
-        self.previewButton = QPushButton('Preview Stretch', self)
+        self.previewButton = QPushButton('Apply Stretch', self)
         self.previewButton.clicked.connect(self.previewStretch)
         button_layout.addWidget(self.previewButton)
 
