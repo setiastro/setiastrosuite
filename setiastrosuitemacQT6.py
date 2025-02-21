@@ -205,7 +205,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.13"
+VERSION = "2.10.14"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3449,10 +3449,11 @@ class AstroEditingSuite(QMainWindow):
         dialog.append_text("Stars-only image generated.\n")
 
         # Step 10: Prompt user to save Stars Only Image
+        working_dir = self.settings.value("working_directory", os.getcwd())
         save_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Stars Only Image",
-            self.starnet_dir,  # Updated to use instance attribute
+            working_dir,  # Now using the working directory from preferences
             "TIFF Files (*.tif *.tiff);;PNG Files (*.png)"
         )
 
@@ -3806,7 +3807,7 @@ class AstroEditingSuite(QMainWindow):
             print("No file path provided in metadata.")
         
         # If slot == 0 and we have a valid image, update dimensions
-        if slot == 0 and image is not None:
+        if image is not None:
             # image should be a numpy array with shape (height, width[, channels])
             h, w = image.shape[:2]
             self.dim_label.setText(f"{w} x {h}")
@@ -10567,10 +10568,10 @@ class PSFViewer(QDialog):
             bin_edges = np.linspace(0, 1, bin_count + 1)
         else:
             if self.histogram_mode == 'PSF':
-                # Use the 'fwhm_used' column (should be between 2 and 10)
-                data = np.array(self.star_catalog['fwhm_used'])
-                # Set bin range to cover 0 to 10.
-                bin_edges = np.linspace(0, 10, bin_count + 1)
+                # Use the HFR (Half Flux Radius) by dividing the FWHM values by 2.
+                data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
+                # Set bin range accordingly (e.g. 0 to 5 if original FWHM ranged from 0 to 10).
+                bin_edges = np.linspace(0, 5, bin_count + 1)
             else:
                 # Use the 'flux' column; let bins span the range of flux.
                 data = np.array(self.star_catalog['flux'])
@@ -10657,7 +10658,8 @@ class PSFViewer(QDialog):
             # If 'fwhm_used' is present, move it to the front.
             if 'fwhm_used' in colnames:
                 colnames.remove('fwhm_used')
-                colnames.insert(0, 'fwhm_used')
+                # Replace with HFR as the displayed column name.
+                colnames.insert(0, 'HFR')
 
         # Update the table to have one column per desired parameter.
         self.stats_table.setColumnCount(len(colnames))
@@ -10668,7 +10670,11 @@ class PSFViewer(QDialog):
         # For each column, compute and display the statistics.
         for col_index, col in enumerate(colnames):
             try:
-                col_data = np.array(self.star_catalog[col], dtype=float)
+                if col == 'HFR':
+                    # Get the original fwhm_used values and convert them to HFR.
+                    col_data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
+                else:
+                    col_data = np.array(self.star_catalog[col], dtype=float)
                 min_val = np.min(col_data)
                 max_val = np.max(col_data)
                 med_val = np.median(col_data)
@@ -28031,9 +28037,9 @@ class HaloBGonTab(QWidget):
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
         if event.angleDelta().y() > 0:
-            self.zoom_in()
+            self.zoomIn()
         else:
-            self.zoom_out()
+            self.zoomOut()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
