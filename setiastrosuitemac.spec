@@ -40,6 +40,7 @@ a = Analysis(
         ('wimilogo.png', '.'), 
         ('wrench_icon.png', '.'), 
         ('platesolve.png', '.'),
+        ('supernova.png', '.'),
         ('psf.png', '.'),        
         ('eye.png', '.'), 
         ('disk.png', '.'), 
