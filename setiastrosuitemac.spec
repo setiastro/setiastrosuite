@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
-
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 from PyInstaller.utils.hooks import (
     collect_submodules,
     collect_data_files,
     collect_dynamic_libs
 )
+
+import sys
+import types
+
+# Create a dummy module if it doesn't exist
+if "numba.core.types.old_scalars" not in sys.modules:
+    dummy = types.ModuleType("numba.core.types.old_scalars")
+    sys.modules["numba.core.types.old_scalars"] = dummy
 
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import get_package_paths
@@ -25,33 +32,29 @@ dask_data = collect_data_files('dask', include_py_files=False)
 from PyInstaller.utils.hooks import get_package_paths
 
 photutils_path = get_package_paths('photutils')[0]
-
-directory = '/Users/jackson/Documents/GitHub/setiastrosuite'
-
 a = Analysis(
     ['setiastrosuitemacQT6.py'],
     pathex=[],
     binaries=[],
     datas=[
-        (directory + '/.venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
+        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
         ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
-        ('celestial_catalog.csv', '.'), 
+         ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
         ('wimilogo.png', '.'), 
         ('wrench_icon.png', '.'), 
         ('platesolve.png', '.'),
         ('supernova.png', '.'),
-        ('psf.png', '.'),        
+        ('psf.png', '.'),         
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
-        ('rescale.png', '.'),  
-        ('staralign.png', '.'),       
         ('LExtract.png', '.'),
         ('LInsert.png', '.'),
         ('slot1.png', '.'),
         ('slot0.png', '.'),
         ('slot2.png', '.'),
+        ('mosaic.png', '.'),
         ('hdr.png', '.'),
         ('slot3.png', '.'),
         ('slot4.png', '.'),
@@ -59,11 +62,11 @@ a = Analysis(
         ('slot6.png', '.'),
         ('slot7.png', '.'),
         ('slot8.png', '.'),
-        ('slot9.png', '.'),   
+        ('slot9.png', '.'),  
         ('rescale.png', '.'),  
         ('staralign.png', '.'),
-        ('pixelmath.png', '.'),
-        ('histogram.png', '.'),   
+        ('pixelmath.png', '.'),   
+        ('histogram.png', '.'),     
         ('invert.png', '.'),
         ('fliphorizontal.png', '.'),
         ('flipvertical.png', '.'),
@@ -90,14 +93,14 @@ a = Analysis(
         ('font.png', '.'), 
         ('spinner.gif', '.'), 
         ('cvs.png', '.'), 
-        (directory + '/.venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
-        (directory + '/.venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
+        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
+        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
     ] + dask_data+ photutils_data,
     hiddenimports=[] + photutils_submodules,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'torchvision'],
+    excludes=['torch', 'torchvision', 'PyQt5'],
     noarchive=False,
     optimize=0,
 )
@@ -109,6 +112,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
+    runtime_hooks=['path/to/numba_runtime_hook.py'],
     name='setiastrosuitemac',
     debug=False,
     bootloader_ignore_signals=False,
@@ -122,6 +126,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=[directory + 'astrosuite.icns'],
+    icon=['/Users/franklinmarek/cosmicclarity/astrosuite.icns'],
     onefile=True  # Enable single-file mode
 )
+
+
+
