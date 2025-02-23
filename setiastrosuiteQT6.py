@@ -21579,6 +21579,12 @@ class CosmicClarityTab(QWidget):
             self._execute_cosmic_clarity(*self.operation_queue.pop(0))
 
     def _execute_cosmic_clarity(self, mode, output_suffix):
+        if self.loaded_image_path is None:
+            print("Warning: loaded_image_path is None. Using default base filename 'image'.")
+            base_filename = "image"
+        else:
+            base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
         """Execute a single Cosmic Clarity operation."""
         # Determine the correct executable name based on platform and mode
         if os.name == 'nt':
@@ -21606,9 +21612,6 @@ class CosmicClarityTab(QWidget):
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
 
-        # Construct the base filename from the loaded image path
-        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
-        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
         input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
