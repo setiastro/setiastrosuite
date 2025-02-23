@@ -30,11 +30,14 @@ from io import BytesIO
 import re
 from scipy.spatial import Delaunay, KDTree
 import random
+if sys.stdout is not None:
+    sys.stdout.reconfigure(encoding='utf-8')
 
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
+from numba import njit, prange
 
 
 from astropy.wcs.utils import skycoord_to_pixel
@@ -172,6 +175,7 @@ from PyQt6.QtGui import (
     QPolygonF,
     QPalette, 
     QWheelEvent, 
+    QDoubleValidator,
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -205,7 +209,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.10.14"
+VERSION = "2.11.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -258,7 +262,8 @@ if hasattr(sys, '_MEIPASS'):
     staralign_path = os.path.join(sys._MEIPASS, 'staralign.png')
     mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')  
     platesolve_path = os.path.join(sys._MEIPASS, 'platesolve.png')
-    psf_path = os.path.join(sys._MEIPASS, 'psf.png')      
+    psf_path = os.path.join(sys._MEIPASS, 'psf.png')    
+    supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')      
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -309,6 +314,7 @@ else:
     mask_path = 'maskapply.png'
     platesolve_path = 'platesolve.png'
     psf_path = 'psf.png'    
+    supernova_path = 'supernova.png'    
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -390,7 +396,11 @@ class AstroEditingSuite(QMainWindow):
         
         open_project_action = QAction("Open Project", self)
         open_project_action.setStatusTip("Open a saved project")
-        open_project_action.triggered.connect(self.open_project)        
+        open_project_action.triggered.connect(self.open_project)   
+
+        new_project_action = QAction("New Project", self)
+        new_project_action.setStatusTip("Clear the current project and start a new project (this will erase all data)")
+        new_project_action.triggered.connect(self.new_project)     
 
         # Add actions to the File menu
         file_menu.addAction(open_action)
@@ -401,6 +411,7 @@ class AstroEditingSuite(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(save_project_action)   # New action
         file_menu.addAction(open_project_action)   # New action
+        file_menu.addAction(new_project_action) 
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
 
@@ -730,7 +741,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Mosaic Menu
         # --------------------
-        mosaic_menu = menubar.addMenu("Mosaic")
+        mosaic_menu = menubar.addMenu("Star Stuff")
 
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
@@ -753,7 +764,13 @@ class AstroEditingSuite(QMainWindow):
         psf_viewer_action = QAction(QIcon(psf_path), "PSF Viewer", self)
         psf_viewer_action.setStatusTip("View PSF histograms and star statistics")
         psf_viewer_action.triggered.connect(self.psf_viewer)
-        mosaic_menu.addAction(psf_viewer_action)          
+        mosaic_menu.addAction(psf_viewer_action)        
+
+        # Supernova Action (New!)
+        supernova_action = QAction(QIcon(supernova_path), "SuperNova Asteroid Hunter", self)
+        supernova_action.setStatusTip("Hunt for anomalies in your images")
+        supernova_action.triggered.connect(self.open_supernova_hunter)
+        mosaic_menu.addAction(supernova_action)    
 
         # --------------------
         # Toolbar
@@ -899,7 +916,8 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
         mosaictoolbar.addAction(plate_solver_action)
-        mosaictoolbar.addAction(psf_viewer_action)        
+        mosaictoolbar.addAction(psf_viewer_action)     
+        mosaictoolbar.addAction(supernova_action)   
         
         # --------------------
         # Mask Toolbar
@@ -1064,6 +1082,13 @@ class AstroEditingSuite(QMainWindow):
         check_update_action.triggered.connect(self.check_for_updates)
         update_menu.addAction(check_update_action)
 
+        # Help Menu with About action
+        help_menu = menubar.addMenu("About")
+        about_action = QAction("About", self)
+        about_action.setStatusTip("About AstroEditingSuite")
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
         # --------------------
         # Apply Default Theme
         # --------------------
@@ -1077,6 +1102,17 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+
+    def show_about_dialog(self):
+
+        dialog = AboutDialog(self)
+        dialog.show()
+
+    def open_supernova_hunter(self):
+        # Instantiate the SuperNova/Asteroid Hunter widget
+        self.supernova_hunter_tab = SupernovaAsteroidHunterTab()
+        # Show the new window (or tab)
+        self.supernova_hunter_tab.show()
 
     def open_preview_window(self, slot):
         """Opens a separate preview window for the specified image slot."""
@@ -1436,6 +1472,76 @@ class AstroEditingSuite(QMainWindow):
             action.setStatusTip(f"Open preview for {new_name}")        
 
         print("Project loaded successfully from:", fileName)
+
+    def new_project(self):
+        """
+        Clears all current project data (images, masks, undo/redo stacks, etc.)
+        after warning the user that this operation is destructive.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "New Project",
+            "This will erase all data in current slots and undo/redo stacks. Are you sure you want to create a new project?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            print("New project canceled by user.")
+            return
+
+        # Clear ImageManager data
+        self.image_manager._images = {i: None for i in range(self.image_manager.max_slots)}
+        self.image_manager._metadata = {i: {} for i in range(self.image_manager.max_slots)}
+        self.image_manager._undo_stacks = {i: [] for i in range(self.image_manager.max_slots)}
+        self.image_manager._redo_stacks = {i: [] for i in range(self.image_manager.max_slots)}
+        self.image_manager.current_slot = 0
+
+        # Clear MaskManager data
+        self.mask_manager._masks = {}
+        self.mask_manager.applied_mask = None
+        self.mask_manager.applied_mask_slot = None
+
+        # Clear preview windows if any
+        self.preview_windows = {}
+
+        # Reset custom slot names to defaults
+        self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+        self.mask_slot_names = {i: f"Mask Slot {i}" for i in range(5)}
+
+        # Update UI elements that are managed outside of ImageManager
+        # For instance, update file name label or other status indicators.
+        # Here we call update_file_name with default parameters.
+        self.update_file_name(0, None, {})
+
+        # Clear all tabs that display images.
+        self.clear_all_tabs()
+
+        print("New project created: All image, mask, and undo/redo data have been cleared.")
+
+    def clear_all_tabs(self):
+        """
+        Simulate a tab click by switching to a different tab and back.
+        This forces the tab's update logic to clear the image.
+        """
+        if self.tabs.count() < 2:
+            # Only one tab—try calling clear_image() if available.
+            current_tab = self.tabs.currentWidget()
+            if hasattr(current_tab, "clear_image"):
+                current_tab.clear_image()
+            return
+
+        # Save the current index.
+        current_index = self.tabs.currentIndex()
+        # Choose a different tab index.
+        new_index = 1 if current_index == 0 else 0
+        # Switch to the new index.
+        self.tabs.setCurrentIndex(new_index)
+        # Immediately switch back.
+        self.tabs.setCurrentIndex(current_index)
+        print("Simulated tab click to clear image.")
 
     def open_histogram(self):
         # Check if a histogram dialog is already open; if so, bring it to front.
@@ -3253,6 +3359,13 @@ class AstroEditingSuite(QMainWindow):
         else:
             print(f"Using existing StarNet executable path: {self.starnet_exe_path}")
 
+        # Step 1.5: Check if the executable exists
+        if not os.path.exists(self.starnet_exe_path):
+            QMessageBox.critical(self, "StarNet Not Found",
+                                f"StarNet executable not found at {self.starnet_exe_path}. Aborting star removal process.")
+            print(f"StarNet executable not found: {self.starnet_exe_path}")
+            return
+
         # Step 2: Ensure current image is loaded
         if self.image_manager.image is None:
             QMessageBox.warning(self, "No Image", "Please load an image before removing stars.")
@@ -3265,7 +3378,8 @@ class AstroEditingSuite(QMainWindow):
         current_os = platform.system()
         print(f"Operating System detected: {current_os}")
         if current_os not in ["Windows", "Darwin", "Linux"]:
-            QMessageBox.critical(self, "Unsupported OS", f"The current operating system '{current_os}' is not supported.")
+            QMessageBox.critical(self, "Unsupported OS",
+                                f"The current operating system '{current_os}' is not supported.")
             print(f"Unsupported operating system: {current_os}")
             return
 
@@ -3300,7 +3414,6 @@ class AstroEditingSuite(QMainWindow):
             self.image_was_stretched = True
         else:
             print("Image is not linear. Proceeding without stretching.")
-            processing_image = processing_image
             self.image_was_stretched = False
 
         # Step 4: Set Command Parameters Based on OS
@@ -3343,7 +3456,6 @@ class AstroEditingSuite(QMainWindow):
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
             # macOS does NOT require the stride parameter
-            stride = None
             command = [
                 self.starnet_exe_path,
                 self.input_image_path,
@@ -3357,8 +3469,14 @@ class AstroEditingSuite(QMainWindow):
         if current_os in ["Darwin", "Linux"]:
             if not os.access(self.starnet_exe_path, os.X_OK):
                 print(f"StarNet executable not executable. Setting execute permissions for {self.starnet_exe_path}")
-                os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
-                print("Execute permissions set.")
+                try:
+                    os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
+                    print("Execute permissions set.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Permission Error",
+                                        f"Failed to set execute permissions for StarNet executable: {e}")
+                    print(f"Failed to set execute permissions for {self.starnet_exe_path}: {e}")
+                    return
             else:
                 print("StarNet executable already has execute permissions.")
         else:
@@ -3973,6 +4091,11 @@ class AstroEditingSuite(QMainWindow):
             try:
                 # Load the image into ImageManager
                 image, header, bit_depth, is_mono = load_image(file_path)
+                if image is not None:
+                    print(f"DEBUG: Loaded image max value: {image.max()}")
+                    print(f"DEBUG: Loaded image min value: {image.min()}")
+                    print(f"DEBUG: Loaded image shape: {image.shape}")
+                    print(f"DEBUG: Loaded image dtype: {image.dtype}")
                 metadata = {
                     'file_path': file_path,
                     'original_header': header,
@@ -4111,7 +4234,26 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About Seti Astro Suite")
+        layout = QVBoxLayout()
 
+        # Create a QLabel with rich text (HTML) for clickable links
+        about_text = (
+            f"<h2>Seti Astro's Suite {VERSION}</h2>"
+            "<p>Written by Franklin Marek</p>"
+            "<p>Website: <a href='http://www.setiastro.com'>www.setiastro.com</a></p>"
+            "<p>Donations: <a href='https://www.setiastro.com/checkout/donate?donatePageId=65ae7e7bac20370d8c04c1ab'>Click here to donate</a></p>"
+        )
+        label = QLabel(about_text)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        label.setOpenExternalLinks(True)
+        
+        layout.addWidget(label)
+        self.setLayout(layout)
 
 class RecombineDialog(QDialog):
     def __init__(self, available_slots, parent=None):
@@ -6449,96 +6591,272 @@ class MosaicPreviewWindow(QDialog):
     def __init__(self, image_array, title="", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title if title else "Preview")
-        self.image_array = image_array
-        self.original_array = image_array.copy()  # Keep original for re-stretching
-        self.auto_stretch = True  # Default to auto-stretch
+
+        # Keep the original array around for re-stretch or reset
+        self.original_array = image_array.copy()
+        # Current displayed array (8-bit or whatever you want)
+        self.image_array = image_array.copy()
+
+        # Zoom state
+        self.zoom_factor = 1.0
+
+        # Variables for panning (dragging)
+        self.dragging = False
+        self.last_mouse_pos = QPoint()
         self.initUI()
 
     def initUI(self):
         layout = QVBoxLayout(self)
 
-        # Preview label
+        # 1) QScrollArea to enable scrollbars for large images
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        layout.addWidget(self.scroll_area)
+
+        # 2) Label inside the scroll area
         self.preview_label = QLabel("No image yet.")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.preview_label)
+        self.scroll_area.setWidget(self.preview_label)
+        self.scroll_area.viewport().installEventFilter(self)
 
-        # Auto-Stretch Toggle
+        # 3) Auto-Stretch Toggle
         self.stretch_toggle = QCheckBox("Auto-Stretch for Display")
         self.stretch_toggle.setChecked(True)
         self.stretch_toggle.stateChanged.connect(self.update_display)
         layout.addWidget(self.stretch_toggle)
 
-        # Button row
+        # 4) Button row (Zoom, Fit, etc.)
         button_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        button_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        button_layout.addWidget(self.zoom_out_button)
+
+        self.fit_button = QPushButton("Fit to Preview")
+        self.fit_button.clicked.connect(self.fit_to_preview)
+        button_layout.addWidget(self.fit_button)
+
         self.autostretch_button = QPushButton("Reapply Stretch")
         self.autostretch_button.clicked.connect(self.autostretch_image)
         button_layout.addWidget(self.autostretch_button)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         button_layout.addWidget(close_btn)
+
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+        # Finally, display the initial image
         self.display_image(self.image_array)
 
     def display_image(self, arr):
-        """ Convert array to QPixmap and display """
+        """
+        Convert array to QPixmap and display in preview_label.
+        We'll respect self.zoom_factor to scale the pixmap.
+        """
         if arr is None or arr.size == 0:
             print("WARNING: Trying to display an empty image.")
             return
 
-        # Apply stretching only if enabled
+        # Possibly apply auto-stretch
         if self.stretch_toggle.isChecked():
-            arr = self.stretch_for_display(arr)
-
-        # Convert to 3-channel for Qt display if grayscale
-        if arr.ndim == 2:
-            arr_3ch = np.stack([arr] * 3, axis=-1)
+            arr_display = self.stretch_for_display(arr)
         else:
-            arr_3ch = arr
+            # If it's already 8-bit or float, just convert to 8-bit safely
+            arr_display = self.to_8bit(arr)
+        
+        # Convert single-channel => 3 channels if needed
+        if arr_display.ndim == 2:
+            arr_3ch = np.stack([arr_display]*3, axis=-1)
+        elif arr_display.ndim == 3 and arr_display.shape[2] == 1:
+            arr_3ch = np.concatenate([arr_display, arr_display, arr_display], axis=2)
+        else:
+            arr_3ch = arr_display
 
+        # Make QImage => QPixmap
         h, w, c = arr_3ch.shape
         bytes_per_line = w * c
         qimg = QImage(arr_3ch.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
-
         pixmap = QPixmap.fromImage(qimg)
 
-        # Scale to fit window
-        pixmap = pixmap.scaled(
-            self.preview_label.size(),
+        # Apply zoom factor
+        new_w = int(w * self.zoom_factor)
+        new_h = int(h * self.zoom_factor)
+        if new_w < 1: new_w = 1
+        if new_h < 1: new_h = 1
+
+        scaled_pixmap = pixmap.scaled(
+            new_w, new_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
-        self.preview_label.setPixmap(pixmap)
+
+        # Set the label to the scaled pixmap
+        self.preview_label.setPixmap(scaled_pixmap)
+        # Important: set the label size so the scroll area can scroll if it's bigger
+        self.preview_label.resize(scaled_pixmap.size())
 
     def stretch_for_display(self, arr):
-        """ Applies an auto-stretch to improve visualization """
-        arr = arr.astype(np.float32)
-        mn, mx = np.percentile(arr, (0.5, 99.5))  # Ignore extreme tails
+        """
+        Applies an auto-stretch to improve visualization:
+          1) Compute 0.5 and 99.5 percentiles
+          2) Rescale to [0..255]
+        """
+        arr = arr.astype(np.float32, copy=False)
+        mn, mx = np.percentile(arr, (0.5, 99.5))
         if mx > mn:
             arr = (arr - mn) / (mx - mn)
         else:
             arr = np.zeros_like(arr)
-        return (arr * 255).clip(0, 255).astype(np.uint8)
+        arr = (arr * 255).clip(0, 255).astype(np.uint8)
+        return arr
+
+    def eventFilter(self, source, event):
+        """
+        Capture mouse events on the scroll_area.viewport():
+          - Left-button press => start dragging
+          - Mouse move => if dragging, pan
+          - Left-button release => stop dragging
+          - Wheel => zoom in/out
+        """
+        if source == self.scroll_area.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.dragging = True
+                    self.last_mouse_pos = event.pos()
+                    return True  # We handled it
+            elif event.type() == QEvent.Type.MouseMove:
+                if self.dragging:
+                    # Compute how far we moved
+                    delta = event.pos() - self.last_mouse_pos
+                    self.last_mouse_pos = event.pos()
+
+                    # Adjust scrollbars
+                    h_bar = self.scroll_area.horizontalScrollBar()
+                    v_bar = self.scroll_area.verticalScrollBar()
+                    h_bar.setValue(h_bar.value() - delta.x())
+                    v_bar.setValue(v_bar.value() - delta.y())
+
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.dragging = False
+                    return True
+            elif event.type() == QEvent.Type.Wheel:
+                # Zoom in or out
+                if event.angleDelta().y() > 0:
+                    self.zoom_in()
+                else:
+                    self.zoom_out()
+                event.accept()
+                return True
+        return super().eventFilter(source, event)
+
+    def to_8bit(self, arr):
+        """
+        Simple fallback if not using auto-stretch:
+        - If float in [0..1], multiply by 255
+        - If already 8-bit, do nothing
+        """
+        if arr.dtype == np.uint8:
+            return arr
+        # else assume float [0..1]
+        return (arr*255).clip(0,255).astype(np.uint8)
 
     def update_display(self):
-        """ Toggle between raw and stretched display """
+        """
+        Called when toggling the stretch checkbox. Re-display the image.
+        """
         self.display_image(self.image_array)
 
     def autostretch_image(self):
-        """ Auto-stretch original image and update preview """
+        """
+        Auto-stretch the original image and update preview.
+        If the image has multiple channels, we do the same approach as stretch_for_display
+        but typically you'd do something more advanced for color.
+        """
         arr = self.original_array.copy()
-        if arr.ndim == 2:
-            arr_stretched = self.stretch_for_display(arr)
+        # e.g., if color, you might do a channel-by-channel approach
+        # For simplicity, let's do a grayscale approach using the mean:
+        if arr.ndim == 3:
+            # we create a single channel for stretch
+            g = np.mean(arr, axis=-1)
+            arr_stretched = self.stretch_for_display(g)
+            # Then broadcast back to 3 channels
+            arr_stretched = np.stack([arr_stretched]*3, axis=-1)
         else:
-            # If image has three channels, use the mean for stretching.
-            arr_stretched = self.stretch_for_display(np.mean(arr, axis=-1))
+            arr_stretched = self.stretch_for_display(arr)
         self.image_array = arr_stretched
         self.display_image(self.image_array)
 
+    # ---------------------
+    # ZOOM Methods
+    # ---------------------
+    def zoom_in(self):
+        self.zoom_factor *= 1.2
+        self.display_image(self.image_array)
+
+    def zoom_out(self):
+        self.zoom_factor /= 1.2
+        if self.zoom_factor < 0.05:
+            self.zoom_factor = 0.05
+        self.display_image(self.image_array)
+
+    def fit_to_preview(self):
+        """
+        Scale the image so it fits inside the scroll_area's viewport.
+        We'll measure the image's actual size, compare to the viewport,
+        and adjust zoom_factor accordingly.
+        """
+        if self.image_array is None or self.image_array.size == 0:
+            return
+
+        # We'll figure out the image's *unzoomed* dimensions
+        arr_display = self.image_array
+        if self.stretch_toggle.isChecked():
+            arr_display = self.stretch_for_display(arr_display)
+        else:
+            arr_display = self.to_8bit(arr_display)
+
+        # Convert single-channel => 3 channels if needed, to find w,h
+        if arr_display.ndim == 2:
+            arr_3ch = np.stack([arr_display]*3, axis=-1)
+        elif arr_display.ndim == 3 and arr_display.shape[2] == 1:
+            arr_3ch = np.concatenate([arr_display, arr_display, arr_display], axis=2)
+        else:
+            arr_3ch = arr_display
+
+        h, w, c = arr_3ch.shape
+
+        # The scroll area viewport size
+        viewport_size = self.scroll_area.viewport().size()
+        vw, vh = viewport_size.width(), viewport_size.height()
+
+        # Compute the scale factor to fit image inside viewport
+        scale_w = vw / w if w else 1.0
+        scale_h = vh / h if h else 1.0
+        new_zoom = min(scale_w, scale_h)
+        if new_zoom <= 0:
+            new_zoom = 0.01
+
+        self.zoom_factor = new_zoom
+        self.display_image(self.image_array)
+
     def resizeEvent(self, event):
-        """ Refresh displayed pixmap when window is resized """
+        """
+        Refresh displayed pixmap when window is resized,
+        only if we want the displayed image to keep fitting automatically.
+        But typically, we won't auto-fit on window resize if user is controlling zoom.
+        """
         super().resizeEvent(event)
+        # Optionally do:
+        # self.fit_to_preview()
+        # or if you want to keep the user-chosen zoom, just re-display:
         self.display_image(self.image_array)
 
 class MosaicSettingsDialog(QDialog):
@@ -6552,71 +6870,63 @@ class MosaicSettingsDialog(QDialog):
         layout = QFormLayout(self)
 
         # Number of Stars to Attempt to Use
-        self.starCountSpin = QSpinBox()
-        self.starCountSpin.setRange(1, 1000)
-        self.starCountSpin.setValue(self.settings.value("mosaic/num_stars", 150, type=int))
+        self.starCountSpin = CustomSpinBox(minimum=1, maximum=1000,
+                                        initial=self.settings.value("mosaic/num_stars", 150, type=int),
+                                        step=1)
         layout.addRow("Number of Stars:", self.starCountSpin)
 
         # Translation Max Tolerance
-        self.transTolSpin = QDoubleSpinBox()
-        self.transTolSpin.setRange(0.0, 10.0)
-        self.transTolSpin.setDecimals(3)
-        self.transTolSpin.setValue(self.settings.value("mosaic/translation_max_tolerance", 3.0, type=float))
+        self.transTolSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/translation_max_tolerance", 3.0, type=float),
+                                                step=0.1)
         layout.addRow("Translation Max Tolerance:", self.transTolSpin)
 
         # Scale Min Tolerance
-        self.scaleMinSpin = QDoubleSpinBox()
-        self.scaleMinSpin.setRange(0.0, 10.0)
-        self.scaleMinSpin.setDecimals(3)
-        self.scaleMinSpin.setValue(self.settings.value("mosaic/scale_min_tolerance", 0.8, type=float))
+        self.scaleMinSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/scale_min_tolerance", 0.8, type=float),
+                                                step=0.1)
         layout.addRow("Scale Min Tolerance:", self.scaleMinSpin)
 
         # Scale Max Tolerance
-        self.scaleMaxSpin = QDoubleSpinBox()
-        self.scaleMaxSpin.setRange(0.0, 10.0)
-        self.scaleMaxSpin.setDecimals(3)
-        self.scaleMaxSpin.setValue(self.settings.value("mosaic/scale_max_tolerance", 1.25, type=float))
+        self.scaleMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/scale_max_tolerance", 1.25, type=float),
+                                                step=0.1)
         layout.addRow("Scale Max Tolerance:", self.scaleMaxSpin)
 
         # Rotation Max Tolerance
-        self.rotationMaxSpin = QDoubleSpinBox()
-        self.rotationMaxSpin.setRange(0.0, 180.0)
-        self.rotationMaxSpin.setDecimals(2)
-        self.rotationMaxSpin.setValue(self.settings.value("mosaic/rotation_max_tolerance", 45.0, type=float))
+        self.rotationMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=180.0,
+                                                initial=self.settings.value("mosaic/rotation_max_tolerance", 45.0, type=float),
+                                                step=0.1)
+        # Force two decimals in display
+        self.rotationMaxSpin.lineEdit.setText(f"{self.rotationMaxSpin.value():.2f}")
         layout.addRow("Rotation Max Tolerance (°):", self.rotationMaxSpin)
 
-        # Skew Max Tolerance (dot product of normalized columns; 0 means orthogonal)
-        self.skewMaxSpin = QDoubleSpinBox()
-        self.skewMaxSpin.setRange(0.0, 1.0)
-        self.skewMaxSpin.setDecimals(3)
-        self.skewMaxSpin.setSingleStep(0.01)
-        self.skewMaxSpin.setValue(self.settings.value("mosaic/skew_max_tolerance", 0.1, type=float))
+        # Skew Max Tolerance
+        self.skewMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=1.0,
+                                            initial=self.settings.value("mosaic/skew_max_tolerance", 0.1, type=float),
+                                            step=0.01)
         layout.addRow("Skew Max Tolerance:", self.skewMaxSpin)
 
         # FWHM for Star Detection
-        self.fwhmSpin = QDoubleSpinBox()
-        self.fwhmSpin.setRange(0.0, 20.0)
-        self.fwhmSpin.setDecimals(2)
-        self.fwhmSpin.setValue(self.settings.value("mosaic/star_fwhm", 3.0, type=float))
+        self.fwhmSpin = CustomDoubleSpinBox(minimum=0.0, maximum=20.0,
+                                            initial=self.settings.value("mosaic/star_fwhm", 3.0, type=float),
+                                            step=0.1)
+        self.fwhmSpin.lineEdit.setText(f"{self.fwhmSpin.value():.2f}")
         layout.addRow("FWHM for Star Detection:", self.fwhmSpin)
 
         # Sigma for Star Detection
-        self.sigmaSpin = QDoubleSpinBox()
-        self.sigmaSpin.setRange(0.0, 10.0)
-        self.sigmaSpin.setDecimals(2)
-        self.sigmaSpin.setValue(self.settings.value("mosaic/star_sigma", 3.0, type=float))
+        self.sigmaSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                            initial=self.settings.value("mosaic/star_sigma", 3.0, type=float),
+                                            step=0.1)
+        self.sigmaSpin.lineEdit.setText(f"{self.sigmaSpin.value():.2f}")
         layout.addRow("Sigma for Star Detection:", self.sigmaSpin)
 
-        self.polyDegreeSpin = QSpinBox()
-        self.polyDegreeSpin.setRange(1, 6)
-        self.polyDegreeSpin.setValue(self.settings.value("mosaic/poly_degree", 3, type=int))
+        # Polynomial Degree
+        self.polyDegreeSpin = CustomSpinBox(minimum=1, maximum=6,
+                                            initial=self.settings.value("mosaic/poly_degree", 3, type=int),
+                                            step=1)
         layout.addRow("Polynomial Degree:", self.polyDegreeSpin)
 
-
-        buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttonBox.accepted.connect(self.accept)
-        buttonBox.rejected.connect(self.reject)
-        layout.addRow(buttonBox)
 
     def accept(self):
         # Save the values to QSettings
@@ -9513,6 +9823,14 @@ class PlateSolver(QDialog):
                     is_mono = True
                 else:
                     is_mono = False
+
+                # If mono, expand it to 3-channel
+                if is_mono:
+                    original_image_data = np.stack([original_image_data] * 3, axis=-1)  # Convert to RGB-equivalent format
+                    is_mono = False  # Mark as non-mono since we expanded it
+
+                if "file_path" in solved_header:
+                    del solved_header["file_path"]                    
                 # Save the original image data with the solved header.
                 save_image(
                     img_array=original_image_data,
@@ -10689,6 +11007,795 @@ class PSFViewer(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row_index, col_index, item)
 
+@njit(parallel=True)
+def _cosmetic_correction_numba(padded, corrected, H, W, C, half_w, hot_sigma, cold_sigma):
+    """
+    Numba-compiled helper for local outlier correction.
+    padded   : (H + 2*half_w, W + 2*half_w, C) padded image
+    corrected: (H, W, C) array we write into
+    H, W, C  : Dimensions of the unpadded image
+    half_w   : half of window_size (e.g. 1 if window_size=3)
+    hot_sigma, cold_sigma: thresholds
+    """
+    window_size = half_w * 2 + 1
+    # Temporary array to hold the neighborhood pixel values (for median calc).
+    # For a 3×3 patch, that's 9 elements.
+    local_vals = np.empty((window_size * window_size,), dtype=np.float32)
+
+    for y in prange(H):
+        for x in range(W):
+            # Coordinates in the padded image
+            y_p = y + half_w
+            x_p = x + half_w
+
+            for c_i in range(C):
+                # Extract the local patch
+                k = 0
+                for dy in range(-half_w, half_w+1):
+                    for dx in range(-half_w, half_w+1):
+                        local_vals[k] = padded[y_p + dy, x_p + dx, c_i]
+                        k += 1
+
+                # Compute local median
+                # For 3×3, sorting 9 items is cheap:
+                local_vals.sort()
+                M = local_vals[len(local_vals)//2]  # middle item => median
+
+                # Median absolute deviation (MAD)
+                for n in range(len(local_vals)):
+                    local_vals[n] = abs(local_vals[n] - M)
+                local_vals.sort()
+                dev = 1.4826 * local_vals[len(local_vals)//2]  # scale by 1.4826
+
+                T = corrected[y, x, c_i]  # original pixel
+                # Check hot/cold
+                if T > M + hot_sigma * dev:
+                    corrected[y, x, c_i] = M
+                elif T < M - cold_sigma * dev:
+                    corrected[y, x, c_i] = M
+
+
+def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
+    """
+    Local outlier (hot/cold) correction accelerated by Numba.
+    - For each pixel, we get its window_size×window_size neighborhood,
+    compute the local median (M) & robust scale estimate (DEV),
+    then mark pixel as hot if T > M + hot_sigma*DEV or cold if T < M - cold_sigma*DEV,
+    in which case we replace T with M.
+
+    image      : np.ndarray, shape (H,W) or (H,W,3) in [0..1].
+    hot_sigma  : float, threshold above local median for "hot"
+    cold_sigma : float, threshold below local median for "cold"
+    window_size: int, e.g. 3 => 3×3 patch
+
+    returns an np.ndarray of the same shape with outliers replaced.
+    """
+    was_gray = False
+    if image.ndim == 2:  # shape (H, W)
+        was_gray = True
+        image = image[:, :, np.newaxis]
+
+    H, W, C = image.shape
+    half_w = window_size // 2
+
+    # Reflect-pad the image for easy neighborhood extraction
+    padded = np.pad(
+        image,
+        pad_width=((half_w, half_w), (half_w, half_w), (0, 0)),
+        mode='reflect'
+    ).astype(np.float32)
+
+    # We'll operate on a copy so as not to modify the input.
+    corrected = image.astype(np.float32).copy()
+
+    # Call the numba function
+    _cosmetic_correction_numba(padded, corrected, H, W, C, half_w, hot_sigma, cold_sigma)
+
+    if was_gray:
+        # Squeeze back to 2D
+        corrected = corrected[:, :, 0]
+
+    return corrected
+
+
+class SupernovaAsteroidHunterTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        # Parameters for the hunter
+        self.parameters = {
+            "referenceImagePath": "",
+            "searchImagePaths": [],
+            "threshold": 0.10  # Default threshold value
+        }
+        # Preprocessed images will be stored here
+        self.preprocessed_reference = None
+        self.preprocessed_search = []  # List of dicts: {"path": str, "image": np.array}
+        # Detected anomaly data for each search image
+        self.anomalyData = []
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # Instruction Label
+        instructions = QLabel("Select the reference image and search images. Then click Process to hunt for anomalies.")
+        layout.addWidget(instructions)
+
+        # --- Reference Image Selection ---
+        ref_layout = QHBoxLayout()
+        self.ref_line_edit = QLineEdit(self)
+        self.ref_line_edit.setPlaceholderText("No reference image selected")
+        self.ref_button = QPushButton("Select Reference Image", self)
+        self.ref_button.clicked.connect(self.selectReferenceImage)
+        ref_layout.addWidget(self.ref_line_edit)
+        ref_layout.addWidget(self.ref_button)
+        layout.addLayout(ref_layout)
+
+        # --- Search Images Selection ---
+        search_layout = QHBoxLayout()
+        self.search_list = QListWidget(self)
+        self.search_button = QPushButton("Select Search Images", self)
+        self.search_button.clicked.connect(self.selectSearchImages)
+        search_layout.addWidget(self.search_list)
+        search_layout.addWidget(self.search_button)
+        layout.addLayout(search_layout)
+
+        # --- Cosmetic Correction Checkbox ---
+        self.cosmetic_checkbox = QCheckBox("Apply Cosmetic Correction before Preprocessing", self)
+        layout.addWidget(self.cosmetic_checkbox)
+
+        # --- Threshold Slider ---
+        thresh_layout = QHBoxLayout()
+        self.thresh_label = QLabel("Anomaly Detection Threshold: 0.10", self)
+        self.thresh_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.thresh_slider.setMinimum(1)
+        self.thresh_slider.setMaximum(50)  # Represents 0.01 to 0.50
+        self.thresh_slider.setValue(10)      # 10 => 0.10 threshold
+        self.thresh_slider.valueChanged.connect(self.updateThreshold)
+        thresh_layout.addWidget(self.thresh_label)
+        thresh_layout.addWidget(self.thresh_slider)
+        layout.addLayout(thresh_layout)
+
+        # --- Process Button ---
+        self.process_button = QPushButton("Process (Cosmetic Correction, Preprocess, and Search)", self)
+        self.process_button.clicked.connect(self.process)
+        layout.addWidget(self.process_button)
+
+        # --- Progress Labels ---
+        self.preprocess_progress_label = QLabel("Preprocessing progress: 0 / 0", self)
+        self.search_progress_label = QLabel("Processing progress: 0 / 0", self)
+        layout.addWidget(self.preprocess_progress_label)
+        layout.addWidget(self.search_progress_label)
+
+        # -- Add a new status label --
+        self.status_label = QLabel("Status: Idle", self)
+        layout.addWidget(self.status_label)
+
+        # --- New Instance Button ---
+        self.new_instance_button = QPushButton("New Instance", self)
+        self.new_instance_button.clicked.connect(self.newInstance)
+        layout.addWidget(self.new_instance_button)
+
+        self.setLayout(layout)
+        self.setWindowTitle("Supernova/Asteroid Hunter")
+
+    def updateThreshold(self, value):
+        threshold = value / 100.0  # e.g. slider value 10 becomes 0.10
+        self.parameters["threshold"] = threshold
+        self.thresh_label.setText(f"Anomaly Detection Threshold: {threshold:.2f}")
+
+    def selectReferenceImage(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "",
+                                                   "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
+        if file_path:
+            self.parameters["referenceImagePath"] = file_path
+            self.ref_line_edit.setText(os.path.basename(file_path))
+
+    def selectSearchImages(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Search Images", "",
+                                                     "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
+        if file_paths:
+            self.parameters["searchImagePaths"] = file_paths
+            self.search_list.clear()
+            for path in file_paths:
+                self.search_list.addItem(os.path.basename(path))
+
+    def process(self):
+        self.status_label.setText("Process started...")
+        QApplication.processEvents()
+
+        # If cosmetic correction is enabled, run it first
+        if self.cosmetic_checkbox.isChecked():
+            self.status_label.setText("Running Cosmetic Correction...")
+            QApplication.processEvents()
+            self.runCosmeticCorrectionIfNeeded()
+
+        self.status_label.setText("Preprocessing images...")
+        QApplication.processEvents()
+        self.preprocessImages()
+
+        self.status_label.setText("Analyzing anomalies...")
+        QApplication.processEvents()
+        self.runSearch()
+
+        self.status_label.setText("Process complete.")
+        QApplication.processEvents()
+
+
+    def runCosmeticCorrectionIfNeeded(self):
+        """
+        Runs cosmetic correction on each search image...
+        """
+        # Dictionary to hold corrected images
+        self.cosmetic_images = {}
+
+        for idx, image_path in enumerate(self.parameters["searchImagePaths"]):
+            try:
+                # Update status label to show which image is being handled
+                self.status_label.setText(f"Cosmetic Correction: {idx+1}/{len(self.parameters['searchImagePaths'])} => {os.path.basename(image_path)}")
+                QApplication.processEvents()
+
+                img, header, bit_depth, is_mono = load_image(image_path)
+                if img is None:
+                    print(f"Unable to load image: {image_path}")
+                    continue
+
+                # Numba correction
+                corrected = bulk_cosmetic_correction_numba(
+                    img,
+                    hot_sigma=3.0,
+                    cold_sigma=3.0,
+                    window_size=3
+                )
+                self.cosmetic_images[image_path] = corrected
+                print(f"Cosmetic correction (Numba) applied to: {image_path}")
+
+            except Exception as e:
+                print(f"Error in cosmetic correction for {image_path}: {e}")
+
+
+    def preprocessImages(self):
+        # Update status label for reference image
+        self.status_label.setText("Preprocessing reference image...")
+        QApplication.processEvents()
+
+        ref_path = self.parameters["referenceImagePath"]
+        if not ref_path:
+            QMessageBox.warning(self, "Error", "No reference image selected.")
+            return
+
+        try:
+            ref_img, header, bit_depth, is_mono = load_image(ref_path)
+
+            # Create a debug prefix from the reference path (e.g. "C:/data/ref_debug")
+            debug_prefix_ref = os.path.splitext(ref_path)[0] + "_debug_ref"
+
+            self.status_label.setText("Applying background neutralization & ABE on reference...")
+            QApplication.processEvents()
+
+            # Pass debug_prefix_ref to preprocessImage
+            ref_processed = self.preprocessImage(ref_img, debug_prefix=debug_prefix_ref)
+            self.preprocessed_reference = ref_processed
+            self.preprocess_progress_label.setText("Preprocessing reference image... Done.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to preprocess reference image: {e}")
+            return
+
+        self.preprocessed_search = []
+        search_paths = self.parameters["searchImagePaths"]
+        for i, path in enumerate(search_paths):
+            try:
+                self.status_label.setText(f"Preprocessing search image {i+1}/{len(search_paths)} => {os.path.basename(path)}")
+                QApplication.processEvents()
+
+                # Create a debug prefix from the search path
+                debug_prefix_search = os.path.splitext(path)[0] + f"_debug_search_{i+1}"
+
+                if hasattr(self, 'cosmetic_images') and path in self.cosmetic_images:
+                    img = self.cosmetic_images[path]
+                else:
+                    img, header, bit_depth, is_mono = load_image(path)
+
+                # Pass debug_prefix_search to preprocessImage
+                processed = self.preprocessImage(img, debug_prefix=debug_prefix_search)
+                self.preprocessed_search.append({"path": path, "image": processed})
+
+                self.preprocess_progress_label.setText(f"Preprocessing image {i+1} of {len(search_paths)}... Done.")
+                QApplication.processEvents()
+
+            except Exception as e:
+                print(f"Failed to preprocess {path}: {e}")
+
+        self.status_label.setText("All search images preprocessed.")
+        QApplication.processEvents()
+
+
+
+    def preprocessImage(self, img, debug_prefix=None):
+        """
+        Runs the full preprocessing chain on a single image:
+        1. Background Neutralization
+        2. Automatic Background Extraction (ABE)
+        3. Pixel-math stretching
+
+        Optionally saves debug images if debug_prefix is provided.
+        """
+
+
+        # --- Step 1: Background Neutralization ---
+        if img.ndim == 3 and img.shape[2] == 3:
+            h, w, _ = img.shape
+            sample_x = int(w * 0.45)
+            sample_y = int(h * 0.45)
+            sample_w = max(1, int(w * 0.1))
+            sample_h = max(1, int(h * 0.1))
+            sample_region = img[sample_y:sample_y+sample_h, sample_x:sample_x+sample_w, :]
+            medians = np.median(sample_region, axis=(0, 1))
+            average_median = np.mean(medians)
+            neutralized = img.copy()
+            for c in range(3):
+                diff = medians[c] - average_median
+                numerator = neutralized[:, :, c] - diff
+                denominator = 1.0 - diff
+                if abs(denominator) < 1e-8:
+                    denominator = 1e-8
+                neutralized[:, :, c] = np.clip(numerator / denominator, 0, 1)
+        else:
+            neutralized = img
+
+
+        # --- Step 2: Automatic Background Extraction (ABE) ---
+        pgr = PolyGradientRemoval(
+            neutralized,
+            poly_degree=2,          # or pass in a user choice
+            downsample_scale=4,
+            num_sample_points=100
+        )
+        abe = pgr.process()  # returns final polynomial-corrected image in original domain
+
+
+        # --- Step 3: Pixel Math Stretch ---
+        stretched = self.pixel_math_stretch(abe)
+
+        return stretched
+
+
+
+    def pixel_math_stretch(self, image):
+        """
+        Replaces the old pixel math stretch logic by using the existing
+        stretch_mono_image or stretch_color_image methods. 
+        """
+        # Choose a target median (the default you’ve used elsewhere is often 0.25)
+        target_median = 0.25
+
+        # Check if the image is mono or color
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Treat it as mono
+            stretched = stretch_mono_image(
+                image.squeeze(),  # squeeze in case it's (H,W,1)
+                target_median=target_median,
+                normalize=False,  # Adjust if you want normalization
+                apply_curves=False,
+                curves_boost=0.0
+            )
+            # If it was (H,W,1), replicate to 3 channels (optional)
+            # or just keep it mono if you prefer
+            # For now, replicate to 3 channels:
+            stretched = np.stack([stretched]*3, axis=-1)
+        else:
+            # Full-color image
+            stretched = stretch_color_image(
+                image,
+                target_median=target_median,
+                linked=False,      # or False if you want per-channel stretches
+                normalize=False,  
+                apply_curves=False,
+                curves_boost=0.0
+            )
+
+        return np.clip(stretched, 0, 1)
+
+    def runSearch(self):
+        if self.preprocessed_reference is None:
+            QMessageBox.warning(self, "Error", "Reference image not preprocessed.")
+            return
+        if not self.preprocessed_search:
+            QMessageBox.warning(self, "Error", "No search images preprocessed.")
+            return
+
+        ref_gray = self.to_grayscale(self.preprocessed_reference)
+
+        self.anomalyData = []
+        total = len(self.preprocessed_search)
+        for i, search_dict in enumerate(self.preprocessed_search):
+            search_img = search_dict["image"]
+            search_gray = self.to_grayscale(search_img)
+
+            diff_img = self.subtractImagesOnce(search_gray, ref_gray)
+            anomalies = self.detectAnomaliesConnected(diff_img, threshold=self.parameters["threshold"])
+
+            # Just store the anomalies
+            self.anomalyData.append({
+                "imageName": os.path.basename(search_dict["path"]),
+                "anomalyCount": len(anomalies),
+                "anomalies": anomalies
+            })
+
+            self.search_progress_label.setText(f"Processing image {i+1} of {total}...")
+            QApplication.processEvents()
+
+        self.search_progress_label.setText("Search for anomalies complete.")
+
+        # Optionally still show the text-based summary:
+        self.showDetailedResultsDialog(self.anomalyData)
+
+        # Now build & show the anomaly tree for user double-click
+        self.showAnomalyListDialog()
+
+    def showAnomalyListDialog(self):
+        """
+        Build a QDialog with a QTreeWidget listing each image and its anomaly count.
+        Double-clicking an item will open a non-modal preview.
+        """
+        if not self.anomalyData:
+            QMessageBox.information(self, "Info", "No anomalies or no images processed.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Anomaly Results")
+
+        layout = QVBoxLayout(dialog)
+
+        self.anomaly_tree = QTreeWidget(dialog)
+        self.anomaly_tree.setColumnCount(2)
+        self.anomaly_tree.setHeaderLabels(["Image", "Anomaly Count"])
+        layout.addWidget(self.anomaly_tree)
+
+        # Populate the tree
+        for i, data in enumerate(self.anomalyData):
+            item = QTreeWidgetItem([
+                data["imageName"],
+                str(data["anomalyCount"])
+            ])
+            # Store an index or reference so we know which image to open
+            item.setData(0, Qt.ItemDataRole.UserRole, i)
+            self.anomaly_tree.addTopLevelItem(item)
+
+        # Connect double-click
+        self.anomaly_tree.itemDoubleClicked.connect(self.onAnomalyItemDoubleClicked)
+
+        dialog.setLayout(layout)
+        dialog.resize(300, 200)
+        dialog.show()  # non-modal, so the user can keep using the main window
+
+    def onAnomalyItemDoubleClicked(self, item, column):
+        """
+        Called when the user double-clicks a row in the anomaly tree.
+        We'll open a MosaicPreviewWindow showing bounding boxes for that image.
+        """
+        # Retrieve the index we stored
+        idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if idx is None:
+            return
+
+        # anomalies from anomalyData
+        anomalies = self.anomalyData[idx]["anomalies"]
+        image_name = self.anomalyData[idx]["imageName"]
+
+        # The preprocessed image from self.preprocessed_search
+        # We assume the i-th preprocessed image matches the i-th anomalyData.
+        # Make sure your code lines up these two lists the same order.
+        # e.g., i=0 => self.preprocessed_search[0], self.anomalyData[0]
+        search_img = self.preprocessed_search[idx]["image"]  # already in [0..1], shape (H,W,3)
+
+        if anomalies:
+            # Create an annotated image
+            annotated_8bit = self.draw_bounding_boxes_on_stretched(search_img, anomalies)
+
+            # Pass to MosaicPreviewWindow
+            preview = MosaicPreviewWindow(
+                annotated_8bit, 
+                title=f"Anomalies in {image_name}", 
+                parent=self
+            )
+            # Optionally disable auto-stretch so the boxes remain bright
+            preview.stretch_toggle.setChecked(False)
+            preview.resize(1200, 800)
+            preview.show()  # non-modal
+        else:
+            QMessageBox.information(self, "No Anomalies", f"No anomalies found for {image_name}.")
+
+
+    def draw_bounding_boxes_on_stretched(self,
+        stretched_image: np.ndarray, 
+        anomalies: list
+    ) -> np.ndarray:
+        """
+        1) Convert 'stretched_image' [0..1] -> [0..255] 8-bit color
+        2) Draw red rectangles for each anomaly in 'anomalies'.
+        Each anomaly is assumed to have keys: minX, minY, maxX, maxY
+        3) Return the 8-bit color image (H,W,3).
+        """
+        import cv2
+        import numpy as np
+
+        # Ensure 3 channels
+        if stretched_image.ndim == 2:
+            stretched_3ch = np.stack([stretched_image]*3, axis=-1)
+        elif stretched_image.ndim == 3 and stretched_image.shape[2] == 1:
+            stretched_3ch = np.concatenate([stretched_image]*3, axis=2)
+        else:
+            stretched_3ch = stretched_image
+
+        # Convert float [0..1] => uint8 [0..255]
+        img_bgr = (stretched_3ch * 255).clip(0,255).astype(np.uint8)
+
+        # Define the margin
+        margin = 15
+
+        # Draw red boxes in BGR color = (0, 0, 255)
+        for anomaly in anomalies:
+            x1, y1 = anomaly["minX"], anomaly["minY"]
+            x2, y2 = anomaly["maxX"], anomaly["maxY"]
+
+            # Expand the bounding box by a 10-pixel margin
+            x1_exp = x1 - margin
+            y1_exp = y1 - margin
+            x2_exp = x2 + margin
+            y2_exp = y2 + margin
+            cv2.rectangle(
+                img_bgr, (x1_exp, y1_exp), (x2_exp, y2_exp),
+                color=(255, 0, 0),
+                thickness=5
+            )
+
+        return img_bgr
+
+
+    def subtractImagesOnce(self, search_img, ref_img, debug_prefix=None):
+        """
+        Compute the absolute difference of two images (both already grayscale).
+        Both images must have the same dimensions.
+
+        Optionally, if 'debug_prefix' is provided, save the difference
+        as a debug image. For example: "mydebugprefix_diff.tif".
+        """
+        if search_img.shape != ref_img.shape:
+            raise ValueError("Image dimensions do not match for difference.")
+
+        # Both search_img and ref_img are assumed in [0..1]
+        # so the absolute difference will also be in [0..1].
+        result = search_img - ref_img
+        print("Computed difference between search and reference images.")
+
+        # If debug_prefix is specified, save the difference image
+        # For example:
+        #self.debug_save_image(
+        #    result,
+        #    prefix=debug_prefix,
+        #    step_name="diff",
+        #    ext=".tif"
+        #)
+        np.clip(result, 0, 1)  # Ensure result is in [0..1]
+        return result
+
+    def debug_save_image(self, image, prefix="debug", step_name="step", ext=".tif"):
+        """
+        Saves 'image' to disk for debugging. 
+        - 'prefix' can be a directory path or prefix for your debug images.
+        - 'step_name' is appended to the filename to indicate which step.
+        - 'ext' could be '.tif', '.png', or another format you support.
+
+        This example uses your 'save_image' function from earlier or can
+        directly use tiff.imwrite or similar.
+        """
+        import os
+        # Ensure the image is float32 in [0..1] before saving
+        image = image.astype(np.float32, copy=False)
+
+        # Build debug filename
+        filename = f"{prefix}_{step_name}{ext}"
+
+        # E.g., if you have a global 'save_image' function:
+        save_image(
+            image, 
+            filename,
+            original_format="tif",  # or "png", "fits", etc.
+            bit_depth="16-bit"
+        )
+        print(f"[DEBUG] Saved {step_name} => {filename}")
+
+    def to_grayscale(self, image):
+        """
+        Converts an image to grayscale by averaging channels if needed.
+        If the image is already 2D, return it as is.
+        """
+        if image.ndim == 2:
+            # Already grayscale
+            return image
+        elif image.ndim == 3 and image.shape[2] == 3:
+            # Average the three channels
+            return np.mean(image, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            # Squeeze out that single channel
+            return image[:, :, 0]
+        else:
+            raise ValueError(f"Unsupported image shape for grayscale: {image.shape}")
+
+    def detectAnomaliesConnected(self, diff_img: np.ndarray, threshold: float = 0.1):
+        """
+        1) Build mask = diff_img > threshold.
+        2) Optionally skip 5% border by zeroing out that region in the mask.
+        3) connectedComponentsWithStats => bounding boxes.
+        4) Filter by min_area, etc.
+        5) Return a list of anomalies, each with minX, minY, maxX, maxY, area.
+        """
+        h, w = diff_img.shape
+
+        # 1) Create the mask
+        mask = (diff_img > threshold).astype(np.uint8)
+
+        # 2) Skip 5% border (optional)
+        border_x = int(0.05 * w)
+        border_y = int(0.05 * h)
+        mask[:border_y, :] = 0
+        mask[h - border_y:, :] = 0
+        mask[:, :border_x] = 0
+        mask[:, w - border_x:] = 0
+
+        # 3) connectedComponentsWithStats => label each region
+        # connectivity=8 => 8-way adjacency
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+        # stats[i] = [x, y, width, height, area], for i in [1..num_labels-1]
+        # label_id=0 => background
+
+        anomalies = []
+        for label_id in range(1, num_labels):
+            x, y, width_, height_, area_ = stats[label_id]
+
+            # bounding box corners
+            minX = x
+            minY = y
+            maxX = x + width_ - 1
+            maxY = y + height_ - 1
+
+            # 4) Filter out tiny or huge areas if you want:
+            # e.g., skip anything <4x4 => area<16
+            if area_ < 25:
+                continue
+            # e.g., skip bounding boxes bigger than 40 in either dimension if you want
+            if width_ > 200 or height_ > 200:
+                continue
+
+            anomalies.append({
+                "minX": minX,
+                "minY": minY,
+                "maxX": maxX,
+                "maxY": maxY,
+                "area": area_
+            })
+
+        return anomalies
+
+
+    def showDetailedResultsDialog(self, anomalyData):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Anomaly Detection Results")
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit(dialog)
+        text_edit.setReadOnly(True)
+        result_text = "Detailed Anomaly Results:\n\n"
+
+        for data in anomalyData:
+            result_text += f"Image: {data['imageName']}\nAnomalies: {data['anomalyCount']}\n"
+            for group in data["anomalies"]:
+                # Now refer to 'minX', 'minY', 'maxX', 'maxY'
+                result_text += (
+                    f"  Group Bounding Box: "
+                    f"Top-Left ({group['minX']}, {group['minY']}), "
+                    f"Bottom-Right ({group['maxX']}, {group['maxY']})\n"
+                )
+            result_text += "\n"
+
+        text_edit.setText(result_text)
+        layout.addWidget(text_edit)
+        dialog.setLayout(layout)
+        dialog.show()
+
+    def showAnomaliesOnImage(self, image: np.ndarray, anomalies: list, window_title="Anomalies"):
+        """
+        Displays 'image' in a QDialog with red bounding boxes for each anomaly.
+        'image' is assumed to be float32 in [0..1], shape (H,W) or (H,W,3).
+        'anomalies' is a list of dicts, each with keys: minX, minY, maxX, maxY, etc.
+        """
+        import cv2
+        import numpy as np
+
+        # 1) Convert to 3-channel if needed
+        if image.ndim == 2:
+            # grayscale => replicate to 3-ch so we can draw colored rectangles
+            image_3ch = np.stack([image, image, image], axis=-1)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            # single-channel in last dimension
+            image_3ch = np.concatenate([image, image, image], axis=2)
+        else:
+            image_3ch = image
+
+        # 2) Convert float [0..1] => uint8 [0..255], and reorder to BGR if needed
+        # OpenCV expects BGR order for color. If your array is already RGB, we can just treat it as BGR if color correctness isn't critical. 
+        # For a quick approach, let's do it directly:
+        image_bgr = (image_3ch * 255).astype(np.uint8)
+
+        # 3) Draw bounding boxes with a margin
+        margin = 10  # You can adjust this as desired
+        height, width = image_bgr.shape[:2]
+
+        for anomaly in anomalies:
+            x1, y1 = anomaly["minX"], anomaly["minY"]
+            x2, y2 = anomaly["maxX"], anomaly["maxY"]
+
+            # Inflate the bounding box
+            x1 = max(0, x1 - margin)
+            y1 = max(0, y1 - margin)
+            x2 = min(width - 1,  x2 + margin)
+            y2 = min(height - 1, y2 + margin)
+
+            # Draw the rectangle (BGR color=(255,0,0) => Blue if you want red use (0,0,255))
+            cv2.rectangle(
+                image_bgr, 
+                (x1, y1), (x2, y2), 
+                color=(255, 0, 0),  # Blue in BGR
+                thickness=5
+            )
+
+
+        # 4) Convert the annotated BGR image back to QImage => QPixmap => show in QDialog
+        # We can do something like:
+        height, width = image_bgr.shape[:2]
+
+        # For color images, QImage.Format_RGB888 expects an RGB order
+        # We can convert BGR->RGB by:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+        qimg = QImage(
+            image_rgb.data, 
+            width, 
+            height, 
+            3 * width, 
+            QImage.Format.Format_RGB888
+        )
+        pixmap = QPixmap.fromImage(qimg)
+
+        # 5) Show in a simple QDialog with a QLabel or QGraphicsView
+        dialog = QDialog(self)
+        dialog.setWindowTitle(window_title)
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(dialog)
+        label.setPixmap(pixmap)
+        layout.addWidget(label)
+
+        dialog.setLayout(layout)
+        dialog.resize(width, height)
+        dialog.show()
+
+
+    def newInstance(self):
+        # Reset parameters and UI elements for a new run
+        self.parameters = {"referenceImagePath": "", "searchImagePaths": [], "threshold": 0.10}
+        self.ref_line_edit.clear()
+        self.search_list.clear()
+        self.cosmetic_checkbox.setChecked(False)
+        self.thresh_slider.setValue(10)
+        self.preprocess_progress_label.setText("Preprocessing progress: 0 / 0")
+        self.search_progress_label.setText("Processing progress: 0 / 0")
+        self.preprocessed_reference = None
+        self.preprocessed_search = []
+        self.anomalyData = []
+        QMessageBox.information(self, "New Instance", "Reset for a new instance.")
 
 class HDRWorker(QObject):
     """
@@ -12456,6 +13563,723 @@ class BlemishBlasterDialog(QDialog):
         super().closeEvent(event)
 
 
+class PolyGradientRemoval:
+    """
+    A headless class that replicates the polynomial background removal
+    logic from GradientRemovalDialog, minus the RBF step and UI code.
+
+    Flow:
+      1) Stretch the image (unlinked linear stretch).
+      2) Downsample.
+      3) Build an exclusion mask that:
+         - Skips zero-valued pixels in any channel.
+         - Optionally skip user-specified mask areas if desired (can pass mask to process()).
+      4) Generate sample points from corners, borders, quartiles, do gradient_descent_to_dim_spot, skip bright areas.
+      5) Fit a polynomial background and subtract it.
+      6) Re-normalize median, clip to [0..1].
+      7) Unstretch the final image back to the original domain.
+    """
+
+    def __init__(
+        self,
+        image: np.ndarray,
+        poly_degree: int = 2,
+        downsample_scale: int = 5,
+        num_sample_points: int = 100
+    ):
+        """
+        Args:
+            image (np.ndarray): Input image in [0..1], shape (H,W) or (H,W,3), float32 recommended.
+            poly_degree (int): Polynomial degree (1=linear,2=quadratic).
+            downsample_scale (int): Factor for area downsampling.
+            num_sample_points (int): Number of sample points to generate.
+        """
+        self.image = image.copy()
+        self.poly_degree = poly_degree
+        self.downsample_scale = downsample_scale
+        self.num_sample_points = num_sample_points
+
+        # For the stretch/unstretch logic
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        self.was_single_channel = False
+
+    def process(self, user_exclusion_mask: np.ndarray = None) -> np.ndarray:
+        """
+        Main pipeline to remove polynomial gradient. 
+        user_exclusion_mask: optional (H,W) boolean array, False => skip those pixels.
+        
+        Returns the final corrected image in the original brightness domain.
+        """
+        # 1) Stretch
+        stretched = self.pixel_math_stretch(self.image)
+
+        # 2) Downsample
+        small_stretched = self.downsample_image(stretched, self.downsample_scale)
+        h_s, w_s = small_stretched.shape[:2]
+
+        # 3) Build an exclusion mask in the small domain that:
+        #    - Skips zero-valued pixels
+        #    - Skips user_exclusion_mask if provided
+        final_excl_mask_small = self.build_exclusion_mask_small(small_stretched, user_exclusion_mask)
+
+        # 4) Generate sample points from corners/borders/quartiles
+        sample_points = self.generate_sample_points(
+            small_stretched,
+            num_points=self.num_sample_points,
+            exclusion_mask=final_excl_mask_small
+        )
+
+        # 5) Fit polynomial on the downsampled image
+        poly_background_small = self.fit_polynomial_gradient(
+            small_stretched, sample_points, degree=self.poly_degree
+        )
+
+        # Upscale background to full size
+        poly_background = self.upscale_background(
+            poly_background_small, stretched.shape[:2]
+        )
+
+        # Subtract
+        after_poly = stretched - poly_background
+
+        # Re-normalize median to original
+        original_median = np.median(stretched)
+        after_poly = self.normalize_image(after_poly, original_median)
+
+        # Clip
+        after_poly = np.clip(after_poly, 0, 1)
+
+        # 6) Unstretch
+        corrected = self.unstretch_image(after_poly)
+
+        return corrected
+
+    # ---------------------------------------------------------------
+    # Helper: Stretch / Unstretch
+    # ---------------------------------------------------------------
+    def pixel_math_stretch(self, image: np.ndarray) -> np.ndarray:
+        """
+        Unlinked linear stretch using your existing Numba functions.
+
+        Steps:
+        1) If single-channel, replicate to 3-ch so we can store stats & do consistent logic.
+        2) For each channel c: subtract the channel's min => data is >= 0.
+        3) Compute the median after min subtraction for that channel.
+        4) Call the appropriate Numba function:
+            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            on the 1-ch array.
+            - If 3-ch color, call _numba_color_final_formula_unlinked.
+        5) Clip to [0,1].
+        6) Store self.stretch_original_mins / medians so we can unstretch later.
+        """
+        target_median = 0.25
+
+        # 1) Handle single-channel => replicate to 3 channels
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            self.was_single_channel = True
+            image_3ch = np.stack([image.squeeze()] * 3, axis=-1)
+        else:
+            self.was_single_channel = False
+            image_3ch = image
+
+        image_3ch = image_3ch.astype(np.float32, copy=True)
+
+        H, W, C = image_3ch.shape
+        # We assume C=3 now.
+
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+
+        # 2) Subtract min per channel
+        for c in range(C):
+            cmin = image_3ch[..., c].min()
+            image_3ch[..., c] -= cmin
+            self.stretch_original_mins.append(float(cmin))
+
+        # 3) Compute median after min subtraction
+        medians_after_sub = []
+        for c in range(C):
+            cmed = float(np.median(image_3ch[..., c]))
+            medians_after_sub.append(cmed)
+        self.stretch_original_medians = medians_after_sub
+
+        # 4) Apply the final formula with your Numba functions
+        if self.was_single_channel:
+            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # on the single channel. We can do that by extracting one channel from image_3ch.
+            # Then replicate the result to 3 channels, or keep it as 1-ch?
+            # Typically we keep it as 1-ch in the end, so let's do that.
+
+            # We'll just pick channel 0, run the mono formula, store it back in a 2D array.
+            mono_array = image_3ch[..., 0]  # shape (H,W)
+            cmed = medians_after_sub[0]     # The median for that channel
+            # We call the numba function
+            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+
+            # Now place it back into image_3ch for consistency
+            for c in range(3):
+                image_3ch[..., c] = stretched_mono
+        else:
+            # 3-channel unlinked
+            medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
+            # 'image_3ch' is our 'rescaled'
+            stretched_3ch = _numba_color_final_formula_unlinked(
+                image_3ch, medians_rescaled, target_median
+            )
+            image_3ch = stretched_3ch
+
+        # 5) Clip to [0..1]
+        np.clip(image_3ch, 0.0, 1.0, out=image_3ch)
+        image = image_3ch
+        return image
+
+
+    def unstretch_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Undo the above unlinked stretch, returning to original domain.
+        """
+        image = image.astype(np.float32, copy=True)
+
+        for c in range(3):
+            cmed_stretched = np.median(image[..., c])
+            orig_med = self.stretch_original_medians[c]
+            orig_min = self.stretch_original_mins[c]
+
+            if cmed_stretched != 0 and orig_med != 0:
+                numerator = (cmed_stretched - 1)*orig_med * image[..., c]
+                denominator = cmed_stretched*(orig_med + image[..., c] - 1) - orig_med*image[..., c]
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator/denominator
+
+            image[..., c] += orig_min
+
+        image = np.clip(image, 0, 1)
+
+        if self.was_single_channel:
+            # revert to single channel
+            image = np.mean(image, axis=2, keepdims=True)
+
+        return image
+
+    # ---------------------------------------------------------------
+    # Helper: Downsample
+    # ---------------------------------------------------------------
+    def downsample_image(self, image: np.ndarray, scale: int=6) -> np.ndarray:
+        """
+        Downsamples with area interpolation.
+        """
+        h, w = image.shape[:2]
+        new_w = max(1, w//scale)
+        new_h = max(1, h//scale)
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    # ---------------------------------------------------------------
+    # Helper: Build an Exclusion Mask in the Small Domain
+    # ---------------------------------------------------------------
+    def build_exclusion_mask_small(
+        self, small_image: np.ndarray, user_exclusion_mask: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Creates a boolean mask in the small (downsampled) domain that excludes:
+          - Any pixel with a zero in any channel
+          - user_exclusion_mask if provided (also downsampled)
+
+        Returns shape=(h_small,w_small), bool
+        """
+        h_s, w_s = small_image.shape[:2]
+
+        # 1) Zero-value mask
+        # If color => skip any pixel that has a 0 in any channel
+        # If gray => skip pixel if it's 0
+        if small_image.ndim == 3 and small_image.shape[2] == 3:
+            nonzero_mask = np.all(small_image > 0, axis=2)
+        else:
+            nonzero_mask = (small_image > 0)
+
+        # 2) If user_exclusion_mask is provided, downsample it and combine
+        if user_exclusion_mask is not None:
+            # user_exclusion_mask is presumably the size of the original image
+            # We downsample it to match the small domain
+            h_full, w_full = user_exclusion_mask.shape
+            # Convert to uint8 for resizing with nearest
+            mask_u8 = user_exclusion_mask.astype(np.uint8)
+            small_mask = cv2.resize(mask_u8, (w_s, h_s), interpolation=cv2.INTER_NEAREST)
+            final_mask = (small_mask > 0) & nonzero_mask
+        else:
+            final_mask = nonzero_mask
+
+        return final_mask
+
+    # ---------------------------------------------------------------
+    # 4) Generate Sample Points (the exact snippet from GradientRemovalDialog)
+    # ---------------------------------------------------------------
+    def generate_sample_points(
+        self,
+        image: np.ndarray,
+        num_points: int = 25,
+        exclusion_mask: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Replicates the sample-point logic from GradientRemovalDialog:
+          - corners + border points
+          - random points in quartiles
+          - gradient_descent_to_dim_spot
+          - skip bright half
+          - skip any area where exclusion_mask is False
+        """
+        h, w = image.shape[:2]
+        points = []
+
+        def valid_mask(x_, y_):
+            return (
+                0 <= x_ < w and
+                0 <= y_ < h and
+                (exclusion_mask is None or exclusion_mask[y_, x_])
+            )
+
+        # border_margin = 10
+        border_margin = 10
+
+        # Corner points
+        corners = [
+            (border_margin, border_margin),
+            (w - border_margin - 1, border_margin),
+            (border_margin, h - border_margin - 1),
+            (w - border_margin - 1, h - border_margin - 1)
+        ]
+        for (x_, y_) in corners:
+            if valid_mask(x_, y_):
+                x_new, y_new = self.gradient_descent_to_dim_spot(image, x_, y_)
+                if valid_mask(x_new, y_new):
+                    points.append((x_new, y_new))
+
+        # Top and bottom borders
+        for x_ in np.linspace(border_margin, w - border_margin, 5, dtype=int):
+            # top
+            if valid_mask(x_, border_margin):
+                xt, yt = self.gradient_descent_to_dim_spot(image, x_, border_margin)
+                if valid_mask(xt, yt):
+                    points.append((xt, yt))
+
+            # bottom
+            yb = h - border_margin - 1
+            if valid_mask(x_, yb):
+                xb, yb2 = self.gradient_descent_to_dim_spot(image, x_, yb)
+                if valid_mask(xb, yb2):
+                    points.append((xb, yb2))
+
+        # Left & right
+        for y_ in np.linspace(border_margin, h - border_margin, 5, dtype=int):
+            # left
+            if valid_mask(border_margin, y_):
+                xl, yl = self.gradient_descent_to_dim_spot(image, border_margin, y_)
+                if valid_mask(xl, yl):
+                    points.append((xl, yl))
+
+            # right
+            xr = w - border_margin - 1
+            if valid_mask(xr, y_):
+                xr2, yr2 = self.gradient_descent_to_dim_spot(image, xr, y_)
+                if valid_mask(xr2, yr2):
+                    points.append((xr2, yr2))
+
+        # Random quartiles
+        quartiles = self.divide_into_quartiles(image)
+        half_h, half_w = h//2, w//2
+
+        def sub_offset(k):
+            if "top" in k:
+                oy = 0
+            else:
+                oy = half_h
+            if "left" in k:
+                ox = 0
+            else:
+                ox = half_w
+            return (oy, ox)
+
+        for key, quartile in quartiles.items():
+            hq, wq = quartile.shape[:2]
+            offset_y, offset_x = sub_offset(key)
+
+            # Convert quartile to grayscale if needed
+            if quartile.ndim == 3 and quartile.shape[2] == 3:
+                lum = np.dot(quartile[..., :3], [0.2989, 0.5870, 0.1140])
+            else:
+                lum = quartile
+
+            # Exclude top 50% bright
+            mask_bright = self.exclude_bright_regions(lum, 0.5)
+
+            # Combine with the main exclusion_mask if present
+            if exclusion_mask is not None:
+                quart_excl = exclusion_mask[offset_y:offset_y + hq, offset_x:offset_x + wq]
+                combined_mask = mask_bright & quart_excl
+            else:
+                combined_mask = mask_bright
+
+            eligible_indices = np.argwhere(combined_mask)
+            if len(eligible_indices) == 0:
+                continue
+
+            num_points_in_quartile = min(len(eligible_indices), self.num_sample_points//4)
+            selected_indices = eligible_indices[np.random.choice(len(eligible_indices), num_points_in_quartile, replace=False)]
+
+            for (yy_, xx_) in selected_indices:
+                y_coord = offset_y + yy_
+                x_coord = offset_x + xx_
+
+                x_new, y_new = self.gradient_descent_to_dim_spot(image, x_coord, y_coord)
+                if valid_mask(x_new, y_new):
+                    points.append((x_new, y_new))
+
+        return np.array(points, dtype=np.int32)
+
+    def gradient_descent_to_dim_spot(self, image, x, y, max_iterations=10, patch_size=5):
+        """
+        Same as in GradientRemovalDialog: move (x,y) to a dimmer neighbor
+        based on median of a local patch.
+        """
+        half_patch = patch_size//2
+        if image.ndim == 3:
+            h, w, _ = image.shape
+            lum = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140])
+        else:
+            h, w = image.shape
+            lum = image
+
+        for _ in range(max_iterations):
+            xmin, xmax = max(0, x-half_patch), min(w, x+half_patch+1)
+            ymin, ymax = max(0, y-half_patch), min(h, y+half_patch+1)
+            patch = lum[ymin:ymax, xmin:xmax]
+            current_val = np.median(patch)
+
+            neighbors = [
+                (nx, ny)
+                for nx in range(max(0, x-1), min(w, x+2))
+                for ny in range(max(0, y-1), min(h, y+2))
+                if (nx, ny) != (x, y)
+            ]
+
+            def local_median(coord):
+                nx, ny = coord
+                xmin_n, xmax_n = max(0, nx-half_patch), min(w, nx+half_patch+1)
+                ymin_n, ymax_n = max(0, ny-half_patch), min(h, ny+half_patch+1)
+                npatch = lum[ymin_n:ymax_n, xmin_n:xmax_n]
+                return np.median(npatch)
+
+            dimmest_neighbor = min(neighbors, key=local_median)
+            dimmest_val = local_median(dimmest_neighbor)
+
+            if dimmest_val >= current_val:
+                break
+
+            x, y = dimmest_neighbor
+
+        return (x, y)
+
+    def divide_into_quartiles(self, image: np.ndarray) -> dict:
+        """
+        Splits 'image' into top_left, top_right, bottom_left, bottom_right subimages.
+        """
+        h, w = image.shape[:2]
+        half_h, half_w = h//2, w//2
+        return {
+            'top_left': image[:half_h, :half_w],
+            'top_right': image[:half_h, half_w:],
+            'bottom_left': image[half_h:, :half_w],
+            'bottom_right': image[half_h:, half_w:]
+        }
+
+    def exclude_bright_regions(self, arr: np.ndarray, fraction: float=0.5) -> np.ndarray:
+        """
+        Returns a bool mask where True => arr < threshold, 
+        skipping the top 'fraction' of bright pixels.
+        """
+        flat = arr.flatten()
+        thresh = np.percentile(flat, 100*(1-fraction))
+        return arr < thresh
+
+    # ---------------------------------------------------------------
+    # 5) Fit Polynomial
+    # ---------------------------------------------------------------
+    def fit_polynomial_gradient(
+        self,
+        image: np.ndarray,
+        sample_points: np.ndarray,
+        degree: int = 2,
+        patch_size: int = 15
+    ) -> np.ndarray:
+        """
+        The same patch-based polynomial fitting from GradientRemovalDialog.
+        For each sample point, we take the median of a patch around it => z.
+        Then solve for polynomial coeffs. Then evaluate for the entire image.
+        """
+        h, w = image.shape[:2]
+        half_patch = patch_size // 2
+
+        x_coords = []
+        y_coords = []
+        z_vals = []
+
+        if image.ndim == 3 and image.shape[2] == 3:
+            # color => do a channel-by-channel approach
+            background = np.zeros_like(image, dtype=np.float32)
+            for c in range(3):
+                x_coords = []
+                y_coords = []
+                z_vals = []
+                for (sx, sy) in sample_points:
+                    xmin, xmax = max(0, sx-half_patch), min(w, sx+half_patch+1)
+                    ymin, ymax = max(0, sy-half_patch), min(h, sy+half_patch+1)
+                    patch = image[ymin:ymax, xmin:xmax, c]
+                    z_vals.append(np.median(patch))
+                    x_coords.append(sx)
+                    y_coords.append(sy)
+
+                z_vals = np.array(z_vals, dtype=np.float32)
+                x_coords = np.array(x_coords, dtype=np.float32)
+                y_coords = np.array(y_coords, dtype=np.float32)
+
+                # build design matrix
+                A = self.build_poly_terms(x_coords, y_coords, degree)
+                coeffs, _, _, _ = np.linalg.lstsq(A, z_vals, rcond=None)
+
+                # Evaluate
+                xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+                A_full = self.build_poly_terms(xx.flatten().astype(np.float32), yy.flatten().astype(np.float32), degree)
+                bg_channel = (A_full @ coeffs).reshape(h, w)
+                background[..., c] = bg_channel
+
+            return background
+        else:
+            # grayscale
+            background = np.zeros((h,w), dtype=np.float32)
+            for (sx, sy) in sample_points:
+                xmin, xmax = max(0, sx-half_patch), min(w, sx+half_patch+1)
+                ymin, ymax = max(0, sy-half_patch), min(h, sy+half_patch+1)
+                patch = image[ymin:ymax, xmin:xmax]
+                z_vals.append(np.median(patch))
+                x_coords.append(sx)
+                y_coords.append(sy)
+
+            z_vals = np.array(z_vals, dtype=np.float32)
+            x_coords = np.array(x_coords, dtype=np.float32)
+            y_coords = np.array(y_coords, dtype=np.float32)
+
+            A = self.build_poly_terms(x_coords, y_coords, degree)
+            coeffs, _, _, _ = np.linalg.lstsq(A, z_vals, rcond=None)
+
+            xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+            A_full = self.build_poly_terms(xx.flatten().astype(np.float32), yy.flatten().astype(np.float32), degree)
+            bg_gray = (A_full @ coeffs).reshape(h, w).astype(np.float32)
+            background = bg_gray
+            return background
+
+    def build_poly_terms(self, x_array: np.ndarray, y_array: np.ndarray, degree: int):
+        """
+        For degree=1 => [1, x, y]
+        For degree=2 => [1, x, y, x^2, x*y, y^2]
+        """
+        if degree == 1:
+            return np.column_stack([
+                np.ones_like(x_array),
+                x_array,
+                y_array
+            ])
+        elif degree == 2:
+            return np.column_stack([
+                np.ones_like(x_array),
+                x_array,
+                y_array,
+                x_array**2,
+                x_array*y_array,
+                y_array**2
+            ])
+        else:
+            raise ValueError(f"Unsupported polynomial degree={degree}.")
+
+    # ---------------------------------------------------------------
+    # 6) Upscale
+    # ---------------------------------------------------------------
+    def upscale_background(self, background: np.ndarray, out_shape: tuple) -> np.ndarray:
+        """
+        Resizes 'background' to out_shape=(H,W).
+        """
+        oh, ow = out_shape
+        if background.ndim == 3 and background.shape[2] == 3:
+            big = np.zeros((oh, ow, 3), dtype=np.float32)
+            for c in range(3):
+                big[..., c] = cv2.resize(background[..., c], (ow, oh), interpolation=cv2.INTER_LINEAR)
+            return big
+        else:
+            return cv2.resize(background, (ow, oh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+
+    # ---------------------------------------------------------------
+    # 7) Normalize
+    # ---------------------------------------------------------------
+    def normalize_image(self, image: np.ndarray, target_median: float) -> np.ndarray:
+        """
+        Shift image so its median matches target_median.
+        """
+        cmed = np.median(image)
+        diff = target_median - cmed
+        return image + diff
+
+class CustomDoubleSpinBox(QWidget):
+    valueChanged = pyqtSignal(float)
+
+    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1, parent=None):
+        super().__init__(parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self._value = initial
+
+        # Create a line edit with a double validator.
+        self.lineEdit = QLineEdit(f"{initial:.3f}")
+        self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        validator = QDoubleValidator(self.minimum, self.maximum, 3, self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.lineEdit.setValidator(validator)
+        self.lineEdit.editingFinished.connect(self.onEditingFinished)
+
+        # Create up and down buttons.
+        self.upButton = QToolButton()
+        self.upButton.setText("▲")
+        self.upButton.clicked.connect(self.increaseValue)
+        self.downButton = QToolButton()
+        self.downButton.setText("▼")
+        self.downButton.clicked.connect(self.decreaseValue)
+
+        # Arrange buttons vertically.
+        buttonLayout = QVBoxLayout()
+        buttonLayout.addWidget(self.upButton)
+        buttonLayout.addWidget(self.downButton)
+        buttonLayout.setSpacing(0)
+        buttonLayout.setContentsMargins(0, 0, 0, 0)
+
+        # Arrange the line edit and button layout horizontally.
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(self.lineEdit)
+        mainLayout.addLayout(buttonLayout)
+        mainLayout.setSpacing(0)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(mainLayout)
+
+        self.updateButtonStates()
+
+    def updateButtonStates(self):
+        self.upButton.setEnabled(self._value < self.maximum)
+        self.downButton.setEnabled(self._value > self.minimum)
+
+    def increaseValue(self):
+        self.setValue(self._value + self.step)
+
+    def decreaseValue(self):
+        self.setValue(self._value - self.step)
+
+    def onEditingFinished(self):
+        try:
+            new_val = float(self.lineEdit.text())
+        except ValueError:
+            new_val = self._value
+        self.setValue(new_val)
+
+    def setValue(self, val: float):
+        if val < self.minimum:
+            val = self.minimum
+        elif val > self.maximum:
+            val = self.maximum
+        if abs(val - self._value) > 1e-9:
+            self._value = val
+            self.lineEdit.setText(f"{val:.3f}")
+            self.valueChanged.emit(val)
+            self.updateButtonStates()
+
+    def value(self) -> float:
+        return self._value
+
+class CustomSpinBox(QWidget):
+    """
+    A simple custom spin box that mimics QSpinBox functionality.
+    Emits valueChanged(int) when the value changes.
+    """
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, minimum=0, maximum=100, initial=0, step=1, parent=None):
+        super().__init__(parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self._value = initial
+
+        # Create a line edit to show the value.
+        self.lineEdit = QLineEdit(str(initial))
+        self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        # Optionally, restrict input to integers using a validator.
+        from PyQt6.QtGui import QIntValidator
+        self.lineEdit.setValidator(QIntValidator(self.minimum, self.maximum, self))
+        self.lineEdit.editingFinished.connect(self.editingFinished)
+
+        # Create up and down buttons with arrow text or icons.
+        self.upButton = QToolButton()
+        self.upButton.setText("▲")
+        self.downButton = QToolButton()
+        self.downButton.setText("▼")
+        self.upButton.clicked.connect(self.increaseValue)
+        self.downButton.clicked.connect(self.decreaseValue)
+
+        # Arrange the buttons vertically.
+        buttonLayout = QVBoxLayout()
+        buttonLayout.addWidget(self.upButton)
+        buttonLayout.addWidget(self.downButton)
+        buttonLayout.setSpacing(0)
+        buttonLayout.setContentsMargins(0, 0, 0, 0)
+
+        # Arrange the line edit and buttons horizontally.
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(self.lineEdit)
+        mainLayout.addLayout(buttonLayout)
+        mainLayout.setSpacing(0)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(mainLayout)
+
+        self.updateButtonStates()
+
+    @property
+    def value(self):
+        return self._value
+
+    def setValue(self, val):
+        if val < self.minimum:
+            val = self.minimum
+        elif val > self.maximum:
+            val = self.maximum
+        if val != self._value:
+            self._value = val
+            self.lineEdit.setText(str(val))
+            self.valueChanged.emit(val)
+            self.updateButtonStates()
+
+    def updateButtonStates(self):
+        self.upButton.setEnabled(self._value < self.maximum)
+        self.downButton.setEnabled(self._value > self.minimum)
+
+    def increaseValue(self):
+        self.setValue(self._value + self.step)
+
+    def decreaseValue(self):
+        self.setValue(self._value - self.step)
+
+    def editingFinished(self):
+        try:
+            newVal = int(self.lineEdit.text())
+        except ValueError:
+            newVal = self._value
+        self.setValue(newVal)
+
 class GradientRemovalDialog(QDialog):
     # Define signals to communicate with AstroEditingSuite
     processing_completed = pyqtSignal(np.ndarray, np.ndarray, bool)  # Corrected Image, Gradient Background
@@ -12556,26 +14380,17 @@ class GradientRemovalDialog(QDialog):
         form_layout = QFormLayout()
 
         # Number of sample points
-        self.sample_points_spinbox = QSpinBox()
-        self.sample_points_spinbox.setRange(10, 1000)
-        self.sample_points_spinbox.setValue(self.num_sample_points)
-        self.sample_points_spinbox.setSingleStep(10)
+        self.sample_points_spinbox = CustomSpinBox(minimum=10, maximum=1000, initial=self.num_sample_points, step=10)
         self.sample_points_spinbox.valueChanged.connect(self.update_num_sample_points)
         form_layout.addRow("Number of Sample Points:", self.sample_points_spinbox)
 
         # Polynomial degree
-        self.poly_degree_spinbox = QSpinBox()
-        self.poly_degree_spinbox.setRange(1, 10)
-        self.poly_degree_spinbox.setValue(self.poly_degree)
-        self.poly_degree_spinbox.setSingleStep(1)
+        self.poly_degree_spinbox = CustomSpinBox(minimum=1, maximum=10, initial=self.poly_degree, step=1)
         self.poly_degree_spinbox.valueChanged.connect(self.update_poly_degree)
         form_layout.addRow("Polynomial Degree:", self.poly_degree_spinbox)
 
-        # RBF smoothing
-        self.rbf_smooth_spinbox = QDoubleSpinBox()
-        self.rbf_smooth_spinbox.setRange(0.0, 10.0)
-        self.rbf_smooth_spinbox.setValue(self.rbf_smooth)
-        self.rbf_smooth_spinbox.setSingleStep(0.1)
+        # RBF smoothing using CustomDoubleSpinBox
+        self.rbf_smooth_spinbox = CustomSpinBox(minimum=0.0, maximum=10.0, initial=self.rbf_smooth, step=0.1)
         self.rbf_smooth_spinbox.valueChanged.connect(self.update_rbf_smooth)
         form_layout.addRow("RBF Smoothness:", self.rbf_smooth_spinbox)
 
@@ -16828,8 +18643,13 @@ class XISFViewer(QWidget):
         It updates the UI with the new image only if the changed slot is the active slot.
         """
         if not self.isVisible():
-            return        
+            return
+
+        # If image is None, clear the display and metadata.
         if image is None:
+            self.image_label.clear()
+            self.metadata_tree.clear()
+            print(f"XISFViewer: Cleared image display for slot {slot}.")
             return
 
         # Clear the previous content before updating.
@@ -16865,6 +18685,7 @@ class XISFViewer(QWidget):
         self.display_image()
 
         print(f"XISFViewer: Image updated from ImageManager slot {slot}.")
+
 
 
 
@@ -19766,6 +21587,12 @@ class CosmicClarityTab(QWidget):
             self._execute_cosmic_clarity(*self.operation_queue.pop(0))
 
     def _execute_cosmic_clarity(self, mode, output_suffix):
+        if self.loaded_image_path is None:
+            print("Warning: loaded_image_path is None. Using default base filename 'image'.")
+            base_filename = "image"
+        else:
+            base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
         """Execute a single Cosmic Clarity operation."""
         # Determine the correct executable name based on platform and mode
         if os.name == 'nt':
@@ -19793,9 +21620,6 @@ class CosmicClarityTab(QWidget):
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
 
-        # Construct the base filename from the loaded image path
-        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
-        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
         input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
@@ -24001,6 +25825,312 @@ class CurveEditor(QGraphicsView):
             self.updateCurve()
         super().keyPressEvent(event)
 
+@njit(parallel=True)
+def apply_lut_gray(image_in, lut):
+    """
+    Numba-accelerated application of 'lut' to a single-channel image_in in [0..1].
+    'lut' is a 1D array of shape (size,) also in [0..1].
+    """
+    out = np.empty_like(image_in)
+    height, width = image_in.shape
+    size_lut = len(lut) - 1
+
+    for y in prange(height):
+        for x in range(width):
+            v = image_in[y, x]
+            idx = int(v * size_lut + 0.5)
+            if idx < 0: idx = 0
+            elif idx > size_lut: idx = size_lut
+            out[y, x] = lut[idx]
+
+    return out
+
+@njit(parallel=True)
+def apply_lut_color(image_in, lut):
+    """
+    Numba-accelerated application of 'lut' to a 3-channel image_in in [0..1].
+    'lut' is a 1D array of shape (size,) also in [0..1].
+    """
+    out = np.empty_like(image_in)
+    height, width, channels = image_in.shape
+    size_lut = len(lut) - 1
+
+    for y in prange(height):
+        for x in range(width):
+            for c in range(channels):
+                v = image_in[y, x, c]
+                idx = int(v * size_lut + 0.5)
+                if idx < 0: idx = 0
+                elif idx > size_lut: idx = size_lut
+                out[y, x, c] = lut[idx]
+
+    return out
+
+@njit(parallel=True)
+def apply_lut_mono_inplace(array2d, lut):
+    """
+    In-place LUT application on a single-channel 2D array in [0..1].
+    'lut' has shape (size,) also in [0..1].
+    """
+    H, W = array2d.shape
+    size_lut = len(lut) - 1
+    for y in prange(H):
+        for x in prange(W):
+            v = array2d[y, x]
+            idx = int(v * size_lut + 0.5)
+            if idx < 0:
+                idx = 0
+            elif idx > size_lut:
+                idx = size_lut
+            array2d[y, x] = lut[idx]
+
+@njit(parallel=True)
+def apply_lut_color_inplace(array3d, lut):
+    """
+    In-place LUT application on a 3-channel array in [0..1].
+    'lut' has shape (size,) also in [0..1].
+    """
+    H, W, C = array3d.shape
+    size_lut = len(lut) - 1
+    for y in prange(H):
+        for x in prange(W):
+            for c in range(C):
+                v = array3d[y, x, c]
+                idx = int(v * size_lut + 0.5)
+                if idx < 0:
+                    idx = 0
+                elif idx > size_lut:
+                    idx = size_lut
+                array3d[y, x, c] = lut[idx]
+
+def build_curve_lut(curve_func, size=65536):
+    """
+    Build a LUT of length 'size' that maps float in [0..1] to [0..1],
+    using your existing PCHIP curve_func(x) which is defined on x in [0..360].
+    We'll do:
+       mapped = 360 - curve_func(x)
+       out = clamp( mapped / 360, [0..1] )
+    """
+    import numpy as np
+    lut = np.zeros(size, dtype=np.float32)
+    for i in range(size):
+        v = i / (size - 1)  # in [0..1]
+        x = v * 360.0
+        mapped = 360.0 - curve_func(x)
+        outv = mapped / 360.0
+        if outv < 0.0: outv = 0.0
+        elif outv > 1.0: outv = 1.0
+        lut[i] = outv
+    return lut
+
+# D65 reference
+_Xn, _Yn, _Zn = 0.95047, 1.00000, 1.08883
+
+# Matrix for RGB -> XYZ (sRGB => D65)
+_M_rgb2xyz = np.array([
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041]
+], dtype=np.float32)
+
+# Matrix for XYZ -> RGB (sRGB => D65)
+_M_xyz2rgb = np.array([
+    [ 3.2404542, -1.5371385, -0.4985314],
+    [-0.9692660,  1.8760108,  0.0415560],
+    [ 0.0556434, -0.2040259,  1.0572252]
+], dtype=np.float32)
+
+@njit(parallel=True)
+def rgb_to_xyz_numba(rgb):
+    """
+    Convert an image from sRGB to XYZ (D65).
+    rgb: float32 array in [0..1], shape (H,W,3)
+    returns xyz in [0..maybe >1], shape (H,W,3)
+    """
+    H, W, _ = rgb.shape
+    out = np.empty((H, W, 3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            r = rgb[y, x, 0]
+            g = rgb[y, x, 1]
+            b = rgb[y, x, 2]
+            # Multiply by M_rgb2xyz
+            X = _M_rgb2xyz[0,0]*r + _M_rgb2xyz[0,1]*g + _M_rgb2xyz[0,2]*b
+            Y = _M_rgb2xyz[1,0]*r + _M_rgb2xyz[1,1]*g + _M_rgb2xyz[1,2]*b
+            Z = _M_rgb2xyz[2,0]*r + _M_rgb2xyz[2,1]*g + _M_rgb2xyz[2,2]*b
+            out[y, x, 0] = X
+            out[y, x, 1] = Y
+            out[y, x, 2] = Z
+    return out
+
+@njit(parallel=True)
+def xyz_to_rgb_numba(xyz):
+    """
+    Convert an image from XYZ (D65) to sRGB.
+    xyz: float32 array, shape (H,W,3)
+    returns rgb in [0..1], shape (H,W,3)
+    """
+    H, W, _ = xyz.shape
+    out = np.empty((H, W, 3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            X = xyz[y, x, 0]
+            Y = xyz[y, x, 1]
+            Z = xyz[y, x, 2]
+            # Multiply by M_xyz2rgb
+            r = _M_xyz2rgb[0,0]*X + _M_xyz2rgb[0,1]*Y + _M_xyz2rgb[0,2]*Z
+            g = _M_xyz2rgb[1,0]*X + _M_xyz2rgb[1,1]*Y + _M_xyz2rgb[1,2]*Z
+            b = _M_xyz2rgb[2,0]*X + _M_xyz2rgb[2,1]*Y + _M_xyz2rgb[2,2]*Z
+            # Clip to [0..1]
+            if r < 0: r = 0
+            elif r > 1: r = 1
+            if g < 0: g = 0
+            elif g > 1: g = 1
+            if b < 0: b = 0
+            elif b > 1: b = 1
+            out[y, x, 0] = r
+            out[y, x, 1] = g
+            out[y, x, 2] = b
+    return out
+
+@njit
+def f_lab_numba(t):
+    delta = 6/29
+    out = np.empty_like(t, dtype=np.float32)
+    for i in range(t.size):
+        val = t.flat[i]
+        if val > delta**3:
+            out.flat[i] = val**(1/3)
+        else:
+            out.flat[i] = val/(3*delta*delta) + (4/29)
+    return out
+
+@njit(parallel=True)
+def xyz_to_lab_numba(xyz):
+    """
+    xyz => shape(H,W,3), in D65. 
+    returns lab in shape(H,W,3): L in [0..100], a,b in ~[-128..127].
+    """
+    H, W, _ = xyz.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            X = xyz[y, x, 0] / _Xn
+            Y = xyz[y, x, 1] / _Yn
+            Z = xyz[y, x, 2] / _Zn
+            fx = (X)**(1/3) if X > (6/29)**3 else X/(3*(6/29)**2) + 4/29
+            fy = (Y)**(1/3) if Y > (6/29)**3 else Y/(3*(6/29)**2) + 4/29
+            fz = (Z)**(1/3) if Z > (6/29)**3 else Z/(3*(6/29)**2) + 4/29
+            L = 116*fy - 16
+            a = 500*(fx - fy)
+            b = 200*(fy - fz)
+            out[y, x, 0] = L
+            out[y, x, 1] = a
+            out[y, x, 2] = b
+    return out
+
+@njit(parallel=True)
+def lab_to_xyz_numba(lab):
+    """
+    lab => shape(H,W,3): L in [0..100], a,b in ~[-128..127].
+    returns xyz shape(H,W,3).
+    """
+    H, W, _ = lab.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    delta = 6/29
+    for y in prange(H):
+        for x in prange(W):
+            L = lab[y, x, 0]
+            a = lab[y, x, 1]
+            b = lab[y, x, 2]
+            fy = (L+16)/116
+            fx = fy + a/500
+            fz = fy - b/200
+
+            if fx > delta:
+                xr = fx**3
+            else:
+                xr = 3*delta*delta*(fx - 4/29)
+            if fy > delta:
+                yr = fy**3
+            else:
+                yr = 3*delta*delta*(fy - 4/29)
+            if fz > delta:
+                zr = fz**3
+            else:
+                zr = 3*delta*delta*(fz - 4/29)
+
+            X = _Xn * xr
+            Y = _Yn * yr
+            Z = _Zn * zr
+            out[y, x, 0] = X
+            out[y, x, 1] = Y
+            out[y, x, 2] = Z
+    return out
+
+@njit(parallel=True)
+def rgb_to_hsv_numba(rgb):
+    H, W, _ = rgb.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            r = rgb[y,x,0]
+            g = rgb[y,x,1]
+            b = rgb[y,x,2]
+            cmax = max(r,g,b)
+            cmin = min(r,g,b)
+            delta = cmax - cmin
+            # Hue
+            h = 0.0
+            if delta != 0.0:
+                if cmax == r:
+                    h = 60*(((g-b)/delta) % 6)
+                elif cmax == g:
+                    h = 60*(((b-r)/delta) + 2)
+                else:
+                    h = 60*(((r-g)/delta) + 4)
+            # Saturation
+            s = 0.0
+            if cmax > 0.0:
+                s = delta / cmax
+            v = cmax
+            out[y,x,0] = h
+            out[y,x,1] = s
+            out[y,x,2] = v
+    return out
+
+@njit(parallel=True)
+def hsv_to_rgb_numba(hsv):
+    H, W, _ = hsv.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            h = hsv[y,x,0]
+            s = hsv[y,x,1]
+            v = hsv[y,x,2]
+            c = v*s
+            hh = (h/60.0) % 6
+            x_ = c*(1 - abs(hh % 2 - 1))
+            m = v - c
+            r = 0.0
+            g = 0.0
+            b = 0.0
+            if 0 <= hh < 1:
+                r,g,b = c,x_,0
+            elif 1 <= hh < 2:
+                r,g,b = x_,c,0
+            elif 2 <= hh < 3:
+                r,g,b = 0,c,x_
+            elif 3 <= hh < 4:
+                r,g,b = 0,x_,c
+            elif 4 <= hh < 5:
+                r,g,b = x_,0,c
+            else:
+                r,g,b = c,0,x_
+            out[y,x,0] = (r + m)
+            out[y,x,1] = (g + m)
+            out[y,x,2] = (b + m)
+    return out
 
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
@@ -24016,133 +26146,118 @@ class FullCurvesProcessingThread(QThread):
         self.result_ready.emit(adjusted_image)
 
     @staticmethod
-    def apply_curve_direct(value, curve_func):
-        # value in [0..1]
-        # Evaluate curve at value*360 (X), get Y in [0..360]
-        # Invert it: out = 360 - curve_func(X)
-        # Map back to [0..1]: out/360
-        out = curve_func(value*360.0)
-        out = 360.0 - out
-        return np.clip(out/360.0, 0, 1).astype(np.float32)
-
-    @staticmethod
     def process_curve(image, curve_mode, curve_func):
-        if image is None:
+        """
+        Main entry point to apply the user's curve in 'curve_mode'
+        to 'image' using a single big LUT for [0..1].
+        """
+        import numpy as np
+
+        if image is None or curve_func is None:
             return image
 
-        if curve_func is None:
-            # No curve defined, identity
-            return image
-
+        # 1) Convert to float32 [0..1]
         if image.dtype != np.float32:
             image = image.astype(np.float32, copy=False)
 
+        # 2) Build a big LUT
+        lut = build_curve_lut(curve_func, size=65536)
+
+        # 3) If single-channel, reshape to (H,W,1) for uniform handling
         is_gray = (image.ndim == 2 or image.shape[2] == 1)
         if is_gray:
             image = image.reshape(image.shape[0], image.shape[1], 1)
 
         mode = curve_mode.lower()
 
-        # Helper functions for color modes
-        def apply_to_all_channels(img):
-            for c in range(img.shape[2]):
-                img[:,:,c] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,c], curve_func)
-            return img
-
-        def apply_to_channel(img, ch):
-            img[:,:,ch] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,ch], curve_func)
-            return img
-
+        # ----------------------------------------------------------------------
+        # R/G/B/K (Brightness) => direct LUT application
+        # ----------------------------------------------------------------------
         if mode == 'r':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 0)
+            # Apply LUT only to channel 0
+            # We do it manually:
+            out = image.copy()
+            H, W, _ = out.shape
+            # channel 0
+            apply_lut_mono_inplace(out[...,0], lut)
+            return out
 
         elif mode == 'g':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 1)
+            # channel 1
+            out = image.copy()
+            apply_lut_mono_inplace(out[...,1], lut)
+            return out
 
         elif mode == 'b':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 2)
+            # channel 2
+            out = image.copy()
+            apply_lut_mono_inplace(out[...,2], lut)
+            return out
 
         elif mode == 'k (brightness)':
-            image = apply_to_all_channels(image)
+            # Apply LUT to all channels
+            out = image.copy()
+            apply_lut_color_inplace(out, lut)
+            return out
 
-        elif mode == 'l*':
-            # Convert to Lab, apply curve to L
-            # L in [0..100], normalize to [0..1], apply curve, then *100
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+        # -------------------------------------------------------
+        # L*, a*, b*, Chroma => do color transform => apply LUT => transform back
+        # -------------------------------------------------------
+        elif mode in ["l*", "a*", "b*", "chroma"]:
+            # 1) Convert RGB -> XYZ -> Lab via Numba
+            xyz = rgb_to_xyz_numba(image)             # Numba-based
+            lab = xyz_to_lab_numba(xyz)               # Numba-based
 
-            L_norm = np.clip(lab[:,:,0]/100.0, 0, 1)
-            L_new = FullCurvesProcessingThread.apply_curve_direct(L_norm, curve_func)*100.0
-            lab[:,:,0] = L_new
+            if mode == "l*":
+                # L in [0..100]
+                L = lab[..., 0] / 100.0
+                apply_lut_mono_inplace(L, lut)
+                lab[..., 0] = L * 100.0
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-            
-        elif mode == 'a*':
-            # Convert to Lab, apply curve to a*
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+            elif mode == "a*":
+                # a in [-128..127], shift => [0..255], then /255 => [0..1]
+                a = lab[..., 1]
+                a_norm = (a + 128.0) / 255.0
+                a_norm = np.clip(a_norm, 0, 1)
+                apply_lut_mono_inplace(a_norm, lut)
+                lab[..., 1] = a_norm * 255.0 - 128.0
 
-            # a* in [-128..127], shift/scale to [0..1]
-            a_norm = np.clip((lab[:,:,1] + 128.0)/255.0, 0, 1)
-            a_new = FullCurvesProcessingThread.apply_curve_direct(a_norm, curve_func)*255.0 - 128.0
-            lab[:,:,1] = a_new
+            elif mode == "b*":
+                # b in [-128..127]
+                b = lab[..., 2]
+                b_norm = (b + 128.0) / 255.0
+                b_norm = np.clip(b_norm, 0, 1)
+                apply_lut_mono_inplace(b_norm, lut)
+                lab[..., 2] = b_norm * 255.0 - 128.0
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
+            elif mode == "chroma":
+                a_ = lab[..., 1]
+                b_ = lab[..., 2]
+                C = np.sqrt(a_ * a_ + b_ * b_)
+                C_norm = np.clip(C / 200.0, 0, 1)
+                apply_lut_mono_inplace(C_norm, lut)
+                C_new = C_norm * 200.0
+                ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C != 0))
+                lab[..., 1] = a_ * ratio
+                lab[..., 2] = b_ * ratio
 
-        elif mode == 'b*':
-            # Convert to Lab, apply curve to b*
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+            # Convert Lab -> XYZ -> RGB
+            xyz_new = lab_to_xyz_numba(lab)           # Numba-based
+            out = xyz_to_rgb_numba(xyz_new)           # Numba-based
+            return out
 
-            b_norm = np.clip((lab[:,:,2] + 128.0)/255.0, 0, 1)
-            b_new = FullCurvesProcessingThread.apply_curve_direct(b_norm, curve_func)*255.0 - 128.0
-            lab[:,:,2] = b_new
+        # -------------------------------------------------------
+        # HSV saturation => same approach
+        # -------------------------------------------------------
+        elif mode == "saturation":
+            hsv = rgb_to_hsv_numba(image)             # Numba-based
+            S = hsv[..., 1]
+            apply_lut_mono_inplace(S, lut)
+            hsv[..., 1] = S
+            out = hsv_to_rgb_numba(hsv)               # Numba-based
+            return out
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-
-        elif mode == 'chroma':
-            # Convert to Lab, apply curve to Chroma
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
-
-            a_ = lab[:,:,1]
-            b_ = lab[:,:,2]
-            C = np.sqrt(a_*a_ + b_*b_)
-            C_norm = np.clip(C/200.0, 0, 1)
-            C_new = FullCurvesProcessingThread.apply_curve_direct(C_norm, curve_func)*200.0
-
-            ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C!=0))
-            lab[:,:,1] = a_*ratio
-            lab[:,:,2] = b_*ratio
-
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-
-        elif mode == 'saturation':
-            # Convert to HSV, apply curve to S
-            hsv = FullCurvesProcessingThread.rgb_to_hsv(image)
-            S = hsv[:,:,1]
-            S_new = FullCurvesProcessingThread.apply_curve_direct(S, curve_func)
-            hsv[:,:,1] = S_new
-            image = FullCurvesProcessingThread.hsv_to_rgb(hsv)
-
-        if is_gray:
-            image = image[:,:,0]
-
+        # If none matched, just return the image
         return image
 
     @staticmethod
@@ -29549,30 +31664,51 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 file_meta = xisf.get_file_metadata()
 
 
-                # Determine bit depth and normalize
+                # Here we check the maximum pixel value to determine bit depth
+                # --- Detect the bit depth by dtype ---
                 if image_data.dtype == np.uint8:
                     bit_depth = "8-bit"
+                    print("Debug: Detected 8-bit dtype. Normalizing by 255.")
                     image = image_data.astype(np.float32) / 255.0
+
                 elif image_data.dtype == np.uint16:
                     bit_depth = "16-bit"
+                    print("Debug: Detected 16-bit dtype. Normalizing by 65535.")
                     image = image_data.astype(np.float32) / 65535.0
+
                 elif image_data.dtype == np.uint32:
                     bit_depth = "32-bit unsigned"
+                    print("Debug: Detected 32-bit unsigned dtype. Normalizing by 4294967295.")
                     image = image_data.astype(np.float32) / 4294967295.0
-                elif image_data.dtype == np.float32:
+
+                elif image_data.dtype == np.float32 or image_data.dtype == np.float64:
                     bit_depth = "32-bit floating point"
-                    image = image_data
+                    print("Debug: Detected float dtype. Casting to float32 (no normalization).")
+                    image = image_data.astype(np.float32)
+
                 else:
-                    raise ValueError("Unsupported XISF data type!")
+                    raise ValueError(f"Unsupported XISF data type: {image_data.dtype}")
 
                 # Handle mono or RGB XISF
-                if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):  # Mono
+                if image_data.ndim == 2:
+                    # We know it's mono. Already normalized in `image`.
                     is_mono = True
-                    if image_data.ndim == 3:
-                        image = np.squeeze(image_data, axis=2)
-                    image = np.stack([image] * 3, axis=-1)  # Convert to RGB by stacking
-                elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
+                    # If you really want to store it in an RGB shape:
+                    image = np.stack([image] * 3, axis=-1)
+
+                elif image_data.ndim == 3 and image_data.shape[2] == 1:
+                    # It's mono with shape (H, W, 1)
+                    is_mono = True
+                    # Squeeze the normalized image, not the original image_data
+                    image = np.squeeze(image, axis=2)
+                    # If you want an RGB shape, you can do:
+                    image = np.stack([image] * 3, axis=-1)
+
+                elif image_data.ndim == 3 and image_data.shape[2] == 3:
                     is_mono = False
+                    # We already stored the normalized float32 data in `image`.
+                    # So no change needed if it’s already shape (H, W, 3).
+
                 else:
                     raise ValueError("Unsupported XISF image dimensions!")
 
@@ -30040,70 +32176,299 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
 
 
+@njit(parallel=True)
+def _numba_mono_final_formula(rescaled, median_rescaled, target_median):
+    """
+    Applies the final formula *after* we already have the rescaled values.
+    
+    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
+    median_rescaled = median(rescaled)
+    
+    out_val = ((median_rescaled - 1) * target_median * r) /
+              ( median_rescaled*(target_median + r -1) - target_median*r )
+    """
+    H, W = rescaled.shape
+    out = np.empty_like(rescaled)
 
+    for y in prange(H):
+        for x in range(W):
+            r = rescaled[y, x]
+            numer = (median_rescaled - 1.0) * target_median * r
+            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+            if abs(denom) < 1e-12:
+                denom = 1e-12
+            out[y, x] = numer / denom
+
+    return out
+
+@njit(parallel=True)
+def _numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
+    """
+    Linked color transform: we use one median_rescaled for all channels.
+    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
+    median_rescaled = median of *all* pixels in rescaled
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                numer = (median_rescaled - 1.0) * target_median * r
+                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+                if abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
+
+@njit(parallel=True)
+def _numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
+    """
+    Unlinked color transform: a separate median_rescaled per channel.
+    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
+    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                med = medians_rescaled[c]
+                numer = (med - 1.0) * target_median * r
+                denom = med * (target_median + r - 1.0) - target_median * r
+                if abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
 
 
 def stretch_mono_image(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Stretches a single-channel (2D) image so that its median ends up near `target_median`.
+    Uses the old formula, but with the final math done in a Numba function.
+    """
+    # 1) Compute black_point from old logic
     black_point = max(np.min(image), np.median(image) - 2.7 * np.std(image))
-    rescaled_image = (image - black_point) / (1 - black_point)
-    median_image = np.median(rescaled_image)
-    stretched_image = ((median_image - 1) * target_median * rescaled_image) / (median_image * (target_median + rescaled_image - 1) - target_median * rescaled_image)
+
+    # 2) Rescale in Python
+    #    r = (val - black_point) / (1 - black_point)
+    denom_bp = 1.0 - black_point
+    rescaled_image = (image - black_point) / denom_bp
+
+    # 3) Compute median of *this* rescaled data
+    median_rescaled = np.median(rescaled_image)
+
+    # 4) Final stretch in Numba
+    stretched_image = _numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
+
+    # 5) Optional curves
     if apply_curves:
         stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
-    
+
+    # 6) Optional normalize
     if normalize:
-        stretched_image = stretched_image / np.max(stretched_image)
-    
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
+    # 7) Clip result [0..1]
     return np.clip(stretched_image, 0, 1)
 
-
-def stretch_color_image(image, target_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0):
-    # If image is 2D or has only one channel, treat it as mono.
+def stretch_color_image(image, target_median, linked=True,
+                        normalize=False, apply_curves=False, curves_boost=0.0):
+    # If image is mono or single-channel, treat as mono
     if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
-        # Squeeze to 2D if needed.
         mono = image.squeeze()
-        mono_stretched = stretch_mono_image(mono, target_median, normalize=normalize, apply_curves=apply_curves, curves_boost=curves_boost)
-        # Replicate into 3 channels.
+        mono_stretched = stretch_mono_image(mono, target_median,
+                                            normalize=normalize,
+                                            apply_curves=apply_curves,
+                                            curves_boost=curves_boost)
+        # Replicate into 3 channels if you want a 3-channel result
         return np.stack([mono_stretched] * 3, axis=-1)
 
-    # Otherwise, assume image is a full-color image with 3 channels.
+    # If it's actually color (H, W, 3):
     if linked:
-        combined_median = np.median(image)
-        combined_std = np.std(image)
-        black_point = max(np.min(image), combined_median - 2.7 * combined_std)
-        rescaled_image = (image - black_point) / (1 - black_point)
-        median_image = np.median(rescaled_image)
-        stretched_image = ((median_image - 1) * target_median * rescaled_image) / (median_image * (target_median + rescaled_image - 1) - target_median * rescaled_image)
+        stretched_image = stretch_color_image_linked(image, target_median,
+                                                     normalize=normalize,
+                                                     apply_curves=apply_curves,
+                                                     curves_boost=curves_boost)
     else:
-        stretched_image = np.zeros_like(image)
-        for channel in range(image.shape[2]):
-            black_point = max(np.min(image[..., channel]), np.median(image[..., channel]) - 2.7 * np.std(image[..., channel]))
-            rescaled_channel = (image[..., channel] - black_point) / (1 - black_point)
-            median_channel = np.median(rescaled_channel)
-            stretched_image[..., channel] = ((median_channel - 1) * target_median * rescaled_channel) / (median_channel * (target_median + rescaled_channel - 1) - target_median * rescaled_channel)
-    
+        stretched_image = stretch_color_image_unlinked(image, target_median,
+                                                       normalize=normalize,
+                                                       apply_curves=apply_curves,
+                                                       curves_boost=curves_boost)
+    return stretched_image
+
+def stretch_color_image_linked(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Linked color stretch: uses one black_point and one median for all channels.
+    """
+    # 1) Compute black_point from the combined median, std
+    combined_median = np.median(image)
+    combined_std = np.std(image)
+    black_point = max(np.min(image), combined_median - 2.7 * combined_std)
+
+    # 2) Rescale
+    #    (H, W, 3)
+    denom_bp = 1.0 - black_point
+    rescaled_image = (image - black_point) / denom_bp
+
+    # 3) Median of the entire rescaled array
+    median_rescaled = np.median(rescaled_image)
+
+    # 4) Final formula in Numba
+    stretched_image = _numba_color_final_formula_linked(
+        rescaled_image, 
+        median_rescaled, 
+        target_median
+    )
+
+    # 5) Optional curves
     if apply_curves:
         stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
-    
+
+    # 6) Optional normalize
     if normalize:
-        stretched_image = stretched_image / np.max(stretched_image)
-    
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
+    return np.clip(stretched_image, 0, 1)
+
+def stretch_color_image_unlinked(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Unlinked color stretch: each channel has its own black_point, own median.
+    """
+    H, W, _ = image.shape
+    rescaled_image = np.zeros_like(image, dtype=np.float32)
+    black_points = np.zeros(3, dtype=np.float32)
+    medians_rescaled = np.zeros(3, dtype=np.float32)
+
+    # 1) For each channel, compute black point, rescale, find median
+    for c in range(3):
+        channel = image[..., c]
+        channel_median = np.median(channel)
+        channel_std = np.std(channel)
+        bp = max(channel.min(), channel_median - 2.7 * channel_std)
+
+        # Store black point
+        black_points[c] = bp
+
+        # Rescale that channel
+        denom_bp = 1.0 - bp
+        rescaled_image[..., c] = (channel - bp) / denom_bp
+
+    # 2) For each channel, compute median of the rescaled version
+    for c in range(3):
+        medians_rescaled[c] = np.median(rescaled_image[..., c])
+
+    # 3) Final formula in Numba
+    stretched_image = _numba_color_final_formula_unlinked(
+        rescaled_image,
+        medians_rescaled,
+        target_median
+    )
+
+    # 4) Optional curves
+    if apply_curves:
+        stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
+
+    # 5) Optional normalize
+    if normalize:
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
     return np.clip(stretched_image, 0, 1)
 
 
+@njit
+def piecewise_linear(val, xvals, yvals):
+    """
+    Performs piecewise linear interpolation:
+    Given a scalar 'val', and arrays xvals, yvals (each of length N),
+    finds i s.t. xvals[i] <= val < xvals[i+1],
+    then returns the linear interpolation between yvals[i], yvals[i+1].
+    If val < xvals[0], returns yvals[0].
+    If val > xvals[-1], returns yvals[-1].
+    """
+    if val <= xvals[0]:
+        return yvals[0]
+    for i in range(len(xvals)-1):
+        if val < xvals[i+1]:
+            # Perform a linear interpolation in interval [xvals[i], xvals[i+1]]
+            dx = xvals[i+1] - xvals[i]
+            dy = yvals[i+1] - yvals[i]
+            ratio = (val - xvals[i]) / dx
+            return yvals[i] + ratio * dy
+    return yvals[-1]
+
+@njit(parallel=True)
+def apply_curves_numba(image, xvals, yvals):
+    """
+    Numba-accelerated routine to apply piecewise linear interpolation 
+    to each pixel in 'image'.
+    - image can be (H,W) or (H,W,3).
+    - xvals, yvals are the curve arrays in ascending order.
+    Returns the adjusted image as float32.
+    """
+    if image.ndim == 2:
+        H, W = image.shape
+        out = np.empty((H, W), dtype=np.float32)
+        for y in prange(H):
+            for x in range(W):
+                val = image[y, x]
+                out[y, x] = piecewise_linear(val, xvals, yvals)
+        return out
+    elif image.ndim == 3:
+        H, W, C = image.shape
+        out = np.empty((H, W, C), dtype=np.float32)
+        for y in prange(H):
+            for x in range(W):
+                for c in range(C):
+                    val = image[y, x, c]
+                    out[y, x, c] = piecewise_linear(val, xvals, yvals)
+        return out
+    else:
+        # Unexpected shape
+        return image  # Fallback
 
 def apply_curves_adjustment(image, target_median, curves_boost):
+    """
+    Original signature unchanged, but now uses a Numba helper
+    to do the pixel-by-pixel interpolation.
+
+    'image' can be 2D (H,W) or 3D (H,W,3).
+    """
+    # Build the curve array as before
     curve = [
         [0.0, 0.0],
         [0.5 * target_median, 0.5 * target_median],
         [target_median, target_median],
-        [(1 / 4 * (1 - target_median) + target_median), 
-         np.power((1 / 4 * (1 - target_median) + target_median), (1 - curves_boost))],
-        [(3 / 4 * (1 - target_median) + target_median), 
-         np.power(np.power((3 / 4 * (1 - target_median) + target_median), (1 - curves_boost)), (1 - curves_boost))],
+        [
+            (1/4 * (1 - target_median) + target_median),
+            np.power((1/4 * (1 - target_median) + target_median), (1 - curves_boost))
+        ],
+        [
+            (3/4 * (1 - target_median) + target_median),
+            np.power(np.power((3/4 * (1 - target_median) + target_median), (1 - curves_boost)), (1 - curves_boost))
+        ],
         [1.0, 1.0]
     ]
-    adjusted_image = np.interp(image, [p[0] for p in curve], [p[1] for p in curve])
+    # Convert to arrays
+    xvals = np.array([p[0] for p in curve], dtype=np.float32)
+    yvals = np.array([p[1] for p in curve], dtype=np.float32)
+
+    # Ensure 'image' is float32
+    image_32 = image.astype(np.float32, copy=False)
+
+    # Now apply the piecewise linear function in Numba
+    adjusted_image = apply_curves_numba(image_32, xvals, yvals)
     return adjusted_image
 
 def resource_path(relative_path):
