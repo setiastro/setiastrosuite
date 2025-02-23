@@ -5,5 +5,5 @@
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.0/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.0/setiastrosuite_linux"
   },
-  "notes": "Maintenance update for various bug fixes "
+  "notes": "New Function: SuperNova and Asteroid Hunter. New Capability: Using all cores on multi core cpu's for computationally expensive processes of statistical stretch, autostretch, blink stretch, applying curves, SuperNova and Asteroid Hunter, stretching in ABE. More to come on multi threaded operations. Linux now on QT6. About menu item. New Project under File  "
 }
