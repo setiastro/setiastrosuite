@@ -1104,7 +1104,6 @@ class AstroEditingSuite(QMainWindow):
         self.update_slot_toolbar_highlight()
 
     def show_about_dialog(self):
-        from PyQt5.QtWidgets import QDialog
         dialog = AboutDialog(self)
         dialog.show()
 
@@ -9823,6 +9822,14 @@ class PlateSolver(QDialog):
                     is_mono = True
                 else:
                     is_mono = False
+
+                # If mono, expand it to 3-channel
+                if is_mono:
+                    original_image_data = np.stack([original_image_data] * 3, axis=-1)  # Convert to RGB-equivalent format
+                    is_mono = False  # Mark as non-mono since we expanded it
+
+                if "file_path" in solved_header:
+                    del solved_header["file_path"]                    
                 # Save the original image data with the solved header.
                 save_image(
                     img_array=original_image_data,
@@ -11525,7 +11532,7 @@ class SupernovaAsteroidHunterTab(QWidget):
         img_bgr = (stretched_3ch * 255).clip(0,255).astype(np.uint8)
 
         # Define the margin
-        margin = 10
+        margin = 15
 
         # Draw red boxes in BGR color = (0, 0, 255)
         for anomaly in anomalies:
@@ -11538,7 +11545,7 @@ class SupernovaAsteroidHunterTab(QWidget):
             x2_exp = x2 + margin
             y2_exp = y2 + margin
             cv2.rectangle(
-                img_bgr, (x1, y1), (x2, y2),
+                img_bgr, (x1_exp, y1_exp), (x2_exp, y2_exp),
                 color=(255, 0, 0),
                 thickness=5
             )
