@@ -9,7 +9,7 @@ pytz
 scipy
 rawpy
 requests
-pyqt5
+pyqt6
 lz4
 zstandard
 pywavelets
@@ -17,3 +17,4 @@ pyqt6
 pyinstaller
 photutils
 reproject
+numba
