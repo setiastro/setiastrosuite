@@ -209,7 +209,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.0"
+VERSION = "2.11.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1104,7 +1104,6 @@ class AstroEditingSuite(QMainWindow):
         self.update_slot_toolbar_highlight()
 
     def show_about_dialog(self):
-
         dialog = AboutDialog(self)
         dialog.show()
 
@@ -9832,6 +9831,11 @@ class PlateSolver(QDialog):
                 if "file_path" in solved_header:
                     del solved_header["file_path"]                    
                 # Save the original image data with the solved header.
+
+                # Print the final header before saving
+                print("\n✅ FINAL HEADER BEFORE SAVING:")
+                for key, value in solved_header.items():
+                    print(f"{key} = {value}")                
                 save_image(
                     img_array=original_image_data,
                     filename=save_path,
@@ -14390,7 +14394,7 @@ class GradientRemovalDialog(QDialog):
         form_layout.addRow("Polynomial Degree:", self.poly_degree_spinbox)
 
         # RBF smoothing using CustomDoubleSpinBox
-        self.rbf_smooth_spinbox = CustomSpinBox(minimum=0.0, maximum=10.0, initial=self.rbf_smooth, step=0.1)
+        self.rbf_smooth_spinbox = CustomDoubleSpinBox(minimum=0.0, maximum=10.0, initial=self.rbf_smooth, step=0.1)
         self.rbf_smooth_spinbox.valueChanged.connect(self.update_rbf_smooth)
         form_layout.addRow("RBF Smoothness:", self.rbf_smooth_spinbox)
 
@@ -31841,7 +31845,17 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
     Save an image array to a file in the specified format and bit depth.
     """
     img_array = ensure_native_byte_order(img_array)  # Ensure correct byte order
-    xisf_metadata = original_header
+    is_xisf = False  # Flag to determine if the original file was XISF
+
+    # **🔹 Detect If Original File Was XISF**
+    if original_header:
+        for key in original_header.keys():
+            if key.startswith("XISF:"):
+                is_xisf = True
+                break
+
+    if image_meta and "XISFProperties" in image_meta:
+        is_xisf = True  # Confirm XISF metadata exists
 
     try:
         if original_format == 'png':
@@ -31871,170 +31885,83 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             if not filename.lower().endswith(f".{original_format}"):
                 filename = filename.rsplit('.', 1)[0] + f".{original_format}"
 
-            # Decide whether to rebuild the header from XISF metadata.
-            def header_has_only_xisf(header_dict):
-                # Return True if all keys in header_dict start with 'XISF:'
-                return all(key.upper().startswith("XISF:") for key in header_dict.keys())
+            # **📌 CASE 1: ORIGINAL FILE WAS XISF → CONVERT TO FITS HEADER**
+            if is_xisf:
+                print("Detected XISF metadata. Converting to FITS header...")
+                fits_header = fits.Header()
 
-            use_rebuild = False
-            if original_header is not None and isinstance(original_header, dict):
-                if header_has_only_xisf(original_header):
-                    use_rebuild = True
-                    print("Original header contains only XISF metadata. Rebuilding FITS header from image_meta.")
+                if 'XISFProperties' in image_meta:
+                    xisf_props = image_meta['XISFProperties']
+
+                    # Extract WCS parameters
+                    if 'PCL:AstrometricSolution:ReferenceCoordinates' in xisf_props:
+                        ref_coords = xisf_props['PCL:AstrometricSolution:ReferenceCoordinates']['value']
+                        fits_header['CRVAL1'] = ref_coords[0]
+                        fits_header['CRVAL2'] = ref_coords[1]
+
+                    if 'PCL:AstrometricSolution:ReferenceLocation' in xisf_props:
+                        ref_pixel = xisf_props['PCL:AstrometricSolution:ReferenceLocation']['value']
+                        fits_header['CRPIX1'] = ref_pixel[0]
+                        fits_header['CRPIX2'] = ref_pixel[1]
+
+                    if 'PCL:AstrometricSolution:PixelSize' in xisf_props:
+                        pixel_size = xisf_props['PCL:AstrometricSolution:PixelSize']['value']
+                        fits_header['CDELT1'] = -pixel_size / 3600.0
+                        fits_header['CDELT2'] = pixel_size / 3600.0
+
+                    if 'PCL:AstrometricSolution:LinearTransformationMatrix' in xisf_props:
+                        linear_transform = xisf_props['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                        fits_header['CD1_1'] = linear_transform[0][0]
+                        fits_header['CD1_2'] = linear_transform[0][1]
+                        fits_header['CD2_1'] = linear_transform[1][0]
+                        fits_header['CD2_2'] = linear_transform[1][1]
+
+                # Ensure essential WCS headers exist
+                fits_header.setdefault('CTYPE1', 'RA---TAN')
+                fits_header.setdefault('CTYPE2', 'DEC--TAN')
+
+                print("Converted XISF metadata to FITS header.")
+
+            # **📌 CASE 2: ORIGINAL FILE WAS FITS → PRESERVE HEADER**
+            elif original_header is not None:
+                print("Detected FITS format. Preserving original FITS header.")
+                fits_header = fits.Header()
+                for key, value in original_header.items():
+                    if key.startswith("XISF:"):
+                        continue  # Skip XISF metadata
+
+                    if isinstance(value, dict) and 'value' in value:
+                        value = value['value']
+
+                    try:
+                        fits_header[key] = value
+                    except Exception as e:
+                        print(f"Skipping problematic key {key} due to error: {e}")
             else:
-                # If no original header exists, we must rebuild.
-                use_rebuild = True
-                print("No original header available; rebuilding minimal FITS header.")
+                raise ValueError("Original header is required for FITS format!")
 
-            # If rebuilding, use the XISF viewer logic:
-            if use_rebuild:
-                header = fits.Header()
-                crval1, crval2 = None, None
+            # **📌 Image Processing for FITS**
+            fits_header['BSCALE'] = 1.0
+            fits_header['BZERO'] = 0.0
 
-                # Define the list of WCS keywords we care about.
-                wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
-                                "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
-
-                if image_meta and 'FITSKeywords' in image_meta:
-                    for keyword, values in image_meta['FITSKeywords'].items():
-                        for entry in values:
-                            if 'value' in entry:
-                                value = entry['value']
-                                if keyword in wcs_keywords:
-                                    try:
-                                        value = int(value)
-                                    except ValueError:
-                                        try:
-                                            value = float(value)
-                                        except Exception:
-                                            pass
-                                header[keyword] = value
-
-                # Manually add WCS information if missing.
-                if 'CTYPE1' not in header:
-                    header['CTYPE1'] = 'RA---TAN'
-                if 'CTYPE2' not in header:
-                    header['CTYPE2'] = 'DEC--TAN'
-
-                # Add the -SIP suffix if SIP coefficients are present.
-                if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
-                    header['CTYPE1'] = 'RA---TAN-SIP'
-                    header['CTYPE2'] = 'DEC--TAN-SIP'
-
-                # Set default reference pixel (center of the image).
-                if 'CRPIX1' not in header:
-                    header['CRPIX1'] = img_array.shape[1] / 2  # X center
-                if 'CRPIX2' not in header:
-                    header['CRPIX2'] = img_array.shape[0] / 2  # Y center
-
-                # Retrieve RA and DEC if available.
-                if image_meta and 'FITSKeywords' in image_meta:
-                    if 'RA' in image_meta['FITSKeywords']:
-                        crval1 = float(image_meta['FITSKeywords']['RA'][0]['value'])
-                    if 'DEC' in image_meta['FITSKeywords']:
-                        crval2 = float(image_meta['FITSKeywords']['DEC'][0]['value'])
-                if crval1 is not None and crval2 is not None:
-                    header['CRVAL1'] = crval1
-                    header['CRVAL2'] = crval2
-                else:
-                    print("RA and DEC values not found in FITS Keywords.")
-
-                # Calculate pixel scale if focal length and pixel size are available.
-                if image_meta and 'FITSKeywords' in image_meta and \
-                'FOCALLEN' in image_meta['FITSKeywords'] and 'XPIXSZ' in image_meta['FITSKeywords']:
-                    focal_length = float(image_meta['FITSKeywords']['FOCALLEN'][0]['value'])
-                    pixel_size = float(image_meta['FITSKeywords']['XPIXSZ'][0]['value'])
-                    pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
-                    header['CDELT1'] = -pixel_scale / 3600.0
-                    header['CDELT2'] = pixel_scale / 3600.0
-                else:
-                    header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
-                    header['CDELT2'] = 2.77778e-4
-
-                # Populate CD matrix using the XISF LinearTransformationMatrix if available.
-                if image_meta and 'XISFProperties' in image_meta and \
-                'PCL:AstrometricSolution:LinearTransformationMatrix' in image_meta['XISFProperties']:
-                    linear_transform = image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
-                    header['CD1_1'] = linear_transform[0][0]
-                    header['CD1_2'] = linear_transform[0][1]
-                    header['CD2_1'] = linear_transform[1][0]
-                    header['CD2_2'] = linear_transform[1][1]
-                else:
-                    header['CD1_1'] = header['CDELT1']
-                    header['CD1_2'] = 0.0
-                    header['CD2_1'] = 0.0
-                    header['CD2_2'] = header['CDELT2']
-
-                # Duplicate the mono image to create a 3-channel image if necessary.
-                if is_mono:
-                    image_data_fits = np.stack([img_array[:, :, 0]] * 3, axis=-1)
-                    image_data_fits = np.transpose(image_data_fits, (2, 0, 1))
-                    header['NAXIS'] = 3
-                    header['NAXIS3'] = 3
-                else:
-                    image_data_fits = np.transpose(img_array, (2, 0, 1))
-                    header['NAXIS'] = 3
-                    header['NAXIS3'] = 3
-
-            else:
-                # Otherwise, use the provided original header.
-                if original_header is not None and isinstance(original_header, dict):
-                    valid_header = {}
-                    for key, value in original_header.items():
-                        if not key.upper().startswith("XISF:"):
-                            valid_header[key] = value
-                    header = fits.Header()
-                    for key, value in valid_header.items():
-                        try:
-                            header[key] = value
-                        except Exception as e:
-                            print(f"Skipping key {key} due to error: {e}")
-                else:
-                    raise ValueError("Original header is required for FITS format!")
-
-            header['BSCALE'] = 1.0
-            header['BZERO'] = 0.0
-
-            # Now update the header with image dimensions:
             if is_mono or img_array.ndim == 2:
-                if img_array.ndim == 3:
-                    print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
-                    img_array = img_array[..., 0]
-                if bit_depth == "16-bit":
-                    img_array_fits = (img_array * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    bzero = header.get('BZERO', 0)
-                    bscale = header.get('BSCALE', 1)
-                    img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
-                else:
-                    img_array_fits = img_array.astype(np.float32)
-                header['NAXIS'] = 2
-                header['NAXIS1'] = img_array.shape[1]
-                header['NAXIS2'] = img_array.shape[0]
-                header.pop('NAXIS3', None)
-                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+                img_array_fits = img_array[:, :, 0] if len(img_array.shape) == 3 else img_array
+                fits_header['NAXIS'] = 2
             else:
-                img_array_transposed = np.transpose(img_array, (2, 0, 1))
-                if bit_depth == "16-bit":
-                    img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    bzero = header.get('BZERO', 0)
-                    bscale = header.get('BSCALE', 1)
-                    img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
-                    header['BITPIX'] = -32
-                else:
-                    img_array_fits = img_array_transposed.astype(np.float32)
-                header['NAXIS'] = 3
-                header['NAXIS1'] = img_array_transposed.shape[2]
-                header['NAXIS2'] = img_array_transposed.shape[1]
-                header['NAXIS3'] = img_array_transposed.shape[0]
-                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+                img_array_fits = np.transpose(img_array, (2, 0, 1))
+                fits_header['NAXIS'] = 3
+                fits_header['NAXIS3'] = 3
 
-            try:
-                hdu.writeto(filename, overwrite=True)
-                print(f"Saved FITS image with metadata to: {filename}")
-            except Exception as e:
-                print(f"Error saving FITS file: {e}")
+            fits_header['NAXIS1'] = img_array.shape[1]
+            fits_header['NAXIS2'] = img_array.shape[0]
+
+            # **💾 Save the FITS File**
+            hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
+            hdu.writeto(filename, overwrite=True)
+            print(f"Saved FITS image to: {filename}")
+            return
+
+
 
         elif original_format in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
             # Save as FITS file with metadata
