@@ -30,11 +30,14 @@ from io import BytesIO
 import re
 from scipy.spatial import Delaunay, KDTree
 import random
+if sys.stdout is not None:
+    sys.stdout.reconfigure(encoding='utf-8')
 
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
+from numba import njit, prange
 
 
 from astropy.wcs.utils import skycoord_to_pixel
@@ -85,29 +88,128 @@ from scipy.ndimage import convolve
 
 import rawpy
 
-# PyQt5 imports
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-    QFileDialog, QGraphicsView, QGraphicsScene, QMessageBox, QInputDialog, QTreeWidget, 
-    QTreeWidgetItem, QCheckBox, QDialog, QFormLayout, QSpinBox, QDialogButtonBox, QGridLayout,
-    QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsRectItem, QGraphicsPathItem, QDoubleSpinBox, QPlainTextEdit,
-    QColorDialog, QFontDialog, QStyle, QSlider, QTabWidget, QScrollArea, QSizePolicy, QSpacerItem, QAbstractItemView, QToolBar,QGraphicsPixmapItem,QRubberBand,QVBoxLayout,QGroupBox,
-    QGraphicsTextItem, QComboBox, QLineEdit, QRadioButton, QButtonGroup, QHeaderView, QStackedWidget, QSplitter, QMenu, QAction, QMenuBar, QTextEdit, QProgressBar, QGraphicsItem, QToolButton, QStatusBar,QShortcut, QTableWidget,
-    QTableWidgetItem,    QTableWidget, QProgressDialog,
+#################################
+# PyQt6 Imports
+#################################
+
+# ----- QtWidgets -----
+from PyQt6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QFileDialog,
+    QGraphicsView,
+    QGraphicsScene,
+    QMessageBox,
+    QInputDialog,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QCheckBox,
+    QDialog,
+    QFormLayout,
+    QSpinBox,
+    QDialogButtonBox,
+    QGridLayout,
+    QGraphicsEllipseItem,
+    QGraphicsLineItem,
+    QGraphicsRectItem,
+    QGraphicsPathItem,
+    QDoubleSpinBox,
+    QColorDialog,
+    QFontDialog,
+    QStyle,
+    QSlider,
+    QTabWidget,
+    QScrollArea,
+    QSizePolicy,
+    QSpacerItem,
+    QAbstractItemView,
+    QToolBar,
+    QGraphicsPixmapItem,
+    QRubberBand,
+    QGroupBox,
+    QGraphicsTextItem,
+    QComboBox,
+    QLineEdit,
+    QRadioButton,
+    QButtonGroup,
+    QHeaderView,
+    QStackedWidget,
+    QSplitter,
+    QMenuBar,
+    QTextEdit,
+    QPlainTextEdit,      
+    QProgressBar,
+    QGraphicsItem,
+    QToolButton,
+    QStatusBar,
+    QMenu,
+    QTableWidget,
     QTableWidgetItem,
     QListWidget,
-    QListWidgetItem
+    QListWidgetItem,
+    QProgressDialog
 )
-from PyQt5.QtGui import (
-    QPixmap, QImage, QPainter, QPen, QColor, QTransform, QIcon, QPainterPath, QFont, QMovie, QCursor, QBrush, QPolygon, QPolygonF, QKeySequence, QPalette, QWheelEvent)
-from PyQt5.QtCore import Qt, QRectF, QLineF, QPointF, QThread, pyqtSignal, QCoreApplication, QPoint, QTimer, QRect, QFileSystemWatcher, QEvent, pyqtSlot, QProcess, QSize, QObject,QSettings, QRunnable, QThreadPool
+
+# ----- QtGui -----
+from PyQt6.QtGui import (
+    QPixmap,
+    QImage,
+    QPainter,
+    QPen,
+    QColor,
+    QTransform,
+    QIcon,
+    QPainterPath,
+    QKeySequence,
+    QFont,
+    QMovie,
+    QCursor,
+    QBrush,
+    QShortcut,
+    QPolygon,
+    QPolygonF,
+    QPalette, 
+    QWheelEvent, 
+    QDoubleValidator,
+    QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
+)
+
+# ----- QtCore -----
+from PyQt6.QtCore import (
+    Qt,
+    QRectF,
+    QLineF,
+    QPointF,
+    QThread,
+    pyqtSignal,
+    QCoreApplication,
+    QPoint,
+    QTimer,
+    QRect,
+    QFileSystemWatcher,
+    QEvent,
+    pyqtSlot,
+    QProcess,
+    QSize,
+    QObject,
+    QSettings,
+    QRunnable,
+    QThreadPool
+)
+
 
 # Math functions
 from math import sqrt
 import math
 from copy import deepcopy
 
-VERSION = "2.10.13"
+
+VERSION = "2.11.1"
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
@@ -159,7 +261,8 @@ if hasattr(sys, '_MEIPASS'):
     staralign_path = os.path.join(sys._MEIPASS, 'staralign.png')
     mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')      
     platesolve_path = os.path.join(sys._MEIPASS, 'platesolve.png')
-    psf_path = os.path.join(sys._MEIPASS, 'psf.png')      
+    psf_path = os.path.join(sys._MEIPASS, 'psf.png')   
+    supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')       
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -209,7 +312,8 @@ else:
     staralign_path = 'staralign.png'
     mask_path = 'maskapply.png'    
     platesolve_path = 'platesolve.png'
-    psf_path = 'psf.png'    
+    psf_path = 'psf.png'   
+    supernova_path = 'supernova.png'     
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -291,7 +395,11 @@ class AstroEditingSuite(QMainWindow):
         
         open_project_action = QAction("Open Project", self)
         open_project_action.setStatusTip("Open a saved project")
-        open_project_action.triggered.connect(self.open_project)        
+        open_project_action.triggered.connect(self.open_project)   
+
+        new_project_action = QAction("New Project", self)
+        new_project_action.setStatusTip("Clear the current project and start a new project (this will erase all data)")
+        new_project_action.triggered.connect(self.new_project)     
 
         # Add actions to the File menu
         file_menu.addAction(open_action)
@@ -302,6 +410,7 @@ class AstroEditingSuite(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(save_project_action)   # New action
         file_menu.addAction(open_project_action)   # New action
+        file_menu.addAction(new_project_action) 
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
 
@@ -631,7 +740,7 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Mosaic Menu
         # --------------------
-        mosaic_menu = menubar.addMenu("Mosaic")
+        mosaic_menu = menubar.addMenu("Star Stuff")
 
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
@@ -654,7 +763,13 @@ class AstroEditingSuite(QMainWindow):
         psf_viewer_action = QAction(QIcon(psf_path), "PSF Viewer", self)
         psf_viewer_action.setStatusTip("View PSF histograms and star statistics")
         psf_viewer_action.triggered.connect(self.psf_viewer)
-        mosaic_menu.addAction(psf_viewer_action)          
+        mosaic_menu.addAction(psf_viewer_action)        
+
+        # Supernova Action (New!)
+        supernova_action = QAction(QIcon(supernova_path), "SuperNova Asteroid Hunter", self)
+        supernova_action.setStatusTip("Hunt for anomalies in your images")
+        supernova_action.triggered.connect(self.open_supernova_hunter)
+        mosaic_menu.addAction(supernova_action)    
 
         # --------------------
         # Toolbar
@@ -800,7 +915,8 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
         mosaictoolbar.addAction(plate_solver_action)
-        mosaictoolbar.addAction(psf_viewer_action)        
+        mosaictoolbar.addAction(psf_viewer_action)     
+        mosaictoolbar.addAction(supernova_action)   
         
         # --------------------
         # Mask Toolbar
@@ -965,6 +1081,13 @@ class AstroEditingSuite(QMainWindow):
         check_update_action.triggered.connect(self.check_for_updates)
         update_menu.addAction(check_update_action)
 
+        # Help Menu with About action
+        help_menu = menubar.addMenu("About")
+        about_action = QAction("About", self)
+        about_action.setStatusTip("About AstroEditingSuite")
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
         # --------------------
         # Apply Default Theme
         # --------------------
@@ -979,21 +1102,15 @@ class AstroEditingSuite(QMainWindow):
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
 
-    def show_slot_context_menu(self, pos, slot):
-        """
-        Shows a context menu for the image slot button with options to open a preview.
-        (You can expand this to include more actions if needed.)
-        """
-        button = self.slot_actions.get(slot)
-        if not button:
-            return
+    def show_about_dialog(self):
+        dialog = AboutDialog(self)
+        dialog.show()
 
-        menu = QMenu(button)
-        action_show_preview = menu.addAction("Show Slot Preview")
-        global_pos = button.mapToGlobal(pos)
-        selected_action = menu.exec(global_pos)
-        if selected_action == action_show_preview:
-            self.open_preview_window(slot)
+    def open_supernova_hunter(self):
+        # Instantiate the SuperNova/Asteroid Hunter widget
+        self.supernova_hunter_tab = SupernovaAsteroidHunterTab()
+        # Show the new window (or tab)
+        self.supernova_hunter_tab.show()
 
     def open_preview_window(self, slot):
         """Opens a separate preview window for the specified image slot."""
@@ -1353,6 +1470,76 @@ class AstroEditingSuite(QMainWindow):
             action.setStatusTip(f"Open preview for {new_name}")        
 
         print("Project loaded successfully from:", fileName)
+
+    def new_project(self):
+        """
+        Clears all current project data (images, masks, undo/redo stacks, etc.)
+        after warning the user that this operation is destructive.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self,
+            "New Project",
+            "This will erase all data in current slots and undo/redo stacks. Are you sure you want to create a new project?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            print("New project canceled by user.")
+            return
+
+        # Clear ImageManager data
+        self.image_manager._images = {i: None for i in range(self.image_manager.max_slots)}
+        self.image_manager._metadata = {i: {} for i in range(self.image_manager.max_slots)}
+        self.image_manager._undo_stacks = {i: [] for i in range(self.image_manager.max_slots)}
+        self.image_manager._redo_stacks = {i: [] for i in range(self.image_manager.max_slots)}
+        self.image_manager.current_slot = 0
+
+        # Clear MaskManager data
+        self.mask_manager._masks = {}
+        self.mask_manager.applied_mask = None
+        self.mask_manager.applied_mask_slot = None
+
+        # Clear preview windows if any
+        self.preview_windows = {}
+
+        # Reset custom slot names to defaults
+        self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+        self.mask_slot_names = {i: f"Mask Slot {i}" for i in range(5)}
+
+        # Update UI elements that are managed outside of ImageManager
+        # For instance, update file name label or other status indicators.
+        # Here we call update_file_name with default parameters.
+        self.update_file_name(0, None, {})
+
+        # Clear all tabs that display images.
+        self.clear_all_tabs()
+
+        print("New project created: All image, mask, and undo/redo data have been cleared.")
+
+    def clear_all_tabs(self):
+        """
+        Simulate a tab click by switching to a different tab and back.
+        This forces the tab's update logic to clear the image.
+        """
+        if self.tabs.count() < 2:
+            # Only one tab—try calling clear_image() if available.
+            current_tab = self.tabs.currentWidget()
+            if hasattr(current_tab, "clear_image"):
+                current_tab.clear_image()
+            return
+
+        # Save the current index.
+        current_index = self.tabs.currentIndex()
+        # Choose a different tab index.
+        new_index = 1 if current_index == 0 else 0
+        # Switch to the new index.
+        self.tabs.setCurrentIndex(new_index)
+        # Immediately switch back.
+        self.tabs.setCurrentIndex(current_index)
+        print("Simulated tab click to clear image.")
 
     def open_histogram(self):
         # Check if a histogram dialog is already open; if so, bring it to front.
@@ -3153,6 +3340,8 @@ class AstroEditingSuite(QMainWindow):
         Removes stars from the current image using StarNet and generates a stars-only image.
         Supports Windows, macOS, and Linux platforms.
         """
+        # Refresh the StarNet executable path from preferences.
+        self.starnet_exe_path = self.settings.value("starnet/exe_path", "")
 
         print("Starting star removal process...")
 
@@ -3168,6 +3357,13 @@ class AstroEditingSuite(QMainWindow):
         else:
             print(f"Using existing StarNet executable path: {self.starnet_exe_path}")
 
+        # Step 1.5: Check if the executable exists
+        if not os.path.exists(self.starnet_exe_path):
+            QMessageBox.critical(self, "StarNet Not Found",
+                                f"StarNet executable not found at {self.starnet_exe_path}. Aborting star removal process.")
+            print(f"StarNet executable not found: {self.starnet_exe_path}")
+            return
+
         # Step 2: Ensure current image is loaded
         if self.image_manager.image is None:
             QMessageBox.warning(self, "No Image", "Please load an image before removing stars.")
@@ -3180,7 +3376,8 @@ class AstroEditingSuite(QMainWindow):
         current_os = platform.system()
         print(f"Operating System detected: {current_os}")
         if current_os not in ["Windows", "Darwin", "Linux"]:
-            QMessageBox.critical(self, "Unsupported OS", f"The current operating system '{current_os}' is not supported.")
+            QMessageBox.critical(self, "Unsupported OS",
+                                f"The current operating system '{current_os}' is not supported.")
             print(f"Unsupported operating system: {current_os}")
             return
 
@@ -3215,7 +3412,6 @@ class AstroEditingSuite(QMainWindow):
             self.image_was_stretched = True
         else:
             print("Image is not linear. Proceeding without stretching.")
-            processing_image = processing_image
             self.image_was_stretched = False
 
         # Step 4: Set Command Parameters Based on OS
@@ -3258,7 +3454,6 @@ class AstroEditingSuite(QMainWindow):
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
             # macOS does NOT require the stride parameter
-            stride = None
             command = [
                 self.starnet_exe_path,
                 self.input_image_path,
@@ -3272,8 +3467,14 @@ class AstroEditingSuite(QMainWindow):
         if current_os in ["Darwin", "Linux"]:
             if not os.access(self.starnet_exe_path, os.X_OK):
                 print(f"StarNet executable not executable. Setting execute permissions for {self.starnet_exe_path}")
-                os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
-                print("Execute permissions set.")
+                try:
+                    os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
+                    print("Execute permissions set.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Permission Error",
+                                        f"Failed to set execute permissions for StarNet executable: {e}")
+                    print(f"Failed to set execute permissions for {self.starnet_exe_path}: {e}")
+                    return
             else:
                 print("StarNet executable already has execute permissions.")
         else:
@@ -3366,10 +3567,11 @@ class AstroEditingSuite(QMainWindow):
         dialog.append_text("Stars-only image generated.\n")
 
         # Step 10: Prompt user to save Stars Only Image
+        working_dir = self.settings.value("working_directory", os.getcwd())
         save_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Stars Only Image",
-            self.starnet_dir,  # Updated to use instance attribute
+            working_dir,  # Now using the working directory from preferences
             "TIFF Files (*.tif *.tiff);;PNG Files (*.png)"
         )
 
@@ -3723,7 +3925,7 @@ class AstroEditingSuite(QMainWindow):
             print("No file path provided in metadata.")
         
         # If slot == 0 and we have a valid image, update dimensions
-        if slot == 0 and image is not None:
+        if image is not None:
             # image should be a numpy array with shape (height, width[, channels])
             h, w = image.shape[:2]
             self.dim_label.setText(f"{w} x {h}")
@@ -3887,6 +4089,11 @@ class AstroEditingSuite(QMainWindow):
             try:
                 # Load the image into ImageManager
                 image, header, bit_depth, is_mono = load_image(file_path)
+                if image is not None:
+                    print(f"DEBUG: Loaded image max value: {image.max()}")
+                    print(f"DEBUG: Loaded image min value: {image.min()}")
+                    print(f"DEBUG: Loaded image shape: {image.shape}")
+                    print(f"DEBUG: Loaded image dtype: {image.dtype}")
                 metadata = {
                     'file_path': file_path,
                     'original_header': header,
@@ -4025,6 +4232,26 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
+class AboutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("About Seti Astro Suite")
+        layout = QVBoxLayout()
+
+        # Create a QLabel with rich text (HTML) for clickable links
+        about_text = (
+            f"<h2>Seti Astro's Suite {VERSION}</h2>"
+            "<p>Written by Franklin Marek</p>"
+            "<p>Website: <a href='http://www.setiastro.com'>www.setiastro.com</a></p>"
+            "<p>Donations: <a href='https://www.setiastro.com/checkout/donate?donatePageId=65ae7e7bac20370d8c04c1ab'>Click here to donate</a></p>"
+        )
+        label = QLabel(about_text)
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        label.setOpenExternalLinks(True)
+        
+        layout.addWidget(label)
+        self.setLayout(layout)
 
 class RecombineDialog(QDialog):
     def __init__(self, available_slots, parent=None):
@@ -4208,7 +4435,7 @@ class CropTool(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-        self.setGeometry(150, 150, 800, 600)  # Initial size
+        self.setGeometry(100, 100, 800, 600)  # Initial size
 
         self.image_manager = image_manager
         self.original_image_data = image_data.copy()  # Keep a copy of the original image
@@ -4612,6 +4839,17 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, self._metadata[slot])
         print(f"ImageManager: Image set for slot {slot} via property setter.")
 
+    def get_slot_name(self, slot):
+        """
+        Returns the display name for a given slot.
+        If a slot has been renamed (stored under "slot_name" in metadata), that name is returned.
+        Otherwise, it returns "Slot X" (using 1-indexed numbering for display).
+        """
+        metadata = self._metadata.get(slot, {})
+        if 'slot_name' in metadata:
+            return metadata['slot_name']
+        else:
+            return f"Slot {slot + 1}"
 
 
     def set_metadata(self, metadata):
@@ -5185,7 +5423,7 @@ class MaskCreationDialog(QDialog):
         """
         if event.button() == Qt.MouseButton.LeftButton:
             self.drawing = True
-            adjusted_pos = self.get_adjusted_position(event.pos())
+            adjusted_pos = self.get_adjusted_position(event.position())
             self.current_polygon = [adjusted_pos]
             self.update_selection()
 
@@ -5194,7 +5432,7 @@ class MaskCreationDialog(QDialog):
         Handles the mouse move event to update the current polygon being drawn.
         """
         if self.drawing:
-            adjusted_pos = self.get_adjusted_position(event.pos())
+            adjusted_pos = self.get_adjusted_position(event.position())
             self.current_polygon.append(adjusted_pos)
             self.update_selection()
 
@@ -6351,96 +6589,272 @@ class MosaicPreviewWindow(QDialog):
     def __init__(self, image_array, title="", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title if title else "Preview")
-        self.image_array = image_array
-        self.original_array = image_array.copy()  # Keep original for re-stretching
-        self.auto_stretch = True  # Default to auto-stretch
+
+        # Keep the original array around for re-stretch or reset
+        self.original_array = image_array.copy()
+        # Current displayed array (8-bit or whatever you want)
+        self.image_array = image_array.copy()
+
+        # Zoom state
+        self.zoom_factor = 1.0
+
+        # Variables for panning (dragging)
+        self.dragging = False
+        self.last_mouse_pos = QPoint()
         self.initUI()
 
     def initUI(self):
         layout = QVBoxLayout(self)
 
-        # Preview label
+        # 1) QScrollArea to enable scrollbars for large images
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        layout.addWidget(self.scroll_area)
+
+        # 2) Label inside the scroll area
         self.preview_label = QLabel("No image yet.")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.preview_label)
+        self.scroll_area.setWidget(self.preview_label)
+        self.scroll_area.viewport().installEventFilter(self)
 
-        # Auto-Stretch Toggle
+        # 3) Auto-Stretch Toggle
         self.stretch_toggle = QCheckBox("Auto-Stretch for Display")
         self.stretch_toggle.setChecked(True)
         self.stretch_toggle.stateChanged.connect(self.update_display)
         layout.addWidget(self.stretch_toggle)
 
-        # Button row
+        # 4) Button row (Zoom, Fit, etc.)
         button_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self.zoom_in)
+        button_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self.zoom_out)
+        button_layout.addWidget(self.zoom_out_button)
+
+        self.fit_button = QPushButton("Fit to Preview")
+        self.fit_button.clicked.connect(self.fit_to_preview)
+        button_layout.addWidget(self.fit_button)
+
         self.autostretch_button = QPushButton("Reapply Stretch")
         self.autostretch_button.clicked.connect(self.autostretch_image)
         button_layout.addWidget(self.autostretch_button)
+
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         button_layout.addWidget(close_btn)
+
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
+        # Finally, display the initial image
         self.display_image(self.image_array)
 
     def display_image(self, arr):
-        """ Convert array to QPixmap and display """
+        """
+        Convert array to QPixmap and display in preview_label.
+        We'll respect self.zoom_factor to scale the pixmap.
+        """
         if arr is None or arr.size == 0:
             print("WARNING: Trying to display an empty image.")
             return
 
-        # Apply stretching only if enabled
+        # Possibly apply auto-stretch
         if self.stretch_toggle.isChecked():
-            arr = self.stretch_for_display(arr)
-
-        # Convert to 3-channel for Qt display if grayscale
-        if arr.ndim == 2:
-            arr_3ch = np.stack([arr] * 3, axis=-1)
+            arr_display = self.stretch_for_display(arr)
         else:
-            arr_3ch = arr
+            # If it's already 8-bit or float, just convert to 8-bit safely
+            arr_display = self.to_8bit(arr)
+        
+        # Convert single-channel => 3 channels if needed
+        if arr_display.ndim == 2:
+            arr_3ch = np.stack([arr_display]*3, axis=-1)
+        elif arr_display.ndim == 3 and arr_display.shape[2] == 1:
+            arr_3ch = np.concatenate([arr_display, arr_display, arr_display], axis=2)
+        else:
+            arr_3ch = arr_display
 
+        # Make QImage => QPixmap
         h, w, c = arr_3ch.shape
         bytes_per_line = w * c
         qimg = QImage(arr_3ch.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
-
         pixmap = QPixmap.fromImage(qimg)
 
-        # Scale to fit window
-        pixmap = pixmap.scaled(
-            self.preview_label.size(),
+        # Apply zoom factor
+        new_w = int(w * self.zoom_factor)
+        new_h = int(h * self.zoom_factor)
+        if new_w < 1: new_w = 1
+        if new_h < 1: new_h = 1
+
+        scaled_pixmap = pixmap.scaled(
+            new_w, new_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
-        self.preview_label.setPixmap(pixmap)
+
+        # Set the label to the scaled pixmap
+        self.preview_label.setPixmap(scaled_pixmap)
+        # Important: set the label size so the scroll area can scroll if it's bigger
+        self.preview_label.resize(scaled_pixmap.size())
 
     def stretch_for_display(self, arr):
-        """ Applies an auto-stretch to improve visualization """
-        arr = arr.astype(np.float32)
-        mn, mx = np.percentile(arr, (0.5, 99.5))  # Ignore extreme tails
+        """
+        Applies an auto-stretch to improve visualization:
+          1) Compute 0.5 and 99.5 percentiles
+          2) Rescale to [0..255]
+        """
+        arr = arr.astype(np.float32, copy=False)
+        mn, mx = np.percentile(arr, (0.5, 99.5))
         if mx > mn:
             arr = (arr - mn) / (mx - mn)
         else:
             arr = np.zeros_like(arr)
-        return (arr * 255).clip(0, 255).astype(np.uint8)
+        arr = (arr * 255).clip(0, 255).astype(np.uint8)
+        return arr
+
+    def eventFilter(self, source, event):
+        """
+        Capture mouse events on the scroll_area.viewport():
+          - Left-button press => start dragging
+          - Mouse move => if dragging, pan
+          - Left-button release => stop dragging
+          - Wheel => zoom in/out
+        """
+        if source == self.scroll_area.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.dragging = True
+                    self.last_mouse_pos = event.pos()
+                    return True  # We handled it
+            elif event.type() == QEvent.Type.MouseMove:
+                if self.dragging:
+                    # Compute how far we moved
+                    delta = event.pos() - self.last_mouse_pos
+                    self.last_mouse_pos = event.pos()
+
+                    # Adjust scrollbars
+                    h_bar = self.scroll_area.horizontalScrollBar()
+                    v_bar = self.scroll_area.verticalScrollBar()
+                    h_bar.setValue(h_bar.value() - delta.x())
+                    v_bar.setValue(v_bar.value() - delta.y())
+
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.dragging = False
+                    return True
+            elif event.type() == QEvent.Type.Wheel:
+                # Zoom in or out
+                if event.angleDelta().y() > 0:
+                    self.zoom_in()
+                else:
+                    self.zoom_out()
+                event.accept()
+                return True
+        return super().eventFilter(source, event)
+
+    def to_8bit(self, arr):
+        """
+        Simple fallback if not using auto-stretch:
+        - If float in [0..1], multiply by 255
+        - If already 8-bit, do nothing
+        """
+        if arr.dtype == np.uint8:
+            return arr
+        # else assume float [0..1]
+        return (arr*255).clip(0,255).astype(np.uint8)
 
     def update_display(self):
-        """ Toggle between raw and stretched display """
+        """
+        Called when toggling the stretch checkbox. Re-display the image.
+        """
         self.display_image(self.image_array)
 
     def autostretch_image(self):
-        """ Auto-stretch original image and update preview """
+        """
+        Auto-stretch the original image and update preview.
+        If the image has multiple channels, we do the same approach as stretch_for_display
+        but typically you'd do something more advanced for color.
+        """
         arr = self.original_array.copy()
-        if arr.ndim == 2:
-            arr_stretched = self.stretch_for_display(arr)
+        # e.g., if color, you might do a channel-by-channel approach
+        # For simplicity, let's do a grayscale approach using the mean:
+        if arr.ndim == 3:
+            # we create a single channel for stretch
+            g = np.mean(arr, axis=-1)
+            arr_stretched = self.stretch_for_display(g)
+            # Then broadcast back to 3 channels
+            arr_stretched = np.stack([arr_stretched]*3, axis=-1)
         else:
-            # If image has three channels, use the mean for stretching.
-            arr_stretched = self.stretch_for_display(np.mean(arr, axis=-1))
+            arr_stretched = self.stretch_for_display(arr)
         self.image_array = arr_stretched
         self.display_image(self.image_array)
 
+    # ---------------------
+    # ZOOM Methods
+    # ---------------------
+    def zoom_in(self):
+        self.zoom_factor *= 1.2
+        self.display_image(self.image_array)
+
+    def zoom_out(self):
+        self.zoom_factor /= 1.2
+        if self.zoom_factor < 0.05:
+            self.zoom_factor = 0.05
+        self.display_image(self.image_array)
+
+    def fit_to_preview(self):
+        """
+        Scale the image so it fits inside the scroll_area's viewport.
+        We'll measure the image's actual size, compare to the viewport,
+        and adjust zoom_factor accordingly.
+        """
+        if self.image_array is None or self.image_array.size == 0:
+            return
+
+        # We'll figure out the image's *unzoomed* dimensions
+        arr_display = self.image_array
+        if self.stretch_toggle.isChecked():
+            arr_display = self.stretch_for_display(arr_display)
+        else:
+            arr_display = self.to_8bit(arr_display)
+
+        # Convert single-channel => 3 channels if needed, to find w,h
+        if arr_display.ndim == 2:
+            arr_3ch = np.stack([arr_display]*3, axis=-1)
+        elif arr_display.ndim == 3 and arr_display.shape[2] == 1:
+            arr_3ch = np.concatenate([arr_display, arr_display, arr_display], axis=2)
+        else:
+            arr_3ch = arr_display
+
+        h, w, c = arr_3ch.shape
+
+        # The scroll area viewport size
+        viewport_size = self.scroll_area.viewport().size()
+        vw, vh = viewport_size.width(), viewport_size.height()
+
+        # Compute the scale factor to fit image inside viewport
+        scale_w = vw / w if w else 1.0
+        scale_h = vh / h if h else 1.0
+        new_zoom = min(scale_w, scale_h)
+        if new_zoom <= 0:
+            new_zoom = 0.01
+
+        self.zoom_factor = new_zoom
+        self.display_image(self.image_array)
+
     def resizeEvent(self, event):
-        """ Refresh displayed pixmap when window is resized """
+        """
+        Refresh displayed pixmap when window is resized,
+        only if we want the displayed image to keep fitting automatically.
+        But typically, we won't auto-fit on window resize if user is controlling zoom.
+        """
         super().resizeEvent(event)
+        # Optionally do:
+        # self.fit_to_preview()
+        # or if you want to keep the user-chosen zoom, just re-display:
         self.display_image(self.image_array)
 
 class MosaicSettingsDialog(QDialog):
@@ -6454,71 +6868,63 @@ class MosaicSettingsDialog(QDialog):
         layout = QFormLayout(self)
 
         # Number of Stars to Attempt to Use
-        self.starCountSpin = QSpinBox()
-        self.starCountSpin.setRange(1, 1000)
-        self.starCountSpin.setValue(self.settings.value("mosaic/num_stars", 150, type=int))
+        self.starCountSpin = CustomSpinBox(minimum=1, maximum=1000,
+                                        initial=self.settings.value("mosaic/num_stars", 150, type=int),
+                                        step=1)
         layout.addRow("Number of Stars:", self.starCountSpin)
 
         # Translation Max Tolerance
-        self.transTolSpin = QDoubleSpinBox()
-        self.transTolSpin.setRange(0.0, 10.0)
-        self.transTolSpin.setDecimals(3)
-        self.transTolSpin.setValue(self.settings.value("mosaic/translation_max_tolerance", 3.0, type=float))
+        self.transTolSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/translation_max_tolerance", 3.0, type=float),
+                                                step=0.1)
         layout.addRow("Translation Max Tolerance:", self.transTolSpin)
 
         # Scale Min Tolerance
-        self.scaleMinSpin = QDoubleSpinBox()
-        self.scaleMinSpin.setRange(0.0, 10.0)
-        self.scaleMinSpin.setDecimals(3)
-        self.scaleMinSpin.setValue(self.settings.value("mosaic/scale_min_tolerance", 0.8, type=float))
+        self.scaleMinSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/scale_min_tolerance", 0.8, type=float),
+                                                step=0.1)
         layout.addRow("Scale Min Tolerance:", self.scaleMinSpin)
 
         # Scale Max Tolerance
-        self.scaleMaxSpin = QDoubleSpinBox()
-        self.scaleMaxSpin.setRange(0.0, 10.0)
-        self.scaleMaxSpin.setDecimals(3)
-        self.scaleMaxSpin.setValue(self.settings.value("mosaic/scale_max_tolerance", 1.25, type=float))
+        self.scaleMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                                initial=self.settings.value("mosaic/scale_max_tolerance", 1.25, type=float),
+                                                step=0.1)
         layout.addRow("Scale Max Tolerance:", self.scaleMaxSpin)
 
         # Rotation Max Tolerance
-        self.rotationMaxSpin = QDoubleSpinBox()
-        self.rotationMaxSpin.setRange(0.0, 180.0)
-        self.rotationMaxSpin.setDecimals(2)
-        self.rotationMaxSpin.setValue(self.settings.value("mosaic/rotation_max_tolerance", 45.0, type=float))
+        self.rotationMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=180.0,
+                                                initial=self.settings.value("mosaic/rotation_max_tolerance", 45.0, type=float),
+                                                step=0.1)
+        # Force two decimals in display
+        self.rotationMaxSpin.lineEdit.setText(f"{self.rotationMaxSpin.value():.2f}")
         layout.addRow("Rotation Max Tolerance (°):", self.rotationMaxSpin)
 
-        # Skew Max Tolerance (dot product of normalized columns; 0 means orthogonal)
-        self.skewMaxSpin = QDoubleSpinBox()
-        self.skewMaxSpin.setRange(0.0, 1.0)
-        self.skewMaxSpin.setDecimals(3)
-        self.skewMaxSpin.setSingleStep(0.01)
-        self.skewMaxSpin.setValue(self.settings.value("mosaic/skew_max_tolerance", 0.1, type=float))
+        # Skew Max Tolerance
+        self.skewMaxSpin = CustomDoubleSpinBox(minimum=0.0, maximum=1.0,
+                                            initial=self.settings.value("mosaic/skew_max_tolerance", 0.1, type=float),
+                                            step=0.01)
         layout.addRow("Skew Max Tolerance:", self.skewMaxSpin)
 
         # FWHM for Star Detection
-        self.fwhmSpin = QDoubleSpinBox()
-        self.fwhmSpin.setRange(0.0, 20.0)
-        self.fwhmSpin.setDecimals(2)
-        self.fwhmSpin.setValue(self.settings.value("mosaic/star_fwhm", 3.0, type=float))
+        self.fwhmSpin = CustomDoubleSpinBox(minimum=0.0, maximum=20.0,
+                                            initial=self.settings.value("mosaic/star_fwhm", 3.0, type=float),
+                                            step=0.1)
+        self.fwhmSpin.lineEdit.setText(f"{self.fwhmSpin.value():.2f}")
         layout.addRow("FWHM for Star Detection:", self.fwhmSpin)
 
         # Sigma for Star Detection
-        self.sigmaSpin = QDoubleSpinBox()
-        self.sigmaSpin.setRange(0.0, 10.0)
-        self.sigmaSpin.setDecimals(2)
-        self.sigmaSpin.setValue(self.settings.value("mosaic/star_sigma", 3.0, type=float))
+        self.sigmaSpin = CustomDoubleSpinBox(minimum=0.0, maximum=10.0,
+                                            initial=self.settings.value("mosaic/star_sigma", 3.0, type=float),
+                                            step=0.1)
+        self.sigmaSpin.lineEdit.setText(f"{self.sigmaSpin.value():.2f}")
         layout.addRow("Sigma for Star Detection:", self.sigmaSpin)
 
-        self.polyDegreeSpin = QSpinBox()
-        self.polyDegreeSpin.setRange(1, 6)
-        self.polyDegreeSpin.setValue(self.settings.value("mosaic/poly_degree", 3, type=int))
+        # Polynomial Degree
+        self.polyDegreeSpin = CustomSpinBox(minimum=1, maximum=6,
+                                            initial=self.settings.value("mosaic/poly_degree", 3, type=int),
+                                            step=1)
         layout.addRow("Polynomial Degree:", self.polyDegreeSpin)
 
-
-        buttonBox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttonBox.accepted.connect(self.accept)
-        buttonBox.rejected.connect(self.reject)
-        layout.addRow(buttonBox)
 
     def accept(self):
         # Save the values to QSettings
@@ -9415,7 +9821,20 @@ class PlateSolver(QDialog):
                     is_mono = True
                 else:
                     is_mono = False
+
+                # If mono, expand it to 3-channel
+                if is_mono:
+                    original_image_data = np.stack([original_image_data] * 3, axis=-1)  # Convert to RGB-equivalent format
+                    is_mono = False  # Mark as non-mono since we expanded it
+
+                if "file_path" in solved_header:
+                    del solved_header["file_path"]                    
                 # Save the original image data with the solved header.
+
+                # Print the final header before saving
+                print("\n✅ FINAL HEADER BEFORE SAVING:")
+                for key, value in solved_header.items():
+                    print(f"{key} = {value}")                
                 save_image(
                     img_array=original_image_data,
                     filename=save_path,
@@ -10158,7 +10577,6 @@ class BatchPlateSolverDialog(QDialog):
         self.logStatus("Batch plate solving completed.")
 
 
-
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
@@ -10473,10 +10891,10 @@ class PSFViewer(QDialog):
             bin_edges = np.linspace(0, 1, bin_count + 1)
         else:
             if self.histogram_mode == 'PSF':
-                # Use the 'fwhm_used' column (should be between 2 and 10)
-                data = np.array(self.star_catalog['fwhm_used'])
-                # Set bin range to cover 0 to 10.
-                bin_edges = np.linspace(0, 10, bin_count + 1)
+                # Use the HFR (Half Flux Radius) by dividing the FWHM values by 2.
+                data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
+                # Set bin range accordingly (e.g. 0 to 5 if original FWHM ranged from 0 to 10).
+                bin_edges = np.linspace(0, 5, bin_count + 1)
             else:
                 # Use the 'flux' column; let bins span the range of flux.
                 data = np.array(self.star_catalog['flux'])
@@ -10563,7 +10981,8 @@ class PSFViewer(QDialog):
             # If 'fwhm_used' is present, move it to the front.
             if 'fwhm_used' in colnames:
                 colnames.remove('fwhm_used')
-                colnames.insert(0, 'fwhm_used')
+                # Replace with HFR as the displayed column name.
+                colnames.insert(0, 'HFR')
 
         # Update the table to have one column per desired parameter.
         self.stats_table.setColumnCount(len(colnames))
@@ -10574,7 +10993,11 @@ class PSFViewer(QDialog):
         # For each column, compute and display the statistics.
         for col_index, col in enumerate(colnames):
             try:
-                col_data = np.array(self.star_catalog[col], dtype=float)
+                if col == 'HFR':
+                    # Get the original fwhm_used values and convert them to HFR.
+                    col_data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
+                else:
+                    col_data = np.array(self.star_catalog[col], dtype=float)
                 min_val = np.min(col_data)
                 max_val = np.max(col_data)
                 med_val = np.median(col_data)
@@ -10587,236 +11010,795 @@ class PSFViewer(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row_index, col_index, item)
 
-class HistogramDialog(QDialog):
-    def __init__(self, image, parent=None):
-        """
-        Initialize the histogram dialog.
+@njit(parallel=True)
+def _cosmetic_correction_numba(padded, corrected, H, W, C, half_w, hot_sigma, cold_sigma):
+    """
+    Numba-compiled helper for local outlier correction.
+    padded   : (H + 2*half_w, W + 2*half_w, C) padded image
+    corrected: (H, W, C) array we write into
+    H, W, C  : Dimensions of the unpadded image
+    half_w   : half of window_size (e.g. 1 if window_size=3)
+    hot_sigma, cold_sigma: thresholds
+    """
+    window_size = half_w * 2 + 1
+    # Temporary array to hold the neighborhood pixel values (for median calc).
+    # For a 3×3 patch, that's 9 elements.
+    local_vals = np.empty((window_size * window_size,), dtype=np.float32)
 
-        Args:
-            image (np.ndarray): The image array (either grayscale or RGB).
-                                  Pixel values are expected to be in [0, 1].
-            parent: Parent widget.
-        """
-        super().__init__(parent)
-        self.setWindowTitle("Histogram")
-        self.image = image  # The image from which to compute the histogram.
-        self.zoom_factor = 1.0  # 1.0 means 100%
-        self.log_scale = False  # Default: linear x-axis
+    for y in prange(H):
+        for x in range(W):
+            # Coordinates in the padded image
+            y_p = y + half_w
+            x_p = x + half_w
+
+            for c_i in range(C):
+                # Extract the local patch
+                k = 0
+                for dy in range(-half_w, half_w+1):
+                    for dx in range(-half_w, half_w+1):
+                        local_vals[k] = padded[y_p + dy, x_p + dx, c_i]
+                        k += 1
+
+                # Compute local median
+                # For 3×3, sorting 9 items is cheap:
+                local_vals.sort()
+                M = local_vals[len(local_vals)//2]  # middle item => median
+
+                # Median absolute deviation (MAD)
+                for n in range(len(local_vals)):
+                    local_vals[n] = abs(local_vals[n] - M)
+                local_vals.sort()
+                dev = 1.4826 * local_vals[len(local_vals)//2]  # scale by 1.4826
+
+                T = corrected[y, x, c_i]  # original pixel
+                # Check hot/cold
+                if T > M + hot_sigma * dev:
+                    corrected[y, x, c_i] = M
+                elif T < M - cold_sigma * dev:
+                    corrected[y, x, c_i] = M
+
+
+def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
+    """
+    Local outlier (hot/cold) correction accelerated by Numba.
+    - For each pixel, we get its window_size×window_size neighborhood,
+    compute the local median (M) & robust scale estimate (DEV),
+    then mark pixel as hot if T > M + hot_sigma*DEV or cold if T < M - cold_sigma*DEV,
+    in which case we replace T with M.
+
+    image      : np.ndarray, shape (H,W) or (H,W,3) in [0..1].
+    hot_sigma  : float, threshold above local median for "hot"
+    cold_sigma : float, threshold below local median for "cold"
+    window_size: int, e.g. 3 => 3×3 patch
+
+    returns an np.ndarray of the same shape with outliers replaced.
+    """
+    was_gray = False
+    if image.ndim == 2:  # shape (H, W)
+        was_gray = True
+        image = image[:, :, np.newaxis]
+
+    H, W, C = image.shape
+    half_w = window_size // 2
+
+    # Reflect-pad the image for easy neighborhood extraction
+    padded = np.pad(
+        image,
+        pad_width=((half_w, half_w), (half_w, half_w), (0, 0)),
+        mode='reflect'
+    ).astype(np.float32)
+
+    # We'll operate on a copy so as not to modify the input.
+    corrected = image.astype(np.float32).copy()
+
+    # Call the numba function
+    _cosmetic_correction_numba(padded, corrected, H, W, C, half_w, hot_sigma, cold_sigma)
+
+    if was_gray:
+        # Squeeze back to 2D
+        corrected = corrected[:, :, 0]
+
+    return corrected
+
+
+class SupernovaAsteroidHunterTab(QWidget):
+    def __init__(self):
+        super().__init__()
+        # Parameters for the hunter
+        self.parameters = {
+            "referenceImagePath": "",
+            "searchImagePaths": [],
+            "threshold": 0.10  # Default threshold value
+        }
+        # Preprocessed images will be stored here
+        self.preprocessed_reference = None
+        self.preprocessed_search = []  # List of dicts: {"path": str, "image": np.array}
+        # Detected anomaly data for each search image
+        self.anomalyData = []
         self.initUI()
 
     def initUI(self):
-        main_layout = QVBoxLayout(self)
-        
-        # Create a top-level horizontal layout to hold the histogram and the statistics table.
-        top_layout = QHBoxLayout()
+        layout = QVBoxLayout(self)
 
-        # Create a scroll area for the histogram display.
-        self.scroll_area = QScrollArea(self)
-        # Set a fixed size for the scroll area so the dialog doesn't expand.
-        self.scroll_area.setFixedSize(520, 310)
-        self.scroll_area.setWidgetResizable(False)
-        
-        # Create the histogram label that will be placed inside the scroll area.
-        self.hist_label = QLabel(self)
-        self.hist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scroll_area.setWidget(self.hist_label)
-        top_layout.addWidget(self.scroll_area)
+        # Instruction Label
+        instructions = QLabel("Select the reference image and search images. Then click Process to hunt for anomalies.")
+        layout.addWidget(instructions)
 
-        # Create the statistics table.
-        self.stats_table = QTableWidget(self)
-        # We will update the number of columns in updateStatistics() based on image channels.
-        self.stats_table.setRowCount(4)  # Min, Max, Median, StdDev
-        self.stats_table.setColumnCount(1)  # Default to 1 column for mono; update later if RGB.
-        # Set row headers.
-        self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
-        # Fix the width of the table.
-        self.stats_table.setFixedWidth(360)
-        top_layout.addWidget(self.stats_table)
-        
-        # Add the top_layout to the main layout.
-        main_layout.addLayout(top_layout)
-        
-        # Controls layout: zoom slider and log toggle button.
-        controls_layout = QHBoxLayout()
-        
-        self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
-        self.zoom_slider.setRange(50, 1000)  # 50% to 1000%
-        self.zoom_slider.setValue(100)       # Default 100%
-        self.zoom_slider.setTickInterval(10)
-        self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.zoom_slider.valueChanged.connect(self.updateZoom)
-        controls_layout.addWidget(QLabel("Zoom:"))
-        controls_layout.addWidget(self.zoom_slider)
-        
-        # Toggle button for log x-axis.
-        self.log_toggle_button = QPushButton("Toggle Log X-Axis", self)
-        self.log_toggle_button.setCheckable(True)
-        self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
-        self.log_toggle_button.toggled.connect(self.toggleLogScale)
-        controls_layout.addWidget(self.log_toggle_button)
-        
-        main_layout.addLayout(controls_layout)
+        # --- Reference Image Selection ---
+        ref_layout = QHBoxLayout()
+        self.ref_line_edit = QLineEdit(self)
+        self.ref_line_edit.setPlaceholderText("No reference image selected")
+        self.ref_button = QPushButton("Select Reference Image", self)
+        self.ref_button.clicked.connect(self.selectReferenceImage)
+        ref_layout.addWidget(self.ref_line_edit)
+        ref_layout.addWidget(self.ref_button)
+        layout.addLayout(ref_layout)
 
-        # Add a Close button.
-        close_btn = QPushButton("Close", self)
-        close_btn.clicked.connect(self.accept)
-        main_layout.addWidget(close_btn)
-        
-        self.setLayout(main_layout)
-        self.drawHistogram()
+        # --- Search Images Selection ---
+        search_layout = QHBoxLayout()
+        self.search_list = QListWidget(self)
+        self.search_button = QPushButton("Select Search Images", self)
+        self.search_button.clicked.connect(self.selectSearchImages)
+        search_layout.addWidget(self.search_list)
+        search_layout.addWidget(self.search_button)
+        layout.addLayout(search_layout)
 
-    def updateHistogram(self, new_image):
+        # --- Cosmetic Correction Checkbox ---
+        self.cosmetic_checkbox = QCheckBox("Apply Cosmetic Correction before Preprocessing", self)
+        layout.addWidget(self.cosmetic_checkbox)
+
+        # --- Threshold Slider ---
+        thresh_layout = QHBoxLayout()
+        self.thresh_label = QLabel("Anomaly Detection Threshold: 0.10", self)
+        self.thresh_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.thresh_slider.setMinimum(1)
+        self.thresh_slider.setMaximum(50)  # Represents 0.01 to 0.50
+        self.thresh_slider.setValue(10)      # 10 => 0.10 threshold
+        self.thresh_slider.valueChanged.connect(self.updateThreshold)
+        thresh_layout.addWidget(self.thresh_label)
+        thresh_layout.addWidget(self.thresh_slider)
+        layout.addLayout(thresh_layout)
+
+        # --- Process Button ---
+        self.process_button = QPushButton("Process (Cosmetic Correction, Preprocess, and Search)", self)
+        self.process_button.clicked.connect(self.process)
+        layout.addWidget(self.process_button)
+
+        # --- Progress Labels ---
+        self.preprocess_progress_label = QLabel("Preprocessing progress: 0 / 0", self)
+        self.search_progress_label = QLabel("Processing progress: 0 / 0", self)
+        layout.addWidget(self.preprocess_progress_label)
+        layout.addWidget(self.search_progress_label)
+
+        # -- Add a new status label --
+        self.status_label = QLabel("Status: Idle", self)
+        layout.addWidget(self.status_label)
+
+        # --- New Instance Button ---
+        self.new_instance_button = QPushButton("New Instance", self)
+        self.new_instance_button.clicked.connect(self.newInstance)
+        layout.addWidget(self.new_instance_button)
+
+        self.setLayout(layout)
+        self.setWindowTitle("Supernova/Asteroid Hunter")
+
+    def updateThreshold(self, value):
+        threshold = value / 100.0  # e.g. slider value 10 becomes 0.10
+        self.parameters["threshold"] = threshold
+        self.thresh_label.setText(f"Anomaly Detection Threshold: {threshold:.2f}")
+
+    def selectReferenceImage(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "",
+                                                   "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
+        if file_path:
+            self.parameters["referenceImagePath"] = file_path
+            self.ref_line_edit.setText(os.path.basename(file_path))
+
+    def selectSearchImages(self):
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "Select Search Images", "",
+                                                     "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)")
+        if file_paths:
+            self.parameters["searchImagePaths"] = file_paths
+            self.search_list.clear()
+            for path in file_paths:
+                self.search_list.addItem(os.path.basename(path))
+
+    def process(self):
+        self.status_label.setText("Process started...")
+        QApplication.processEvents()
+
+        # If cosmetic correction is enabled, run it first
+        if self.cosmetic_checkbox.isChecked():
+            self.status_label.setText("Running Cosmetic Correction...")
+            QApplication.processEvents()
+            self.runCosmeticCorrectionIfNeeded()
+
+        self.status_label.setText("Preprocessing images...")
+        QApplication.processEvents()
+        self.preprocessImages()
+
+        self.status_label.setText("Analyzing anomalies...")
+        QApplication.processEvents()
+        self.runSearch()
+
+        self.status_label.setText("Process complete.")
+        QApplication.processEvents()
+
+
+    def runCosmeticCorrectionIfNeeded(self):
         """
-        Update the histogram with a new image.
+        Runs cosmetic correction on each search image...
         """
-        self.image = new_image
-        self.drawHistogram()
+        # Dictionary to hold corrected images
+        self.cosmetic_images = {}
 
-    def updateZoom(self, value):
-        self.zoom_factor = value / 100.0
-        self.drawHistogram()
+        for idx, image_path in enumerate(self.parameters["searchImagePaths"]):
+            try:
+                # Update status label to show which image is being handled
+                self.status_label.setText(f"Cosmetic Correction: {idx+1}/{len(self.parameters['searchImagePaths'])} => {os.path.basename(image_path)}")
+                QApplication.processEvents()
 
-    def toggleLogScale(self, checked):
-        self.log_scale = checked
-        self.drawHistogram()
+                img, header, bit_depth, is_mono = load_image(image_path)
+                if img is None:
+                    print(f"Unable to load image: {image_path}")
+                    continue
 
-    def drawHistogram(self):
-        """
-        Computes and draws the histogram.
-        In linear mode, it uses equally spaced bins.
-        In log mode, it uses logarithmically spaced bins (with a small epsilon to avoid log(0)).
-        Also draws an x-axis with tick marks and labels.
-        """
-        # Base dimensions.
-        base_width = 512
-        height = 300
-        width = int(base_width * self.zoom_factor)
-        
-        # Create a pixmap with the computed dimensions.
-        pixmap = QPixmap(width, height)
-        pixmap.fill(Qt.GlobalColor.white)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        bin_count = 512
-        
-        # Choose bin edges based on the log_scale toggle.
-        if self.log_scale:
-            eps = 1e-4  # Cannot start at 0 for log scale.
-            bin_edges = np.logspace(np.log10(eps), 0, bin_count + 1)
-            log_min = np.log10(eps)
-            log_max = 0  # log10(1)=0
-            def x_pos(edge):
-                return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
-        else:
-            bin_edges = np.linspace(0, 1, bin_count + 1)
-            def x_pos(edge):
-                return int(edge * width)
-        
-        # Draw histogram bars.
-        if self.image.ndim == 3 and self.image.shape[2] == 3:
-            # For RGB images, draw each channel histogram.
-            channel_colors = [
-                QColor(255, 0, 0, 120),
-                QColor(0, 255, 0, 120),
-                QColor(0, 0, 255, 120)
-            ]
-            for ch in range(3):
-                hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_edges)
-                if hist.max() > 0:
-                    hist = hist.astype(np.float32) / hist.max()
+                # Numba correction
+                corrected = bulk_cosmetic_correction_numba(
+                    img,
+                    hot_sigma=3.0,
+                    cold_sigma=3.0,
+                    window_size=3
+                )
+                self.cosmetic_images[image_path] = corrected
+                print(f"Cosmetic correction (Numba) applied to: {image_path}")
+
+            except Exception as e:
+                print(f"Error in cosmetic correction for {image_path}: {e}")
+
+
+    def preprocessImages(self):
+        # Update status label for reference image
+        self.status_label.setText("Preprocessing reference image...")
+        QApplication.processEvents()
+
+        ref_path = self.parameters["referenceImagePath"]
+        if not ref_path:
+            QMessageBox.warning(self, "Error", "No reference image selected.")
+            return
+
+        try:
+            ref_img, header, bit_depth, is_mono = load_image(ref_path)
+
+            # Create a debug prefix from the reference path (e.g. "C:/data/ref_debug")
+            debug_prefix_ref = os.path.splitext(ref_path)[0] + "_debug_ref"
+
+            self.status_label.setText("Applying background neutralization & ABE on reference...")
+            QApplication.processEvents()
+
+            # Pass debug_prefix_ref to preprocessImage
+            ref_processed = self.preprocessImage(ref_img, debug_prefix=debug_prefix_ref)
+            self.preprocessed_reference = ref_processed
+            self.preprocess_progress_label.setText("Preprocessing reference image... Done.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to preprocess reference image: {e}")
+            return
+
+        self.preprocessed_search = []
+        search_paths = self.parameters["searchImagePaths"]
+        for i, path in enumerate(search_paths):
+            try:
+                self.status_label.setText(f"Preprocessing search image {i+1}/{len(search_paths)} => {os.path.basename(path)}")
+                QApplication.processEvents()
+
+                # Create a debug prefix from the search path
+                debug_prefix_search = os.path.splitext(path)[0] + f"_debug_search_{i+1}"
+
+                if hasattr(self, 'cosmetic_images') and path in self.cosmetic_images:
+                    img = self.cosmetic_images[path]
                 else:
-                    hist = hist.astype(np.float32)
-                painter.setPen(QPen(channel_colors[ch]))
-                for i in range(bin_count):
-                    x0 = x_pos(bin_edges[i])
-                    x1 = x_pos(bin_edges[i+1])
-                    bar_width = x1 - x0
-                    bar_height = hist[i] * height
-                    painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
-        else:
-            # Mono: if image is 3D with one channel, squeeze.
-            if self.image.ndim == 3 and self.image.shape[2] == 1:
-                gray = self.image.squeeze()
-            else:
-                gray = self.image
-            hist, _ = np.histogram(gray.ravel(), bins=bin_edges)
-            if hist.max() > 0:
-                hist = hist.astype(np.float32) / hist.max()
-            else:
-                hist = hist.astype(np.float32)
-            painter.setPen(QPen(QColor(0, 0, 0)))
-            for i in range(bin_count):
-                x0 = x_pos(bin_edges[i])
-                x1 = x_pos(bin_edges[i+1])
-                bar_width = x1 - x0
-                bar_height = hist[i] * height
-                painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
-        
-        # Draw x-axis.
-        painter.setPen(QPen(QColor(0, 0, 0), 2))
-        painter.drawLine(0, height - 1, width, height - 1)
-        
-        # Draw tick marks and labels.
-        painter.setFont(QFont("Arial", 10))
-        if self.log_scale:
-            tick_values = np.logspace(np.log10(eps), 0, 11)
-            for tick in tick_values:
-                x = x_pos(tick)
-                painter.drawLine(x, height - 1, x, height - 6)
-                painter.drawText(x - 10, height - 10, f"{tick:.3f}")
-        else:
-            tick_values = np.linspace(0, 1, 11)
-            for tick in tick_values:
-                x = x_pos(tick)
-                painter.drawLine(x, height - 1, x, height - 6)
-                painter.drawText(x - 10, height - 10, f"{tick:.1f}")
-        
-        painter.end()
-        self.hist_label.setPixmap(pixmap)
-        self.hist_label.resize(pixmap.size())
-        
-        # Update the statistics table.
-        self.updateStatistics()
+                    img, header, bit_depth, is_mono = load_image(path)
 
-    def updateStatistics(self):
+                # Pass debug_prefix_search to preprocessImage
+                processed = self.preprocessImage(img, debug_prefix=debug_prefix_search)
+                self.preprocessed_search.append({"path": path, "image": processed})
+
+                self.preprocess_progress_label.setText(f"Preprocessing image {i+1} of {len(search_paths)}... Done.")
+                QApplication.processEvents()
+
+            except Exception as e:
+                print(f"Failed to preprocess {path}: {e}")
+
+        self.status_label.setText("All search images preprocessed.")
+        QApplication.processEvents()
+
+
+
+    def preprocessImage(self, img, debug_prefix=None):
         """
-        Computes statistics for the current image and updates the table.
-        For an RGB image, computes per-channel min, max, median, and standard deviation.
-        For a mono image, computes statistics for the first channel.
+        Runs the full preprocessing chain on a single image:
+        1. Background Neutralization
+        2. Automatic Background Extraction (ABE)
+        3. Pixel-math stretching
+
+        Optionally saves debug images if debug_prefix is provided.
         """
-        # Determine if the image is color or mono.
-        if self.image.ndim == 3 and self.image.shape[2] == 3:
-            # Color image: 3 columns.
-            self.stats_table.setColumnCount(3)
-            self.stats_table.setHorizontalHeaderLabels(["R", "G", "B"])
-            channels = [self.image[..., i] for i in range(3)]
+
+
+        # --- Step 1: Background Neutralization ---
+        if img.ndim == 3 and img.shape[2] == 3:
+            h, w, _ = img.shape
+            sample_x = int(w * 0.45)
+            sample_y = int(h * 0.45)
+            sample_w = max(1, int(w * 0.1))
+            sample_h = max(1, int(h * 0.1))
+            sample_region = img[sample_y:sample_y+sample_h, sample_x:sample_x+sample_w, :]
+            medians = np.median(sample_region, axis=(0, 1))
+            average_median = np.mean(medians)
+            neutralized = img.copy()
+            for c in range(3):
+                diff = medians[c] - average_median
+                numerator = neutralized[:, :, c] - diff
+                denominator = 1.0 - diff
+                if abs(denominator) < 1e-8:
+                    denominator = 1e-8
+                neutralized[:, :, c] = np.clip(numerator / denominator, 0, 1)
         else:
-            # Mono: 1 column.
-            self.stats_table.setColumnCount(1)
-            self.stats_table.setHorizontalHeaderLabels(["Gray"])
-            # If the image is 3D with 1 channel, squeeze it.
-            if self.image.ndim == 3 and self.image.shape[2] == 1:
-                channels = [self.image.squeeze()]
-            else:
-                channels = [self.image]
-        
-        # Compute statistics for each channel.
-        stats = {"Min": [], "Max": [], "Median": [], "StdDev": []}
-        for ch in channels:
-            stats["Min"].append(np.min(ch))
-            stats["Max"].append(np.max(ch))
-            stats["Median"].append(np.median(ch))
-            stats["StdDev"].append(np.std(ch))
-        
-        # Update the table cells.
-        row_labels = ["Min", "Max", "Median", "StdDev"]
-        for row, label in enumerate(row_labels):
-            for col in range(self.stats_table.columnCount()):
-                val = stats[label][col]
-                item = QTableWidgetItem(f"{val:.3f}")
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.stats_table.setItem(row, col, item)
+            neutralized = img
+
+
+        # --- Step 2: Automatic Background Extraction (ABE) ---
+        pgr = PolyGradientRemoval(
+            neutralized,
+            poly_degree=2,          # or pass in a user choice
+            downsample_scale=4,
+            num_sample_points=100
+        )
+        abe = pgr.process()  # returns final polynomial-corrected image in original domain
+
+
+        # --- Step 3: Pixel Math Stretch ---
+        stretched = self.pixel_math_stretch(abe)
+
+        return stretched
+
+
+
+    def pixel_math_stretch(self, image):
+        """
+        Replaces the old pixel math stretch logic by using the existing
+        stretch_mono_image or stretch_color_image methods. 
+        """
+        # Choose a target median (the default you’ve used elsewhere is often 0.25)
+        target_median = 0.25
+
+        # Check if the image is mono or color
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            # Treat it as mono
+            stretched = stretch_mono_image(
+                image.squeeze(),  # squeeze in case it's (H,W,1)
+                target_median=target_median,
+                normalize=False,  # Adjust if you want normalization
+                apply_curves=False,
+                curves_boost=0.0
+            )
+            # If it was (H,W,1), replicate to 3 channels (optional)
+            # or just keep it mono if you prefer
+            # For now, replicate to 3 channels:
+            stretched = np.stack([stretched]*3, axis=-1)
+        else:
+            # Full-color image
+            stretched = stretch_color_image(
+                image,
+                target_median=target_median,
+                linked=False,      # or False if you want per-channel stretches
+                normalize=False,  
+                apply_curves=False,
+                curves_boost=0.0
+            )
+
+        return np.clip(stretched, 0, 1)
+
+    def runSearch(self):
+        if self.preprocessed_reference is None:
+            QMessageBox.warning(self, "Error", "Reference image not preprocessed.")
+            return
+        if not self.preprocessed_search:
+            QMessageBox.warning(self, "Error", "No search images preprocessed.")
+            return
+
+        ref_gray = self.to_grayscale(self.preprocessed_reference)
+
+        self.anomalyData = []
+        total = len(self.preprocessed_search)
+        for i, search_dict in enumerate(self.preprocessed_search):
+            search_img = search_dict["image"]
+            search_gray = self.to_grayscale(search_img)
+
+            diff_img = self.subtractImagesOnce(search_gray, ref_gray)
+            anomalies = self.detectAnomaliesConnected(diff_img, threshold=self.parameters["threshold"])
+
+            # Just store the anomalies
+            self.anomalyData.append({
+                "imageName": os.path.basename(search_dict["path"]),
+                "anomalyCount": len(anomalies),
+                "anomalies": anomalies
+            })
+
+            self.search_progress_label.setText(f"Processing image {i+1} of {total}...")
+            QApplication.processEvents()
+
+        self.search_progress_label.setText("Search for anomalies complete.")
+
+        # Optionally still show the text-based summary:
+        self.showDetailedResultsDialog(self.anomalyData)
+
+        # Now build & show the anomaly tree for user double-click
+        self.showAnomalyListDialog()
+
+    def showAnomalyListDialog(self):
+        """
+        Build a QDialog with a QTreeWidget listing each image and its anomaly count.
+        Double-clicking an item will open a non-modal preview.
+        """
+        if not self.anomalyData:
+            QMessageBox.information(self, "Info", "No anomalies or no images processed.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Anomaly Results")
+
+        layout = QVBoxLayout(dialog)
+
+        self.anomaly_tree = QTreeWidget(dialog)
+        self.anomaly_tree.setColumnCount(2)
+        self.anomaly_tree.setHeaderLabels(["Image", "Anomaly Count"])
+        layout.addWidget(self.anomaly_tree)
+
+        # Populate the tree
+        for i, data in enumerate(self.anomalyData):
+            item = QTreeWidgetItem([
+                data["imageName"],
+                str(data["anomalyCount"])
+            ])
+            # Store an index or reference so we know which image to open
+            item.setData(0, Qt.ItemDataRole.UserRole, i)
+            self.anomaly_tree.addTopLevelItem(item)
+
+        # Connect double-click
+        self.anomaly_tree.itemDoubleClicked.connect(self.onAnomalyItemDoubleClicked)
+
+        dialog.setLayout(layout)
+        dialog.resize(300, 200)
+        dialog.show()  # non-modal, so the user can keep using the main window
+
+    def onAnomalyItemDoubleClicked(self, item, column):
+        """
+        Called when the user double-clicks a row in the anomaly tree.
+        We'll open a MosaicPreviewWindow showing bounding boxes for that image.
+        """
+        # Retrieve the index we stored
+        idx = item.data(0, Qt.ItemDataRole.UserRole)
+        if idx is None:
+            return
+
+        # anomalies from anomalyData
+        anomalies = self.anomalyData[idx]["anomalies"]
+        image_name = self.anomalyData[idx]["imageName"]
+
+        # The preprocessed image from self.preprocessed_search
+        # We assume the i-th preprocessed image matches the i-th anomalyData.
+        # Make sure your code lines up these two lists the same order.
+        # e.g., i=0 => self.preprocessed_search[0], self.anomalyData[0]
+        search_img = self.preprocessed_search[idx]["image"]  # already in [0..1], shape (H,W,3)
+
+        if anomalies:
+            # Create an annotated image
+            annotated_8bit = self.draw_bounding_boxes_on_stretched(search_img, anomalies)
+
+            # Pass to MosaicPreviewWindow
+            preview = MosaicPreviewWindow(
+                annotated_8bit, 
+                title=f"Anomalies in {image_name}", 
+                parent=self
+            )
+            # Optionally disable auto-stretch so the boxes remain bright
+            preview.stretch_toggle.setChecked(False)
+            preview.resize(1200, 800)
+            preview.show()  # non-modal
+        else:
+            QMessageBox.information(self, "No Anomalies", f"No anomalies found for {image_name}.")
+
+
+    def draw_bounding_boxes_on_stretched(self,
+        stretched_image: np.ndarray, 
+        anomalies: list
+    ) -> np.ndarray:
+        """
+        1) Convert 'stretched_image' [0..1] -> [0..255] 8-bit color
+        2) Draw red rectangles for each anomaly in 'anomalies'.
+        Each anomaly is assumed to have keys: minX, minY, maxX, maxY
+        3) Return the 8-bit color image (H,W,3).
+        """
+        import cv2
+        import numpy as np
+
+        # Ensure 3 channels
+        if stretched_image.ndim == 2:
+            stretched_3ch = np.stack([stretched_image]*3, axis=-1)
+        elif stretched_image.ndim == 3 and stretched_image.shape[2] == 1:
+            stretched_3ch = np.concatenate([stretched_image]*3, axis=2)
+        else:
+            stretched_3ch = stretched_image
+
+        # Convert float [0..1] => uint8 [0..255]
+        img_bgr = (stretched_3ch * 255).clip(0,255).astype(np.uint8)
+
+        # Define the margin
+        margin = 15
+
+        # Draw red boxes in BGR color = (0, 0, 255)
+        for anomaly in anomalies:
+            x1, y1 = anomaly["minX"], anomaly["minY"]
+            x2, y2 = anomaly["maxX"], anomaly["maxY"]
+
+            # Expand the bounding box by a 10-pixel margin
+            x1_exp = x1 - margin
+            y1_exp = y1 - margin
+            x2_exp = x2 + margin
+            y2_exp = y2 + margin
+            cv2.rectangle(
+                img_bgr, (x1_exp, y1_exp), (x2_exp, y2_exp),
+                color=(255, 0, 0),
+                thickness=5
+            )
+
+        return img_bgr
+
+
+    def subtractImagesOnce(self, search_img, ref_img, debug_prefix=None):
+        """
+        Compute the absolute difference of two images (both already grayscale).
+        Both images must have the same dimensions.
+
+        Optionally, if 'debug_prefix' is provided, save the difference
+        as a debug image. For example: "mydebugprefix_diff.tif".
+        """
+        if search_img.shape != ref_img.shape:
+            raise ValueError("Image dimensions do not match for difference.")
+
+        # Both search_img and ref_img are assumed in [0..1]
+        # so the absolute difference will also be in [0..1].
+        result = search_img - ref_img
+        print("Computed difference between search and reference images.")
+
+        # If debug_prefix is specified, save the difference image
+        # For example:
+        #self.debug_save_image(
+        #    result,
+        #    prefix=debug_prefix,
+        #    step_name="diff",
+        #    ext=".tif"
+        #)
+        np.clip(result, 0, 1)  # Ensure result is in [0..1]
+        return result
+
+    def debug_save_image(self, image, prefix="debug", step_name="step", ext=".tif"):
+        """
+        Saves 'image' to disk for debugging. 
+        - 'prefix' can be a directory path or prefix for your debug images.
+        - 'step_name' is appended to the filename to indicate which step.
+        - 'ext' could be '.tif', '.png', or another format you support.
+
+        This example uses your 'save_image' function from earlier or can
+        directly use tiff.imwrite or similar.
+        """
+        import os
+        # Ensure the image is float32 in [0..1] before saving
+        image = image.astype(np.float32, copy=False)
+
+        # Build debug filename
+        filename = f"{prefix}_{step_name}{ext}"
+
+        # E.g., if you have a global 'save_image' function:
+        save_image(
+            image, 
+            filename,
+            original_format="tif",  # or "png", "fits", etc.
+            bit_depth="16-bit"
+        )
+        print(f"[DEBUG] Saved {step_name} => {filename}")
+
+    def to_grayscale(self, image):
+        """
+        Converts an image to grayscale by averaging channels if needed.
+        If the image is already 2D, return it as is.
+        """
+        if image.ndim == 2:
+            # Already grayscale
+            return image
+        elif image.ndim == 3 and image.shape[2] == 3:
+            # Average the three channels
+            return np.mean(image, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            # Squeeze out that single channel
+            return image[:, :, 0]
+        else:
+            raise ValueError(f"Unsupported image shape for grayscale: {image.shape}")
+
+    def detectAnomaliesConnected(self, diff_img: np.ndarray, threshold: float = 0.1):
+        """
+        1) Build mask = diff_img > threshold.
+        2) Optionally skip 5% border by zeroing out that region in the mask.
+        3) connectedComponentsWithStats => bounding boxes.
+        4) Filter by min_area, etc.
+        5) Return a list of anomalies, each with minX, minY, maxX, maxY, area.
+        """
+        h, w = diff_img.shape
+
+        # 1) Create the mask
+        mask = (diff_img > threshold).astype(np.uint8)
+
+        # 2) Skip 5% border (optional)
+        border_x = int(0.05 * w)
+        border_y = int(0.05 * h)
+        mask[:border_y, :] = 0
+        mask[h - border_y:, :] = 0
+        mask[:, :border_x] = 0
+        mask[:, w - border_x:] = 0
+
+        # 3) connectedComponentsWithStats => label each region
+        # connectivity=8 => 8-way adjacency
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+        # stats[i] = [x, y, width, height, area], for i in [1..num_labels-1]
+        # label_id=0 => background
+
+        anomalies = []
+        for label_id in range(1, num_labels):
+            x, y, width_, height_, area_ = stats[label_id]
+
+            # bounding box corners
+            minX = x
+            minY = y
+            maxX = x + width_ - 1
+            maxY = y + height_ - 1
+
+            # 4) Filter out tiny or huge areas if you want:
+            # e.g., skip anything <4x4 => area<16
+            if area_ < 25:
+                continue
+            # e.g., skip bounding boxes bigger than 40 in either dimension if you want
+            if width_ > 200 or height_ > 200:
+                continue
+
+            anomalies.append({
+                "minX": minX,
+                "minY": minY,
+                "maxX": maxX,
+                "maxY": maxY,
+                "area": area_
+            })
+
+        return anomalies
+
+
+    def showDetailedResultsDialog(self, anomalyData):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Anomaly Detection Results")
+        layout = QVBoxLayout(dialog)
+        text_edit = QTextEdit(dialog)
+        text_edit.setReadOnly(True)
+        result_text = "Detailed Anomaly Results:\n\n"
+
+        for data in anomalyData:
+            result_text += f"Image: {data['imageName']}\nAnomalies: {data['anomalyCount']}\n"
+            for group in data["anomalies"]:
+                # Now refer to 'minX', 'minY', 'maxX', 'maxY'
+                result_text += (
+                    f"  Group Bounding Box: "
+                    f"Top-Left ({group['minX']}, {group['minY']}), "
+                    f"Bottom-Right ({group['maxX']}, {group['maxY']})\n"
+                )
+            result_text += "\n"
+
+        text_edit.setText(result_text)
+        layout.addWidget(text_edit)
+        dialog.setLayout(layout)
+        dialog.show()
+
+    def showAnomaliesOnImage(self, image: np.ndarray, anomalies: list, window_title="Anomalies"):
+        """
+        Displays 'image' in a QDialog with red bounding boxes for each anomaly.
+        'image' is assumed to be float32 in [0..1], shape (H,W) or (H,W,3).
+        'anomalies' is a list of dicts, each with keys: minX, minY, maxX, maxY, etc.
+        """
+        import cv2
+        import numpy as np
+
+        # 1) Convert to 3-channel if needed
+        if image.ndim == 2:
+            # grayscale => replicate to 3-ch so we can draw colored rectangles
+            image_3ch = np.stack([image, image, image], axis=-1)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            # single-channel in last dimension
+            image_3ch = np.concatenate([image, image, image], axis=2)
+        else:
+            image_3ch = image
+
+        # 2) Convert float [0..1] => uint8 [0..255], and reorder to BGR if needed
+        # OpenCV expects BGR order for color. If your array is already RGB, we can just treat it as BGR if color correctness isn't critical. 
+        # For a quick approach, let's do it directly:
+        image_bgr = (image_3ch * 255).astype(np.uint8)
+
+        # 3) Draw bounding boxes with a margin
+        margin = 10  # You can adjust this as desired
+        height, width = image_bgr.shape[:2]
+
+        for anomaly in anomalies:
+            x1, y1 = anomaly["minX"], anomaly["minY"]
+            x2, y2 = anomaly["maxX"], anomaly["maxY"]
+
+            # Inflate the bounding box
+            x1 = max(0, x1 - margin)
+            y1 = max(0, y1 - margin)
+            x2 = min(width - 1,  x2 + margin)
+            y2 = min(height - 1, y2 + margin)
+
+            # Draw the rectangle (BGR color=(255,0,0) => Blue if you want red use (0,0,255))
+            cv2.rectangle(
+                image_bgr, 
+                (x1, y1), (x2, y2), 
+                color=(255, 0, 0),  # Blue in BGR
+                thickness=5
+            )
+
+
+        # 4) Convert the annotated BGR image back to QImage => QPixmap => show in QDialog
+        # We can do something like:
+        height, width = image_bgr.shape[:2]
+
+        # For color images, QImage.Format_RGB888 expects an RGB order
+        # We can convert BGR->RGB by:
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+        qimg = QImage(
+            image_rgb.data, 
+            width, 
+            height, 
+            3 * width, 
+            QImage.Format.Format_RGB888
+        )
+        pixmap = QPixmap.fromImage(qimg)
+
+        # 5) Show in a simple QDialog with a QLabel or QGraphicsView
+        dialog = QDialog(self)
+        dialog.setWindowTitle(window_title)
+        layout = QVBoxLayout(dialog)
+
+        label = QLabel(dialog)
+        label.setPixmap(pixmap)
+        layout.addWidget(label)
+
+        dialog.setLayout(layout)
+        dialog.resize(width, height)
+        dialog.show()
+
+
+    def newInstance(self):
+        # Reset parameters and UI elements for a new run
+        self.parameters = {"referenceImagePath": "", "searchImagePaths": [], "threshold": 0.10}
+        self.ref_line_edit.clear()
+        self.search_list.clear()
+        self.cosmetic_checkbox.setChecked(False)
+        self.thresh_slider.setValue(10)
+        self.preprocess_progress_label.setText("Preprocessing progress: 0 / 0")
+        self.search_progress_label.setText("Processing progress: 0 / 0")
+        self.preprocessed_reference = None
+        self.preprocessed_search = []
+        self.anomalyData = []
+        QMessageBox.information(self, "New Instance", "Reset for a new instance.")
 
 class HDRWorker(QObject):
     """
@@ -11464,6 +12446,15 @@ class WaveScaleHDRDialog(QDialog):
     # -------------------------------------------------------------------------
     # ZOOM METHODS
     # -------------------------------------------------------------------------
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
+
     def _zoom_in(self):
         new_zoom = self.zoom_factor * self.zoom_step
         if new_zoom <= self.zoom_max:
@@ -12224,11 +13215,11 @@ class BlemishBlasterDialog(QDialog):
         """Event filter to capture mouse move and click events."""
         if source == self.graphics_view:
             if event.type() == QEvent.Type.MouseMove:
-                pos = self.graphics_view.mapToScene(event.pos())
+                pos = self.graphics_view.mapToScene(event.position().toPoint())
                 self.on_mouse_move(pos)
             elif event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
-                    pos = self.graphics_view.mapToScene(event.pos())
+                    pos = self.graphics_view.mapToScene(event.position().toPoint())
                     self.on_mouse_click(pos)
             elif event.type() == QEvent.Type.Enter:
                 # Optionally, set the cursor to ArrowCursor when entering
@@ -12530,7 +13521,6 @@ class BlemishBlasterDialog(QDialog):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-
     def zoom_in(self):
         """Zoom in the image by a predefined step."""
         new_zoom = self.zoom_factor * self.zoom_step
@@ -12575,6 +13565,723 @@ class BlemishBlasterDialog(QDialog):
 
         super().closeEvent(event)
 
+
+class PolyGradientRemoval:
+    """
+    A headless class that replicates the polynomial background removal
+    logic from GradientRemovalDialog, minus the RBF step and UI code.
+
+    Flow:
+      1) Stretch the image (unlinked linear stretch).
+      2) Downsample.
+      3) Build an exclusion mask that:
+         - Skips zero-valued pixels in any channel.
+         - Optionally skip user-specified mask areas if desired (can pass mask to process()).
+      4) Generate sample points from corners, borders, quartiles, do gradient_descent_to_dim_spot, skip bright areas.
+      5) Fit a polynomial background and subtract it.
+      6) Re-normalize median, clip to [0..1].
+      7) Unstretch the final image back to the original domain.
+    """
+
+    def __init__(
+        self,
+        image: np.ndarray,
+        poly_degree: int = 2,
+        downsample_scale: int = 5,
+        num_sample_points: int = 100
+    ):
+        """
+        Args:
+            image (np.ndarray): Input image in [0..1], shape (H,W) or (H,W,3), float32 recommended.
+            poly_degree (int): Polynomial degree (1=linear,2=quadratic).
+            downsample_scale (int): Factor for area downsampling.
+            num_sample_points (int): Number of sample points to generate.
+        """
+        self.image = image.copy()
+        self.poly_degree = poly_degree
+        self.downsample_scale = downsample_scale
+        self.num_sample_points = num_sample_points
+
+        # For the stretch/unstretch logic
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+        self.was_single_channel = False
+
+    def process(self, user_exclusion_mask: np.ndarray = None) -> np.ndarray:
+        """
+        Main pipeline to remove polynomial gradient. 
+        user_exclusion_mask: optional (H,W) boolean array, False => skip those pixels.
+        
+        Returns the final corrected image in the original brightness domain.
+        """
+        # 1) Stretch
+        stretched = self.pixel_math_stretch(self.image)
+
+        # 2) Downsample
+        small_stretched = self.downsample_image(stretched, self.downsample_scale)
+        h_s, w_s = small_stretched.shape[:2]
+
+        # 3) Build an exclusion mask in the small domain that:
+        #    - Skips zero-valued pixels
+        #    - Skips user_exclusion_mask if provided
+        final_excl_mask_small = self.build_exclusion_mask_small(small_stretched, user_exclusion_mask)
+
+        # 4) Generate sample points from corners/borders/quartiles
+        sample_points = self.generate_sample_points(
+            small_stretched,
+            num_points=self.num_sample_points,
+            exclusion_mask=final_excl_mask_small
+        )
+
+        # 5) Fit polynomial on the downsampled image
+        poly_background_small = self.fit_polynomial_gradient(
+            small_stretched, sample_points, degree=self.poly_degree
+        )
+
+        # Upscale background to full size
+        poly_background = self.upscale_background(
+            poly_background_small, stretched.shape[:2]
+        )
+
+        # Subtract
+        after_poly = stretched - poly_background
+
+        # Re-normalize median to original
+        original_median = np.median(stretched)
+        after_poly = self.normalize_image(after_poly, original_median)
+
+        # Clip
+        after_poly = np.clip(after_poly, 0, 1)
+
+        # 6) Unstretch
+        corrected = self.unstretch_image(after_poly)
+
+        return corrected
+
+    # ---------------------------------------------------------------
+    # Helper: Stretch / Unstretch
+    # ---------------------------------------------------------------
+    def pixel_math_stretch(self, image: np.ndarray) -> np.ndarray:
+        """
+        Unlinked linear stretch using your existing Numba functions.
+
+        Steps:
+        1) If single-channel, replicate to 3-ch so we can store stats & do consistent logic.
+        2) For each channel c: subtract the channel's min => data is >= 0.
+        3) Compute the median after min subtraction for that channel.
+        4) Call the appropriate Numba function:
+            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            on the 1-ch array.
+            - If 3-ch color, call _numba_color_final_formula_unlinked.
+        5) Clip to [0,1].
+        6) Store self.stretch_original_mins / medians so we can unstretch later.
+        """
+        target_median = 0.25
+
+        # 1) Handle single-channel => replicate to 3 channels
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            self.was_single_channel = True
+            image_3ch = np.stack([image.squeeze()] * 3, axis=-1)
+        else:
+            self.was_single_channel = False
+            image_3ch = image
+
+        image_3ch = image_3ch.astype(np.float32, copy=True)
+
+        H, W, C = image_3ch.shape
+        # We assume C=3 now.
+
+        self.stretch_original_mins = []
+        self.stretch_original_medians = []
+
+        # 2) Subtract min per channel
+        for c in range(C):
+            cmin = image_3ch[..., c].min()
+            image_3ch[..., c] -= cmin
+            self.stretch_original_mins.append(float(cmin))
+
+        # 3) Compute median after min subtraction
+        medians_after_sub = []
+        for c in range(C):
+            cmed = float(np.median(image_3ch[..., c]))
+            medians_after_sub.append(cmed)
+        self.stretch_original_medians = medians_after_sub
+
+        # 4) Apply the final formula with your Numba functions
+        if self.was_single_channel:
+            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # on the single channel. We can do that by extracting one channel from image_3ch.
+            # Then replicate the result to 3 channels, or keep it as 1-ch?
+            # Typically we keep it as 1-ch in the end, so let's do that.
+
+            # We'll just pick channel 0, run the mono formula, store it back in a 2D array.
+            mono_array = image_3ch[..., 0]  # shape (H,W)
+            cmed = medians_after_sub[0]     # The median for that channel
+            # We call the numba function
+            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+
+            # Now place it back into image_3ch for consistency
+            for c in range(3):
+                image_3ch[..., c] = stretched_mono
+        else:
+            # 3-channel unlinked
+            medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
+            # 'image_3ch' is our 'rescaled'
+            stretched_3ch = _numba_color_final_formula_unlinked(
+                image_3ch, medians_rescaled, target_median
+            )
+            image_3ch = stretched_3ch
+
+        # 5) Clip to [0..1]
+        np.clip(image_3ch, 0.0, 1.0, out=image_3ch)
+        image = image_3ch
+        return image
+
+
+    def unstretch_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Undo the above unlinked stretch, returning to original domain.
+        """
+        image = image.astype(np.float32, copy=True)
+
+        for c in range(3):
+            cmed_stretched = np.median(image[..., c])
+            orig_med = self.stretch_original_medians[c]
+            orig_min = self.stretch_original_mins[c]
+
+            if cmed_stretched != 0 and orig_med != 0:
+                numerator = (cmed_stretched - 1)*orig_med * image[..., c]
+                denominator = cmed_stretched*(orig_med + image[..., c] - 1) - orig_med*image[..., c]
+                denominator = np.where(denominator == 0, 1e-6, denominator)
+                image[..., c] = numerator/denominator
+
+            image[..., c] += orig_min
+
+        image = np.clip(image, 0, 1)
+
+        if self.was_single_channel:
+            # revert to single channel
+            image = np.mean(image, axis=2, keepdims=True)
+
+        return image
+
+    # ---------------------------------------------------------------
+    # Helper: Downsample
+    # ---------------------------------------------------------------
+    def downsample_image(self, image: np.ndarray, scale: int=6) -> np.ndarray:
+        """
+        Downsamples with area interpolation.
+        """
+        h, w = image.shape[:2]
+        new_w = max(1, w//scale)
+        new_h = max(1, h//scale)
+        return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    # ---------------------------------------------------------------
+    # Helper: Build an Exclusion Mask in the Small Domain
+    # ---------------------------------------------------------------
+    def build_exclusion_mask_small(
+        self, small_image: np.ndarray, user_exclusion_mask: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Creates a boolean mask in the small (downsampled) domain that excludes:
+          - Any pixel with a zero in any channel
+          - user_exclusion_mask if provided (also downsampled)
+
+        Returns shape=(h_small,w_small), bool
+        """
+        h_s, w_s = small_image.shape[:2]
+
+        # 1) Zero-value mask
+        # If color => skip any pixel that has a 0 in any channel
+        # If gray => skip pixel if it's 0
+        if small_image.ndim == 3 and small_image.shape[2] == 3:
+            nonzero_mask = np.all(small_image > 0, axis=2)
+        else:
+            nonzero_mask = (small_image > 0)
+
+        # 2) If user_exclusion_mask is provided, downsample it and combine
+        if user_exclusion_mask is not None:
+            # user_exclusion_mask is presumably the size of the original image
+            # We downsample it to match the small domain
+            h_full, w_full = user_exclusion_mask.shape
+            # Convert to uint8 for resizing with nearest
+            mask_u8 = user_exclusion_mask.astype(np.uint8)
+            small_mask = cv2.resize(mask_u8, (w_s, h_s), interpolation=cv2.INTER_NEAREST)
+            final_mask = (small_mask > 0) & nonzero_mask
+        else:
+            final_mask = nonzero_mask
+
+        return final_mask
+
+    # ---------------------------------------------------------------
+    # 4) Generate Sample Points (the exact snippet from GradientRemovalDialog)
+    # ---------------------------------------------------------------
+    def generate_sample_points(
+        self,
+        image: np.ndarray,
+        num_points: int = 25,
+        exclusion_mask: np.ndarray = None
+    ) -> np.ndarray:
+        """
+        Replicates the sample-point logic from GradientRemovalDialog:
+          - corners + border points
+          - random points in quartiles
+          - gradient_descent_to_dim_spot
+          - skip bright half
+          - skip any area where exclusion_mask is False
+        """
+        h, w = image.shape[:2]
+        points = []
+
+        def valid_mask(x_, y_):
+            return (
+                0 <= x_ < w and
+                0 <= y_ < h and
+                (exclusion_mask is None or exclusion_mask[y_, x_])
+            )
+
+        # border_margin = 10
+        border_margin = 10
+
+        # Corner points
+        corners = [
+            (border_margin, border_margin),
+            (w - border_margin - 1, border_margin),
+            (border_margin, h - border_margin - 1),
+            (w - border_margin - 1, h - border_margin - 1)
+        ]
+        for (x_, y_) in corners:
+            if valid_mask(x_, y_):
+                x_new, y_new = self.gradient_descent_to_dim_spot(image, x_, y_)
+                if valid_mask(x_new, y_new):
+                    points.append((x_new, y_new))
+
+        # Top and bottom borders
+        for x_ in np.linspace(border_margin, w - border_margin, 5, dtype=int):
+            # top
+            if valid_mask(x_, border_margin):
+                xt, yt = self.gradient_descent_to_dim_spot(image, x_, border_margin)
+                if valid_mask(xt, yt):
+                    points.append((xt, yt))
+
+            # bottom
+            yb = h - border_margin - 1
+            if valid_mask(x_, yb):
+                xb, yb2 = self.gradient_descent_to_dim_spot(image, x_, yb)
+                if valid_mask(xb, yb2):
+                    points.append((xb, yb2))
+
+        # Left & right
+        for y_ in np.linspace(border_margin, h - border_margin, 5, dtype=int):
+            # left
+            if valid_mask(border_margin, y_):
+                xl, yl = self.gradient_descent_to_dim_spot(image, border_margin, y_)
+                if valid_mask(xl, yl):
+                    points.append((xl, yl))
+
+            # right
+            xr = w - border_margin - 1
+            if valid_mask(xr, y_):
+                xr2, yr2 = self.gradient_descent_to_dim_spot(image, xr, y_)
+                if valid_mask(xr2, yr2):
+                    points.append((xr2, yr2))
+
+        # Random quartiles
+        quartiles = self.divide_into_quartiles(image)
+        half_h, half_w = h//2, w//2
+
+        def sub_offset(k):
+            if "top" in k:
+                oy = 0
+            else:
+                oy = half_h
+            if "left" in k:
+                ox = 0
+            else:
+                ox = half_w
+            return (oy, ox)
+
+        for key, quartile in quartiles.items():
+            hq, wq = quartile.shape[:2]
+            offset_y, offset_x = sub_offset(key)
+
+            # Convert quartile to grayscale if needed
+            if quartile.ndim == 3 and quartile.shape[2] == 3:
+                lum = np.dot(quartile[..., :3], [0.2989, 0.5870, 0.1140])
+            else:
+                lum = quartile
+
+            # Exclude top 50% bright
+            mask_bright = self.exclude_bright_regions(lum, 0.5)
+
+            # Combine with the main exclusion_mask if present
+            if exclusion_mask is not None:
+                quart_excl = exclusion_mask[offset_y:offset_y + hq, offset_x:offset_x + wq]
+                combined_mask = mask_bright & quart_excl
+            else:
+                combined_mask = mask_bright
+
+            eligible_indices = np.argwhere(combined_mask)
+            if len(eligible_indices) == 0:
+                continue
+
+            num_points_in_quartile = min(len(eligible_indices), self.num_sample_points//4)
+            selected_indices = eligible_indices[np.random.choice(len(eligible_indices), num_points_in_quartile, replace=False)]
+
+            for (yy_, xx_) in selected_indices:
+                y_coord = offset_y + yy_
+                x_coord = offset_x + xx_
+
+                x_new, y_new = self.gradient_descent_to_dim_spot(image, x_coord, y_coord)
+                if valid_mask(x_new, y_new):
+                    points.append((x_new, y_new))
+
+        return np.array(points, dtype=np.int32)
+
+    def gradient_descent_to_dim_spot(self, image, x, y, max_iterations=10, patch_size=5):
+        """
+        Same as in GradientRemovalDialog: move (x,y) to a dimmer neighbor
+        based on median of a local patch.
+        """
+        half_patch = patch_size//2
+        if image.ndim == 3:
+            h, w, _ = image.shape
+            lum = np.dot(image[..., :3], [0.2989, 0.5870, 0.1140])
+        else:
+            h, w = image.shape
+            lum = image
+
+        for _ in range(max_iterations):
+            xmin, xmax = max(0, x-half_patch), min(w, x+half_patch+1)
+            ymin, ymax = max(0, y-half_patch), min(h, y+half_patch+1)
+            patch = lum[ymin:ymax, xmin:xmax]
+            current_val = np.median(patch)
+
+            neighbors = [
+                (nx, ny)
+                for nx in range(max(0, x-1), min(w, x+2))
+                for ny in range(max(0, y-1), min(h, y+2))
+                if (nx, ny) != (x, y)
+            ]
+
+            def local_median(coord):
+                nx, ny = coord
+                xmin_n, xmax_n = max(0, nx-half_patch), min(w, nx+half_patch+1)
+                ymin_n, ymax_n = max(0, ny-half_patch), min(h, ny+half_patch+1)
+                npatch = lum[ymin_n:ymax_n, xmin_n:xmax_n]
+                return np.median(npatch)
+
+            dimmest_neighbor = min(neighbors, key=local_median)
+            dimmest_val = local_median(dimmest_neighbor)
+
+            if dimmest_val >= current_val:
+                break
+
+            x, y = dimmest_neighbor
+
+        return (x, y)
+
+    def divide_into_quartiles(self, image: np.ndarray) -> dict:
+        """
+        Splits 'image' into top_left, top_right, bottom_left, bottom_right subimages.
+        """
+        h, w = image.shape[:2]
+        half_h, half_w = h//2, w//2
+        return {
+            'top_left': image[:half_h, :half_w],
+            'top_right': image[:half_h, half_w:],
+            'bottom_left': image[half_h:, :half_w],
+            'bottom_right': image[half_h:, half_w:]
+        }
+
+    def exclude_bright_regions(self, arr: np.ndarray, fraction: float=0.5) -> np.ndarray:
+        """
+        Returns a bool mask where True => arr < threshold, 
+        skipping the top 'fraction' of bright pixels.
+        """
+        flat = arr.flatten()
+        thresh = np.percentile(flat, 100*(1-fraction))
+        return arr < thresh
+
+    # ---------------------------------------------------------------
+    # 5) Fit Polynomial
+    # ---------------------------------------------------------------
+    def fit_polynomial_gradient(
+        self,
+        image: np.ndarray,
+        sample_points: np.ndarray,
+        degree: int = 2,
+        patch_size: int = 15
+    ) -> np.ndarray:
+        """
+        The same patch-based polynomial fitting from GradientRemovalDialog.
+        For each sample point, we take the median of a patch around it => z.
+        Then solve for polynomial coeffs. Then evaluate for the entire image.
+        """
+        h, w = image.shape[:2]
+        half_patch = patch_size // 2
+
+        x_coords = []
+        y_coords = []
+        z_vals = []
+
+        if image.ndim == 3 and image.shape[2] == 3:
+            # color => do a channel-by-channel approach
+            background = np.zeros_like(image, dtype=np.float32)
+            for c in range(3):
+                x_coords = []
+                y_coords = []
+                z_vals = []
+                for (sx, sy) in sample_points:
+                    xmin, xmax = max(0, sx-half_patch), min(w, sx+half_patch+1)
+                    ymin, ymax = max(0, sy-half_patch), min(h, sy+half_patch+1)
+                    patch = image[ymin:ymax, xmin:xmax, c]
+                    z_vals.append(np.median(patch))
+                    x_coords.append(sx)
+                    y_coords.append(sy)
+
+                z_vals = np.array(z_vals, dtype=np.float32)
+                x_coords = np.array(x_coords, dtype=np.float32)
+                y_coords = np.array(y_coords, dtype=np.float32)
+
+                # build design matrix
+                A = self.build_poly_terms(x_coords, y_coords, degree)
+                coeffs, _, _, _ = np.linalg.lstsq(A, z_vals, rcond=None)
+
+                # Evaluate
+                xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+                A_full = self.build_poly_terms(xx.flatten().astype(np.float32), yy.flatten().astype(np.float32), degree)
+                bg_channel = (A_full @ coeffs).reshape(h, w)
+                background[..., c] = bg_channel
+
+            return background
+        else:
+            # grayscale
+            background = np.zeros((h,w), dtype=np.float32)
+            for (sx, sy) in sample_points:
+                xmin, xmax = max(0, sx-half_patch), min(w, sx+half_patch+1)
+                ymin, ymax = max(0, sy-half_patch), min(h, sy+half_patch+1)
+                patch = image[ymin:ymax, xmin:xmax]
+                z_vals.append(np.median(patch))
+                x_coords.append(sx)
+                y_coords.append(sy)
+
+            z_vals = np.array(z_vals, dtype=np.float32)
+            x_coords = np.array(x_coords, dtype=np.float32)
+            y_coords = np.array(y_coords, dtype=np.float32)
+
+            A = self.build_poly_terms(x_coords, y_coords, degree)
+            coeffs, _, _, _ = np.linalg.lstsq(A, z_vals, rcond=None)
+
+            xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+            A_full = self.build_poly_terms(xx.flatten().astype(np.float32), yy.flatten().astype(np.float32), degree)
+            bg_gray = (A_full @ coeffs).reshape(h, w).astype(np.float32)
+            background = bg_gray
+            return background
+
+    def build_poly_terms(self, x_array: np.ndarray, y_array: np.ndarray, degree: int):
+        """
+        For degree=1 => [1, x, y]
+        For degree=2 => [1, x, y, x^2, x*y, y^2]
+        """
+        if degree == 1:
+            return np.column_stack([
+                np.ones_like(x_array),
+                x_array,
+                y_array
+            ])
+        elif degree == 2:
+            return np.column_stack([
+                np.ones_like(x_array),
+                x_array,
+                y_array,
+                x_array**2,
+                x_array*y_array,
+                y_array**2
+            ])
+        else:
+            raise ValueError(f"Unsupported polynomial degree={degree}.")
+
+    # ---------------------------------------------------------------
+    # 6) Upscale
+    # ---------------------------------------------------------------
+    def upscale_background(self, background: np.ndarray, out_shape: tuple) -> np.ndarray:
+        """
+        Resizes 'background' to out_shape=(H,W).
+        """
+        oh, ow = out_shape
+        if background.ndim == 3 and background.shape[2] == 3:
+            big = np.zeros((oh, ow, 3), dtype=np.float32)
+            for c in range(3):
+                big[..., c] = cv2.resize(background[..., c], (ow, oh), interpolation=cv2.INTER_LINEAR)
+            return big
+        else:
+            return cv2.resize(background, (ow, oh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+
+    # ---------------------------------------------------------------
+    # 7) Normalize
+    # ---------------------------------------------------------------
+    def normalize_image(self, image: np.ndarray, target_median: float) -> np.ndarray:
+        """
+        Shift image so its median matches target_median.
+        """
+        cmed = np.median(image)
+        diff = target_median - cmed
+        return image + diff
+
+class CustomDoubleSpinBox(QWidget):
+    valueChanged = pyqtSignal(float)
+
+    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1, parent=None):
+        super().__init__(parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self._value = initial
+
+        # Create a line edit with a double validator.
+        self.lineEdit = QLineEdit(f"{initial:.3f}")
+        self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        validator = QDoubleValidator(self.minimum, self.maximum, 3, self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.lineEdit.setValidator(validator)
+        self.lineEdit.editingFinished.connect(self.onEditingFinished)
+
+        # Create up and down buttons.
+        self.upButton = QToolButton()
+        self.upButton.setText("▲")
+        self.upButton.clicked.connect(self.increaseValue)
+        self.downButton = QToolButton()
+        self.downButton.setText("▼")
+        self.downButton.clicked.connect(self.decreaseValue)
+
+        # Arrange buttons vertically.
+        buttonLayout = QVBoxLayout()
+        buttonLayout.addWidget(self.upButton)
+        buttonLayout.addWidget(self.downButton)
+        buttonLayout.setSpacing(0)
+        buttonLayout.setContentsMargins(0, 0, 0, 0)
+
+        # Arrange the line edit and button layout horizontally.
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(self.lineEdit)
+        mainLayout.addLayout(buttonLayout)
+        mainLayout.setSpacing(0)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(mainLayout)
+
+        self.updateButtonStates()
+
+    def updateButtonStates(self):
+        self.upButton.setEnabled(self._value < self.maximum)
+        self.downButton.setEnabled(self._value > self.minimum)
+
+    def increaseValue(self):
+        self.setValue(self._value + self.step)
+
+    def decreaseValue(self):
+        self.setValue(self._value - self.step)
+
+    def onEditingFinished(self):
+        try:
+            new_val = float(self.lineEdit.text())
+        except ValueError:
+            new_val = self._value
+        self.setValue(new_val)
+
+    def setValue(self, val: float):
+        if val < self.minimum:
+            val = self.minimum
+        elif val > self.maximum:
+            val = self.maximum
+        if abs(val - self._value) > 1e-9:
+            self._value = val
+            self.lineEdit.setText(f"{val:.3f}")
+            self.valueChanged.emit(val)
+            self.updateButtonStates()
+
+    def value(self) -> float:
+        return self._value
+
+class CustomSpinBox(QWidget):
+    """
+    A simple custom spin box that mimics QSpinBox functionality.
+    Emits valueChanged(int) when the value changes.
+    """
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, minimum=0, maximum=100, initial=0, step=1, parent=None):
+        super().__init__(parent)
+        self.minimum = minimum
+        self.maximum = maximum
+        self.step = step
+        self._value = initial
+
+        # Create a line edit to show the value.
+        self.lineEdit = QLineEdit(str(initial))
+        self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        # Optionally, restrict input to integers using a validator.
+        from PyQt6.QtGui import QIntValidator
+        self.lineEdit.setValidator(QIntValidator(self.minimum, self.maximum, self))
+        self.lineEdit.editingFinished.connect(self.editingFinished)
+
+        # Create up and down buttons with arrow text or icons.
+        self.upButton = QToolButton()
+        self.upButton.setText("▲")
+        self.downButton = QToolButton()
+        self.downButton.setText("▼")
+        self.upButton.clicked.connect(self.increaseValue)
+        self.downButton.clicked.connect(self.decreaseValue)
+
+        # Arrange the buttons vertically.
+        buttonLayout = QVBoxLayout()
+        buttonLayout.addWidget(self.upButton)
+        buttonLayout.addWidget(self.downButton)
+        buttonLayout.setSpacing(0)
+        buttonLayout.setContentsMargins(0, 0, 0, 0)
+
+        # Arrange the line edit and buttons horizontally.
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(self.lineEdit)
+        mainLayout.addLayout(buttonLayout)
+        mainLayout.setSpacing(0)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(mainLayout)
+
+        self.updateButtonStates()
+
+    @property
+    def value(self):
+        return self._value
+
+    def setValue(self, val):
+        if val < self.minimum:
+            val = self.minimum
+        elif val > self.maximum:
+            val = self.maximum
+        if val != self._value:
+            self._value = val
+            self.lineEdit.setText(str(val))
+            self.valueChanged.emit(val)
+            self.updateButtonStates()
+
+    def updateButtonStates(self):
+        self.upButton.setEnabled(self._value < self.maximum)
+        self.downButton.setEnabled(self._value > self.minimum)
+
+    def increaseValue(self):
+        self.setValue(self._value + self.step)
+
+    def decreaseValue(self):
+        self.setValue(self._value - self.step)
+
+    def editingFinished(self):
+        try:
+            newVal = int(self.lineEdit.text())
+        except ValueError:
+            newVal = self._value
+        self.setValue(newVal)
 
 class GradientRemovalDialog(QDialog):
     # Define signals to communicate with AstroEditingSuite
@@ -12676,26 +14383,17 @@ class GradientRemovalDialog(QDialog):
         form_layout = QFormLayout()
 
         # Number of sample points
-        self.sample_points_spinbox = QSpinBox()
-        self.sample_points_spinbox.setRange(10, 1000)
-        self.sample_points_spinbox.setValue(self.num_sample_points)
-        self.sample_points_spinbox.setSingleStep(10)
+        self.sample_points_spinbox = CustomSpinBox(minimum=10, maximum=1000, initial=self.num_sample_points, step=10)
         self.sample_points_spinbox.valueChanged.connect(self.update_num_sample_points)
         form_layout.addRow("Number of Sample Points:", self.sample_points_spinbox)
 
         # Polynomial degree
-        self.poly_degree_spinbox = QSpinBox()
-        self.poly_degree_spinbox.setRange(1, 10)
-        self.poly_degree_spinbox.setValue(self.poly_degree)
-        self.poly_degree_spinbox.setSingleStep(1)
+        self.poly_degree_spinbox = CustomSpinBox(minimum=1, maximum=10, initial=self.poly_degree, step=1)
         self.poly_degree_spinbox.valueChanged.connect(self.update_poly_degree)
         form_layout.addRow("Polynomial Degree:", self.poly_degree_spinbox)
 
-        # RBF smoothing
-        self.rbf_smooth_spinbox = QDoubleSpinBox()
-        self.rbf_smooth_spinbox.setRange(0.0, 10.0)
-        self.rbf_smooth_spinbox.setValue(self.rbf_smooth)
-        self.rbf_smooth_spinbox.setSingleStep(0.1)
+        # RBF smoothing using CustomDoubleSpinBox
+        self.rbf_smooth_spinbox = CustomDoubleSpinBox(minimum=0.0, maximum=10.0, initial=self.rbf_smooth, step=0.1)
         self.rbf_smooth_spinbox.valueChanged.connect(self.update_rbf_smooth)
         form_layout.addRow("RBF Smoothness:", self.rbf_smooth_spinbox)
 
@@ -12773,7 +14471,6 @@ class GradientRemovalDialog(QDialog):
         self.pixmap_item.setPixmap(stretched_pixmap)
         # Optionally, re-fit the view:
         self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -13916,7 +15613,6 @@ class ImagePreview(QWidget):
         self.closed.emit(self.slot)  # Emit the slot number
         event.accept()  # Proceed with the standard close event
 
-
 class GraXpertThread(QThread):
     """Thread to execute GraXpert commands."""
     stdout_signal = pyqtSignal(str)
@@ -14167,6 +15863,7 @@ class RGBCombinationDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to combine images: {e}")
             print(f"Error in RGB Combination: {e}")
+
 
 class StarNetThread(QThread):
     # Define signals to communicate with the main thread
@@ -14442,49 +16139,55 @@ class AddStarsDialog(QDialog):
             self.update_preview()
 
     def load_starless_image(self):
-        """
-        Loads the starless image based on the selection in the combo box.
-        """
-        selected = self.starless_combo.currentText()
-        if selected.startswith("Slot"):
-            slot = int(selected.split()[-1])
+        """Loads the starless image based on the selection in the combo box."""
+        selected_data = self.starless_combo.currentData()
+
+        if selected_data is None:
+            # This is the "Select Slot" item
+            self.starless_image = None
+
+        elif selected_data == "file":
+            # "Load from File" is handled by the button, so do nothing here
+            pass
+
+        else:
+            # Here, selected_data should be the integer slot index
+            slot = selected_data  
             image = self.image_manager._images.get(slot, None)
             if image is not None:
                 self.starless_image = image.copy()
-                print(f"Starless image loaded from Slot {slot}.")
+                print(f"Starless image loaded from slot {slot}.")
             else:
                 QMessageBox.warning(self, "Empty Slot", f"Slot {slot} does not contain an image.")
                 self.starless_image = None
-        elif selected == "Load from File":
-            # Already handled via the "Load from File" button
-            pass
-        else:
-            self.starless_image = None
 
         self.update_preview()
 
+
     def load_stars_only_image(self):
-        """
-        Loads the stars-only image based on the selection in the combo box.
-        """
-        selected = self.stars_only_combo.currentText()
-        if selected.startswith("Slot"):
-            slot = int(selected.split()[-1])
+        """Loads the stars-only image based on the selection in the combo box."""
+        selected_data = self.stars_only_combo.currentData()
+
+        if selected_data is None:
+            # "Select Slot"
+            self.stars_only_image = None
+
+        elif selected_data == "file":
+            # "Load from File" is handled by the button
+            pass
+
+        else:
+            slot = selected_data
             image = self.image_manager._images.get(slot, None)
             if image is not None:
                 self.stars_only_image = image.copy()
-                print(f"Stars-only image loaded from Slot {slot}.")
+                print(f"Stars-only image loaded from slot {slot}.")
             else:
                 QMessageBox.warning(self, "Empty Slot", f"Slot {slot} does not contain an image.")
                 self.stars_only_image = None
-        elif selected == "Load from File":
-            # Already handled via the "Load from File" button
-            pass
-        else:
-            self.stars_only_image = None
 
         self.update_preview()
-
+        
     def blend_images(self):
         """
         Blends the starless and stars-only images based on the selected method and blend ratio.
@@ -14734,13 +16437,13 @@ class AddStarsDialog(QDialog):
             QTimer.singleShot(0, self.fit_to_preview)  # Schedule fit_to_preview after the event loop
             self.fitted = True
             print("Dialog shown and image fitted to preview.")
-            
+
 class BackgroundNeutralizationDialog(QDialog):
     def __init__(self, image_manager, parent=None):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("Background Neutralization")
-        self.setGeometry(150, 150, 800, 600)  # Set appropriate size
+        self.setGeometry(100, 100, 800, 600)  # Set appropriate size
         self.initUI()
         self.selection_rect_item = None  # To store the QGraphicsRectItem
 
@@ -14872,8 +16575,11 @@ class BackgroundNeutralizationDialog(QDialog):
 
         # Get the image dimensions
         height, width, channels = image.shape
+        if channels != 3:
+            QMessageBox.warning(self, "Not RGB", "Background Neutralization currently supports only 3-channel RGB images.")
+            return
 
-        # Calculate scaling factors
+        # Calculate scaling factors to map from scene coords to image coords
         scene_rect = self.scene.sceneRect()
         scale_x = width / scene_rect.width()
         scale_y = height / scene_rect.height()
@@ -14890,35 +16596,46 @@ class BackgroundNeutralizationDialog(QDialog):
         w = max(1, min(w, width - x))
         h = max(1, min(h, height - y))
 
-        sample_region = image[y:y + h, x:x + w, :]  # Extract the sample region
+        # Extract the sample region
+        sample_region = image[y:y + h, x:x + w, :]  # Shape: (h, w, 3)
 
         # Calculate medians for each channel
         medians = np.median(sample_region, axis=(0, 1))  # Shape: (3,)
+        # Compute the average of these three medians
         average_median = np.mean(medians)
 
-        # Calculate adjustments: average_median - channel_median
-        adjustments = average_median - medians  # Shape: (3,)
-
-        # Apply adjustments to the entire image
+        # Create a copy of the image for adjustments
         adjusted_image = image.copy()
-        for channel in range(3):
-            delta = adjustments[channel]
-            if delta > 0:
-                # Need to subtract delta from the channel
-                adjusted_image[:, :, channel] -= delta
-                # Prevent division by zero or negative values
-                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
-                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
-            elif delta < 0:
-                # Need to add delta (since delta is negative, this is subtraction)
-                adjusted_image[:, :, channel] += delta
-                adjusted_image[:, :, channel] = np.clip(adjusted_image[:, :, channel], 0.0, 1.0)
-                adjusted_image[:, :, channel] /= (1.0 - delta) if (1.0 - delta) != 0 else 1.0
-            # If delta == 0, no change
 
-        # Update the image in ImageManager
-        self.image_manager.update_image(
-            updated_image=adjusted_image,
+        # For each RGB channel, compute the difference and apply the formula
+        # newChannel = (oldChannel - diff) / (1 - diff),
+        # where diff = median(channel) - average_median
+        for c in range(3):
+            diff = medians[c] - average_median
+
+            # Numerator = old - diff
+            # Denominator = 1 - diff
+            # Make sure we handle any extreme edge cases where (1 - diff) could be 0 or negative
+            numerator = adjusted_image[:, :, c] - diff
+            denominator = 1.0 - diff
+
+            # Avoid division by zero or extremely small denominators
+            # (in normal circumstances, diff should be well within -1..1 for images in [0,1])
+            if abs(denominator) < 1e-8:
+                # If this occurs, you could skip or handle differently.
+                # For safety, just skip or clamp in real code:
+                denominator = 1e-8 if denominator >= 0 else -1e-8
+
+            new_values = numerator / denominator
+
+            # Clip the results to [0, 1] to remain in valid image range
+            new_values = np.clip(new_values, 0.0, 1.0)
+
+            adjusted_image[:, :, c] = new_values
+
+        # Update the image in the ImageManager
+        self.image_manager.set_image(
+            adjusted_image,
             metadata=self.image_manager._metadata[self.image_manager.current_slot]
         )
 
@@ -14927,7 +16644,7 @@ class BackgroundNeutralizationDialog(QDialog):
 
         # Close the dialog
         self.accept()
-        
+
 class RemoveGreenDialog(QDialog):
     def __init__(self, image_manager, mask_manager, parent=None):
         """
@@ -15066,7 +16783,7 @@ class CLAHEDialog(QDialog):
         self.image_manager = image_manager
         self.mask_manager = mask_manager
         self.setWindowTitle("CLAHE")
-        self.setGeometry(200, 200, 800, 600)  # Increased size for better layout
+        self.setGeometry(100, 100, 800, 600)  # Increased size for better layout
         self.initUI()
         self.current_zoom = 1.0  # Initial zoom level
 
@@ -15220,8 +16937,10 @@ class CLAHEDialog(QDialog):
         Updates the preview image based on current slider values and applied mask.
         """
         if self.original_image is None:
-            self.pixmap_item.setPixmap(QPixmap())
+            # Clear the scene and then re-add the pixmap item.
             self.preview_scene.clear()
+            self.pixmap_item = QGraphicsPixmapItem()  # Reinitialize pixmap item.
+            self.preview_scene.addItem(self.pixmap_item)
             self.preview_scene.addText("No image loaded.")
             return
 
@@ -15300,7 +17019,6 @@ class CLAHEDialog(QDialog):
             self.zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
-
 
     def zoom_in(self):
         """
@@ -15412,7 +17130,7 @@ class MorphologyDialog(QDialog):
         self.image_manager = image_manager
         self.mask_manager = mask_manager
         self.setWindowTitle("Morphological Operations")
-        self.setGeometry(200, 200, 800, 600)  # Increased size for better layout
+        self.setGeometry(100, 100, 800, 600)  # Increased size for better layout
         self.initUI()
         self.current_zoom = 1.0  # Initial zoom level
 
@@ -15670,7 +17388,6 @@ class MorphologyDialog(QDialog):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-
     def zoom_in(self):
         """
         Zooms in the preview image by 25%.
@@ -15780,7 +17497,7 @@ class WhiteBalanceDialog(QDialog):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("White Balance")
-        self.setGeometry(200, 200, 800, 500)  # Adjusted size to remove preview area
+        self.setGeometry(100, 100, 800, 500)  # Adjusted size to remove preview area
         self.initUI()
 
     def initUI(self):
@@ -16789,7 +18506,6 @@ class PixelMathDialog(QDialog):
         else:
             return result  # Could be scalar or ndarray
 
-
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -16930,11 +18646,14 @@ class XISFViewer(QWidget):
         It updates the UI with the new image only if the changed slot is the active slot.
         """
         if not self.isVisible():
-            return        
-        if image is None:
             return
 
-
+        # If image is None, clear the display and metadata.
+        if image is None:
+            self.image_label.clear()
+            self.metadata_tree.clear()
+            print(f"XISFViewer: Cleared image display for slot {slot}.")
+            return
 
         # Clear the previous content before updating.
         self.image_label.clear()
@@ -16969,6 +18688,7 @@ class XISFViewer(QWidget):
         self.display_image()
 
         print(f"XISFViewer: Image updated from ImageManager slot {slot}.")
+
 
 
 
@@ -19066,6 +20786,7 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, w, QImage.Format.Format_Grayscale8)
 
 
+
 class CosmicClarityTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -19869,6 +21590,12 @@ class CosmicClarityTab(QWidget):
             self._execute_cosmic_clarity(*self.operation_queue.pop(0))
 
     def _execute_cosmic_clarity(self, mode, output_suffix):
+        if self.loaded_image_path is None:
+            print("Warning: loaded_image_path is None. Using default base filename 'image'.")
+            base_filename = "image"
+        else:
+            base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        print(f"Base filename before saving: {base_filename}")  # Debug print
         """Execute a single Cosmic Clarity operation."""
         # Determine the correct executable name based on platform and mode
         if os.name == 'nt':
@@ -19896,9 +21623,6 @@ class CosmicClarityTab(QWidget):
         input_folder = os.path.join(self.cosmic_clarity_folder, "input")
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
 
-        # Construct the base filename from the loaded image path
-        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
-        print(f"Base filename before saving: {base_filename}")  # Debug print
 
         # Save the current previewed image directly to the input folder
         input_file_path = os.path.join(input_folder, f"{base_filename}.tif")
@@ -20509,7 +22233,6 @@ class CosmicClarityTab(QWidget):
         except Exception as e:
             print(f"Failed to delete files: {e}")
 
-
 class PreviewDialog(QDialog):
     def __init__(self, np_image, parent_tab=None, is_mono=False):
         super().__init__(parent=parent_tab)
@@ -20641,6 +22364,7 @@ class PreviewDialog(QDialog):
 
         # Convert and display the QImage.
         self.display_qimage(display_image)
+
 
 
     def undo_last_process(self):
@@ -21595,7 +23319,7 @@ class StatisticalStretchTab(QWidget):
         # Buttons (Undo and Preview Stretch)
         button_layout = QHBoxLayout()
 
-        self.previewButton = QPushButton('Preview Stretch', self)
+        self.previewButton = QPushButton('Apply Stretch', self)
         self.previewButton.clicked.connect(self.previewStretch)
         button_layout.addWidget(self.previewButton)
 
@@ -21699,9 +23423,9 @@ class StatisticalStretchTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return     
+            return   
         if image is None:
-            return  
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -21937,7 +23661,6 @@ class StatisticalStretchTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-
     def zoom_in(self):
         if self.current_pixmap is not None:
             self.zoom_factor *= 1.2
@@ -22026,6 +23749,7 @@ class StatisticalStretchTab(QWidget):
                 self.fileLabel.setText('Save canceled.')
         else:
             self.fileLabel.setText('No stretched image to save. Please generate a preview first.')
+
 
 
 # Thread for Stat Stretch background processing
@@ -22369,9 +24093,9 @@ class StarStretchTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return     
-        if image is None:
             return  
+        if image is None:
+            return              
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -22549,7 +24273,6 @@ class StarStretchTab(QWidget):
             self.zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
-
 
     def zoom_in(self):
         if self.current_pixmap is not None:
@@ -23401,7 +25124,6 @@ class FullCurvesTab(QWidget):
 
         return super().eventFilter(source, event)
 
-
     def refresh(self):
         if self.image_manager:
             # You might have a way to retrieve the current image and metadata.
@@ -23417,9 +25139,9 @@ class FullCurvesTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return     
+            return
         if image is None:
-            return  
+            return                
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -23556,7 +25278,6 @@ class FullCurvesTab(QWidget):
             self.zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
-
 
     def zoom_in(self):
         """
@@ -23804,7 +25525,7 @@ class ImageLabel(QLabel):
         super().__init__(parent)
         self.setMouseTracking(True)
     def mouseMoveEvent(self, event):
-        self.mouseMoved.emit(event.pos().x(), event.pos().y())
+        self.mouseMoved.emit(event.position().x(), event.position().y())
         super().mouseMoveEvent(event)
 
 class CurveEditor(QGraphicsView):
@@ -24099,7 +25820,7 @@ class CurveEditor(QGraphicsView):
 
     def keyPressEvent(self, event):
         """Remove selected points on Delete key press."""
-        if event.key() == Qt.Key_Delete:
+        if event.key() == Qt.Key.Key_Delete:
             for point in self.control_points[:]:
                 if point.isSelected():
                     self.scene.removeItem(point)
@@ -24107,6 +25828,312 @@ class CurveEditor(QGraphicsView):
             self.updateCurve()
         super().keyPressEvent(event)
 
+@njit(parallel=True)
+def apply_lut_gray(image_in, lut):
+    """
+    Numba-accelerated application of 'lut' to a single-channel image_in in [0..1].
+    'lut' is a 1D array of shape (size,) also in [0..1].
+    """
+    out = np.empty_like(image_in)
+    height, width = image_in.shape
+    size_lut = len(lut) - 1
+
+    for y in prange(height):
+        for x in range(width):
+            v = image_in[y, x]
+            idx = int(v * size_lut + 0.5)
+            if idx < 0: idx = 0
+            elif idx > size_lut: idx = size_lut
+            out[y, x] = lut[idx]
+
+    return out
+
+@njit(parallel=True)
+def apply_lut_color(image_in, lut):
+    """
+    Numba-accelerated application of 'lut' to a 3-channel image_in in [0..1].
+    'lut' is a 1D array of shape (size,) also in [0..1].
+    """
+    out = np.empty_like(image_in)
+    height, width, channels = image_in.shape
+    size_lut = len(lut) - 1
+
+    for y in prange(height):
+        for x in range(width):
+            for c in range(channels):
+                v = image_in[y, x, c]
+                idx = int(v * size_lut + 0.5)
+                if idx < 0: idx = 0
+                elif idx > size_lut: idx = size_lut
+                out[y, x, c] = lut[idx]
+
+    return out
+
+@njit(parallel=True)
+def apply_lut_mono_inplace(array2d, lut):
+    """
+    In-place LUT application on a single-channel 2D array in [0..1].
+    'lut' has shape (size,) also in [0..1].
+    """
+    H, W = array2d.shape
+    size_lut = len(lut) - 1
+    for y in prange(H):
+        for x in prange(W):
+            v = array2d[y, x]
+            idx = int(v * size_lut + 0.5)
+            if idx < 0:
+                idx = 0
+            elif idx > size_lut:
+                idx = size_lut
+            array2d[y, x] = lut[idx]
+
+@njit(parallel=True)
+def apply_lut_color_inplace(array3d, lut):
+    """
+    In-place LUT application on a 3-channel array in [0..1].
+    'lut' has shape (size,) also in [0..1].
+    """
+    H, W, C = array3d.shape
+    size_lut = len(lut) - 1
+    for y in prange(H):
+        for x in prange(W):
+            for c in range(C):
+                v = array3d[y, x, c]
+                idx = int(v * size_lut + 0.5)
+                if idx < 0:
+                    idx = 0
+                elif idx > size_lut:
+                    idx = size_lut
+                array3d[y, x, c] = lut[idx]
+
+def build_curve_lut(curve_func, size=65536):
+    """
+    Build a LUT of length 'size' that maps float in [0..1] to [0..1],
+    using your existing PCHIP curve_func(x) which is defined on x in [0..360].
+    We'll do:
+       mapped = 360 - curve_func(x)
+       out = clamp( mapped / 360, [0..1] )
+    """
+    import numpy as np
+    lut = np.zeros(size, dtype=np.float32)
+    for i in range(size):
+        v = i / (size - 1)  # in [0..1]
+        x = v * 360.0
+        mapped = 360.0 - curve_func(x)
+        outv = mapped / 360.0
+        if outv < 0.0: outv = 0.0
+        elif outv > 1.0: outv = 1.0
+        lut[i] = outv
+    return lut
+
+# D65 reference
+_Xn, _Yn, _Zn = 0.95047, 1.00000, 1.08883
+
+# Matrix for RGB -> XYZ (sRGB => D65)
+_M_rgb2xyz = np.array([
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041]
+], dtype=np.float32)
+
+# Matrix for XYZ -> RGB (sRGB => D65)
+_M_xyz2rgb = np.array([
+    [ 3.2404542, -1.5371385, -0.4985314],
+    [-0.9692660,  1.8760108,  0.0415560],
+    [ 0.0556434, -0.2040259,  1.0572252]
+], dtype=np.float32)
+
+@njit(parallel=True)
+def rgb_to_xyz_numba(rgb):
+    """
+    Convert an image from sRGB to XYZ (D65).
+    rgb: float32 array in [0..1], shape (H,W,3)
+    returns xyz in [0..maybe >1], shape (H,W,3)
+    """
+    H, W, _ = rgb.shape
+    out = np.empty((H, W, 3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            r = rgb[y, x, 0]
+            g = rgb[y, x, 1]
+            b = rgb[y, x, 2]
+            # Multiply by M_rgb2xyz
+            X = _M_rgb2xyz[0,0]*r + _M_rgb2xyz[0,1]*g + _M_rgb2xyz[0,2]*b
+            Y = _M_rgb2xyz[1,0]*r + _M_rgb2xyz[1,1]*g + _M_rgb2xyz[1,2]*b
+            Z = _M_rgb2xyz[2,0]*r + _M_rgb2xyz[2,1]*g + _M_rgb2xyz[2,2]*b
+            out[y, x, 0] = X
+            out[y, x, 1] = Y
+            out[y, x, 2] = Z
+    return out
+
+@njit(parallel=True)
+def xyz_to_rgb_numba(xyz):
+    """
+    Convert an image from XYZ (D65) to sRGB.
+    xyz: float32 array, shape (H,W,3)
+    returns rgb in [0..1], shape (H,W,3)
+    """
+    H, W, _ = xyz.shape
+    out = np.empty((H, W, 3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            X = xyz[y, x, 0]
+            Y = xyz[y, x, 1]
+            Z = xyz[y, x, 2]
+            # Multiply by M_xyz2rgb
+            r = _M_xyz2rgb[0,0]*X + _M_xyz2rgb[0,1]*Y + _M_xyz2rgb[0,2]*Z
+            g = _M_xyz2rgb[1,0]*X + _M_xyz2rgb[1,1]*Y + _M_xyz2rgb[1,2]*Z
+            b = _M_xyz2rgb[2,0]*X + _M_xyz2rgb[2,1]*Y + _M_xyz2rgb[2,2]*Z
+            # Clip to [0..1]
+            if r < 0: r = 0
+            elif r > 1: r = 1
+            if g < 0: g = 0
+            elif g > 1: g = 1
+            if b < 0: b = 0
+            elif b > 1: b = 1
+            out[y, x, 0] = r
+            out[y, x, 1] = g
+            out[y, x, 2] = b
+    return out
+
+@njit
+def f_lab_numba(t):
+    delta = 6/29
+    out = np.empty_like(t, dtype=np.float32)
+    for i in range(t.size):
+        val = t.flat[i]
+        if val > delta**3:
+            out.flat[i] = val**(1/3)
+        else:
+            out.flat[i] = val/(3*delta*delta) + (4/29)
+    return out
+
+@njit(parallel=True)
+def xyz_to_lab_numba(xyz):
+    """
+    xyz => shape(H,W,3), in D65. 
+    returns lab in shape(H,W,3): L in [0..100], a,b in ~[-128..127].
+    """
+    H, W, _ = xyz.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            X = xyz[y, x, 0] / _Xn
+            Y = xyz[y, x, 1] / _Yn
+            Z = xyz[y, x, 2] / _Zn
+            fx = (X)**(1/3) if X > (6/29)**3 else X/(3*(6/29)**2) + 4/29
+            fy = (Y)**(1/3) if Y > (6/29)**3 else Y/(3*(6/29)**2) + 4/29
+            fz = (Z)**(1/3) if Z > (6/29)**3 else Z/(3*(6/29)**2) + 4/29
+            L = 116*fy - 16
+            a = 500*(fx - fy)
+            b = 200*(fy - fz)
+            out[y, x, 0] = L
+            out[y, x, 1] = a
+            out[y, x, 2] = b
+    return out
+
+@njit(parallel=True)
+def lab_to_xyz_numba(lab):
+    """
+    lab => shape(H,W,3): L in [0..100], a,b in ~[-128..127].
+    returns xyz shape(H,W,3).
+    """
+    H, W, _ = lab.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    delta = 6/29
+    for y in prange(H):
+        for x in prange(W):
+            L = lab[y, x, 0]
+            a = lab[y, x, 1]
+            b = lab[y, x, 2]
+            fy = (L+16)/116
+            fx = fy + a/500
+            fz = fy - b/200
+
+            if fx > delta:
+                xr = fx**3
+            else:
+                xr = 3*delta*delta*(fx - 4/29)
+            if fy > delta:
+                yr = fy**3
+            else:
+                yr = 3*delta*delta*(fy - 4/29)
+            if fz > delta:
+                zr = fz**3
+            else:
+                zr = 3*delta*delta*(fz - 4/29)
+
+            X = _Xn * xr
+            Y = _Yn * yr
+            Z = _Zn * zr
+            out[y, x, 0] = X
+            out[y, x, 1] = Y
+            out[y, x, 2] = Z
+    return out
+
+@njit(parallel=True)
+def rgb_to_hsv_numba(rgb):
+    H, W, _ = rgb.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            r = rgb[y,x,0]
+            g = rgb[y,x,1]
+            b = rgb[y,x,2]
+            cmax = max(r,g,b)
+            cmin = min(r,g,b)
+            delta = cmax - cmin
+            # Hue
+            h = 0.0
+            if delta != 0.0:
+                if cmax == r:
+                    h = 60*(((g-b)/delta) % 6)
+                elif cmax == g:
+                    h = 60*(((b-r)/delta) + 2)
+                else:
+                    h = 60*(((r-g)/delta) + 4)
+            # Saturation
+            s = 0.0
+            if cmax > 0.0:
+                s = delta / cmax
+            v = cmax
+            out[y,x,0] = h
+            out[y,x,1] = s
+            out[y,x,2] = v
+    return out
+
+@njit(parallel=True)
+def hsv_to_rgb_numba(hsv):
+    H, W, _ = hsv.shape
+    out = np.empty((H,W,3), dtype=np.float32)
+    for y in prange(H):
+        for x in prange(W):
+            h = hsv[y,x,0]
+            s = hsv[y,x,1]
+            v = hsv[y,x,2]
+            c = v*s
+            hh = (h/60.0) % 6
+            x_ = c*(1 - abs(hh % 2 - 1))
+            m = v - c
+            r = 0.0
+            g = 0.0
+            b = 0.0
+            if 0 <= hh < 1:
+                r,g,b = c,x_,0
+            elif 1 <= hh < 2:
+                r,g,b = x_,c,0
+            elif 2 <= hh < 3:
+                r,g,b = 0,c,x_
+            elif 3 <= hh < 4:
+                r,g,b = 0,x_,c
+            elif 4 <= hh < 5:
+                r,g,b = x_,0,c
+            else:
+                r,g,b = c,0,x_
+            out[y,x,0] = (r + m)
+            out[y,x,1] = (g + m)
+            out[y,x,2] = (b + m)
+    return out
 
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
@@ -24122,133 +26149,118 @@ class FullCurvesProcessingThread(QThread):
         self.result_ready.emit(adjusted_image)
 
     @staticmethod
-    def apply_curve_direct(value, curve_func):
-        # value in [0..1]
-        # Evaluate curve at value*360 (X), get Y in [0..360]
-        # Invert it: out = 360 - curve_func(X)
-        # Map back to [0..1]: out/360
-        out = curve_func(value*360.0)
-        out = 360.0 - out
-        return np.clip(out/360.0, 0, 1).astype(np.float32)
-
-    @staticmethod
     def process_curve(image, curve_mode, curve_func):
-        if image is None:
+        """
+        Main entry point to apply the user's curve in 'curve_mode'
+        to 'image' using a single big LUT for [0..1].
+        """
+        import numpy as np
+
+        if image is None or curve_func is None:
             return image
 
-        if curve_func is None:
-            # No curve defined, identity
-            return image
-
+        # 1) Convert to float32 [0..1]
         if image.dtype != np.float32:
             image = image.astype(np.float32, copy=False)
 
+        # 2) Build a big LUT
+        lut = build_curve_lut(curve_func, size=65536)
+
+        # 3) If single-channel, reshape to (H,W,1) for uniform handling
         is_gray = (image.ndim == 2 or image.shape[2] == 1)
         if is_gray:
             image = image.reshape(image.shape[0], image.shape[1], 1)
 
         mode = curve_mode.lower()
 
-        # Helper functions for color modes
-        def apply_to_all_channels(img):
-            for c in range(img.shape[2]):
-                img[:,:,c] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,c], curve_func)
-            return img
-
-        def apply_to_channel(img, ch):
-            img[:,:,ch] = FullCurvesProcessingThread.apply_curve_direct(img[:,:,ch], curve_func)
-            return img
-
+        # ----------------------------------------------------------------------
+        # R/G/B/K (Brightness) => direct LUT application
+        # ----------------------------------------------------------------------
         if mode == 'r':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 0)
+            # Apply LUT only to channel 0
+            # We do it manually:
+            out = image.copy()
+            H, W, _ = out.shape
+            # channel 0
+            apply_lut_mono_inplace(out[...,0], lut)
+            return out
 
         elif mode == 'g':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 1)
+            # channel 1
+            out = image.copy()
+            apply_lut_mono_inplace(out[...,1], lut)
+            return out
 
         elif mode == 'b':
-            if image.shape[2] == 3:
-                image = apply_to_channel(image, 2)
+            # channel 2
+            out = image.copy()
+            apply_lut_mono_inplace(out[...,2], lut)
+            return out
 
         elif mode == 'k (brightness)':
-            image = apply_to_all_channels(image)
+            # Apply LUT to all channels
+            out = image.copy()
+            apply_lut_color_inplace(out, lut)
+            return out
 
-        elif mode == 'l*':
-            # Convert to Lab, apply curve to L
-            # L in [0..100], normalize to [0..1], apply curve, then *100
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+        # -------------------------------------------------------
+        # L*, a*, b*, Chroma => do color transform => apply LUT => transform back
+        # -------------------------------------------------------
+        elif mode in ["l*", "a*", "b*", "chroma"]:
+            # 1) Convert RGB -> XYZ -> Lab via Numba
+            xyz = rgb_to_xyz_numba(image)             # Numba-based
+            lab = xyz_to_lab_numba(xyz)               # Numba-based
 
-            L_norm = np.clip(lab[:,:,0]/100.0, 0, 1)
-            L_new = FullCurvesProcessingThread.apply_curve_direct(L_norm, curve_func)*100.0
-            lab[:,:,0] = L_new
+            if mode == "l*":
+                # L in [0..100]
+                L = lab[..., 0] / 100.0
+                apply_lut_mono_inplace(L, lut)
+                lab[..., 0] = L * 100.0
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-            
-        elif mode == 'a*':
-            # Convert to Lab, apply curve to a*
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+            elif mode == "a*":
+                # a in [-128..127], shift => [0..255], then /255 => [0..1]
+                a = lab[..., 1]
+                a_norm = (a + 128.0) / 255.0
+                a_norm = np.clip(a_norm, 0, 1)
+                apply_lut_mono_inplace(a_norm, lut)
+                lab[..., 1] = a_norm * 255.0 - 128.0
 
-            # a* in [-128..127], shift/scale to [0..1]
-            a_norm = np.clip((lab[:,:,1] + 128.0)/255.0, 0, 1)
-            a_new = FullCurvesProcessingThread.apply_curve_direct(a_norm, curve_func)*255.0 - 128.0
-            lab[:,:,1] = a_new
+            elif mode == "b*":
+                # b in [-128..127]
+                b = lab[..., 2]
+                b_norm = (b + 128.0) / 255.0
+                b_norm = np.clip(b_norm, 0, 1)
+                apply_lut_mono_inplace(b_norm, lut)
+                lab[..., 2] = b_norm * 255.0 - 128.0
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
+            elif mode == "chroma":
+                a_ = lab[..., 1]
+                b_ = lab[..., 2]
+                C = np.sqrt(a_ * a_ + b_ * b_)
+                C_norm = np.clip(C / 200.0, 0, 1)
+                apply_lut_mono_inplace(C_norm, lut)
+                C_new = C_norm * 200.0
+                ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C != 0))
+                lab[..., 1] = a_ * ratio
+                lab[..., 2] = b_ * ratio
 
-        elif mode == 'b*':
-            # Convert to Lab, apply curve to b*
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
+            # Convert Lab -> XYZ -> RGB
+            xyz_new = lab_to_xyz_numba(lab)           # Numba-based
+            out = xyz_to_rgb_numba(xyz_new)           # Numba-based
+            return out
 
-            b_norm = np.clip((lab[:,:,2] + 128.0)/255.0, 0, 1)
-            b_new = FullCurvesProcessingThread.apply_curve_direct(b_norm, curve_func)*255.0 - 128.0
-            lab[:,:,2] = b_new
+        # -------------------------------------------------------
+        # HSV saturation => same approach
+        # -------------------------------------------------------
+        elif mode == "saturation":
+            hsv = rgb_to_hsv_numba(image)             # Numba-based
+            S = hsv[..., 1]
+            apply_lut_mono_inplace(S, lut)
+            hsv[..., 1] = S
+            out = hsv_to_rgb_numba(hsv)               # Numba-based
+            return out
 
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-
-        elif mode == 'chroma':
-            # Convert to Lab, apply curve to Chroma
-            from_color = FullCurvesProcessingThread.rgb_to_xyz
-            to_color = FullCurvesProcessingThread.xyz_to_rgb
-            xyz = from_color(image)
-            lab = FullCurvesProcessingThread.xyz_to_lab(xyz)
-
-            a_ = lab[:,:,1]
-            b_ = lab[:,:,2]
-            C = np.sqrt(a_*a_ + b_*b_)
-            C_norm = np.clip(C/200.0, 0, 1)
-            C_new = FullCurvesProcessingThread.apply_curve_direct(C_norm, curve_func)*200.0
-
-            ratio = np.divide(C_new, C, out=np.zeros_like(C), where=(C!=0))
-            lab[:,:,1] = a_*ratio
-            lab[:,:,2] = b_*ratio
-
-            xyz_new = FullCurvesProcessingThread.lab_to_xyz(lab)
-            image = to_color(xyz_new)
-
-        elif mode == 'saturation':
-            # Convert to HSV, apply curve to S
-            hsv = FullCurvesProcessingThread.rgb_to_hsv(image)
-            S = hsv[:,:,1]
-            S_new = FullCurvesProcessingThread.apply_curve_direct(S, curve_func)
-            hsv[:,:,1] = S_new
-            image = FullCurvesProcessingThread.hsv_to_rgb(hsv)
-
-        if is_gray:
-            image = image[:,:,0]
-
+        # If none matched, just return the image
         return image
 
     @staticmethod
@@ -24652,9 +26664,6 @@ class FrequencySeperationTab(QWidget):
         self.on_radius_changed(self.radiusSlider.value())
         self.on_tolerance_changed(self.toleranceSlider.value())
 
-    # -----------------------------
-    # Image Manager Integration
-    # -----------------------------
     def refresh(self):
         if self.image_manager:
             # You might have a way to retrieve the current image and metadata.
@@ -24664,15 +26673,18 @@ class FrequencySeperationTab(QWidget):
             image, metadata = self.image_manager.get_current_image_and_metadata()
             self.on_image_changed(current_slot, image, metadata)
 
+    # -----------------------------
+    # Image Manager Integration
+    # -----------------------------
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
-        Updates the display if the current slot is affected.
+        Updates the FrequencySeperationTab if the change is relevant.
         """
         if not self.isVisible():
-            return     
+            return   
         if image is None:
-            return  
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -24710,7 +26722,6 @@ class FrequencySeperationTab(QWidget):
             self.apply_frequency_separation()
 
             print(f"FrequencySeperationTab: Image updated from ImageManager slot {slot}.")
-
 
 
     def map_slider_to_radius(self, slider_pos):
@@ -24838,6 +26849,7 @@ class FrequencySeperationTab(QWidget):
     # -----------------------------
     # Zooming
     # -----------------------------
+
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
         if event.angleDelta().y() > 0:
@@ -24846,7 +26858,6 @@ class FrequencySeperationTab(QWidget):
             self.zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
-
 
     def zoom_in(self):
         self.zoom_factor *= 1.25
@@ -27369,9 +29380,9 @@ class NBtoRGBstarsTab(QWidget):
         self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
-        self.saveButton = QPushButton('Save Combined Image', self)
-        self.saveButton.clicked.connect(self.saveImage)
-        left_layout.addWidget(self.saveButton)
+        self.pushButton = QPushButton('Push to Active Slot', self)
+        self.pushButton.clicked.connect(self.pushToActiveSlot)
+        left_layout.addWidget(self.pushButton)
 
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
@@ -27446,9 +29457,9 @@ class NBtoRGBstarsTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return     
+            return       
         if image is None:
-            return 
+            return         
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -27465,6 +29476,46 @@ class NBtoRGBstarsTab(QWidget):
 
             print(f"NBtoRGBstarsTab: Image updated from ImageManager slot {slot}.")
 
+    def pushToActiveSlot(self):
+        """
+        Pushes the current combined image to the active slot in the ImageManager,
+        along with the associated metadata.
+        """
+        if self.combined_image is None:
+            QMessageBox.warning(self, "Warning", "No combined image available to push.")
+            return
+
+        # Prepare metadata for the combined image.
+        metadata = {
+            'file_path': self.ha_filename if self.ha_image is not None else "Combined Image",
+            'original_header': self.original_header if self.original_header else {},
+            'bit_depth': self.bit_depth if self.bit_depth else "Unknown",
+            'is_mono': self.is_mono,
+            'processing_parameters': {
+                'ha_to_oii_ratio': self.haToOiiRatioSlider.value() / 100.0,
+                'enable_star_stretch': self.starStretchCheckBox.isChecked(),
+                'stretch_factor': self.stretchSlider.value() / 100.0
+            },
+            'processing_timestamp': datetime.now().isoformat(),
+            'source_images': {
+                'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
+                'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
+                'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
+                'OSC': self.osc_filename if self.osc_image is not None else "Not Provided"
+            }
+        }
+
+        # Update the active slot in the ImageManager.
+        if self.image_manager:
+            try:
+                self.image_manager.set_image(self.combined_image, metadata=metadata)
+                QMessageBox.information(self, "Success", "Combined image pushed to active slot.")
+                print("NBtoRGBstarsTab: Combined image pushed to ImageManager active slot.")
+            except Exception as e:
+                print(f"Error updating ImageManager: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot push the combined image.")
 
 
     def createRatioSlider(self, label_text, default_value):
@@ -27674,7 +29725,6 @@ class NBtoRGBstarsTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-
     def zoom_in(self):
         if self.zoom_factor < 20.0:  # Set a maximum zoom limit (e.g., 500%)
             self.zoom_factor *= 1.25  # Increase zoom by 25%
@@ -27761,7 +29811,7 @@ class NBtoRGBstarsTab(QWidget):
 class NBtoRGBProcessingThread(QThread):
     preview_generated = pyqtSignal(np.ndarray)
 
-    def __init__(self, ha_image, oiii_image, sii_image=None, osc_image=None, ha_to_oii_ratio=0.3, enable_star_stretch=True, stretch_factor=5.0):
+    def __init__(self, ha_image=None, oiii_image=None, sii_image=None, osc_image=None, ha_to_oii_ratio=0.3, enable_star_stretch=True, stretch_factor=5.0):
         super().__init__()
         self.ha_image = ha_image
         self.oiii_image = oiii_image
@@ -28027,9 +30077,9 @@ class HaloBGonTab(QWidget):
         Updates the display if the current slot is affected.
         """
         if not self.isVisible():
-            return     
-        if image is None:
             return   
+        if image is None:
+            return             
         if slot == self.image_manager.current_slot:
             # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
@@ -28103,6 +30153,15 @@ class HaloBGonTab(QWidget):
             self.reductionLabel.setText(f"Reduction Amount: {labels[value]}")
         else:
             self.reductionLabel.setText("Reduction Amount: Unknown")
+
+    def wheelEvent(self, event: QWheelEvent):
+        # Check the vertical delta to determine zoom direction.
+        if event.angleDelta().y() > 0:
+            self.zoomIn()
+        else:
+            self.zoomOut()
+        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
+        event.accept()
 
     def zoomIn(self):
         self.zoom_factor *= 1.2  # Increase zoom by 20%
@@ -28733,7 +30792,7 @@ class ContinuumSubtractTab(QWidget):
         if not self.isVisible():
             return     
         if image is None:
-            return   
+            return           
         if slot == 0:  # Assuming slot 0 is used for shared images
             # Ensure the image is a numpy array
             if not isinstance(image, np.ndarray):
@@ -28830,7 +30889,6 @@ class ContinuumSubtractTab(QWidget):
             self.zoom_out()
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
-
 
     def zoom_in(self):
         if self.zoom_factor < 5.0:  # Maximum 500% zoom
@@ -29466,6 +31524,7 @@ def apply_average_neutral_scnr(image: np.ndarray, amount: float = 1.0) -> np.nda
 
     return final_image
 
+
 def load_image(filename, max_retries=3, wait_seconds=3):
     """
     Loads an image from the specified filename with support for various formats.
@@ -29608,30 +31667,51 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 file_meta = xisf.get_file_metadata()
 
 
-                # Determine bit depth and normalize
+                # Here we check the maximum pixel value to determine bit depth
+                # --- Detect the bit depth by dtype ---
                 if image_data.dtype == np.uint8:
                     bit_depth = "8-bit"
+                    print("Debug: Detected 8-bit dtype. Normalizing by 255.")
                     image = image_data.astype(np.float32) / 255.0
+
                 elif image_data.dtype == np.uint16:
                     bit_depth = "16-bit"
+                    print("Debug: Detected 16-bit dtype. Normalizing by 65535.")
                     image = image_data.astype(np.float32) / 65535.0
+
                 elif image_data.dtype == np.uint32:
                     bit_depth = "32-bit unsigned"
+                    print("Debug: Detected 32-bit unsigned dtype. Normalizing by 4294967295.")
                     image = image_data.astype(np.float32) / 4294967295.0
-                elif image_data.dtype == np.float32:
+
+                elif image_data.dtype == np.float32 or image_data.dtype == np.float64:
                     bit_depth = "32-bit floating point"
-                    image = image_data
+                    print("Debug: Detected float dtype. Casting to float32 (no normalization).")
+                    image = image_data.astype(np.float32)
+
                 else:
-                    raise ValueError("Unsupported XISF data type!")
+                    raise ValueError(f"Unsupported XISF data type: {image_data.dtype}")
 
                 # Handle mono or RGB XISF
-                if image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[2] == 1):  # Mono
+                if image_data.ndim == 2:
+                    # We know it's mono. Already normalized in `image`.
                     is_mono = True
-                    if image_data.ndim == 3:
-                        image = np.squeeze(image_data, axis=2)
-                    image = np.stack([image] * 3, axis=-1)  # Convert to RGB by stacking
-                elif image_data.ndim == 3 and image_data.shape[2] == 3:  # RGB
+                    # If you really want to store it in an RGB shape:
+                    image = np.stack([image] * 3, axis=-1)
+
+                elif image_data.ndim == 3 and image_data.shape[2] == 1:
+                    # It's mono with shape (H, W, 1)
+                    is_mono = True
+                    # Squeeze the normalized image, not the original image_data
+                    image = np.squeeze(image, axis=2)
+                    # If you want an RGB shape, you can do:
+                    image = np.stack([image] * 3, axis=-1)
+
+                elif image_data.ndim == 3 and image_data.shape[2] == 3:
                     is_mono = False
+                    # We already stored the normalized float32 data in `image`.
+                    # So no change needed if it’s already shape (H, W, 3).
+
                 else:
                     raise ValueError("Unsupported XISF image dimensions!")
 
@@ -29753,12 +31833,28 @@ def load_image(filename, max_retries=3, wait_seconds=3):
             return None, None, None, None
 
 
+
+
+
+
+
+
 def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False, image_meta=None, file_meta=None):
     """
     Save an image array to a file in the specified format and bit depth.
     """
     img_array = ensure_native_byte_order(img_array)  # Ensure correct byte order
-    xisf_metadata = original_header
+    is_xisf = False  # Flag to determine if the original file was XISF
+
+    # **🔹 Detect If Original File Was XISF**
+    if original_header:
+        for key in original_header.keys():
+            if key.startswith("XISF:"):
+                is_xisf = True
+                break
+
+    if image_meta and "XISFProperties" in image_meta:
+        is_xisf = True  # Confirm XISF metadata exists
 
     try:
         if original_format == 'png':
@@ -29788,170 +31884,83 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
             if not filename.lower().endswith(f".{original_format}"):
                 filename = filename.rsplit('.', 1)[0] + f".{original_format}"
 
-            # Decide whether to rebuild the header from XISF metadata.
-            def header_has_only_xisf(header_dict):
-                # Return True if all keys in header_dict start with 'XISF:'
-                return all(key.upper().startswith("XISF:") for key in header_dict.keys())
+            # **📌 CASE 1: ORIGINAL FILE WAS XISF → CONVERT TO FITS HEADER**
+            if is_xisf:
+                print("Detected XISF metadata. Converting to FITS header...")
+                fits_header = fits.Header()
 
-            use_rebuild = False
-            if original_header is not None and isinstance(original_header, dict):
-                if header_has_only_xisf(original_header):
-                    use_rebuild = True
-                    print("Original header contains only XISF metadata. Rebuilding FITS header from image_meta.")
+                if 'XISFProperties' in image_meta:
+                    xisf_props = image_meta['XISFProperties']
+
+                    # Extract WCS parameters
+                    if 'PCL:AstrometricSolution:ReferenceCoordinates' in xisf_props:
+                        ref_coords = xisf_props['PCL:AstrometricSolution:ReferenceCoordinates']['value']
+                        fits_header['CRVAL1'] = ref_coords[0]
+                        fits_header['CRVAL2'] = ref_coords[1]
+
+                    if 'PCL:AstrometricSolution:ReferenceLocation' in xisf_props:
+                        ref_pixel = xisf_props['PCL:AstrometricSolution:ReferenceLocation']['value']
+                        fits_header['CRPIX1'] = ref_pixel[0]
+                        fits_header['CRPIX2'] = ref_pixel[1]
+
+                    if 'PCL:AstrometricSolution:PixelSize' in xisf_props:
+                        pixel_size = xisf_props['PCL:AstrometricSolution:PixelSize']['value']
+                        fits_header['CDELT1'] = -pixel_size / 3600.0
+                        fits_header['CDELT2'] = pixel_size / 3600.0
+
+                    if 'PCL:AstrometricSolution:LinearTransformationMatrix' in xisf_props:
+                        linear_transform = xisf_props['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
+                        fits_header['CD1_1'] = linear_transform[0][0]
+                        fits_header['CD1_2'] = linear_transform[0][1]
+                        fits_header['CD2_1'] = linear_transform[1][0]
+                        fits_header['CD2_2'] = linear_transform[1][1]
+
+                # Ensure essential WCS headers exist
+                fits_header.setdefault('CTYPE1', 'RA---TAN')
+                fits_header.setdefault('CTYPE2', 'DEC--TAN')
+
+                print("Converted XISF metadata to FITS header.")
+
+            # **📌 CASE 2: ORIGINAL FILE WAS FITS → PRESERVE HEADER**
+            elif original_header is not None:
+                print("Detected FITS format. Preserving original FITS header.")
+                fits_header = fits.Header()
+                for key, value in original_header.items():
+                    if key.startswith("XISF:"):
+                        continue  # Skip XISF metadata
+
+                    if isinstance(value, dict) and 'value' in value:
+                        value = value['value']
+
+                    try:
+                        fits_header[key] = value
+                    except Exception as e:
+                        print(f"Skipping problematic key {key} due to error: {e}")
             else:
-                # If no original header exists, we must rebuild.
-                use_rebuild = True
-                print("No original header available; rebuilding minimal FITS header.")
+                raise ValueError("Original header is required for FITS format!")
 
-            # If rebuilding, use the XISF viewer logic:
-            if use_rebuild:
-                header = fits.Header()
-                crval1, crval2 = None, None
+            # **📌 Image Processing for FITS**
+            fits_header['BSCALE'] = 1.0
+            fits_header['BZERO'] = 0.0
 
-                # Define the list of WCS keywords we care about.
-                wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
-                                "CDELT1", "CDELT2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
-
-                if image_meta and 'FITSKeywords' in image_meta:
-                    for keyword, values in image_meta['FITSKeywords'].items():
-                        for entry in values:
-                            if 'value' in entry:
-                                value = entry['value']
-                                if keyword in wcs_keywords:
-                                    try:
-                                        value = int(value)
-                                    except ValueError:
-                                        try:
-                                            value = float(value)
-                                        except Exception:
-                                            pass
-                                header[keyword] = value
-
-                # Manually add WCS information if missing.
-                if 'CTYPE1' not in header:
-                    header['CTYPE1'] = 'RA---TAN'
-                if 'CTYPE2' not in header:
-                    header['CTYPE2'] = 'DEC--TAN'
-
-                # Add the -SIP suffix if SIP coefficients are present.
-                if any(key in header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]):
-                    header['CTYPE1'] = 'RA---TAN-SIP'
-                    header['CTYPE2'] = 'DEC--TAN-SIP'
-
-                # Set default reference pixel (center of the image).
-                if 'CRPIX1' not in header:
-                    header['CRPIX1'] = img_array.shape[1] / 2  # X center
-                if 'CRPIX2' not in header:
-                    header['CRPIX2'] = img_array.shape[0] / 2  # Y center
-
-                # Retrieve RA and DEC if available.
-                if image_meta and 'FITSKeywords' in image_meta:
-                    if 'RA' in image_meta['FITSKeywords']:
-                        crval1 = float(image_meta['FITSKeywords']['RA'][0]['value'])
-                    if 'DEC' in image_meta['FITSKeywords']:
-                        crval2 = float(image_meta['FITSKeywords']['DEC'][0]['value'])
-                if crval1 is not None and crval2 is not None:
-                    header['CRVAL1'] = crval1
-                    header['CRVAL2'] = crval2
-                else:
-                    print("RA and DEC values not found in FITS Keywords.")
-
-                # Calculate pixel scale if focal length and pixel size are available.
-                if image_meta and 'FITSKeywords' in image_meta and \
-                'FOCALLEN' in image_meta['FITSKeywords'] and 'XPIXSZ' in image_meta['FITSKeywords']:
-                    focal_length = float(image_meta['FITSKeywords']['FOCALLEN'][0]['value'])
-                    pixel_size = float(image_meta['FITSKeywords']['XPIXSZ'][0]['value'])
-                    pixel_scale = (pixel_size * 206.265) / focal_length  # arcsec/pixel
-                    header['CDELT1'] = -pixel_scale / 3600.0
-                    header['CDELT2'] = pixel_scale / 3600.0
-                else:
-                    header['CDELT1'] = -2.77778e-4  # ~1 arcsecond/pixel
-                    header['CDELT2'] = 2.77778e-4
-
-                # Populate CD matrix using the XISF LinearTransformationMatrix if available.
-                if image_meta and 'XISFProperties' in image_meta and \
-                'PCL:AstrometricSolution:LinearTransformationMatrix' in image_meta['XISFProperties']:
-                    linear_transform = image_meta['XISFProperties']['PCL:AstrometricSolution:LinearTransformationMatrix']['value']
-                    header['CD1_1'] = linear_transform[0][0]
-                    header['CD1_2'] = linear_transform[0][1]
-                    header['CD2_1'] = linear_transform[1][0]
-                    header['CD2_2'] = linear_transform[1][1]
-                else:
-                    header['CD1_1'] = header['CDELT1']
-                    header['CD1_2'] = 0.0
-                    header['CD2_1'] = 0.0
-                    header['CD2_2'] = header['CDELT2']
-
-                # Duplicate the mono image to create a 3-channel image if necessary.
-                if is_mono:
-                    image_data_fits = np.stack([img_array[:, :, 0]] * 3, axis=-1)
-                    image_data_fits = np.transpose(image_data_fits, (2, 0, 1))
-                    header['NAXIS'] = 3
-                    header['NAXIS3'] = 3
-                else:
-                    image_data_fits = np.transpose(img_array, (2, 0, 1))
-                    header['NAXIS'] = 3
-                    header['NAXIS3'] = 3
-
-            else:
-                # Otherwise, use the provided original header.
-                if original_header is not None and isinstance(original_header, dict):
-                    valid_header = {}
-                    for key, value in original_header.items():
-                        if not key.upper().startswith("XISF:"):
-                            valid_header[key] = value
-                    header = fits.Header()
-                    for key, value in valid_header.items():
-                        try:
-                            header[key] = value
-                        except Exception as e:
-                            print(f"Skipping key {key} due to error: {e}")
-                else:
-                    raise ValueError("Original header is required for FITS format!")
-
-            header['BSCALE'] = 1.0
-            header['BZERO'] = 0.0
-
-            # Now update the header with image dimensions:
             if is_mono or img_array.ndim == 2:
-                if img_array.ndim == 3:
-                    print("Detected 3-channel data in a mono image; converting to 2D by taking the first channel.")
-                    img_array = img_array[..., 0]
-                if bit_depth == "16-bit":
-                    img_array_fits = (img_array * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    bzero = header.get('BZERO', 0)
-                    bscale = header.get('BSCALE', 1)
-                    img_array_fits = (img_array.astype(np.float32) * bscale + bzero).astype(np.uint32)
-                else:
-                    img_array_fits = img_array.astype(np.float32)
-                header['NAXIS'] = 2
-                header['NAXIS1'] = img_array.shape[1]
-                header['NAXIS2'] = img_array.shape[0]
-                header.pop('NAXIS3', None)
-                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+                img_array_fits = img_array[:, :, 0] if len(img_array.shape) == 3 else img_array
+                fits_header['NAXIS'] = 2
             else:
-                img_array_transposed = np.transpose(img_array, (2, 0, 1))
-                if bit_depth == "16-bit":
-                    img_array_fits = (img_array_transposed * 65535).astype(np.uint16)
-                elif bit_depth == "32-bit unsigned":
-                    bzero = header.get('BZERO', 0)
-                    bscale = header.get('BSCALE', 1)
-                    img_array_fits = img_array_transposed.astype(np.float32) * bscale + bzero
-                    header['BITPIX'] = -32
-                else:
-                    img_array_fits = img_array_transposed.astype(np.float32)
-                header['NAXIS'] = 3
-                header['NAXIS1'] = img_array_transposed.shape[2]
-                header['NAXIS2'] = img_array_transposed.shape[1]
-                header['NAXIS3'] = img_array_transposed.shape[0]
-                hdu = fits.PrimaryHDU(img_array_fits, header=header)
+                img_array_fits = np.transpose(img_array, (2, 0, 1))
+                fits_header['NAXIS'] = 3
+                fits_header['NAXIS3'] = 3
 
-            try:
-                hdu.writeto(filename, overwrite=True)
-                print(f"Saved FITS image with metadata to: {filename}")
-            except Exception as e:
-                print(f"Error saving FITS file: {e}")
+            fits_header['NAXIS1'] = img_array.shape[1]
+            fits_header['NAXIS2'] = img_array.shape[0]
+
+            # **💾 Save the FITS File**
+            hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
+            hdu.writeto(filename, overwrite=True)
+            print(f"Saved FITS image to: {filename}")
+            return
+
+
 
         elif original_format in ['.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef']:
             # Save as FITS file with metadata
@@ -30092,66 +32101,300 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
         raise
 
 
+
+@njit(parallel=True)
+def _numba_mono_final_formula(rescaled, median_rescaled, target_median):
+    """
+    Applies the final formula *after* we already have the rescaled values.
+    
+    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
+    median_rescaled = median(rescaled)
+    
+    out_val = ((median_rescaled - 1) * target_median * r) /
+              ( median_rescaled*(target_median + r -1) - target_median*r )
+    """
+    H, W = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            r = rescaled[y, x]
+            numer = (median_rescaled - 1.0) * target_median * r
+            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+            if abs(denom) < 1e-12:
+                denom = 1e-12
+            out[y, x] = numer / denom
+
+    return out
+
+@njit(parallel=True)
+def _numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
+    """
+    Linked color transform: we use one median_rescaled for all channels.
+    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
+    median_rescaled = median of *all* pixels in rescaled
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                numer = (median_rescaled - 1.0) * target_median * r
+                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+                if abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
+
+@njit(parallel=True)
+def _numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
+    """
+    Unlinked color transform: a separate median_rescaled per channel.
+    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
+    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                med = medians_rescaled[c]
+                numer = (med - 1.0) * target_median * r
+                denom = med * (target_median + r - 1.0) - target_median * r
+                if abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
+
+
 def stretch_mono_image(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Stretches a single-channel (2D) image so that its median ends up near `target_median`.
+    Uses the old formula, but with the final math done in a Numba function.
+    """
+    # 1) Compute black_point from old logic
     black_point = max(np.min(image), np.median(image) - 2.7 * np.std(image))
-    rescaled_image = (image - black_point) / (1 - black_point)
-    median_image = np.median(rescaled_image)
-    stretched_image = ((median_image - 1) * target_median * rescaled_image) / (median_image * (target_median + rescaled_image - 1) - target_median * rescaled_image)
+
+    # 2) Rescale in Python
+    #    r = (val - black_point) / (1 - black_point)
+    denom_bp = 1.0 - black_point
+    rescaled_image = (image - black_point) / denom_bp
+
+    # 3) Compute median of *this* rescaled data
+    median_rescaled = np.median(rescaled_image)
+
+    # 4) Final stretch in Numba
+    stretched_image = _numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
+
+    # 5) Optional curves
     if apply_curves:
         stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
-    
+
+    # 6) Optional normalize
     if normalize:
-        stretched_image = stretched_image / np.max(stretched_image)
-    
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
+    # 7) Clip result [0..1]
     return np.clip(stretched_image, 0, 1)
 
-
-def stretch_color_image(image, target_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0):
-    # If image is 2D or has only one channel, treat it as mono.
+def stretch_color_image(image, target_median, linked=True,
+                        normalize=False, apply_curves=False, curves_boost=0.0):
+    # If image is mono or single-channel, treat as mono
     if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
-        # Squeeze to 2D if needed.
         mono = image.squeeze()
-        mono_stretched = stretch_mono_image(mono, target_median, normalize=normalize, apply_curves=apply_curves, curves_boost=curves_boost)
-        # Replicate into 3 channels.
+        mono_stretched = stretch_mono_image(mono, target_median,
+                                            normalize=normalize,
+                                            apply_curves=apply_curves,
+                                            curves_boost=curves_boost)
+        # Replicate into 3 channels if you want a 3-channel result
         return np.stack([mono_stretched] * 3, axis=-1)
 
-    # Otherwise, assume image is a full-color image with 3 channels.
+    # If it's actually color (H, W, 3):
     if linked:
-        combined_median = np.median(image)
-        combined_std = np.std(image)
-        black_point = max(np.min(image), combined_median - 2.7 * combined_std)
-        rescaled_image = (image - black_point) / (1 - black_point)
-        median_image = np.median(rescaled_image)
-        stretched_image = ((median_image - 1) * target_median * rescaled_image) / (median_image * (target_median + rescaled_image - 1) - target_median * rescaled_image)
+        stretched_image = stretch_color_image_linked(image, target_median,
+                                                     normalize=normalize,
+                                                     apply_curves=apply_curves,
+                                                     curves_boost=curves_boost)
     else:
-        stretched_image = np.zeros_like(image)
-        for channel in range(image.shape[2]):
-            black_point = max(np.min(image[..., channel]), np.median(image[..., channel]) - 2.7 * np.std(image[..., channel]))
-            rescaled_channel = (image[..., channel] - black_point) / (1 - black_point)
-            median_channel = np.median(rescaled_channel)
-            stretched_image[..., channel] = ((median_channel - 1) * target_median * rescaled_channel) / (median_channel * (target_median + rescaled_channel - 1) - target_median * rescaled_channel)
-    
+        stretched_image = stretch_color_image_unlinked(image, target_median,
+                                                       normalize=normalize,
+                                                       apply_curves=apply_curves,
+                                                       curves_boost=curves_boost)
+    return stretched_image
+
+def stretch_color_image_linked(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Linked color stretch: uses one black_point and one median for all channels.
+    """
+    # 1) Compute black_point from the combined median, std
+    combined_median = np.median(image)
+    combined_std = np.std(image)
+    black_point = max(np.min(image), combined_median - 2.7 * combined_std)
+
+    # 2) Rescale
+    #    (H, W, 3)
+    denom_bp = 1.0 - black_point
+    rescaled_image = (image - black_point) / denom_bp
+
+    # 3) Median of the entire rescaled array
+    median_rescaled = np.median(rescaled_image)
+
+    # 4) Final formula in Numba
+    stretched_image = _numba_color_final_formula_linked(
+        rescaled_image, 
+        median_rescaled, 
+        target_median
+    )
+
+    # 5) Optional curves
     if apply_curves:
         stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
-    
+
+    # 6) Optional normalize
     if normalize:
-        stretched_image = stretched_image / np.max(stretched_image)
-    
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
+    return np.clip(stretched_image, 0, 1)
+
+def stretch_color_image_unlinked(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
+    """
+    Unlinked color stretch: each channel has its own black_point, own median.
+    """
+    H, W, _ = image.shape
+    rescaled_image = np.zeros_like(image, dtype=np.float32)
+    black_points = np.zeros(3, dtype=np.float32)
+    medians_rescaled = np.zeros(3, dtype=np.float32)
+
+    # 1) For each channel, compute black point, rescale, find median
+    for c in range(3):
+        channel = image[..., c]
+        channel_median = np.median(channel)
+        channel_std = np.std(channel)
+        bp = max(channel.min(), channel_median - 2.7 * channel_std)
+
+        # Store black point
+        black_points[c] = bp
+
+        # Rescale that channel
+        denom_bp = 1.0 - bp
+        rescaled_image[..., c] = (channel - bp) / denom_bp
+
+    # 2) For each channel, compute median of the rescaled version
+    for c in range(3):
+        medians_rescaled[c] = np.median(rescaled_image[..., c])
+
+    # 3) Final formula in Numba
+    stretched_image = _numba_color_final_formula_unlinked(
+        rescaled_image,
+        medians_rescaled,
+        target_median
+    )
+
+    # 4) Optional curves
+    if apply_curves:
+        stretched_image = apply_curves_adjustment(stretched_image, target_median, curves_boost)
+
+    # 5) Optional normalize
+    if normalize:
+        max_val = stretched_image.max()
+        if max_val > 0:
+            stretched_image /= max_val
+
     return np.clip(stretched_image, 0, 1)
 
 
+@njit
+def piecewise_linear(val, xvals, yvals):
+    """
+    Performs piecewise linear interpolation:
+    Given a scalar 'val', and arrays xvals, yvals (each of length N),
+    finds i s.t. xvals[i] <= val < xvals[i+1],
+    then returns the linear interpolation between yvals[i], yvals[i+1].
+    If val < xvals[0], returns yvals[0].
+    If val > xvals[-1], returns yvals[-1].
+    """
+    if val <= xvals[0]:
+        return yvals[0]
+    for i in range(len(xvals)-1):
+        if val < xvals[i+1]:
+            # Perform a linear interpolation in interval [xvals[i], xvals[i+1]]
+            dx = xvals[i+1] - xvals[i]
+            dy = yvals[i+1] - yvals[i]
+            ratio = (val - xvals[i]) / dx
+            return yvals[i] + ratio * dy
+    return yvals[-1]
+
+@njit(parallel=True)
+def apply_curves_numba(image, xvals, yvals):
+    """
+    Numba-accelerated routine to apply piecewise linear interpolation 
+    to each pixel in 'image'.
+    - image can be (H,W) or (H,W,3).
+    - xvals, yvals are the curve arrays in ascending order.
+    Returns the adjusted image as float32.
+    """
+    if image.ndim == 2:
+        H, W = image.shape
+        out = np.empty((H, W), dtype=np.float32)
+        for y in prange(H):
+            for x in range(W):
+                val = image[y, x]
+                out[y, x] = piecewise_linear(val, xvals, yvals)
+        return out
+    elif image.ndim == 3:
+        H, W, C = image.shape
+        out = np.empty((H, W, C), dtype=np.float32)
+        for y in prange(H):
+            for x in range(W):
+                for c in range(C):
+                    val = image[y, x, c]
+                    out[y, x, c] = piecewise_linear(val, xvals, yvals)
+        return out
+    else:
+        # Unexpected shape
+        return image  # Fallback
+
 def apply_curves_adjustment(image, target_median, curves_boost):
+    """
+    Original signature unchanged, but now uses a Numba helper
+    to do the pixel-by-pixel interpolation.
+
+    'image' can be 2D (H,W) or 3D (H,W,3).
+    """
+    # Build the curve array as before
     curve = [
         [0.0, 0.0],
         [0.5 * target_median, 0.5 * target_median],
         [target_median, target_median],
-        [(1 / 4 * (1 - target_median) + target_median), 
-         np.power((1 / 4 * (1 - target_median) + target_median), (1 - curves_boost))],
-        [(3 / 4 * (1 - target_median) + target_median), 
-         np.power(np.power((3 / 4 * (1 - target_median) + target_median), (1 - curves_boost)), (1 - curves_boost))],
+        [
+            (1/4 * (1 - target_median) + target_median),
+            np.power((1/4 * (1 - target_median) + target_median), (1 - curves_boost))
+        ],
+        [
+            (3/4 * (1 - target_median) + target_median),
+            np.power(np.power((3/4 * (1 - target_median) + target_median), (1 - curves_boost)), (1 - curves_boost))
+        ],
         [1.0, 1.0]
     ]
-    adjusted_image = np.interp(image, [p[0] for p in curve], [p[1] for p in curve])
+    # Convert to arrays
+    xvals = np.array([p[0] for p in curve], dtype=np.float32)
+    yvals = np.array([p[1] for p in curve], dtype=np.float32)
+
+    # Ensure 'image' is float32
+    image_32 = image.astype(np.float32, copy=False)
+
+    # Now apply the piecewise linear function in Numba
+    adjusted_image = apply_curves_numba(image_32, xvals, yvals)
     return adjusted_image
 
 def resource_path(relative_path):
@@ -30468,8 +32711,8 @@ class CustomGraphicsView(QGraphicsView):
         super().__init__(parent)
         self.parent = parent
         self.setMouseTracking(True)  # Enable mouse tracking
-        self.setDragMode(QGraphicsView.NoDrag)  # Disable default drag mode to avoid hand cursor
-        self.setCursor(Qt.ArrowCursor)  # Set default cursor to arrow
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)  # Disable default drag mode to avoid hand cursor
+        self.setCursor(Qt.CursorShape.ArrowCursor)  # Set default cursor to arrow
         self.drawing_item = None
         self.start_pos = None     
         self.annotation_items = []  # Store annotation items  
@@ -30488,8 +32731,8 @@ class CustomGraphicsView(QGraphicsView):
 
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            if event.modifiers() == Qt.ControlModifier:
+        if event.button() == Qt.MouseButton.LeftButton:
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 # Start annotation mode with the current tool
                 self.start_pos = self.mapToScene(event.pos())
 
@@ -30532,7 +32775,7 @@ class CustomGraphicsView(QGraphicsView):
                 elif self.parent.current_tool == "Compass":
                     self.place_celestial_compass(self.start_pos)
 
-            elif event.modifiers() == Qt.ShiftModifier:
+            elif event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
                 # Start drawing a circle for Shift+Click
                 self.drawing_circle = True
                 self.circle_center = self.mapToScene(event.pos())
@@ -30540,7 +32783,7 @@ class CustomGraphicsView(QGraphicsView):
                 self.parent.status_label.setText("Drawing circle: Shift + Drag")
                 self.update_circle()
 
-            elif event.modifiers() == Qt.AltModifier:
+            elif event.modifiers() == Qt.KeyboardModifier.AltModifier:
                 # Start celestial measurement for Alt+Click
                 self.measurement_start = self.mapToScene(event.pos())
                 self.drawing_measurement = True
@@ -30568,7 +32811,7 @@ class CustomGraphicsView(QGraphicsView):
                 else:
                     # Start manual dragging if no modifier is held
                     self.dragging = True
-                    self.setCursor(Qt.ClosedHandCursor)  # Use closed hand cursor to indicate dragging
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)  # Use closed hand cursor to indicate dragging
                     self.drag_start_pos = event.pos()  # Store starting position
 
         super().mousePressEvent(event)
@@ -30623,7 +32866,7 @@ class CustomGraphicsView(QGraphicsView):
             if self.drawing_item:
                 self.parent.main_scene.removeItem(self.drawing_item)  # Remove previous line if exists
             self.drawing_item = QGraphicsLineItem(QLineF(self.measurement_start, scene_pos))
-            self.drawing_item.setPen(QPen(Qt.green, 2, Qt.DashLine))  # Use green dashed line for measurement
+            self.drawing_item.setPen(QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.DashLine))  # Use green dashed line for measurement
             self.parent.main_scene.addItem(self.drawing_item)
 
         elif self.drawing_item:
@@ -30663,7 +32906,7 @@ class CustomGraphicsView(QGraphicsView):
                 
 
     def mouseReleaseEvent(self, event):
-        if self.drawing_circle and event.button() == Qt.LeftButton:
+        if self.drawing_circle and event.button() == Qt.MouseButton.LeftButton:
             # Stop drawing the circle
             self.drawing_circle = False
             self.parent.circle_center = self.circle_center
@@ -30689,7 +32932,7 @@ class CustomGraphicsView(QGraphicsView):
             self.parent.update_circle_data()
             self.update_circle()
 
-        elif self.drawing_measurement and event.button() == Qt.LeftButton:
+        elif self.drawing_measurement and event.button() == Qt.MouseButton.LeftButton:
             # Complete the measurement when the mouse is released
             self.drawing_measurement = False
             measurement_end = self.mapToScene(event.pos())
@@ -30705,7 +32948,7 @@ class CustomGraphicsView(QGraphicsView):
 
                 # Create and add the line item for display
                 measurement_line_item = QGraphicsLineItem(QLineF(self.measurement_start, measurement_end))
-                measurement_line_item.setPen(QPen(Qt.green, 2, Qt.DashLine))
+                measurement_line_item.setPen(QPen(Qt.GlobalColor.green, 2, Qt.PenStyle.DashLine))
                 self.parent.main_scene.addItem(measurement_line_item)
 
                 # Create a midpoint position for the distance text
@@ -30717,21 +32960,21 @@ class CustomGraphicsView(QGraphicsView):
                 # Create and add the text item at the midpoint
                 text_item = QGraphicsTextItem(distance_text)
                 text_item.setPos(midpoint)
-                text_item.setDefaultTextColor(Qt.green)
+                text_item.setDefaultTextColor(Qt.GlobalColor.green)
                 text_item.setFont(self.parent.selected_font)  # Use the selected font
                 self.parent.main_scene.addItem(text_item)
 
                 # Store the line and text in annotation items for future reference
                 measurement_line = QLineF(self.measurement_start, measurement_end)
                 self.annotation_items.append(('line', measurement_line))  # Store QLineF, not QGraphicsLineItem
-                self.annotation_items.append(('text', distance_text, midpoint, Qt.green))
+                self.annotation_items.append(('text', distance_text, midpoint, Qt.GlobalColor.green))
 
             # Clear the temporary measurement line item without removing the final line
             self.drawing_item = None
 
 
 
-        elif self.drawing_item and event.button() == Qt.LeftButton:
+        elif self.drawing_item and event.button() == Qt.MouseButton.LeftButton:
             # Finalize the shape drawing and add its properties to annotation_items
             if isinstance(self.drawing_item, QGraphicsEllipseItem):
                 rect = self.drawing_item.rect()
@@ -30760,7 +33003,7 @@ class CustomGraphicsView(QGraphicsView):
 
         # Stop manual dragging and reset cursor to arrow
         self.dragging = False
-        self.setCursor(Qt.ArrowCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         
         # Update the mini preview to reflect any changes
         self.update_mini_preview()
@@ -30852,7 +33095,7 @@ class CustomGraphicsView(QGraphicsView):
                     north_line_item = QGraphicsLineItem(
                         north_line_coords[0], north_line_coords[1], north_line_coords[2], north_line_coords[3]
                     )
-                    north_line_item.setPen(QPen(Qt.red, 2))
+                    north_line_item.setPen(QPen(Qt.GlobalColor.red, 2))
                     self.parent.main_scene.addItem(north_line_item)
                     
                     # East Line
@@ -30860,19 +33103,19 @@ class CustomGraphicsView(QGraphicsView):
                     east_line_item = QGraphicsLineItem(
                         east_line_coords[0], east_line_coords[1], east_line_coords[2], east_line_coords[3]
                     )
-                    east_line_item.setPen(QPen(Qt.blue, 2))
+                    east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                     self.parent.main_scene.addItem(east_line_item)
                     
                     # North Label
                     text_north = QGraphicsTextItem(compass['north_label'][2])
                     text_north.setPos(compass['north_label'][0], compass['north_label'][1])
-                    text_north.setDefaultTextColor(Qt.red)
+                    text_north.setDefaultTextColor(Qt.GlobalColor.red)
                     self.parent.main_scene.addItem(text_north)
                     
                     # East Label
                     text_east = QGraphicsTextItem(compass['east_label'][2])
                     text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                    text_east.setDefaultTextColor(Qt.blue)
+                    text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                     self.parent.main_scene.addItem(text_east)
 
                 elif item[0] == 'measurement':  # Redraw celestial measurement line
@@ -30883,7 +33126,7 @@ class CustomGraphicsView(QGraphicsView):
                     
                     # Draw the measurement line
                     measurement_line_item = QGraphicsLineItem(line)
-                    measurement_line_item.setPen(QPen(color, 2, Qt.DashLine))  # Dashed line for measurement
+                    measurement_line_item.setPen(QPen(color, 2, Qt.PenStyle.DashLine))  # Dashed line for measurement
                     self.parent.main_scene.addItem(measurement_line_item)
                     
                     # Draw the distance text label
@@ -30948,8 +33191,8 @@ class CustomGraphicsView(QGraphicsView):
             # Scale the main image to fit in the mini preview
             mini_pixmap = self.parent.main_image.scaled(
                 self.parent.mini_preview.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
             )
             mini_painter = QPainter(mini_pixmap)
 
@@ -31054,7 +33297,7 @@ class CustomGraphicsView(QGraphicsView):
                         elif item[0] == 'compass':
                             compass = item[1]
                             # Draw the North line
-                            mini_painter.setPen(QPen(Qt.red, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.red, 1))
                             north_line = compass["north_line"]
                             mini_painter.drawLine(
                                 int(north_line[0] * scale_factor_x), int(north_line[1] * scale_factor_y),
@@ -31062,7 +33305,7 @@ class CustomGraphicsView(QGraphicsView):
                             )
 
                             # Draw the East line
-                            mini_painter.setPen(QPen(Qt.blue, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.blue, 1))
                             east_line = compass["east_line"]
                             mini_painter.drawLine(
                                 int(east_line[0] * scale_factor_x), int(east_line[1] * scale_factor_y),
@@ -31070,13 +33313,13 @@ class CustomGraphicsView(QGraphicsView):
                             )
 
                             # Draw North and East labels
-                            mini_painter.setPen(QPen(Qt.red, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.red, 1))
                             north_label = compass["north_label"]
                             mini_painter.drawText(
                                 int(north_label[0] * scale_factor_x), int(north_label[1] * scale_factor_y), north_label[2]
                             )
 
-                            mini_painter.setPen(QPen(Qt.blue, 1))
+                            mini_painter.setPen(QPen(Qt.GlobalColor.blue, 1))
                             east_label = compass["east_label"]
                             mini_painter.drawText(
                                 int(east_label[0] * scale_factor_x), int(east_label[1] * scale_factor_y), east_label[2]
@@ -31107,7 +33350,7 @@ class CustomGraphicsView(QGraphicsView):
             center.x(), center.y(),
             center.x() + north_dx, center.y() + north_dy
         )
-        north_line.setPen(QPen(Qt.red, 2))
+        north_line.setPen(QPen(Qt.GlobalColor.red, 2))
         self.parent.main_scene.addItem(north_line)
 
         # Draw East line
@@ -31115,17 +33358,17 @@ class CustomGraphicsView(QGraphicsView):
             center.x(), center.y(),
             center.x() + east_dx, center.y() + east_dy
         )
-        east_line.setPen(QPen(Qt.blue, 2))
+        east_line.setPen(QPen(Qt.GlobalColor.blue, 2))
         self.parent.main_scene.addItem(east_line)
 
         # Add labels for North and East
         text_north = QGraphicsTextItem("N")
-        text_north.setDefaultTextColor(Qt.red)
+        text_north.setDefaultTextColor(Qt.GlobalColor.red)
         text_north.setPos(center.x() + north_dx - 10, center.y() + north_dy - 10)
         self.parent.main_scene.addItem(text_north)
 
         text_east = QGraphicsTextItem("E")
-        text_east.setDefaultTextColor(Qt.blue)
+        text_east.setDefaultTextColor(Qt.GlobalColor.blue)
         text_east.setPos(center.x() + east_dx - 15, center.y() + east_dy - 10)
         self.parent.main_scene.addItem(text_east)
 
@@ -31209,7 +33452,7 @@ class CustomGraphicsView(QGraphicsView):
                     
                     # Draw the measurement line
                     measurement_line_item = QGraphicsLineItem(line)
-                    measurement_line_item.setPen(QPen(color, 2, Qt.DashLine))  # Dashed line for measurement
+                    measurement_line_item.setPen(QPen(color, 2, Qt.PenStyle.DashLine))  # Dashed line for measurement
                     self.parent.main_scene.addItem(measurement_line_item)
                     
                     # Draw the distance text label
@@ -31225,7 +33468,7 @@ class CustomGraphicsView(QGraphicsView):
                     north_line_item = QGraphicsLineItem(
                         north_line_coords[0], north_line_coords[1], north_line_coords[2], north_line_coords[3]
                     )
-                    north_line_item.setPen(QPen(Qt.red, 2))
+                    north_line_item.setPen(QPen(Qt.GlobalColor.red, 2))
                     self.parent.main_scene.addItem(north_line_item)
                     
                     # East Line
@@ -31233,19 +33476,19 @@ class CustomGraphicsView(QGraphicsView):
                     east_line_item = QGraphicsLineItem(
                         east_line_coords[0], east_line_coords[1], east_line_coords[2], east_line_coords[3]
                     )
-                    east_line_item.setPen(QPen(Qt.blue, 2))
+                    east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                     self.parent.main_scene.addItem(east_line_item)
                     
                     # North Label
                     text_north = QGraphicsTextItem(compass['north_label'][2])
                     text_north.setPos(compass['north_label'][0], compass['north_label'][1])
-                    text_north.setDefaultTextColor(Qt.red)
+                    text_north.setDefaultTextColor(Qt.GlobalColor.red)
                     self.parent.main_scene.addItem(text_north)
                     
                     # East Label
                     text_east = QGraphicsTextItem(compass['east_label'][2])
                     text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                    text_east.setDefaultTextColor(Qt.blue)
+                    text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                     self.parent.main_scene.addItem(text_east)                               
             # Ensure the search circle is drawn if circle data is available
             #if self.circle_center is not None and self.circle_radius > 0:
@@ -31277,7 +33520,7 @@ class CustomGraphicsView(QGraphicsView):
                             self.parent.main_scene.addItem(crosshair_item)
                     if self.parent.show_names:
                         #print(f"Drawing name: {name} at ({x}, {y})")  # Debugging statement
-                        text_color = obj.get("color", QColor(Qt.white))
+                        text_color = obj.get("color", QColor(Qt.GlobalColor.white))
                         text_item = QGraphicsTextItem(name)
                         text_item.setPos(x + 10, y + 10)  # Offset to avoid overlapping the marker
                         text_item.setDefaultTextColor(text_color)
@@ -31337,7 +33580,7 @@ class CustomGraphicsView(QGraphicsView):
                 
                 # Draw the measurement line
                 measurement_line_item = QGraphicsLineItem(line)
-                measurement_line_item.setPen(QPen(color, 2, Qt.DashLine))  # Dashed line for measurement
+                measurement_line_item.setPen(QPen(color, 2, Qt.PenStyle.DashLine))  # Dashed line for measurement
                 self.parent.main_scene.addItem(measurement_line_item)
                 
                 # Draw the distance text label
@@ -31353,24 +33596,24 @@ class CustomGraphicsView(QGraphicsView):
                     compass['north_line'][0], compass['north_line'][1],
                     compass['north_line'][2], compass['north_line'][3]
                 )
-                north_line_item.setPen(QPen(Qt.red, 2))
+                north_line_item.setPen(QPen(Qt.GlobalColor.red, 2))
                 self.parent.main_scene.addItem(north_line_item)
                 # East line
                 east_line_item = QGraphicsLineItem(
                     compass['east_line'][0], compass['east_line'][1],
                     compass['east_line'][2], compass['east_line'][3]
                 )
-                east_line_item.setPen(QPen(Qt.blue, 2))
+                east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                 self.parent.main_scene.addItem(east_line_item)
                 # North label
                 text_north = QGraphicsTextItem(compass['north_label'][2])
                 text_north.setPos(compass['north_label'][0], compass['north_label'][1])
-                text_north.setDefaultTextColor(Qt.red)
+                text_north.setDefaultTextColor(Qt.GlobalColor.red)
                 self.parent.main_scene.addItem(text_north)
                 # East label
                 text_east = QGraphicsTextItem(compass['east_label'][2])
                 text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                text_east.setDefaultTextColor(Qt.blue)
+                text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                 self.parent.main_scene.addItem(text_east)
         
         # Update the circle data, if any
@@ -31481,7 +33724,7 @@ class CustomGraphicsView(QGraphicsView):
                 
                 # Draw the measurement line
                 measurement_line_item = QGraphicsLineItem(line)
-                measurement_line_item.setPen(QPen(color, 2, Qt.DashLine))  # Dashed line for measurement
+                measurement_line_item.setPen(QPen(color, 2, Qt.PenStyle.DashLine))  # Dashed line for measurement
                 self.parent.main_scene.addItem(measurement_line_item)
                 
                 # Draw the distance text label
@@ -31497,7 +33740,7 @@ class CustomGraphicsView(QGraphicsView):
                     compass['north_line'][0], compass['north_line'][1],
                     compass['north_line'][2], compass['north_line'][3]
                 )
-                north_line_item.setPen(QPen(Qt.red, 2))
+                north_line_item.setPen(QPen(Qt.GlobalColor.red, 2))
                 self.parent.main_scene.addItem(north_line_item)
                 
                 # Redraw east line
@@ -31505,18 +33748,18 @@ class CustomGraphicsView(QGraphicsView):
                     compass['east_line'][0], compass['east_line'][1],
                     compass['east_line'][2], compass['east_line'][3]
                 )
-                east_line_item.setPen(QPen(Qt.blue, 2))
+                east_line_item.setPen(QPen(Qt.GlobalColor.blue, 2))
                 self.parent.main_scene.addItem(east_line_item)
                 
                 # Redraw labels
                 text_north = QGraphicsTextItem(compass['north_label'][2])
                 text_north.setPos(compass['north_label'][0], compass['north_label'][1])
-                text_north.setDefaultTextColor(Qt.red)
+                text_north.setDefaultTextColor(Qt.GlobalColor.red)
                 self.parent.main_scene.addItem(text_north)
                 
                 text_east = QGraphicsTextItem(compass['east_label'][2])
                 text_east.setPos(compass['east_label'][0], compass['east_label'][1])
-                text_east.setDefaultTextColor(Qt.blue)
+                text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                 self.parent.main_scene.addItem(text_east)        
 
 
@@ -31524,17 +33767,18 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("What's In My Image")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 800, 600)
         # Track the theme status
         self.is_dark_mode = True
-        self.header = Header()
         self.metadata = {}
         self.circle_center = None
         self.circle_radius = 0    
         self.show_names = False  # Boolean to toggle showing names on the main image
         self.max_results = 100  # Default maximum number of query results     
         self.current_tool = None  # Track the active annotation tool
+        self.header = Header()
         self.marker_style = "Circle" 
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
             
 
         main_layout = QHBoxLayout()
@@ -31552,13 +33796,13 @@ class MainWindow(QMainWindow):
         logo_pixmap = QPixmap(wimilogo_path)
 
         # Scale the pixmap to fit within a desired size, maintaining the aspect ratio
-        scaled_pixmap = logo_pixmap.scaled(200, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = logo_pixmap.scaled(200, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
         # Set the scaled pixmap to the label
         self.logo_label.setPixmap(scaled_pixmap)
 
         # Set alignment to center the logo horizontally
-        self.logo_label.setAlignment(Qt.AlignCenter)
+        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Optionally, you can set a fixed size for the label (this is for layout purposes)
         self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
@@ -31570,7 +33814,7 @@ class MainWindow(QMainWindow):
         
         # Load button
         self.load_button = QPushButton("Load Image")
-        self.load_button.setIcon(QApplication.style().standardIcon(QStyle.SP_FileDialogStart))
+        self.load_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogStart))
         self.load_button.clicked.connect(self.open_image)
 
         # AutoStretch button
@@ -31586,7 +33830,7 @@ class MainWindow(QMainWindow):
 
         # Create the instruction QLabel for search region
         search_region_instruction_label = QLabel("Shift+Click to define a search region")
-        search_region_instruction_label.setAlignment(Qt.AlignCenter)
+        search_region_instruction_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         search_region_instruction_label.setStyleSheet("font-size: 15px; color: gray;")
 
         # Add this QLabel to your layout at the appropriate position above RA/Dec
@@ -31596,7 +33840,7 @@ class MainWindow(QMainWindow):
 
         # Query Simbad button
         self.query_button = QPushButton("Query Simbad")
-        self.query_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogApplyButton))
+        self.query_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         left_panel.addWidget(self.query_button)
         self.query_button.clicked.connect(lambda: self.query_simbad(self.get_defined_radius()))
 
@@ -31611,7 +33855,7 @@ class MainWindow(QMainWindow):
 
         # Create the Clear Results button
         self.clear_results_button = QPushButton("Clear Results")
-        self.clear_results_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogCloseButton))
+        self.clear_results_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))
         self.clear_results_button.clicked.connect(self.clear_search_results)  # Connect to a function to clear results
         show_clear_layout.addWidget(self.clear_results_button)
 
@@ -31640,7 +33884,7 @@ class MainWindow(QMainWindow):
 
         # Advanced Search Button
         self.advanced_search_button = QPushButton("Advanced Search")
-        self.advanced_search_button.setIcon(QApplication.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.advanced_search_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
         self.advanced_search_button.setCheckable(True)
         self.advanced_search_button.clicked.connect(self.toggle_advanced_search)
         left_panel.addWidget(self.advanced_search_button)
@@ -31661,7 +33905,7 @@ class MainWindow(QMainWindow):
 
         # Copy RA/Dec to Clipboard button
         self.copy_button = QPushButton("Copy RA/Dec to Clipboard", self)
-        self.copy_button.setIcon(QApplication.style().standardIcon(QStyle.SP_CommandLink))
+        self.copy_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_CommandLink))
         self.copy_button.clicked.connect(self.copy_ra_dec_to_clipboard)
         button_layout.addWidget(self.copy_button)
 
@@ -31704,7 +33948,7 @@ class MainWindow(QMainWindow):
             Written by Franklin Marek<br>
             <a href='http://www.setiastro.com'>www.setiastro.com</a>
         """)
-        footer_label.setAlignment(Qt.AlignCenter)
+        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer_label.setOpenExternalLinks(True)
         footer_label.setStyleSheet("font-size: 10px;")
         left_panel.addWidget(footer_label)
@@ -31726,8 +33970,8 @@ class MainWindow(QMainWindow):
         self.main_preview = CustomGraphicsView(self)
         self.main_scene = QGraphicsScene(self.main_preview)
         self.main_preview.setScene(self.main_scene)
-        self.main_preview.setRenderHint(QPainter.Antialiasing)
-        self.main_preview.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.main_preview.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.main_preview.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         right_panel.addWidget(self.main_preview)
 
         # Save Annotated Image and Save Collage of Objects Buttons in a Horizontal Layout between main image and treebox
@@ -31735,7 +33979,7 @@ class MainWindow(QMainWindow):
 
         # Button to toggle annotation tools section
         self.show_annotations_button = QPushButton("Show Annotation Tools")
-        self.show_annotations_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogResetButton))
+        self.show_annotations_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogResetButton))
         self.show_annotations_button.clicked.connect(self.toggle_annotation_tools)
         save_buttons_layout.addWidget(self.show_annotations_button)
         
@@ -31774,7 +34018,7 @@ class MainWindow(QMainWindow):
         self.results_tree = QTreeWidget()
         self.results_tree.setHeaderLabels(["RA", "Dec", "Name", "Diameter", "Type", "Long Type", "Redshift", "Comoving Radial Distance (GLy)"])
         self.results_tree.setFixedHeight(150)
-        self.results_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.results_tree.customContextMenuRequested.connect(self.open_context_menu)
         self.results_tree.itemClicked.connect(self.on_tree_item_clicked)
         self.results_tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
@@ -31788,7 +34032,7 @@ class MainWindow(QMainWindow):
         annotation_tools_layout = QGridLayout(self.annotation_tools_section)
 
         annotation_instruction_label = QLabel("Ctrl+Click to add items, Alt+Click to measure distance")
-        annotation_instruction_label.setAlignment(Qt.AlignCenter)
+        annotation_instruction_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         annotation_instruction_label.setStyleSheet("font-size: 10px; color: gray;")        
 
         self.draw_ellipse_button = QPushButton("Draw Ellipse")
@@ -31832,17 +34076,17 @@ class MainWindow(QMainWindow):
 
         # Undo button
         self.undo_button = QPushButton("Undo")
-        self.undo_button.setIcon(QApplication.style().standardIcon(QStyle.SP_ArrowLeft))  # Left arrow icon for undo
+        self.undo_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))  # Left arrow icon for undo
         self.undo_button.clicked.connect(self.main_preview.undo_annotation)  # Connect to undo_annotation in CustomGraphicsView
 
         # Clear Annotations button
         self.clear_annotations_button = QPushButton("Clear Annotations")
-        self.clear_annotations_button.setIcon(QApplication.style().standardIcon(QStyle.SP_TrashIcon))  # Trash icon
+        self.clear_annotations_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))  # Trash icon
         self.clear_annotations_button.clicked.connect(self.main_preview.clear_annotations)  # Connect to clear_annotations in CustomGraphicsView
 
         # Delete Selected Object button
         self.delete_selected_object_button = QPushButton("Delete Selected Object")
-        self.delete_selected_object_button.setIcon(QApplication.style().standardIcon(QStyle.SP_DialogCloseButton))  # Trash icon
+        self.delete_selected_object_button.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_DialogCloseButton))  # Trash icon
         self.delete_selected_object_button.clicked.connect(self.main_preview.delete_selected_object)  # Connect to delete_selected_object in CustomGraphicsView
 
         # Add the instruction label to the top of the grid layout (row 0, spanning multiple columns)
@@ -31877,7 +34121,7 @@ class MainWindow(QMainWindow):
         # Populate the TreeWidget with object types from otype_long_name_lookup
         for obj_type, description in otype_long_name_lookup.items():
             item = QTreeWidgetItem([obj_type, description])
-            item.setCheckState(0, Qt.Checked)  # Start with all items unchecked
+            item.setCheckState(0, Qt.CheckState.Checked)  # Start with all items unchecked
             self.object_tree.addTopLevelItem(item)
 
         self.advanced_search_panel.addWidget(self.object_tree)
@@ -31957,7 +34201,7 @@ class MainWindow(QMainWindow):
         self.results = []
         self.wcs = None  # Initialize WCS to None
         # Initialize selected color and font with default values
-        self.selected_color = QColor(Qt.red)  # Default annotation color
+        self.selected_color = QColor(Qt.GlobalColor.red)  # Default annotation color
         self.selected_font = QFont("Arial", 12)  # Default font for text annotations        
 
     def update_object_count(self):
@@ -31990,7 +34234,7 @@ class MainWindow(QMainWindow):
         menu.addAction(copy_info_action)
 
         # Display the context menu at the cursor position
-        menu.exec_(self.results_tree.viewport().mapToGlobal(position))
+        menu.exec(self.results_tree.viewport().mapToGlobal(position))
 
     def toggle_autostretch(self):
         if not hasattr(self, 'original_image'):
@@ -32034,7 +34278,7 @@ class MainWindow(QMainWindow):
 
 
 
-        qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+        qimg = QImage(stretched_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
         if qimg.isNull():
             print("Failed to create QImage")
             return
@@ -32045,7 +34289,7 @@ class MainWindow(QMainWindow):
             return
 
         self.main_image = pixmap
-        scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.mini_preview.setPixmap(scaled_pixmap)
 
         self.main_scene.clear()
@@ -32185,12 +34429,12 @@ class MainWindow(QMainWindow):
         msg_box.setText("Do you want to save the Full Image or Cropped Only?")
         
         # Add custom buttons
-        full_image_button = msg_box.addButton("Save Full", QMessageBox.AcceptRole)
-        cropped_image_button = msg_box.addButton("Save Cropped", QMessageBox.DestructiveRole)
-        msg_box.addButton(QMessageBox.Cancel)
+        full_image_button = msg_box.addButton("Save Full", QMessageBox.ButtonRole.AcceptRole)
+        cropped_image_button = msg_box.addButton("Save Cropped", QMessageBox.ButtonRole.DestructiveRole)
+        msg_box.addButton(QMessageBox.StandardButton.Cancel)
 
         # Show the message box and get the user's response
-        msg_box.exec_()
+        msg_box.exec()
 
         # Determine the save type based on the selected button
         if msg_box.clickedButton() == full_image_button:
@@ -32224,7 +34468,7 @@ class MainWindow(QMainWindow):
         if save_full_image:
             # Save the entire main image with annotations
             pixmap = QPixmap(self.main_image.size())
-            pixmap.fill(Qt.transparent)
+            pixmap.fill(Qt.GlobalColor.Transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter)  # Render the entire scene without the search circle
         else:
@@ -32232,7 +34476,7 @@ class MainWindow(QMainWindow):
             rect = self.main_preview.viewport().rect()
             scene_rect = self.main_preview.mapToScene(rect).boundingRect()
             pixmap = QPixmap(int(scene_rect.width()), int(scene_rect.height()))
-            pixmap.fill(Qt.transparent)
+            pixmap.fill(Qt.GlobalColor.Transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter, QRectF(0, 0, pixmap.width(), pixmap.height()), scene_rect)
 
@@ -32272,13 +34516,13 @@ class MainWindow(QMainWindow):
             checkboxes[option] = checkbox
 
         # Add OK and Cancel buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(button_box)
         button_box.accepted.connect(dialog.accept)
         button_box.rejected.connect(dialog.reject)
 
         # Show the dialog and get the user's response
-        if dialog.exec_() == QDialog.Rejected:
+        if dialog.exec() == QDialog.DialogCode.Rejected:
             return  # User cancelled
 
         # Determine which fields to display based on user selection
@@ -32327,7 +34571,7 @@ class MainWindow(QMainWindow):
 
                 # Render the main image without annotations onto a QPixmap
                 patch = QPixmap(self.main_image.size())
-                patch.fill(Qt.black)
+                patch.fill(Qt.GlobalColor.black)
                 painter = QPainter(patch)
                 self.main_scene.clear()  # Clear any previous drawings on the scene
                 self.main_scene.addPixmap(self.main_image)  # Add only the main image without annotations
@@ -32339,7 +34583,7 @@ class MainWindow(QMainWindow):
                 # Crop the relevant area for the object
                 rect = QRectF(x - patch_size // 2, y - patch_size // 2, patch_size, patch_size)
                 cropped_patch = patch.copy(rect.toRect())
-                cropped_image = cropped_patch.toImage().scaled(patch_size, patch_size).convertToFormat(QImage.Format_RGB888)
+                cropped_image = cropped_patch.toImage().scaled(patch_size, patch_size).convertToFormat(QImage.Format.Format_RGB888)
 
                 # Convert QImage to PIL format for adding to the collage
                 bytes_img = cropped_image.bits().asstring(cropped_image.width() * cropped_image.height() * 3)
@@ -32403,7 +34647,7 @@ class MainWindow(QMainWindow):
         selected_types = []
         for i in range(self.object_tree.topLevelItemCount()):
             item = self.object_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.Checked:
+            if item.checkState(0) == Qt.CheckState.Checked:
                 selected_types.append(item.text(0))  # Add the object type
         return selected_types
     
@@ -32455,12 +34699,12 @@ class MainWindow(QMainWindow):
         """Toggle selection for all items in the object tree."""
         # Check if all items are currently selected
         all_checked = all(
-            self.object_tree.topLevelItem(i).checkState(0) == Qt.Checked
+            self.object_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked
             for i in range(self.object_tree.topLevelItemCount())
         )
 
         # Determine the new state: Uncheck if all are checked, otherwise check all
-        new_state = Qt.Unchecked if all_checked else Qt.Checked
+        new_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
 
         # Apply the new state to all items
         for i in range(self.object_tree.topLevelItemCount()):
@@ -32480,7 +34724,7 @@ class MainWindow(QMainWindow):
             description = item.text(1).lower()
             object_type = item.text(0)
             if any(keyword.lower() in description for keyword in star_keywords) or "*" in object_type:
-                new_state = Qt.Checked if item.checkState(0) == Qt.Unchecked else Qt.Unchecked
+                new_state = Qt.CheckState.Checked if item.checkState(0) == Qt.CheckState.Unchecked else Qt.CheckState.Unchecked
                 item.setCheckState(0, new_state)
 
     def toggle_galaxy_items(self):
@@ -32489,7 +34733,7 @@ class MainWindow(QMainWindow):
             item = self.object_tree.topLevelItem(i)
             description = item.text(1).lower()
             if "galaxy" in description or "galaxies" in description:
-                new_state = Qt.Checked if item.checkState(0) == Qt.Unchecked else Qt.Unchecked
+                new_state = Qt.CheckState.Checked if item.checkState(0) == Qt.CheckState.Unchecked else Qt.CheckState.Unchecked
                 item.setCheckState(0, new_state)
 
 
@@ -32611,7 +34855,7 @@ class MainWindow(QMainWindow):
 
     def toggle_object_names(self, state):
         """Toggle the visibility of object names based on the checkbox state."""
-        self.show_names = state == Qt.Checked
+        self.show_names = state == Qt.CheckState.Checked
         self.show_names = bool(state)        
         self.main_preview.draw_query_results()  # Redraw to apply the change
 
@@ -32705,11 +34949,11 @@ class MainWindow(QMainWindow):
                 img = (img_array * 255).astype(np.uint8)
                 height, width, _ = img.shape
                 bytes_per_line = 3 * width
-                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format_RGB888)
+                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(qimg)
 
                 self.main_image = pixmap
-                scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 self.mini_preview.setPixmap(scaled_pixmap)
 
                 self.main_scene.clear()
@@ -33250,6 +35494,7 @@ class MainWindow(QMainWindow):
 
         return solved_header
 
+
     def save_temp_fits_image(self, normalized_image, image_path: str):
         """
         Save the normalized_image as a FITS file to a temporary file.
@@ -33676,7 +35921,7 @@ class MainWindow(QMainWindow):
             )
             
             # Scale the main image for the mini preview and draw the green box on it
-            pixmap = self.main_image.scaled(self.mini_preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pixmap = self.main_image.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             painter = QPainter(pixmap)
             pen = QPen(QColor(0, 255, 0), 2)
             painter.setPen(pen)
@@ -33712,16 +35957,6 @@ class MainWindow(QMainWindow):
         else:
             self.zoom_out()
 
-    def wheelEvent(self, event: QWheelEvent):
-        # Check the vertical delta to determine zoom direction.
-        if event.angleDelta().y() > 0:
-            self.zoom_in()
-        else:
-            self.zoom_out()
-        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
-        event.accept()
-
-
     def zoom_in(self):
         self.zoom_level *= 1.2
         self.main_preview.setTransform(QTransform().scale(self.zoom_level, self.zoom_level))
@@ -33735,6 +35970,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_green_box()
+
 
     def compute_pixscale(self):
         """
@@ -33784,6 +36020,7 @@ class MainWindow(QMainWindow):
             )
         else:
             self.status_label.setText("No search area defined.")
+
 
 
     def get_defined_radius(self):
@@ -34152,7 +36389,7 @@ class MainWindow(QMainWindow):
 
     def toggle_show_names(self, state):
         """Toggle showing/hiding names on the main image."""
-        self.show_names = state == Qt.Checked
+        self.show_names = state == Qt.CheckState.Checked
         self.main_preview.draw_query_results()  # Redraw with or without names
 
     def clear_results(self):
@@ -34168,11 +36405,11 @@ class MainWindow(QMainWindow):
         
         layout = QFormLayout(dialog)
         
-        # Max Results setting
-        max_results_spinbox = QSpinBox()
-        max_results_spinbox.setRange(1, 100000)
-        max_results_spinbox.setValue(self.max_results)
+
+        # Max Results setting using CustomSpinBox
+        max_results_spinbox = CustomSpinBox(minimum=1, maximum=100000, initial=self.max_results, step=1)
         layout.addRow("Max Results:", max_results_spinbox)
+
         
         # Marker Style selection
         marker_style_combo = QComboBox()
@@ -34186,13 +36423,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(force_blind_solve_button)
         
         # OK and Cancel buttons
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
 
     def update_settings(self, max_results, marker_style, dialog):
         """Update settings based on dialog input."""
@@ -34410,6 +36647,7 @@ class CalculationThread(QThread):
         except Exception as e:
             self.calculation_complete.emit(pd.DataFrame(), f"Error: {str(e)}")
 
+
     def calculate_lunar_phase(self, astropy_time, location):
         moon = get_body("moon", astropy_time, location)
         sun = get_sun(astropy_time)
@@ -34587,10 +36825,10 @@ class WhatsInMySky(QWidget):
         ])
         self.tree.setSortingEnabled(True)
         header = self.tree.header()
-        header.setSectionResizeMode(QHeaderView.Interactive)  # Allow users to resize columns
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)  # Allow users to resize columns
         header.setStretchLastSection(False)  # Ensure last column is not stretched automatically
 
-        self.tree.sortByColumn(5, Qt.AscendingOrder)
+        self.tree.sortByColumn(5, Qt.SortOrder.AscendingOrder)
         layout.addWidget(self.tree, 11, 0, 1, 3)
         self.tree.itemDoubleClicked.connect(self.on_row_double_click)
 
@@ -34664,7 +36902,7 @@ class WhatsInMySky(QWidget):
 
         # Load and display the lunar phase image if it exists
         if os.path.exists(phase_image_path):
-            pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pixmap = QPixmap(phase_image_path).scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.lunar_phase_image_label.setPixmap(pixmap)
         else:
             print(f"Image not found: {phase_image_path}")     
@@ -34922,13 +37160,13 @@ if __name__ == '__main__':
     )
 
     app = QApplication(sys.argv)
-
+    app.setWindowIcon(QIcon(icon_path))
     
     try:
         # Create and show the main window
         window = AstroEditingSuite()
         window.show()
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     except Exception as e:
         # Log the error
         logging.error("Unhandled exception occurred", exc_info=True)
