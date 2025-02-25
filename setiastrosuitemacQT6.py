@@ -209,7 +209,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.2"
+VERSION = "2.11.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -263,6 +263,7 @@ if hasattr(sys, '_MEIPASS'):
     platesolve_path = os.path.join(sys._MEIPASS, 'platesolve.png')
     psf_path = os.path.join(sys._MEIPASS, 'psf.png')
     supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')
+    starregistration_path = os.path.join(sys._MEIPASS, 'starregistration.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -314,6 +315,7 @@ else:
     platesolve_path = 'platesolve.png'
     psf_path = 'psf.png'
     supernova_path = 'supernova.png'
+    starregistration_path = 'starregistration.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -755,6 +757,11 @@ class AstroEditingSuite(QMainWindow):
         stellar_align_action.triggered.connect(self.stellar_alignment)
         mosaic_menu.addAction(stellar_align_action)
 
+        star_registration_action = QAction(QIcon(starregistration_path), "Star Registration", self)
+        star_registration_action.setStatusTip("Register multiple images based on star alignment")
+        star_registration_action.triggered.connect(self.star_registration)
+        mosaic_menu.addAction(star_registration_action)        
+
         plate_solver_action = QAction(QIcon(platesolve_path), "Plate Solver", self)
         plate_solver_action.setStatusTip("Perform plate solving on an image")
         plate_solver_action.triggered.connect(self.launch_plate_solver)
@@ -915,6 +922,7 @@ class AstroEditingSuite(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)        
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
+        mosaictoolbar.addAction(star_registration_action)
         mosaictoolbar.addAction(plate_solver_action)
         mosaictoolbar.addAction(psf_viewer_action)     
         mosaictoolbar.addAction(supernova_action)   
@@ -1102,6 +1110,11 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+
+
+    def star_registration(self):
+        self.star_registration_window = StarRegistrationWindow(self.image_manager)
+        self.star_registration_window.show()
 
     def show_about_dialog(self):
         dialog = AboutDialog(self)
@@ -1477,7 +1490,7 @@ class AstroEditingSuite(QMainWindow):
         Clears all current project data (images, masks, undo/redo stacks, etc.)
         after warning the user that this operation is destructive.
         """
-        from PyQt6.QtWidgets import QMessageBox
+        
 
         reply = QMessageBox.question(
             self,
@@ -9300,6 +9313,464 @@ class StellarAlignmentDialog(QDialog):
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
 
+class StarRegistrationThread(QThread):
+    progress_update = pyqtSignal(str)
+    registration_complete = pyqtSignal(bool, str)
+
+    def __init__(self, reference_image_path, files_to_align, output_directory):
+        super().__init__()
+        self.reference_image_path = reference_image_path
+        self.files_to_align = files_to_align
+        self.output_directory = output_directory
+        self.failed_files = []  # Track failed images
+
+    def run(self):
+        try:
+            self.progress_update.emit("Loading reference image...")
+            print("DEBUG: Loading reference image...")
+
+            ref_image, ref_header, ref_bit_depth, ref_is_mono = load_image(self.reference_image_path)
+            print(f"DEBUG: Reference image shape={ref_image.shape}, bit depth={ref_bit_depth}, mono={ref_is_mono}")
+
+            ref_stars = self.detect_stars(ref_image)
+            print(f"DEBUG: Detected {len(ref_stars)} stars in reference image")
+
+            if len(ref_stars) < 10:
+                self.registration_complete.emit(False, "Insufficient stars in reference image!")
+                return
+
+            ref_triangles = self.build_triangle_dict(ref_stars)
+            print(f"DEBUG: Built {len(ref_triangles)} triangle entries from reference image")
+
+            success_count = 0
+
+            for i, file_path in enumerate(self.files_to_align):
+                self.progress_update.emit(f"Processing {os.path.basename(file_path)} ({i+1}/{len(self.files_to_align)})...")
+                print(f"DEBUG: Processing {file_path}")
+
+                # Load image
+                img, img_header, img_bit_depth, img_is_mono = load_image(file_path)
+                if img is None:
+                    self.progress_update.emit(f"Skipping {file_path} (could not load).")
+                    self.failed_files.append(file_path)
+                    continue
+
+                print(f"DEBUG: Loaded image shape={img.shape}, bit depth={img_bit_depth}, mono={img_is_mono}")
+
+                # Detect stars using 3x3 grid strategy
+                img_stars = self.detect_grid_stars(img)
+                print(f"DEBUG: Detected {len(img_stars)} stars in image")
+
+                if len(img_stars) < 9:
+                    self.progress_update.emit(f"Skipping {file_path} (not enough stars found).")
+                    self.failed_files.append(file_path)
+                    continue
+
+                # Compute affine transformation with RANSAC
+                transform_matrix = self.compute_affine_transform_with_ransac(img_stars, ref_stars, ref_triangles)
+                print(f"DEBUG: Transformation matrix: {transform_matrix}")
+
+                if transform_matrix is None:
+                    self.progress_update.emit(f"Skipping {file_path} (alignment failed).")
+                    self.failed_files.append(file_path)
+                    continue
+
+                # Apply transformation
+                aligned_image = self.apply_affine_transform(img, transform_matrix)
+
+                if aligned_image is None:
+                    self.progress_update.emit(f"Skipping {file_path} (could not apply transformation).")
+                    self.failed_files.append(file_path)
+                    continue
+
+                # Generate output filename
+                output_filename = os.path.join(self.output_directory, os.path.splitext(os.path.basename(file_path))[0] + "_r.fits")
+
+                # Save the aligned image
+                save_image(
+                    img_array=aligned_image,
+                    filename=output_filename,
+                    original_format="fits",
+                    bit_depth=img_bit_depth,
+                    original_header=img_header if img_header else None,
+                    is_mono=img_is_mono
+                )
+
+                print(f"DEBUG: Saved aligned image to {output_filename}")
+                success_count += 1
+
+            self.show_summary(success_count)
+
+        except Exception as e:
+            print(f"ERROR: {e}")
+            self.registration_complete.emit(False, f"Error: {str(e)}")
+
+
+
+    def detect_stars(self, image):
+        """ Detects stars in an image using DAOStarFinder (FWHM=3.5). """
+        if image.ndim == 3:  # Convert color images to grayscale
+            image = np.mean(image, axis=2)
+
+        mean, median, std = sigma_clipped_stats(image)
+        daofind = DAOStarFinder(fwhm=3.5, threshold=4.0 * std)
+        sources = daofind(image - median)
+
+        if sources is None or len(sources) == 0:
+            print("DEBUG: No stars detected")
+            return np.array([])
+
+        
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T  # (N, 2) shape
+
+    def detect_grid_stars(self, image):
+        """ Detects 3 brightest stars per 3x3 grid region while excluding a 5% border margin. """
+        print("DEBUG: Detecting stars in 3x3 grid with 5% border margin")
+        if image.ndim == 3:  
+            image = np.mean(image, axis=2)  # Convert to grayscale
+
+        h, w = image.shape
+        margin_x = int(w * 0.05)  # 5% margin on X
+        margin_y = int(h * 0.05)  # 5% margin on Y
+
+        # Define valid region inside margin
+        valid_x_min, valid_x_max = margin_x, w - margin_x
+        valid_y_min, valid_y_max = margin_y, h - margin_y
+
+        # Define grid within valid region
+        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+
+        stars = []
+        
+        for i in range(len(grid_x) - 1):  # Avoid out-of-bounds
+            for j in range(len(grid_y) - 1):  # Avoid out-of-bounds
+                x_min, x_max = grid_x[i], grid_x[i + 1]
+                y_min, y_max = grid_y[j], grid_y[j + 1]
+
+                sub_img = image[y_min:y_max, x_min:x_max]
+                if sub_img.size == 0:
+                    continue  # Skip empty regions
+
+                if np.std(sub_img) > 0:
+                    local_stars = self.detect_stars(sub_img)
+                    if len(local_stars) > 0:
+                        # Convert to original image coordinates, ensuring they remain within valid bounds
+                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max - 1)
+                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max - 1)
+
+                        # Sort stars by brightness and select top 3 per region
+                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+                        stars.extend(sorted_stars[:6])  
+
+        return np.array(stars) if stars else np.array([])
+
+
+    def build_triangle_dict(self, coords):
+        """ Builds a dictionary mapping triangle invariants to star triangle sets. """
+        tri = Delaunay(coords)
+        tri_dict = {}
+        for simplex in tri.simplices:
+            pts = coords[simplex]
+            inv = self.compute_triangle_invariant(pts)
+            if inv is None:
+                continue
+            inv_key = (round(inv[0], 2), round(inv[1], 2))
+            tri_dict.setdefault(inv_key, []).append(simplex)
+        return tri_dict
+
+    def compute_triangle_invariant(self, tri_points):
+        """ Computes invariant features for a given triangle. """
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1] / sides[0], sides[2] / sides[0])
+
+    def compute_affine_transform_with_ransac(self, img_stars, ref_stars, ref_triangles, max_attempts=5):
+        """ Computes affine transformation using RANSAC recursion with constraints. """
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"DEBUG: Attempt {attempt} for affine transformation")
+
+            matches = []
+            for img_star in img_stars:
+                distances = np.linalg.norm(ref_stars - img_star, axis=1)
+                closest_idx = np.argmin(distances)
+                if distances[closest_idx] < 10:  
+                    matches.append((img_star, ref_stars[closest_idx]))
+
+            if len(matches) < 3:  
+                self.progress_update.emit("Not enough matching stars found, skipping image.")
+                return None
+
+            src_pts = np.array([m[0] for m in matches])
+            dst_pts = np.array([m[1] for m in matches])
+
+            transform, inliers = cv2.estimateAffinePartial2D(src_pts.reshape(-1, 1, 2), dst_pts.reshape(-1, 1, 2), method=cv2.LMEDS)
+
+            if transform is not None and self.is_valid_transform(transform):
+                return transform
+
+        self.progress_update.emit("Valid affine transform not found after multiple attempts, skipping image.")
+        return None
+
+    def is_valid_transform(self, matrix):
+        """ Ensures affine transform does not over-scale, skew, or flip the image. """
+        a, b, tx = matrix[0]
+        c, d, ty = matrix[1]
+
+        scale_x = np.sqrt(a ** 2 + c ** 2)
+        scale_y = np.sqrt(b ** 2 + d ** 2)
+        skew = np.abs((a * b + c * d) / (a ** 2 + c ** 2))
+
+        if not (0.5 <= scale_x <= 2.0 and 0.5 <= scale_y <= 2.0):
+            print(f"DEBUG: Scale out of bounds: scale_x={scale_x}, scale_y={scale_y}")
+            return False
+
+        if skew > 0.01:
+            print(f"DEBUG: Skew out of bounds: {skew}")
+            return False
+
+        return True
+
+    def apply_affine_transform(self, image, transform_matrix):
+        """ Applies affine transformation to align the image. """
+        h, w = image.shape[:2]
+        return cv2.warpAffine(image, transform_matrix, (w, h), flags=cv2.INTER_LINEAR)
+
+    def show_summary(self, success_count):
+        """ Displays a summary of processed images in a message box. """
+        total = len(self.files_to_align)
+        failed_count = len(self.failed_files)
+
+        summary_text = (
+            f"Star Registration Completed!\n\n"
+            f"Total Images Processed: {total}\n"
+            f"Successfully Aligned: {success_count}\n"
+            f"Failed Alignments: {failed_count}\n"
+        )
+
+        if failed_count > 0:
+            summary_text += "\nFailed Files:\n" + "\n".join([os.path.basename(f) for f in self.failed_files])
+
+        self.registration_complete.emit(True, summary_text)
+
+class StarRegistrationWindow(QWidget):
+    def __init__(self, image_manager=None):
+        super().__init__()
+        self.image_manager = image_manager  # Reference to the Image Manager
+        self.reference_image_path = None
+        self.files_to_align = []
+        self.output_directory = None
+        self.thread = None  # Store thread reference
+
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Star Registration")
+        self.setGeometry(200, 200, 600, 450)
+        main_layout = QVBoxLayout(self)
+
+        # ─────────────────────────────────────────
+        # Reference Image Selection
+        # ─────────────────────────────────────────
+        ref_layout = QHBoxLayout()
+        self.ref_label = QLabel("Reference Image:")
+        self.ref_path_label = QLabel("No reference selected")
+        self.ref_path_label.setWordWrap(True)
+
+        self.select_ref_slot_button = QPushButton("From Slot")
+        self.select_ref_slot_button.clicked.connect(self.select_reference_from_slot)
+
+        self.select_ref_file_button = QPushButton("From File")
+        self.select_ref_file_button.clicked.connect(self.select_reference_from_file)
+
+        ref_layout.addWidget(self.ref_label)
+        ref_layout.addWidget(self.ref_path_label)
+        ref_layout.addWidget(self.select_ref_slot_button)
+        ref_layout.addWidget(self.select_ref_file_button)
+
+        # ─────────────────────────────────────────
+        # Image Selection Section
+        # ─────────────────────────────────────────
+        file_selection_layout = QHBoxLayout()
+
+        self.add_files_button = QPushButton("Select Files")
+        self.add_files_button.clicked.connect(self.select_files_to_align)
+
+        self.add_directory_button = QPushButton("Select Directory")
+        self.add_directory_button.clicked.connect(self.select_directory_to_align)
+
+        file_selection_layout.addWidget(self.add_files_button)
+        file_selection_layout.addWidget(self.add_directory_button)
+
+        # ─────────────────────────────────────────
+        # TreeBox for Selected Files
+        # ─────────────────────────────────────────
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setColumnCount(1)
+        self.tree_widget.setHeaderLabels(["Files to Align"])
+        self.tree_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # Buttons for managing the TreeBox
+        tree_buttons_layout = QHBoxLayout()
+        self.remove_selected_button = QPushButton("Remove Selected")
+        self.remove_selected_button.clicked.connect(self.remove_selected_files)
+
+        self.clear_tree_button = QPushButton("Clear All")
+        self.clear_tree_button.clicked.connect(self.clear_tree)
+
+        tree_buttons_layout.addWidget(self.remove_selected_button)
+        tree_buttons_layout.addWidget(self.clear_tree_button)
+
+        # ─────────────────────────────────────────
+        # Output Directory Selection
+        # ─────────────────────────────────────────
+        output_layout = QHBoxLayout()
+        self.output_label = QLabel("Output Directory:")
+        self.output_path_label = QLabel("No directory selected")
+        self.output_path_label.setWordWrap(True)
+
+        self.select_output_button = QPushButton("Select Output Folder")
+        self.select_output_button.clicked.connect(self.select_output_directory)
+
+        output_layout.addWidget(self.output_label)
+        output_layout.addWidget(self.output_path_label)
+        output_layout.addWidget(self.select_output_button)
+
+        # ─────────────────────────────────────────
+        # Progress Display
+        # ─────────────────────────────────────────
+        self.progress_label = QLabel("Status: Waiting...")
+        self.progress_label.setStyleSheet("color: blue; font-weight: bold;")
+        
+        # ─────────────────────────────────────────
+        # Start Button
+        # ─────────────────────────────────────────
+        self.start_button = QPushButton("Start Registration")
+        self.start_button.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.start_button.clicked.connect(self.start_registration)
+
+        # ─────────────────────────────────────────
+        # Add widgets to main layout
+        # ─────────────────────────────────────────
+        main_layout.addLayout(ref_layout)
+        main_layout.addLayout(file_selection_layout)
+        main_layout.addWidget(self.tree_widget)
+        main_layout.addLayout(tree_buttons_layout)
+        main_layout.addLayout(output_layout)
+        main_layout.addWidget(self.progress_label)
+        main_layout.addWidget(self.start_button)
+
+    # ─────────────────────────────────────────
+    # Slot/File Selection for Reference Image
+    # ─────────────────────────────────────────
+    def select_reference_from_slot(self):
+        if self.image_manager:
+            available_slots = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+            slot, ok = QInputDialog.getItem(self, "Select Reference Slot", "Choose a reference image slot:", list(available_slots.values()), 0, False)
+            if ok:
+                slot_index = list(available_slots.values()).index(slot)
+                self.reference_image_path = f"Slot {slot_index}"
+                self.ref_path_label.setText(self.reference_image_path)
+
+    def select_reference_from_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf);;All Files (*)")
+        if file_path:
+            self.reference_image_path = file_path
+            self.ref_path_label.setText(os.path.basename(file_path))
+
+    # ─────────────────────────────────────────
+    # File Selection for Alignment
+    # ─────────────────────────────────────────
+    def select_files_to_align(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files to Align", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf);;All Files (*)")
+        if files:
+            for file in files:
+                if file not in self.files_to_align:
+                    self.files_to_align.append(file)
+                    self.tree_widget.addTopLevelItem(QTreeWidgetItem([os.path.basename(file)]))
+
+    def select_directory_to_align(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "")
+        if directory:
+            supported_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.fits', '.fit', '.xisf')
+            new_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(supported_extensions)]
+            for file in new_files:
+                if file not in self.files_to_align:
+                    self.files_to_align.append(file)
+                    self.tree_widget.addTopLevelItem(QTreeWidgetItem([os.path.basename(file)]))
+
+    # ─────────────────────────────────────────
+    # Managing Files in TreeBox
+    # ─────────────────────────────────────────
+    def remove_selected_files(self):
+        selected_items = self.tree_widget.selectedItems()
+        for item in selected_items:
+            file_name = item.text(0)
+            for file_path in self.files_to_align:
+                if os.path.basename(file_path) == file_name:
+                    self.files_to_align.remove(file_path)
+                    break
+            index = self.tree_widget.indexOfTopLevelItem(item)
+            self.tree_widget.takeTopLevelItem(index)
+
+    def clear_tree(self):
+        self.tree_widget.clear()
+        self.files_to_align.clear()
+
+    # ─────────────────────────────────────────
+    # Output Directory Selection
+    # ─────────────────────────────────────────
+    def select_output_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory", "")
+        if directory:
+            self.output_directory = directory
+            self.output_path_label.setText(directory)
+
+    # ─────────────────────────────────────────
+    # Start Registration with Signal Handling
+    # ─────────────────────────────────────────
+    def start_registration(self):
+        if not self.reference_image_path:
+            QMessageBox.warning(self, "Missing Reference", "Please select a reference image before starting.")
+            return
+        if not self.files_to_align:
+            QMessageBox.warning(self, "No Files", "Please add files to align before starting.")
+            return
+        if not self.output_directory:
+            QMessageBox.warning(self, "No Output Directory", "Please select an output directory before starting.")
+            return
+
+        self.progress_label.setText("Status: Running...")
+        self.progress_label.setStyleSheet("color: green; font-weight: bold;")
+
+        self.thread = StarRegistrationThread(self.reference_image_path, self.files_to_align, self.output_directory)
+        self.thread.progress_update.connect(self.update_progress)
+        self.thread.registration_complete.connect(self.registration_finished)
+        self.thread.start()
+
+    def update_progress(self, message):
+        """Update the progress label with the latest status."""
+        self.progress_label.setText(f"Status: {message}")
+        QApplication.processEvents()
+
+    def registration_finished(self, success, message):
+        """Handle the completion of the registration process."""
+        color = "green" if success else "red"
+        self.progress_label.setText(f"Status: {message}")
+        self.progress_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+        if success:
+            QMessageBox.information(self, "Registration Complete", message)
+        else:
+            QMessageBox.warning(self, "Registration Error", message)
+
+
 class PlateSolver(QDialog):
     """
     A dialog class to handle plate solving.
@@ -13631,7 +14102,7 @@ class BlemishBlasterDialog(QDialog):
 
         super().closeEvent(event)
 
-import numpy as np
+
 
 def evaluate_polynomial(H: int, W: int, coeffs: np.ndarray, degree: int) -> np.ndarray:
     """
@@ -13644,7 +14115,7 @@ def evaluate_polynomial(H: int, W: int, coeffs: np.ndarray, degree: int) -> np.n
 
 
 
-import numpy as np
+
 
 def build_poly_terms(x_array: np.ndarray, y_array: np.ndarray, degree: int) -> np.ndarray:
     """
