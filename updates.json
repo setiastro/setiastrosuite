@@ -1,9 +1,9 @@
 {
-  "version": "2.11.1",
+  "version": "2.11.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.1/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.1/setiastrosuite_linux"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.2/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Function: SuperNova and Asteroid Hunter. New Capability: Using all cores on multi core cpu's for computationally expensive processes of statistical stretch, autostretch, blink stretch, applying curves, SuperNova and Asteroid Hunter, stretching in ABE. More to come on multi threaded operations. Linux now on QT6. About menu item. New Project under File  "
+  "notes": "Many more functions now utilize multiple cores.  Immense speed up in WIMS.  Many bug fixes  "
 }
