@@ -36772,78 +36772,64 @@ class CalculationThread(QThread):
             # Define observer's location
             location = EarthLocation(lat=self.latitude * u.deg, lon=self.longitude * u.deg, height=0 * u.m)
 
-            # Calculate Local Sidereal Time
+            # Calculate Local Sidereal Time (LST)
             lst = astropy_time.sidereal_time('apparent', self.longitude * u.deg)
             self.lst_calculated.emit(f"Local Sidereal Time: {lst.to_string(unit=u.hour, precision=3)}")
 
             # Calculate lunar phase
             phase_percentage, phase_image_name = self.calculate_lunar_phase(astropy_time, location)
-
-            # Emit lunar phase data
             self.lunar_phase_calculated.emit(phase_percentage, phase_image_name)
 
-            # Determine the path to celestial_catalog.csv
-            catalog_file = os.path.join(
-                getattr(sys, '_MEIPASS', os.path.dirname(__file__)), "celestial_catalog.csv"
-            )
-
-            # Load celestial catalog from CSV
+            # Load celestial catalog
+            catalog_file = self.get_catalog_file_path()
             if not os.path.exists(catalog_file):
                 self.calculation_complete.emit(pd.DataFrame(), "Catalog file not found.")
                 return
 
             df = pd.read_csv(catalog_file, encoding='ISO-8859-1')
 
-            # Apply catalog filters
+            # Apply catalog filters **AFTER reading to avoid index mismatch**
             df = df[df['Catalog'].isin(self.catalog_filters)]
             df.dropna(subset=['RA', 'Dec'], inplace=True)
 
-            # Check altitude and calculate additional metrics
+            # Ensure DataFrame is contiguous
+            df.reset_index(drop=True, inplace=True)
+
+            # Convert RA/Dec into SkyCoord objects **vectorized**
+            sky_coords = SkyCoord(ra=df['RA'].values * u.deg, dec=df['Dec'].values * u.deg, frame='icrs')
+
+            # Create an AltAz frame for observer location
             altaz_frame = AltAz(obstime=astropy_time, location=location)
-            altitudes, azimuths, minutes_to_transit, degrees_from_moon = [], [], [], []
-            before_or_after = []
 
+            # **Vectorized altitude and azimuth calculation**
+            altaz = sky_coords.transform_to(altaz_frame)
+            df['Altitude'] = np.round(altaz.alt.deg, 1)
+            df['Azimuth'] = np.round(altaz.az.deg, 1)
+
+            # **Vectorized Moon Separation Calculation**
             moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
+            df['Degrees from Moon'] = np.round(sky_coords.separation(moon).deg, 2)
 
-            for _, row in df.iterrows():
-                sky_coord = SkyCoord(ra=row['RA'] * u.deg, dec=row['Dec'] * u.deg, frame='icrs')
-                altaz = sky_coord.transform_to(altaz_frame)
-                altitudes.append(round(altaz.alt.deg, 1))
-                azimuths.append(round(altaz.az.deg, 1))
-
-                # Calculate time difference to transit
-                ra = row['RA'] * u.deg.to(u.hourangle)  # Convert RA from degrees to hour angle
-                time_diff = ((ra - lst.hour) * u.hour) % (24 * u.hour)
-                minutes = round(time_diff.value * 60, 1)
-                if minutes > 720:
-                    minutes = 1440 - minutes
-                    before_or_after.append("After")
-                else:
-                    before_or_after.append("Before")
-                minutes_to_transit.append(minutes)
-
-                # Calculate angular distance from the moon
-                moon_sep = sky_coord.separation(moon).deg
-                degrees_from_moon.append(round(moon_sep, 2))
-
-            df['Altitude'] = altitudes
-            df['Azimuth'] = azimuths
-            df['Minutes to Transit'] = minutes_to_transit
-            df['Before/After Transit'] = before_or_after
-            df['Degrees from Moon'] = degrees_from_moon
-
-            # Apply altitude filter
+            # **Apply altitude filter after calculations**
             df = df[df['Altitude'] >= self.min_altitude]
 
-            # Sort by "Minutes to Transit"
-            df = df.sort_values(by='Minutes to Transit')
+            # **Vectorized calculation of "Minutes to Transit"**
+            ra_hours = df['RA'].values * (24 / 360.0)  # Convert degrees to hours
+            time_diff = ((ra_hours - lst.hour) * u.hour) % (24 * u.hour)  # Hour difference
+            df['Minutes to Transit'] = np.round(time_diff.value * 60, 1)
 
-            # Limit the results to the object_limit
-            df = df.head(self.object_limit)
+            # Correct Before/After Transit flags efficiently
+            df['Before/After Transit'] = np.where(df['Minutes to Transit'] > 720, "After", "Before")
+            df['Minutes to Transit'] = np.where(df['Minutes to Transit'] > 720, 1440 - df['Minutes to Transit'], df['Minutes to Transit'])
+
+            # **Optimized Sorting & Selection**
+            df = df.nsmallest(self.object_limit, 'Minutes to Transit')  # Faster than full sort
 
             self.calculation_complete.emit(df, "Calculation complete.")
         except Exception as e:
             self.calculation_complete.emit(pd.DataFrame(), f"Error: {str(e)}")
+
+
 
 
     def calculate_lunar_phase(self, astropy_time, location):
