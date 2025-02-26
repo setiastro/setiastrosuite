@@ -209,7 +209,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.3"
+VERSION = "2.11.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -264,6 +264,7 @@ if hasattr(sys, '_MEIPASS'):
     psf_path = os.path.join(sys._MEIPASS, 'psf.png')
     supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')
     starregistration_path = os.path.join(sys._MEIPASS, 'starregistration.png')
+    stacking_path = os.path.join(sys._MEIPASS, 'stacking.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -316,6 +317,7 @@ else:
     psf_path = 'psf.png'
     supernova_path = 'supernova.png'
     starregistration_path = 'starregistration.png'
+    stacking_path = 'stacking.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -741,9 +743,15 @@ class AstroEditingSuite(QMainWindow):
         mask_slots_menu.addAction(rename_mask_slot_action)
 
         # --------------------
-        # Mosaic Menu
+        # Star Stuff Menu
         # --------------------
         mosaic_menu = menubar.addMenu("Star Stuff")
+
+        # Stacking Suite Action (New!)
+        stacking_suite_action = QAction(QIcon(stacking_path), "Stacking Suite", self)
+        stacking_suite_action.setStatusTip("Calibrate and stack images with advanced methods")
+        stacking_suite_action.triggered.connect(self.stacking_suite_action)
+        mosaic_menu.addAction(stacking_suite_action)
 
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
@@ -915,11 +923,12 @@ class AstroEditingSuite(QMainWindow):
         geometrybar.addAction(rescale_action)
 
         # --------------------
-        # Mosaic Toolbar
+        # Star Stuff Toolbar
         # --------------------        
-        mosaictoolbar = QToolBar("Mosaic Toolbar")
+        mosaictoolbar = QToolBar("Star Stuff Toolbar")
         mosaictoolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)        
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)  
+        mosaictoolbar.addAction(stacking_suite_action)      
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
         mosaictoolbar.addAction(star_registration_action)
@@ -1125,6 +1134,20 @@ class AstroEditingSuite(QMainWindow):
         self.supernova_hunter_tab = SupernovaAsteroidHunterTab()
         # Show the new window (or tab)
         self.supernova_hunter_tab.show()
+
+    def stacking_suite_action(self):
+        """ Opens the Stacking Suite window only if the correct secret code is entered. """
+
+        # Create input dialog
+        text, ok = QInputDialog.getText(None, "Oops, this is under construction!",
+                                        "If you really want to view it, type in the secret code:")
+
+        if ok and text.strip().lower() == "please":
+            self.stackingsuitewindow = StackingSuiteDialog()
+            self.stackingsuitewindow.show()
+        else:
+            QMessageBox.information(None, "Access Denied", "Incorrect code or action canceled.")
+
 
     def open_preview_window(self, slot):
         """Opens a separate preview window for the specified image slot."""
@@ -6587,6 +6610,961 @@ class HistogramDialog(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row, col, item)
 
+# --------------------------------------------------
+# Stacking Suite
+# --------------------------------------------------
+
+@njit(parallel=True)
+def subtract_dark(frames, dark_frame):
+    """
+    Applies dark subtraction to each frame in a set of flat frames.
+    Args:
+        frames (np.ndarray): 3D array of shape (num_frames, height, width).
+        dark_frame (np.ndarray): 2D array (height, width) for the master dark.
+
+    Returns:
+        np.ndarray: Dark-subtracted flat frames.
+    """
+    num_frames, height, width = frames.shape
+    result = np.empty_like(frames, dtype=np.float32)
+
+    for i in prange(num_frames):  # Parallel loop
+        result[i] = frames[i] - dark_frame  # Element-wise subtraction
+
+    return result
+
+
+@njit(parallel=True, fastmath=True)
+def windsorized_sigma_clip(stack, lower=2.5, upper=2.5):
+    """ Applies Windsorized Sigma Clipping to remove outliers before averaging. """
+    num_frames, height, width = stack.shape
+    clipped = np.zeros((height, width), dtype=np.float32)
+
+    for i in prange(height):
+        for j in prange(width):
+            pixel_values = stack[:, i, j]
+            median_val = np.median(pixel_values)
+            std_dev = np.std(pixel_values)
+
+            lower_bound = median_val - lower * std_dev
+            upper_bound = median_val + upper * std_dev
+
+            valid_values = pixel_values[(pixel_values >= lower_bound) & (pixel_values <= upper_bound)]
+            if valid_values.size > 0:
+                clipped[i, j] = np.mean(valid_values)
+
+    return clipped
+
+class StackingSuiteDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Stacking Suite")
+        self.setGeometry(300, 200, 800, 600)
+
+        # Load settings
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.stacking_directory = self.settings.value("stacking/dir", type=str) or ""
+        self.sigma_high = self.settings.value("stacking/sigma_high", type=float) or 3.0
+        self.sigma_low = self.settings.value("stacking/sigma_low", type=float) or 3.0
+
+        # Dictionaries to store file paths
+        self.dark_files = {}   # { "exposure_time": [file_paths] }
+        self.flat_files = {}   # { "filter - exposure_time": [file_paths] }
+        self.light_files = {}  # { "filter - exposure_time": [file_paths] }
+        self.master_files = {} # { "exposure_time": master_file_path }
+        self.master_sizes = {} # { "master_file_path": "widthxheight" } 
+
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        # Tabs for Darks, Flats, and Lights
+        self.dark_tab = self.create_dark_tab()
+        self.flat_tab = self.create_flat_tab()
+        self.light_tab = self.create_light_tab()
+
+        self.tabs.addTab(self.dark_tab, "Darks")
+        self.tabs.addTab(self.flat_tab, "Flats")
+        self.tabs.addTab(self.light_tab, "Lights")
+
+        # Wrench button to open settings
+        wrench_button = QPushButton()
+        wrench_button.setIcon(QIcon(wrench_path))
+        wrench_button.setToolTip("Set Stacking Directory & Sigma Clipping")
+        wrench_button.clicked.connect(self.open_stacking_settings)
+        layout.addWidget(wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # **🔥 Add Scrollable Status Bar**
+        self.setup_status_bar(layout)  # ⬅️ Call function to set up the status log
+
+    def setup_status_bar(self, layout):
+        """ Sets up a scrollable status log at the bottom of the UI. """
+        self.status_text = QTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setMaximumHeight(100)  # Limits visible lines (~5 lines)
+        self.status_text.setStyleSheet("background-color: black; color: white; font-family: Monospace; padding: 4px;")
+        
+        # Wrap in a scroll area for scrolling
+        self.status_scroll = QScrollArea()
+        self.status_scroll.setWidgetResizable(True)
+        self.status_scroll.setWidget(self.status_text)
+        
+        # Add to the main layout
+        layout.addWidget(self.status_scroll)
+
+    def update_status(self, message):
+        """ Updates the status log with a scrolling history. """
+        self.status_text.append(message)  # Adds new message at the bottom
+        self.status_text.verticalScrollBar().setValue(self.status_text.verticalScrollBar().maximum())  # Auto-scroll to bottom
+        QApplication.processEvents() 
+
+    def open_stacking_settings(self):
+        """ Opens a dialog to set the stacking directory and sigma clipping values. """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Stacking Settings")
+        layout = QVBoxLayout(dialog)
+
+        # Stacking directory selection
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Stacking Directory:")
+        self.dir_path_edit = QLineEdit(self.stacking_directory)
+        dir_button = QPushButton("Browse")
+        dir_button.clicked.connect(self.select_stacking_directory)
+        dir_layout.addWidget(dir_label)
+        dir_layout.addWidget(self.dir_path_edit)
+        dir_layout.addWidget(dir_button)
+        layout.addLayout(dir_layout)
+
+        # Sigma High & Low settings
+        sigma_layout = QHBoxLayout()
+        sigma_layout.addWidget(QLabel("Sigma High:"))
+        self.sigma_high_spinbox = QDoubleSpinBox()
+        self.sigma_high_spinbox.setRange(0.1, 10.0)
+        self.sigma_high_spinbox.setDecimals(2)
+        self.sigma_high_spinbox.setValue(self.sigma_high)
+
+        sigma_layout.addWidget(self.sigma_high_spinbox)
+        sigma_layout.addWidget(QLabel("Sigma Low:"))
+        self.sigma_low_spinbox = QDoubleSpinBox()
+        self.sigma_low_spinbox.setRange(0.1, 10.0)
+        self.sigma_low_spinbox.setDecimals(2)
+        self.sigma_low_spinbox.setValue(self.sigma_low)
+
+        sigma_layout.addWidget(self.sigma_low_spinbox)
+        layout.addLayout(sigma_layout)
+
+        # Save button
+        save_button = QPushButton("Save Settings")
+        save_button.clicked.connect(lambda: self.save_stacking_settings(dialog))
+        layout.addWidget(save_button)
+
+        dialog.exec()
+
+    def select_stacking_directory(self):
+        """ Opens a dialog to choose a stacking directory. """
+        directory = QFileDialog.getExistingDirectory(self, "Select Stacking Directory")
+        if directory:
+            self.stacking_directory = directory
+            self.dir_path_edit.setText(directory)
+
+    def save_stacking_settings(self, dialog):
+        """ Saves stacking directory and sigma values to QSettings. """
+        self.stacking_directory = self.dir_path_edit.text()
+        self.sigma_high = self.sigma_high_spinbox.value()
+        self.sigma_low = self.sigma_low_spinbox.value()
+
+        # Store in QSettings
+        self.settings.setValue("stacking/dir", self.stacking_directory)
+        self.settings.setValue("stacking/sigma_high", self.sigma_high)
+        self.settings.setValue("stacking/sigma_low", self.sigma_low)
+
+        print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}")
+        self.update_status(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}")
+        dialog.accept()
+
+    def create_dark_tab(self):
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)  # Vertical layout to separate sections
+
+        # --- DARK FRAMES TREEBOX (TOP) ---
+        darks_layout = QHBoxLayout()  # Left = Dark Tree, Right = Controls
+
+        # Left Side - Dark Frames
+        dark_frames_layout = QVBoxLayout()
+        dark_frames_layout.addWidget(QLabel("Dark Frames"))
+        self.dark_tree = QTreeWidget()
+        self.dark_tree.setColumnCount(2)
+        self.dark_tree.setHeaderLabels(["Exposure Time", "Metadata"])
+        dark_frames_layout.addWidget(self.dark_tree)
+
+        # Buttons to Add Dark Files & Directories
+        btn_layout = QHBoxLayout()
+        self.add_dark_files_btn = QPushButton("Add Dark Files")
+        self.add_dark_files_btn.clicked.connect(self.add_dark_files)
+        self.add_dark_dir_btn = QPushButton("Add Dark Directory")
+        self.add_dark_dir_btn.clicked.connect(self.add_dark_directory)
+        btn_layout.addWidget(self.add_dark_files_btn)
+        btn_layout.addWidget(self.add_dark_dir_btn)
+        dark_frames_layout.addLayout(btn_layout)
+
+        darks_layout.addLayout(dark_frames_layout, 2)  # Dark Frames Tree takes more space
+
+        # --- RIGHT SIDE: Exposure Tolerance & Master Darks Button ---
+        right_controls_layout = QVBoxLayout()
+
+        # Exposure Tolerance
+        exposure_tolerance_layout = QHBoxLayout()
+        exposure_tolerance_label = QLabel("Exposure Tolerance (seconds):")
+        self.exposure_tolerance_spinbox = QSpinBox()
+        self.exposure_tolerance_spinbox.setRange(0, 30)  # Acceptable range
+        self.exposure_tolerance_spinbox.setValue(5)  # Default: ±5 sec
+        exposure_tolerance_layout.addWidget(exposure_tolerance_label)
+        exposure_tolerance_layout.addWidget(self.exposure_tolerance_spinbox)
+        right_controls_layout.addLayout(exposure_tolerance_layout)
+
+        # --- "Turn Those Darks Into Master Darks" Button ---
+        self.create_master_dark_btn = QPushButton("Turn Those Darks Into Master Darks")
+        self.create_master_dark_btn.clicked.connect(self.create_master_dark)
+
+        # Apply a bold font, padding, and a highlighted effect
+        self.create_master_dark_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;  /* Dark gray */
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;  /* Subtle yellow border */
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+            }
+            QPushButton:pressed {
+                background-color: #222;  /* Darker gray on press */
+                border: 2px solid #FFA500;  /* Orange border when pressed */
+            }
+        """)
+
+        right_controls_layout.addWidget(self.create_master_dark_btn)
+
+
+        darks_layout.addLayout(right_controls_layout, 1)  # Right side takes less space
+
+        main_layout.addLayout(darks_layout)
+
+        # --- MASTER DARKS TREEBOX (BOTTOM) ---
+        main_layout.addWidget(QLabel("Master Darks"))
+        self.master_dark_tree = QTreeWidget()
+        self.master_dark_tree.setColumnCount(2)
+        self.master_dark_tree.setHeaderLabels(["Exposure Time", "Master File"])
+        main_layout.addWidget(self.master_dark_tree)
+
+        # Master Dark Selection Button
+        self.master_dark_btn = QPushButton("Load Master Dark")
+        self.master_dark_btn.clicked.connect(self.load_master_dark)
+        main_layout.addWidget(self.master_dark_btn)
+
+        return tab
+
+
+
+    def create_flat_tab(self):
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)  # Main layout to organize sections
+
+        # --- FLAT FRAMES TREEBOX (TOP) ---
+        flats_layout = QHBoxLayout()  # Left = Flat Tree, Right = Controls
+
+        # Left Side - Flat Frames
+        flat_frames_layout = QVBoxLayout()
+        flat_frames_layout.addWidget(QLabel("Flat Frames"))
+
+        self.flat_tree = QTreeWidget()
+        self.flat_tree.setColumnCount(3)  # Added 3rd column for Master Dark Used
+        self.flat_tree.setHeaderLabels(["Filter & Exposure", "Metadata", "Master Dark Used"])
+        flat_frames_layout.addWidget(self.flat_tree)
+
+        # Buttons to Add Flat Files & Directories
+        btn_layout = QHBoxLayout()
+        self.add_flat_files_btn = QPushButton("Add Flat Files")
+        self.add_flat_files_btn.clicked.connect(self.add_flat_files)
+        self.add_flat_dir_btn = QPushButton("Add Flat Directory")
+        self.add_flat_dir_btn.clicked.connect(self.add_flat_directory)
+        btn_layout.addWidget(self.add_flat_files_btn)
+        btn_layout.addWidget(self.add_flat_dir_btn)
+        flat_frames_layout.addLayout(btn_layout)
+
+        flats_layout.addLayout(flat_frames_layout, 2)  # Left side takes more space
+
+        # --- RIGHT SIDE: Exposure Tolerance & Master Dark Selection ---
+        right_controls_layout = QVBoxLayout()
+
+        # Exposure Tolerance
+        exposure_tolerance_layout = QHBoxLayout()
+        exposure_tolerance_label = QLabel("Exposure Tolerance (seconds):")
+        self.flat_exposure_tolerance_spinbox = QSpinBox()
+        self.flat_exposure_tolerance_spinbox.setRange(0, 30)  # Allow ±0 to 30 seconds
+        self.flat_exposure_tolerance_spinbox.setValue(5)  # Default: ±5 sec
+        exposure_tolerance_layout.addWidget(exposure_tolerance_label)
+        exposure_tolerance_layout.addWidget(self.flat_exposure_tolerance_spinbox)
+        right_controls_layout.addLayout(exposure_tolerance_layout)
+
+        # Auto-Select Master Dark
+        self.auto_select_dark_checkbox = QCheckBox("Auto-Select Closest Master Dark")
+        self.auto_select_dark_checkbox.setChecked(True)  # Default enabled
+        right_controls_layout.addWidget(self.auto_select_dark_checkbox)
+
+        # Manual Override: Select a Master Dark
+        self.override_dark_combo = QComboBox()
+        self.override_dark_combo.addItem("None (Use Auto-Select)")
+        self.override_dark_combo.currentIndexChanged.connect(self.override_selected_master_dark)
+        right_controls_layout.addWidget(QLabel("Override Master Dark Selection"))
+        right_controls_layout.addWidget(self.override_dark_combo)
+
+        self.create_master_flat_btn = QPushButton("Turn Those Flats Into Master Flats")
+        self.create_master_flat_btn.clicked.connect(self.create_master_flat)
+
+        # Apply a bold font, padding, and a glowing effect
+        self.create_master_flat_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;  /* Dark gray */
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;  /* Subtle yellow border */
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+            }
+            QPushButton:pressed {
+                background-color: #222;  /* Darker gray on press */
+                border: 2px solid #FFA500;  /* Orange border when pressed */
+            }
+        """)
+
+
+        right_controls_layout.addWidget(self.create_master_flat_btn)
+
+        flats_layout.addLayout(right_controls_layout, 1)  # Right side takes less space
+
+        main_layout.addLayout(flats_layout)
+
+        # --- MASTER FLATS TREEBOX (BOTTOM) ---
+        main_layout.addWidget(QLabel("Master Flats"))
+        self.master_flat_tree = QTreeWidget()
+        self.master_flat_tree.setColumnCount(2)
+        self.master_flat_tree.setHeaderLabels(["Filter", "Master File"])
+        main_layout.addWidget(self.master_flat_tree)
+
+        # Master Flat Selection Button
+        self.master_flat_btn = QPushButton("Load Master Flat")
+        self.master_flat_btn.clicked.connect(self.load_master_flat)
+        main_layout.addWidget(self.master_flat_btn)
+
+        return tab
+
+
+    def create_light_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Tree widget for light frames
+        self.light_tree = QTreeWidget()
+        self.light_tree.setColumnCount(2)
+        self.light_tree.setHeaderLabels(["Filter & Exposure", "Metadata"])
+        layout.addWidget(QLabel("Light Frames"))
+        layout.addWidget(self.light_tree)
+
+        # Buttons for adding files and directories
+        btn_layout = QHBoxLayout()
+        self.add_light_files_btn = QPushButton("Add Light Files")
+        self.add_light_files_btn.clicked.connect(self.add_light_files)
+        self.add_light_dir_btn = QPushButton("Add Light Directory")
+        self.add_light_dir_btn.clicked.connect(self.add_light_directory)
+        btn_layout.addWidget(self.add_light_files_btn)
+        btn_layout.addWidget(self.add_light_dir_btn)
+        layout.addLayout(btn_layout)
+
+        return tab
+
+
+    def add_dark_files(self):
+        self.add_files(self.dark_tree, "Select Dark Files", "DARK")
+    
+    def add_dark_directory(self):
+        self.add_directory(self.dark_tree, "Select Dark Directory", "DARK")
+
+    def add_flat_files(self):
+        self.add_files(self.flat_tree, "Select Flat Files", "FLAT")
+        self.assign_best_master_dark()  # Assign best dark after adding flats
+
+    def add_flat_directory(self):
+        self.add_directory(self.flat_tree, "Select Flat Directory", "FLAT")
+        self.assign_best_master_dark()  # Assign best dark after adding flats
+
+    
+    def add_light_files(self):
+        self.add_files(self.light_tree, "Select Light Files", "LIGHT")
+    
+    def add_light_directory(self):
+        self.add_directory(self.light_tree, "Select Light Directory", "LIGHT")
+
+    def load_master_dark(self):
+        """ Loads a Master Dark and updates the UI. """
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Master Dark", "", "FITS Files (*.fits *.fit)")
+        if files:  # Ensure files were selected
+            self.add_master_files(self.master_dark_tree, "DARK", files)  # Let add_master_files handle processing
+
+        self.update_override_dark_combo()  # Populate dropdown with new masters
+        self.assign_best_master_dark()  # Auto-assign Master Darks to Flats
+
+        print("DEBUG: Loaded Master Darks and updated assignments.")
+
+
+    def load_master_flat(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Master Flat", "", "FITS Files (*.fits *.fit)")
+        if files:  # Ensure files were selected
+            self.add_master_files(self.master_flat_tree, "FLAT", files)
+
+    def add_files(self, tree, title, expected_type):
+        files, _ = QFileDialog.getOpenFileNames(self, title, "", "FITS Files (*.fits *.fit)")
+        if files:
+            for file in files:
+                self.process_fits_header(file, tree, expected_type)
+    
+    def add_directory(self, tree, title, expected_type):
+        directory = QFileDialog.getExistingDirectory(self, title, "")
+        if directory:
+            for file in os.listdir(directory):
+                if file.lower().endswith((".fits", ".fit")):
+                    self.process_fits_header(os.path.join(directory, file), tree, expected_type)
+    
+    def process_fits_header(self, file_path, tree, expected_type):
+        try:
+            with fits.open(file_path) as hdul:
+                header = hdul[0].header
+                data = hdul[0].data
+                # Check for both EXPOSURE and EXPTIME, defaulting to "Unknown" if neither is found
+                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                filter_name = header.get("FILTER", "Unknown")
+                image_type = header.get("IMAGETYP", "Unknown").upper()
+
+                # Extract image dimensions
+                if data is not None:
+                    height, width = data.shape[-2:]  # Handle 2D and possible 3D (e.g., multi-extension FITS)
+                    image_size = f"{width}x{height}"
+                else:
+                    image_size = "Unknown"
+
+                # Extract metadata
+                sensor_temp = header.get("CCD-TEMP", "N/A")
+                date_obs = header.get("DATE-OBS", "Unknown")
+                metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
+
+                # Ask user if type doesn't match
+                if image_type != expected_type:
+                    response = QMessageBox.question(
+                        self, 
+                        "Mismatched Image Type", 
+                        f"The file:\n{os.path.basename(file_path)}\nhas IMAGETYP = {image_type} "
+                        f"but you are adding it as {expected_type}. \n\nDo you still want to add it?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if response != QMessageBox.StandardButton.Yes:
+                        return  # User rejected adding the file
+
+                # Ensure exposure is properly formatted as a string with "s" if it's a valid number
+                if isinstance(exposure, (int, float)):
+                    exposure = f"{exposure}s"
+
+                # --- Handle Dark Frames ---
+                if expected_type == "DARK":
+                    key = f"{exposure} ({image_size})"
+                    if key not in self.dark_files:
+                        self.dark_files[key] = []
+                    self.dark_files[key].append(file_path)
+
+                    items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                    if not items:
+                        exposure_item = QTreeWidgetItem([key])
+                        tree.addTopLevelItem(exposure_item)
+                    else:
+                        exposure_item = items[0]
+
+                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                # --- Handle Flat Frames ---
+                elif expected_type == "FLAT":
+                    key = f"{filter_name} - {exposure} ({image_size})"
+                    if key not in self.flat_files:
+                        self.flat_files[key] = []
+                    self.flat_files[key].append(file_path)
+
+                    filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                    if not filter_items:
+                        filter_item = QTreeWidgetItem([filter_name])
+                        tree.addTopLevelItem(filter_item)
+                    else:
+                        filter_item = filter_items[0]
+
+                    exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                    exposure_item = next((item for item in exposure_items if item.text(0) == f"{exposure} ({image_size})"), None)
+
+                    if not exposure_item:
+                        exposure_item = QTreeWidgetItem([f"{exposure} ({image_size})"])
+                        filter_item.addChild(exposure_item)
+
+                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                # --- Handle Light Frames ---
+                elif expected_type == "LIGHT":
+                    key = f"{filter_name} - {exposure} ({image_size})"
+                    if key not in self.light_files:
+                        self.light_files[key] = []
+                    self.light_files[key].append(file_path)
+
+                    filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                    if not filter_items:
+                        filter_item = QTreeWidgetItem([filter_name])
+                        tree.addTopLevelItem(filter_item)
+                    else:
+                        filter_item = filter_items[0]
+
+                    exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                    exposure_item = next((item for item in exposure_items if item.text(0) == f"{exposure} ({image_size})"), None)
+
+                    if not exposure_item:
+                        exposure_item = QTreeWidgetItem([f"{exposure} ({image_size})"])
+                        filter_item.addChild(exposure_item)
+
+                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                print(f"DEBUG: Added {file_path} under {expected_type} with metadata: {metadata}")
+                self.update_status(f"✅ Added {file_path} under {expected_type} with metadata: {metadata}")
+                QApplication.processEvents()
+        except Exception as e:
+            print(f"ERROR: Could not read FITS header for {file_path} - {e}")
+            self.update_status(f"❌ ERROR: Could not read FITS header for {file_path} - {e}")
+            QApplication.processEvents()
+
+
+    def add_master_files(self, tree, file_type, files):
+        """ Adds multiple master calibration files to the correct treebox with metadata including image dimensions. """
+        for file_path in files:
+            try:
+                with fits.open(file_path) as hdul:
+                    header = hdul[0].header
+                    data = hdul[0].data
+
+                    # Check for both EXPOSURE and EXPTIME
+                    exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                    filter_name = header.get("FILTER", "Unknown")
+
+                    # Extract image dimensions
+                    if data is not None:
+                        height, width = data.shape[-2:]  # Handle 2D and possible 3D images
+                        image_size = f"{width}x{height}"
+                    else:
+                        image_size = "Unknown"
+
+                    # Extract metadata
+                    sensor_temp = header.get("CCD-TEMP", "N/A")
+                    date_obs = header.get("DATE-OBS", "Unknown")
+                    metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
+
+                    # Construct key based on file type
+                    if file_type == "DARK":
+                        key = f"{exposure}s ({image_size})"
+                        self.master_files[key] = file_path  # Store master dark
+                        self.master_sizes[file_path] = image_size  # ✅ Store size
+
+                    elif file_type == "FLAT":
+                        key = f"{filter_name} ({image_size})"
+                        self.master_files[key] = file_path  # Store master flat
+                        self.master_sizes[file_path] = image_size  # ✅ Store size
+
+                    # Check if category item exists
+                    items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                    if not items:
+                        item = QTreeWidgetItem([key])
+                        tree.addTopLevelItem(item)
+                    else:
+                        item = items[0]
+
+                    # Add master file to column 1 with metadata
+                    item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                    print(f"✅ DEBUG: Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                    self.update_status(f"✅ Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                    print(f"📂 DEBUG: Master Darks Stored: {self.master_files}")
+                    self.update_status(f"📂 DEBUG: Master Darks Stored: {self.master_files}")
+                    QApplication.processEvents()
+
+            except Exception as e:
+                print(f"❌ ERROR: Failed to load master file {file_path} - {e}")
+                self.update_status(f"❌ ERROR: Failed to load master file {file_path} - {e}")
+                QApplication.processEvents()
+
+
+
+    def create_master_dark(self):
+        """ Creates master darks using stacking and saves them in the stacking directory. """
+
+        # Ensure stacking directory is set
+        if not self.stacking_directory:
+            QMessageBox.warning(self, "Error", "Please set the stacking directory first using the wrench button.")
+            return
+
+        exposure_tolerance = self.exposure_tolerance_spinbox.value()
+        dark_files_by_exposure = {}
+
+        # ✅ Step 1: Group dark files by exposure time within tolerance
+        for exposure_time, file_list in self.dark_files.items():
+            exposure_time = float(exposure_time.replace("s", ""))  # Convert to float
+            matched_exposure = None
+
+            for existing_exposure in dark_files_by_exposure.keys():
+                if abs(existing_exposure - exposure_time) <= exposure_tolerance:
+                    matched_exposure = existing_exposure
+                    break
+
+            if matched_exposure is None:
+                dark_files_by_exposure[exposure_time] = []
+                matched_exposure = exposure_time
+
+            dark_files_by_exposure[matched_exposure].extend(file_list)
+
+        # ✅ Step 2: Create Master Calibration Directory
+        master_dir = os.path.join(self.stacking_directory, "Master_Calibration_Files")
+        os.makedirs(master_dir, exist_ok=True)
+
+        # ✅ Step 3: Stack Each Group
+        for exposure_time, file_list in dark_files_by_exposure.items():
+            if len(file_list) < 2:
+                self.update_status(f"⚠️ Skipping {exposure_time}s - Not enough frames to stack.")
+                QApplication.processEvents()
+                continue
+
+            self.update_status(f"🟢 Processing {len(file_list)} darks for {exposure_time}s exposure...")
+            QApplication.processEvents()
+
+            # ✅ Load dark frames directly from the stored file list
+            stacked_data = []
+            for file in file_list:
+                with fits.open(file) as hdul:
+                    data = hdul[0].data.astype(np.float32)  # Ensure 32-bit precision
+                    stacked_data.append(data)
+                    self.update_status(f"📂 Loaded {os.path.basename(file)}")
+                    QApplication.processEvents()
+
+            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
+
+            # ✅ Step 4: Apply Windsorized Sigma Clipping
+            self.update_status(f"📊 Stacking {len(file_list)} frames using sigma clipping...")
+            QApplication.processEvents()
+            clipped_mean = windsorized_sigma_clip(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
+
+            # ✅ Step 5: Save Master Dark
+            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s.fits")
+            self.save_master_dark(clipped_mean, master_dark_path, exposure_time)
+
+            # ✅ Step 6: Add to Master Dark Tree
+            self.add_master_dark_to_tree(exposure_time, master_dark_path)
+
+            self.update_status(f"✅ Master Dark saved: {master_dark_path}")
+            QApplication.processEvents()
+
+        # ✅ Assign best master darks after creation
+        self.assign_best_master_dark()
+
+
+
+
+    def save_master_dark(self, master_dark, output_path, exposure_time):
+        """ Saves the master dark as 32-bit floating point FITS. """
+        
+        hdu = fits.PrimaryHDU(master_dark.astype(np.float32))
+        hdr = hdu.header
+        hdr["IMAGETYP"] = "MASTER DARK"
+        hdr["EXPOSURE"] = exposure_time
+        hdr["BITPIX"] = -32  # 32-bit floating point
+
+        hdu.writeto(output_path, overwrite=True)
+        print(f"Master Dark FITS saved: {output_path}")
+
+    def add_master_dark_to_tree(self, exposure_time, master_dark_path):
+        """ Adds the newly created Master Dark to the Master Dark TreeBox and stores it. """
+
+        # Ensure exposure time is formatted as key
+        exposure_key = f"{exposure_time}s"
+
+        # Store in dictionary so assign_best_master_dark() can use it
+        self.master_files[exposure_key] = master_dark_path
+        print(f"📝 DEBUG: Stored Master Dark -> {exposure_key}: {master_dark_path}")
+        self.update_status(f"📝 Stored Master Dark -> {exposure_key}: {master_dark_path}")
+        QApplication.processEvents()
+
+        # Check if exposure already exists in tree
+        existing_items = self.master_dark_tree.findItems(exposure_key, Qt.MatchFlag.MatchExactly, 0)
+
+        if existing_items:
+            exposure_item = existing_items[0]
+        else:
+            exposure_item = QTreeWidgetItem([exposure_key])
+            self.master_dark_tree.addTopLevelItem(exposure_item)
+
+        master_item = QTreeWidgetItem([os.path.basename(master_dark_path)])
+        exposure_item.addChild(master_item)
+
+
+    def assign_best_master_dark(self):
+        """ Assigns the closest matching master dark based on exposure & image size. """
+        print("\n🔍 DEBUG: Assigning best master darks to flats...\n")
+
+        print(f"📂 Loaded Master Darks ({len(self.master_files)} total):")
+        for key, value in self.master_files.items():
+            print(f"   📌 {key} -> {value}")
+
+        for i in range(self.flat_tree.topLevelItemCount()):
+            filter_item = self.flat_tree.topLevelItem(i)
+
+            for j in range(filter_item.childCount()):
+                exposure_item = filter_item.child(j)
+                exposure_text = exposure_item.text(0)  # Example: "0.0007s (8288x5644)"
+
+                # Extract exposure time (everything before space or parenthesis)
+                match = re.match(r"([\d.]+)s?", exposure_text)
+                if not match:
+                    print(f"⚠️ WARNING: Could not parse exposure time from {exposure_text}")
+                    continue  # Skip if exposure is invalid
+
+                exposure_time = float(match.group(1))  # Extracted number
+                print(f"🟢 Checking Flat Group: {exposure_text}")
+                print(f"✅ Parsed Flat Exposure: {exposure_time}s")
+
+                # Get the size from metadata
+                metadata_text = exposure_item.child(0).text(1) if exposure_item.childCount() > 0 else "Unknown"
+                size_match = re.search(r"Size: (\d+x\d+)", metadata_text)
+                image_size = size_match.group(1) if size_match else "Unknown"
+                print(f"✅ Parsed Flat Size: {image_size}")
+
+                # Find closest matching master dark
+                best_match = None
+                best_diff = float("inf")
+
+                for master_dark_exposure, master_dark_path in self.master_files.items():
+                    master_dark_exposure_time_match = re.match(r"([\d.]+)s?", master_dark_exposure)
+                    if not master_dark_exposure_time_match:
+                        continue  # Skip if master dark exposure is invalid
+
+                    master_dark_exposure_time = float(master_dark_exposure_time_match.group(1))
+                    master_dark_size = self.master_sizes.get(master_dark_path, "Unknown")  # ✅ Use `self.master_sizes`
+
+                    print(f"🔎 Comparing with Master Dark: {master_dark_exposure_time}s ({master_dark_size})")
+
+                    # Ensure exposure and image size match
+                    if image_size == master_dark_size:
+                        diff = abs(master_dark_exposure_time - exposure_time)
+                        if diff < best_diff:
+                            best_match = master_dark_path
+                            best_diff = diff
+
+                # Assign best match in column 3
+                exposure_item.setText(2, os.path.basename(best_match) if best_match else "None")
+                print(f"🔵 Assigned Master Dark: {os.path.basename(best_match) if best_match else 'None'}\n")
+                print(f"📂 Loaded Master Darks ({len(self.master_files)} total):")
+                for key, value in self.master_files.items():
+                    print(f"   📌 {key} -> {value}")
+
+                print("\n🔍 DEBUG: Assigning best master darks to flats...\n")
+
+
+        print("\n✅ DEBUG: Finished assigning best matching Master Darks to Flats.\n")
+
+
+    def update_override_dark_combo(self):
+        """ Populates the dropdown with available Master Darks and None options. """
+        self.override_dark_combo.clear()
+        self.override_dark_combo.addItem("None (Use Auto-Select)")  # ✅ Default behavior
+        self.override_dark_combo.addItem("None (Use no Dark to Calibrate)")  # ✅ New option
+
+        for exposure, path in self.master_files.items():
+            self.override_dark_combo.addItem(f"{os.path.basename(path)} ({exposure})")
+
+        print("✅ DEBUG: Updated Override Master Dark dropdown with No-Dark option.")
+
+
+
+    def override_selected_master_dark(self):
+        """ Overrides the selected master dark for the currently highlighted flat group. """
+        selected_items = self.flat_tree.selectedItems()
+        if not selected_items:
+            return
+
+        new_dark = self.override_dark_combo.currentText()
+
+        # ✅ Handle "None (Use no Dark to Calibrate)" explicitly
+        if new_dark == "None (Use no Dark to Calibrate)":
+            new_dark = "No Calibration"  # Show "No Calibration" in the UI
+        elif new_dark == "None (Use Auto-Select)":
+            new_dark = None  # Auto-select behavior
+
+        for item in selected_items:
+            if item.parent():  # Ensure it's an exposure group, not the top filter name
+                item.setText(2, new_dark if new_dark else "Auto")
+
+        print(f"✅ DEBUG: Override Master Dark set to: {new_dark}")
+
+
+
+    def create_master_flat(self):
+        """ Creates master flats using per-frame dark subtraction before stacking. """
+
+        if not self.stacking_directory:
+            QMessageBox.warning(self, "Error", "Please set the stacking directory first using the wrench button.")
+            return
+
+        exposure_tolerance = self.flat_exposure_tolerance_spinbox.value()
+        flat_files_by_filter = {}
+
+        # ✅ Group Flats by Filter & Exposure within Tolerance
+        for filter_exposure, file_list in self.flat_files.items():
+            filter_name, exposure_time = filter_exposure.split(" - ")
+
+            # Extract only the exposure time
+            match = re.match(r"([\d.]+)s?", exposure_time)
+            if not match:
+                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time}")
+                continue  # Skip invalid entries
+
+            exposure_time = float(match.group(1))  # Extracted number
+
+            matched_exposure = None
+            for existing_exposure in flat_files_by_filter.keys():
+                if abs(existing_exposure - exposure_time) <= exposure_tolerance:
+                    matched_exposure = existing_exposure
+                    break
+
+            if matched_exposure is None:
+                flat_files_by_filter[exposure_time] = []
+                matched_exposure = exposure_time
+
+            flat_files_by_filter[matched_exposure].extend(file_list)
+
+        # ✅ Create Master Calibration Directory
+        master_dir = os.path.join(self.stacking_directory, "Master_Calibration_Files")
+        os.makedirs(master_dir, exist_ok=True)
+
+        # ✅ Stack Each Group
+        for exposure_time, file_list in flat_files_by_filter.items():
+            if len(file_list) < 2:
+                self.update_status(f"⚠️ Skipping {exposure_time}s - Not enough frames to stack.")
+                QApplication.processEvents()
+                continue
+
+            self.update_status(f"🟢 Processing {len(file_list)} flats for {exposure_time}s exposure...")
+            QApplication.processEvents()
+
+            # ✅ Extract best-matching Master Dark from TreeBox assignment
+            selected_master_dark = None
+            for i in range(self.flat_tree.topLevelItemCount()):
+                filter_item = self.flat_tree.topLevelItem(i)
+                if filter_item.text(0) == filter_name:
+                    for j in range(filter_item.childCount()):
+                        exposure_item = filter_item.child(j)
+                        if f"{exposure_time}s" in exposure_item.text(0):  # Matching exposure
+                            master_dark_name = exposure_item.text(2)  # Get Master Dark filename from treebox
+                            
+                            # ✅ Convert from filename to full path if it exists in master_files
+                            selected_master_dark = self.master_files.get(master_dark_name, None)
+                            break
+
+
+            # ✅ Ensure selected_master_dark is a **full file path**
+            if selected_master_dark and selected_master_dark not in ["None", "No Calibration"]:
+                selected_master_dark = self.master_files.get(selected_master_dark, None)
+
+            # ✅ Handle "None (Use no Dark to Calibrate)"
+            if selected_master_dark in [None, "No Calibration"]:
+                selected_master_dark = None
+                self.update_status(f"🚫 No Dark Calibration applied for {exposure_time}s flats.")
+
+            self.update_status(f"🔹 Using Master Dark: {selected_master_dark if selected_master_dark else 'None'} for {exposure_time}s flats.")
+            QApplication.processEvents()
+
+            # ✅ Load flats directly from file list
+            stacked_data = []
+            self.update_status(f"📂 Loading flat frames for calibration")
+            QApplication.processEvents()
+            for file in file_list:
+                with fits.open(file) as hdul:
+                    data = hdul[0].data.astype(np.float32)
+                    stacked_data.append(data)
+
+            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
+
+            # ✅ Apply Dark Subtraction Per Frame
+            if selected_master_dark:
+                with fits.open(selected_master_dark) as hdul:
+                    master_dark_data = hdul[0].data.astype(np.float32)
+
+                # 🔥 Apply Optimized Dark Subtraction
+                self.update_status("⚡ Applying dark subtraction per frame...")
+                QApplication.processEvents()
+                stacked_data = subtract_dark(stacked_data, master_dark_data)
+                self.update_status(f"✅ Dark Subtraction applied using: {selected_master_dark}")
+
+            # ✅ Apply Windsorized Sigma Clipping
+            self.update_status(f"📊 Stacking {len(file_list)} frames using sigma clipping...")
+            QApplication.processEvents()
+            clipped_mean = windsorized_sigma_clip(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
+
+            # ✅ Save Master Flat
+            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{filter_name}.fits")
+            self.save_master_flat(clipped_mean, master_flat_path, exposure_time, filter_name)
+
+            # ✅ Add to Master Flat Tree
+            self.add_master_flat_to_tree(filter_name, master_flat_path)
+
+            self.update_status(f"✅ Master Flat saved: {master_flat_path}")
+
+
+
+
+
+    def save_master_flat(self, master_flat, output_path, exposure_time, filter_name):
+        """ Saves master flat as 32-bit floating point FITS with correct header. """
+
+        hdu = fits.PrimaryHDU(master_flat.astype(np.float32))
+        hdr = hdu.header
+        hdr["IMAGETYP"] = "MASTER FLAT"
+        hdr["EXPOSURE"] = exposure_time
+        hdr["FILTER"] = filter_name
+        hdr["BITPIX"] = -32  # 32-bit floating point
+
+        hdu.writeto(output_path, overwrite=True)
+        print(f"Master Flat FITS saved: {output_path}")
+
+    def add_master_flat_to_tree(self, filter_name, master_flat_path):
+        """ Adds the newly created Master Flat to the Master Flat TreeBox and stores it. """
+
+        # Store in dictionary
+        self.master_files[filter_name] = master_flat_path  # Store the flat file for future use
+        print(f"📝 DEBUG: Stored Master Flat -> {filter_name}: {master_flat_path}")
+
+        existing_items = self.master_flat_tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+
+        if existing_items:
+            filter_item = existing_items[0]
+        else:
+            filter_item = QTreeWidgetItem([filter_name])
+            self.master_flat_tree.addTopLevelItem(filter_item)
+
+        master_item = QTreeWidgetItem([os.path.basename(master_flat_path)])
+        filter_item.addChild(master_item)
+
+
 def get_wcs_from_header(header):
     """Attempt to create a WCS from a FITS header."""
     if not header:
@@ -12042,7 +13020,7 @@ class SupernovaAsteroidHunterTab(QWidget):
             )
             # Optionally disable auto-stretch so the boxes remain bright
             preview.stretch_toggle.setChecked(False)
-            preview.resize(1200, 800)
+            preview.resize(800, 600)
             preview.show()  # non-modal
         else:
             QMessageBox.information(self, "No Anomalies", f"No anomalies found for {image_name}.")
@@ -26235,8 +27213,7 @@ class CurveEditor(QGraphicsView):
 
     def updateCurve(self):
         """Update the curve by redrawing based on endpoints and control points."""
-
-
+        
         all_points = self.end_points + self.control_points
         if not all_points:
             # No points, no curve
@@ -26252,31 +27229,40 @@ class CurveEditor(QGraphicsView):
         xs = [p.scenePos().x() for p in sorted_points]
         ys = [p.scenePos().y() for p in sorted_points]
 
+        # Ensure X values are strictly increasing
+        unique_xs, unique_ys = [], []
+        for i in range(len(xs)):
+            if i == 0 or xs[i] > xs[i - 1]:  # Skip duplicate X values
+                unique_xs.append(xs[i])
+                unique_ys.append(ys[i])
+
         # If there's only one point or none, we can't interpolate
-        if len(xs) < 2:
-            # If there's a single point, just draw a dot or do nothing
+        if len(unique_xs) < 2:
             if self.curve_item:
                 self.scene.removeItem(self.curve_item)
                 self.curve_item = None
 
-            if len(xs) == 1:
+            if len(unique_xs) == 1:
                 # Optionally draw a single point
                 single_path = QPainterPath()
-                single_path.addEllipse(xs[0]-2, ys[0]-2, 4, 4)
+                single_path.addEllipse(unique_xs[0]-2, unique_ys[0]-2, 4, 4)
                 pen = QPen(Qt.GlobalColor.white)
                 pen.setWidth(3)
                 self.curve_item = self.scene.addPath(single_path, pen)
             return
 
-        # Create a PCHIP interpolator
-        interpolator = PchipInterpolator(xs, ys)
-        self.curve_function = interpolator
+        try:
+            # Create a PCHIP interpolator
+            interpolator = PchipInterpolator(unique_xs, unique_ys)
+            self.curve_function = interpolator
 
-        # Sample the curve
-        sample_xs = np.linspace(xs[0], xs[-1], 361)
-        sample_ys = interpolator(sample_xs)
+            # Sample the curve
+            sample_xs = np.linspace(unique_xs[0], unique_xs[-1], 361)
+            sample_ys = interpolator(sample_xs)
 
-
+        except ValueError as e:
+            print(f"Interpolation Error: {e}")  # Log the error instead of crashing
+            return  # Exit gracefully
 
         curve_points = [QPointF(float(x), float(y)) for x, y in zip(sample_xs, sample_ys)]
         self.curve_points = curve_points
@@ -26302,8 +27288,7 @@ class CurveEditor(QGraphicsView):
         if hasattr(self, 'preview_callback') and self.preview_callback:
             # Generate the 8-bit LUT and pass it to the callback
             lut = self.get8bitLUT()
-            self.preview_callback(lut)  # Pass curve_mode      
-
+            self.preview_callback(lut)
 
     def getCurveFunction(self):
         return self.curve_function
