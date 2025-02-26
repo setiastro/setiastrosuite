@@ -1,9 +1,9 @@
 {
-  "version": "2.11.3",
+  "version": "2.11.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.3/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.3/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.3/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.4/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.4/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Function: Stellar Registration to align multiple images to a single reference frame.  Great to use for things like Supernova Asteroid Hunter and upcoming features over the next few weeks "
+  "notes": "Hot fix for curves bug that was causing crashes with reports of x values not strictly increasing "
 }
