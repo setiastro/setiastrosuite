@@ -8564,7 +8564,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status("⚠️ No light frames found!")
             return
 
-        self.update_status("📊 Measuring frames for weight calculation...")
+        self.update_status("📊 Loading in frame image arrays for weight calculation...")
 
         self.frame_weights = {}  # ✅ Store as an instance variable
         mean_values = {}
@@ -8748,7 +8748,7 @@ class StackingSuiteDialog(QDialog):
                     # Load the aligned image.
                     image_data, header, _, _ = load_image(aligned_file_path)
                     if image_data is None:
-                        self.update_status(f"⚠️ Failed to load {aligned_file_path}")
+                        self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
                         continue
 
                     stacked_data.append(image_data)
@@ -11580,6 +11580,91 @@ class StellarAlignmentDialog(QDialog):
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
 
+#############################################
+# Worker Signals for Registration Workers
+#############################################
+class RegistrationWorkerSignals(QObject):
+    progress = pyqtSignal(str)  # e.g., "Loaded image X"
+    result = pyqtSignal(str)    # e.g., output filename
+    error = pyqtSignal(str)     # e.g., error message
+
+#############################################
+# Worker to Process One Image Registration
+#############################################
+class StarRegistrationWorker(QRunnable):
+    def __init__(self, file_path, ref_stars, ref_triangles, output_directory):
+        super().__init__()
+        self.file_path = file_path
+        self.ref_stars = ref_stars
+        self.ref_triangles = ref_triangles
+        self.output_directory = output_directory
+        self.signals = RegistrationWorkerSignals()
+
+    def run(self):
+        try:
+            # Load image
+            img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
+            if img is None:
+                self.signals.error.emit(f"Could not load {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+            
+            # Detect stars using the static grid method
+            img_stars = StarRegistrationThread.detect_grid_stars_static(img)
+            if len(img_stars) < 9:
+                self.signals.error.emit(f"Not enough stars in {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # Compute affine transform with iterative refinement (static version)
+            transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
+                img_stars, self.ref_stars, self.ref_triangles
+            )
+            if transform is None:
+                self.signals.error.emit(f"Alignment failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Computed transform for {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # Apply the affine transform
+            aligned_image = StarRegistrationThread.apply_affine_transform_static(img, transform)
+            if aligned_image is None:
+                self.signals.error.emit(f"Transform application failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            # Build output filename (force extension to .fits)
+            base = os.path.basename(self.file_path)
+            name, _ = os.path.splitext(base)
+            output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
+            
+            # Save the aligned image
+            save_image(
+                img_array=aligned_image,
+                filename=output_filename,
+                original_format="fits",
+                bit_depth=img_bit_depth,
+                original_header=img_header,
+                is_mono=img_is_mono
+            )
+            self.signals.result.emit(output_filename)
+            self.signals.progress.emit(f"Registered {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+        except Exception as e:
+            self.signals.error.emit(f"Error processing {self.file_path}: {e}")
+            QApplication.processEvents()
+
+#############################################
+# Main Star Registration Thread (Concurrent)
+#############################################
 class StarRegistrationThread(QThread):
     progress_update = pyqtSignal(str)
     registration_complete = pyqtSignal(bool, str)
@@ -11589,153 +11674,60 @@ class StarRegistrationThread(QThread):
         self.reference_image_path = reference_image_path
         self.files_to_align = files_to_align
         self.output_directory = output_directory
-        self.failed_files = []  # Track failed images
 
     def run(self):
         try:
             self.progress_update.emit("Identifying stars in reference image...")
-            print("DEBUG: Loading reference image...")
-
             ref_image, ref_header, ref_bit_depth, ref_is_mono = load_image(self.reference_image_path)
-            print(f"DEBUG: Reference image shape={ref_image.shape}, bit depth={ref_bit_depth}, mono={ref_is_mono}")
-
+            self.progress_update.emit(f"Loaded reference image: shape {ref_image.shape}")
             ref_stars = self.detect_stars(ref_image)
-            print(f"DEBUG: Detected {len(ref_stars)} stars in reference image")
-            self.progress_update.emit(f"Detected {len(ref_stars)} stars in reference image")
-
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
-
             ref_triangles = self.build_triangle_dict(ref_stars)
-            print(f"DEBUG: Built {len(ref_triangles)} triangle entries from reference image")
+            self.progress_update.emit(f"Reference image: {len(ref_stars)} stars, {len(ref_triangles)} triangle entries")
 
-            success_count = 0
+            # Use all available cores.
+            pool = QThreadPool.globalInstance()
+            num_cores = os.cpu_count() or 4
+            pool.setMaxThreadCount(num_cores)
+            self.progress_update.emit(f"Using {num_cores} cores for registration.")
 
-            for i, file_path in enumerate(self.files_to_align):
-                self.progress_update.emit(f"Registering {os.path.basename(file_path)} ({i+1}/{len(self.files_to_align)})...")
-                print(f"DEBUG: Processing {file_path}")
+            total_files = len(self.files_to_align)
+            for file_path in self.files_to_align:
+                worker = StarRegistrationWorker(file_path, ref_stars, ref_triangles, self.output_directory)
+                worker.signals.progress.connect(self.on_worker_progress)
+                worker.signals.error.connect(self.on_worker_error)
+                worker.signals.result.connect(self.on_worker_result)
+                pool.start(worker)
 
-                # Load image
-                img, img_header, img_bit_depth, img_is_mono = load_image(file_path)
-                if img is None:
-                    self.progress_update.emit(f"Skipping {file_path} (could not load).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                print(f"DEBUG: Loaded image shape={img.shape}, bit depth={img_bit_depth}, mono={img_is_mono}")
-
-                # Detect stars using 3x3 grid strategy
-                img_stars = self.detect_grid_stars(img)
-                print(f"DEBUG: Detected {len(img_stars)} stars in image")
-
-                if len(img_stars) < 9:
-                    self.progress_update.emit(f"Skipping {file_path} (not enough stars found).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Compute affine transformation with RANSAC
-                transform_matrix = self.compute_affine_transform_with_ransac(img_stars, ref_stars, ref_triangles)
-                print(f"DEBUG: Transformation matrix: {transform_matrix}")
-
-                if transform_matrix is None:
-                    self.progress_update.emit(f"Skipping {file_path} (alignment failed).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Apply transformation
-                aligned_image = self.apply_affine_transform(img, transform_matrix)
-
-                if aligned_image is None:
-                    self.progress_update.emit(f"Skipping {file_path} (could not apply transformation).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Generate output filename
-                output_filename = os.path.join(self.output_directory, os.path.splitext(os.path.basename(file_path))[0] + "_r.fits")
-
-                # Save the aligned image
-                save_image(
-                    img_array=aligned_image,
-                    filename=output_filename,
-                    original_format="fits",
-                    bit_depth=img_bit_depth,
-                    original_header=img_header if img_header else None,
-                    is_mono=img_is_mono
-                )
-
-                print(f"DEBUG: Saved aligned image to {output_filename}")
-                success_count += 1
-
-            self.show_summary(success_count)
-
+            pool.waitForDone()
+            summary_text = f"Concurrent registration complete. Processed {total_files} files."
+            self.registration_complete.emit(True, summary_text)
         except Exception as e:
-            print(f"ERROR: {e}")
-            self.registration_complete.emit(False, f"Error: {str(e)}")
+            self.registration_complete.emit(False, f"Error: {e}")
 
+    def on_worker_progress(self, msg):
+        # Emit the message to the stacking suite's status window.
+        self.progress_update.emit(msg)
 
+    def on_worker_error(self, msg):
+        self.progress_update.emit("Error: " + msg)
+
+    def on_worker_result(self, out):
+        self.progress_update.emit("Saved: " + out)
 
     def detect_stars(self, image):
-        """ Detects stars in an image using DAOStarFinder (FWHM=3.5). """
-        if image.ndim == 3:  # Convert color images to grayscale
+        if image.ndim == 3:
             image = np.mean(image, axis=2)
-
         mean, median, std = sigma_clipped_stats(image)
         daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
         sources = daofind(image - median)
-
         if sources is None or len(sources) == 0:
-            print("DEBUG: No stars detected")
             return np.array([])
-
-        
-        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T  # (N, 2) shape
-
-    def detect_grid_stars(self, image):
-        """ Detects 3 brightest stars per 3x3 grid region while excluding a 5% border margin. """
-        print("DEBUG: Detecting stars in 3x3 grid with 5% border margin")
-        if image.ndim == 3:  
-            image = np.mean(image, axis=2)  # Convert to grayscale
-
-        h, w = image.shape
-        margin_x = int(w * 0.05)  # 5% margin on X
-        margin_y = int(h * 0.05)  # 5% margin on Y
-
-        # Define valid region inside margin
-        valid_x_min, valid_x_max = margin_x, w - margin_x
-        valid_y_min, valid_y_max = margin_y, h - margin_y
-
-        # Define grid within valid region
-        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
-        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
-
-        stars = []
-        
-        for i in range(len(grid_x) - 1):  # Avoid out-of-bounds
-            for j in range(len(grid_y) - 1):  # Avoid out-of-bounds
-                x_min, x_max = grid_x[i], grid_x[i + 1]
-                y_min, y_max = grid_y[j], grid_y[j + 1]
-
-                sub_img = image[y_min:y_max, x_min:x_max]
-                if sub_img.size == 0:
-                    continue  # Skip empty regions
-
-                if np.std(sub_img) > 0:
-                    local_stars = self.detect_stars(sub_img)
-                    if len(local_stars) > 0:
-                        # Convert to original image coordinates, ensuring they remain within valid bounds
-                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max - 1)
-                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max - 1)
-
-                        # Sort stars by brightness and select top 3 per region
-                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:12])  
-
-        return np.array(stars) if stars else np.array([])
-
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
 
     def build_triangle_dict(self, coords):
-        """ Builds a dictionary mapping triangle invariants to star triangle sets. """
         tri = Delaunay(coords)
         tri_dict = {}
         for simplex in tri.simplices:
@@ -11748,7 +11740,6 @@ class StarRegistrationThread(QThread):
         return tri_dict
 
     def compute_triangle_invariant(self, tri_points):
-        """ Computes invariant features for a given triangle. """
         d1 = np.linalg.norm(tri_points[0] - tri_points[1])
         d2 = np.linalg.norm(tri_points[1] - tri_points[2])
         d3 = np.linalg.norm(tri_points[2] - tri_points[0])
@@ -11757,134 +11748,132 @@ class StarRegistrationThread(QThread):
             return None
         return (sides[1] / sides[0], sides[2] / sides[0])
 
-    def compute_affine_transform_with_ransac(self, img_stars, ref_stars, ref_triangles, max_attempts=5, max_iter=5, convergence_thresh=0.3):
-        """
-        Computes an affine transformation using RANSAC followed by iterative refinement.
-        
-        Parameters:
-        img_stars: (N,2) array of star positions in the image to be aligned.
-        ref_stars: (M,2) array of star positions in the reference image.
-        ref_triangles: (unused in this version) dictionary of triangle invariants.
-        max_attempts: maximum number of attempts to get an initial rough transform.
-        max_iter: maximum number of iterative refinement iterations.
-        convergence_thresh: convergence tolerance in pixels (for the translation components).
-        
-        Returns:
-        A 2x3 affine transformation matrix if successful; otherwise, None.
-        """
-        # Initial rough transform using basic RANSAC approach.
+    # --- Static Methods for use in Workers ---
+    @staticmethod
+    def detect_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        mean, median, std = sigma_clipped_stats(image)
+        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        sources = daofind(image - median)
+        if sources is None or len(sources) == 0:
+            return np.array([])
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+    @staticmethod
+    def detect_grid_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        h, w = image.shape
+        margin_x = int(w * 0.05)
+        margin_y = int(h * 0.05)
+        valid_x_min, valid_x_max = margin_x, w - margin_x
+        valid_y_min, valid_y_max = margin_y, h - margin_y
+        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+        stars = []
+        for i in range(len(grid_x) - 1):
+            for j in range(len(grid_y) - 1):
+                x_min, x_max = grid_x[i], grid_x[i+1]
+                y_min, y_max = grid_y[j], grid_y[j+1]
+                sub_img = image[y_min:y_max, x_min:x_max]
+                if sub_img.size == 0:
+                    continue
+                if np.std(sub_img) > 0:
+                    local_stars = StarRegistrationThread.detect_stars_static(sub_img)
+                    if len(local_stars) > 0:
+                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
+                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
+                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+                        stars.extend(sorted_stars[:12])
+        return np.array(stars) if stars else np.array([])
+
+    @staticmethod
+    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=5, max_iter=5, convergence_thresh=0.3):
+        print("DEBUG: Starting compute_affine_transform_with_ransac_static")
         attempt = 0
         transform = None
         while attempt < max_attempts:
             attempt += 1
+            print(f"DEBUG: Initial RANSAC attempt {attempt}")
             matches = []
             for img_star in img_stars:
                 distances = np.linalg.norm(ref_stars - img_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 25:  # initial matching threshold in pixels
+                if distances[closest_idx] < 20:
                     matches.append((img_star, ref_stars[closest_idx]))
+            print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
             if len(matches) < 3:
-                self.progress_update.emit("Not enough matching stars found in initial estimation, skipping image.")
-                return None
-
+                print("DEBUG: Not enough matches; continuing to next attempt.")
+                continue
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
             dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
-
-            rough_transform, inliers = cv2.estimateAffinePartial2D(src_pts.reshape(-1, 1, 2),
-                                                                dst_pts.reshape(-1, 1, 2),
-                                                                method=cv2.LMEDS)
-            if rough_transform is not None and self.is_valid_transform(rough_transform):
+            rough_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
+            if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
                 transform = rough_transform
+                print("DEBUG: Rough transform computed successfully.")
                 break
-
+            else:
+                print("DEBUG: Rough transform invalid; retrying.")
         if transform is None:
-            self.progress_update.emit("Initial affine transform not found.")
+            print("DEBUG: Failed to compute initial rough transform.")
             return None
-
-        # Begin iterative refinement.
         for iter_num in range(max_iter):
-            # Apply current transform to original image star coordinates.
             transformed_img_stars = cv2.transform(img_stars.reshape(-1, 1, 2), transform).reshape(-1, 2)
-
-            # For each transformed star, find the closest reference star with a tighter threshold.
             matches = []
             for idx, t_star in enumerate(transformed_img_stars):
                 distances = np.linalg.norm(ref_stars - t_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 7:  # tighter threshold for refinement
+                if distances[closest_idx] < 7:
                     matches.append((img_stars[idx], ref_stars[closest_idx]))
-
+            print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
             if len(matches) < 3:
-                self.progress_update.emit("Not enough matching stars during refinement; alignment failed.")
-                return None  # Return None to avoid partial alignment
-
+                print("DEBUG: Not enough matches during refinement; aborting transform.")
+                return None
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
             dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
-
-            new_transform, inliers = cv2.estimateAffinePartial2D(src_pts.reshape(-1,1,2),
-                                                                dst_pts.reshape(-1,1,2),
-                                                                method=cv2.LMEDS)
+            new_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
             if new_transform is None:
-                self.progress_update.emit("Refinement failed to compute a new transform; alignment failed.")
+                print("DEBUG: Refinement failed to compute a new transform; aborting.")
                 return None
-
-            # Check convergence by comparing translation components.
             delta = np.linalg.norm(new_transform[:, 2] - transform[:, 2])
+            print(f"DEBUG: Iteration {iter_num+1}: translation delta = {delta:.3f} pixels")
             transform = new_transform
-            self.progress_update.emit(f"Refinement iteration {iter_num+1}: translation delta = {delta:.3f} pixels")
-            QApplication.processEvents()
             if delta < convergence_thresh:
+                print("DEBUG: Convergence reached.")
                 break
-
-        if not self.is_valid_transform(transform):
-            self.progress_update.emit("Final transform did not pass validation; alignment failed.")
+        if not StarRegistrationThread.is_valid_transform_static(transform):
+            print("DEBUG: Final transform failed validation.")
             return None
-
+        print("DEBUG: Final transform computed successfully.")
         return transform
 
-
-
-    def is_valid_transform(self, matrix):
-        """ Ensures affine transform does not over-scale, skew, or flip the image. """
+    @staticmethod
+    def is_valid_transform_static(matrix):
         a, b, tx = matrix[0]
         c, d, ty = matrix[1]
-
-        scale_x = np.sqrt(a ** 2 + c ** 2)
-        scale_y = np.sqrt(b ** 2 + d ** 2)
-        skew = np.abs((a * b + c * d) / (a ** 2 + c ** 2))
-
+        scale_x = np.sqrt(a**2 + c**2)
+        scale_y = np.sqrt(b**2 + d**2)
+        skew = np.abs((a * b + c * d) / (a**2 + c**2))
         if not (0.5 <= scale_x <= 2.0 and 0.5 <= scale_y <= 2.0):
-            print(f"DEBUG: Scale out of bounds: scale_x={scale_x}, scale_y={scale_y}")
             return False
-
         if skew > 0.01:
-            print(f"DEBUG: Skew out of bounds: {skew}")
             return False
-
         return True
 
-    def apply_affine_transform(self, image, transform_matrix):
-        """ Applies affine transformation to align the image. """
+    @staticmethod
+    def apply_affine_transform_static(image, transform_matrix):
         h, w = image.shape[:2]
         return cv2.warpAffine(image, transform_matrix, (w, h), flags=cv2.INTER_LINEAR)
-
-    def show_summary(self, success_count):
-        """ Displays a summary of processed images in a message box. """
-        total = len(self.files_to_align)
-        failed_count = len(self.failed_files)
-
-        summary_text = (
-            f"Star Registration Completed!\n\n"
-            f"Total Images Processed: {total}\n"
-            f"Successfully Aligned: {success_count}\n"
-            f"Failed Alignments: {failed_count}\n"
-        )
-
-        if failed_count > 0:
-            summary_text += "\nFailed Files:\n" + "\n".join([os.path.basename(f) for f in self.failed_files])
-
-        self.registration_complete.emit(True, summary_text)
-
+    
 class StarRegistrationWindow(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
