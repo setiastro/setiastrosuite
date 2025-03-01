@@ -39,6 +39,7 @@ from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
 from numba import njit, prange
 from scipy.optimize import curve_fit
+import exifread
 
 
 from astropy.wcs.utils import skycoord_to_pixel
@@ -210,7 +211,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.5"
+VERSION = "2.11.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1589,6 +1590,17 @@ class AstroEditingSuite(QMainWindow):
         # Reset custom slot names to defaults
         self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
         self.mask_slot_names = {i: f"Mask Slot {i}" for i in range(5)}
+
+        # Update UI elements for slot names (e.g., QToolButtons)
+        for slot, action in self.slot_actions.items():
+            default_name = self.slot_names.get(slot, f"Slot {slot}")
+            action.setText(default_name)
+            action.setStatusTip(f"Open preview for {default_name}")
+
+        # Update any open preview windows
+        for slot, window in self.preview_windows.items():
+            default_name = self.slot_names.get(slot, f"Slot {slot}")
+            window.setWindowTitle(f"Preview - {default_name}")
 
         # Update UI elements that are managed outside of ImageManager
         # For instance, update file name label or other status indicators.
@@ -6698,6 +6710,196 @@ def subtract_dark(frames, dark_frame):
 
     return result
 
+@njit(parallel=True, fastmath=True)
+def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5):
+    """Windsorized Sigma Clipping weighted average with exclusion of zeros."""
+    num_frames, height, width = stack.shape
+    clipped = np.zeros((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in prange(width):
+            pixel_values = stack[:, i, j]
+            median_val = np.median(pixel_values)
+            std_dev = np.std(pixel_values)
+            lower_bound = median_val - lower * std_dev
+            upper_bound = median_val + upper * std_dev
+            # Exclude zeros in addition to out-of-bound values
+            valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+            valid_values = pixel_values[valid_mask]
+            valid_weights = weights[valid_mask]
+            weight_sum = np.sum(valid_weights)
+            if weight_sum > 0:
+                clipped[i, j] = np.sum(valid_values * valid_weights) / weight_sum
+            else:
+                clipped[i, j] = median_val
+    return clipped
+
+
+@njit(parallel=True, fastmath=True)
+def kappa_sigma_clip_weighted(stack, weights, kappa=2.5, iterations=3):
+    """
+    Kappa-Sigma Clipping: Iteratively removes pixels outside [median - kappa*std, median + kappa*std]
+    and returns a weighted average of the remaining pixels.
+    """
+    num_frames, height, width = stack.shape
+    clipped = np.empty((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in range(width):
+            # Make copies of the full pixel stack and weights
+            values = stack[:, i, j].copy()
+            w = weights.copy()
+            for it in range(iterations):
+                if values.size == 0:
+                    break
+                med = np.median(values)
+                std = np.std(values)
+                lower_bound = med - kappa * std
+                upper_bound = med + kappa * std
+                valid = (values != 0) & (values >= lower_bound) & (values <= upper_bound)
+                values = values[valid]
+                w = w[valid]
+            if w.sum() > 0:
+                clipped[i, j] = np.sum(values * w) / w.sum()
+            else:
+                clipped[i, j] = med  # Use last computed median as fallback
+    return clipped
+
+
+@njit(parallel=True, fastmath=True)
+def trimmed_mean_weighted(stack, weights, trim_fraction=0.1):
+    """
+    Trimmed Mean: Sorts the pixel values, removes a fraction of the lowest and highest values,
+    then returns a weighted average of the remaining pixels.
+    """
+    num_frames, height, width = stack.shape
+    clipped = np.empty((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in range(width):
+            pix = stack[:, i, j]
+            # Exclude zeros
+            valid_mask = pix != 0
+            pix = pix[valid_mask]
+            w = weights[valid_mask]
+            n = pix.size
+            if n == 0:
+                clipped[i, j] = 0.0
+            else:
+                trim = int(trim_fraction * n)
+                idx = np.argsort(pix)
+                # Only trim if there are enough values
+                if n > 2 * trim:
+                    trimmed_values = pix[idx][trim:n - trim]
+                    trimmed_weights = w[idx][trim:n - trim]
+                else:
+                    trimmed_values = pix[idx]
+                    trimmed_weights = w[idx]
+                if trimmed_weights.sum() > 0:
+                    clipped[i, j] = np.sum(trimmed_values * trimmed_weights) / trimmed_weights.sum()
+                else:
+                    clipped[i, j] = np.median(trimmed_values)
+    return clipped
+
+
+@njit(parallel=True, fastmath=True)
+def esd_clip_weighted(stack, weights, threshold=3.0):
+    """
+    Extreme Studentized Deviate (ESD) Clipping: Computes z-scores and removes pixels with absolute z-score above threshold.
+    """
+    num_frames, height, width = stack.shape
+    clipped = np.empty((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in range(width):
+            pix = stack[:, i, j]
+            valid_mask = pix != 0
+            values = pix[valid_mask]
+            w = weights[valid_mask]
+            if values.size == 0:
+                clipped[i, j] = 0.0
+                continue
+            mean_val = np.mean(values)
+            std_val = np.std(values)
+            if std_val == 0:
+                clipped[i, j] = mean_val
+                continue
+            z_scores = np.abs((values - mean_val) / std_val)
+            valid2 = z_scores < threshold
+            values = values[valid2]
+            w = w[valid2]
+            if w.sum() > 0:
+                clipped[i, j] = np.sum(values * w) / w.sum()
+            else:
+                clipped[i, j] = mean_val
+    return clipped
+
+
+@njit(parallel=True, fastmath=True)
+def biweight_location_weighted(stack, weights, tuning_constant=6.0):
+    """
+    Biweight Location: Computes a robust estimator of the central value using a biweight function.
+    """
+    num_frames, height, width = stack.shape
+    clipped = np.empty((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in range(width):
+            x = stack[:, i, j]
+            valid_mask = x != 0
+            x = x[valid_mask]
+            w = weights[valid_mask]
+            n = x.size
+            if n == 0:
+                clipped[i, j] = 0.0
+                continue
+            M = np.median(x)
+            mad = np.median(np.abs(x - M))
+            if mad == 0:
+                clipped[i, j] = M
+                continue
+            u = (x - M) / (tuning_constant * mad)
+            mask = np.abs(u) < 1
+            u = u[mask]
+            x_masked = x[mask]
+            w_masked = w[mask]
+            numerator = ((x_masked - M) * (1 - u**2)**2 * w_masked).sum()
+            denominator = ((1 - u**2)**2 * w_masked).sum()
+            if denominator != 0:
+                biweight = M + numerator / denominator
+            else:
+                biweight = M
+            clipped[i, j] = biweight
+    return clipped
+
+
+@njit(parallel=True, fastmath=True)
+def modified_zscore_clip_weighted(stack, weights, threshold=3.5):
+    """
+    Modified Z-Score Clipping: Uses the median absolute deviation (MAD) to compute modified z-scores,
+    then excludes pixels with a modified z-score above the threshold.
+    """
+    num_frames, height, width = stack.shape
+    clipped = np.empty((height, width), dtype=np.float32)
+    for i in prange(height):
+        for j in range(width):
+            x = stack[:, i, j]
+            valid_mask = x != 0
+            x = x[valid_mask]
+            w = weights[valid_mask]
+            n = x.size
+            if n == 0:
+                clipped[i, j] = 0.0
+                continue
+            median_val = np.median(x)
+            mad = np.median(np.abs(x - median_val))
+            if mad == 0:
+                clipped[i, j] = median_val
+                continue
+            modified_z = 0.6745 * (x - median_val) / mad
+            valid2 = np.abs(modified_z) < threshold
+            x = x[valid2]
+            w = w[valid2]
+            if w.sum() > 0:
+                clipped[i, j] = np.sum(x * w) / w.sum()
+            else:
+                clipped[i, j] = median_val
+    return clipped
 
 @njit(parallel=True, fastmath=True)
 def windsorized_sigma_clip(stack, lower=2.5, upper=2.5):
@@ -6748,7 +6950,7 @@ def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5):
             lower_bound = median_val - lower * std_dev
             upper_bound = median_val + upper * std_dev
 
-            valid_mask = (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+            valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
 
             valid_values = pixel_values[valid_mask]
             valid_weights = weights[valid_mask]  # ✅ Select the correct weights
@@ -6857,6 +7059,103 @@ def normalize_images(stack, ref_median):
 
     return normalized_stack
 
+@njit(fastmath=True, parallel=True)
+def debayer_RGGB_fast(image):
+    h, w = image.shape
+    new_h = h // 2
+    new_w = w // 2
+    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
+    for i in prange(new_h):
+        for j in range(new_w):
+            i2 = i * 2
+            j2 = j * 2
+            # RGGB: top-left red, top-right green, bottom-left green, bottom-right blue.
+            r = image[i2, j2]
+            g1 = image[i2, j2 + 1]
+            g2 = image[i2 + 1, j2]
+            b = image[i2 + 1, j2 + 1]
+            out[i, j, 0] = r
+            out[i, j, 1] = (g1 + g2) / 2.0
+            out[i, j, 2] = b
+    return out
+
+@njit(fastmath=True, parallel=True)
+def debayer_BGGR_fast(image):
+    h, w = image.shape
+    new_h = h // 2
+    new_w = w // 2
+    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
+    for i in prange(new_h):
+        for j in range(new_w):
+            i2 = i * 2
+            j2 = j * 2
+            # BGGR: top-left blue, top-right green, bottom-left green, bottom-right red.
+            b = image[i2, j2]
+            g1 = image[i2, j2 + 1]
+            g2 = image[i2 + 1, j2]
+            r = image[i2 + 1, j2 + 1]
+            out[i, j, 2] = b
+            out[i, j, 1] = (g1 + g2) / 2.0
+            out[i, j, 0] = r
+    return out
+
+@njit(fastmath=True, parallel=True)
+def debayer_GRBG_fast(image):
+    h, w = image.shape
+    new_h = h // 2
+    new_w = w // 2
+    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
+    for i in prange(new_h):
+        for j in range(new_w):
+            i2 = i * 2
+            j2 = j * 2
+            # GRBG: top-left green, top-right red, bottom-left blue, bottom-right green.
+            g1 = image[i2, j2]
+            r = image[i2, j2 + 1]
+            b = image[i2 + 1, j2]
+            g2 = image[i2 + 1, j2 + 1]
+            out[i, j, 0] = r
+            out[i, j, 1] = (g1 + g2) / 2.0
+            out[i, j, 2] = b
+    return out
+
+@njit(fastmath=True, parallel=True)
+def debayer_GBRG_fast(image):
+    h, w = image.shape
+    new_h = h // 2
+    new_w = w // 2
+    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
+    for i in prange(new_h):
+        for j in range(new_w):
+            i2 = i * 2
+            j2 = j * 2
+            # GBRG: top-left green, top-right blue, bottom-left red, bottom-right green.
+            g1 = image[i2, j2]
+            b = image[i2, j2 + 1]
+            r = image[i2 + 1, j2]
+            g2 = image[i2 + 1, j2 + 1]
+            out[i, j, 0] = r
+            out[i, j, 1] = (g1 + g2) / 2.0
+            out[i, j, 2] = b
+    return out
+
+def debayer_fits_fast(image_data, bayer_pattern):
+    bp = bayer_pattern.upper()
+    if bp == 'RGGB':
+        return debayer_RGGB_fast(image_data)
+    elif bp == 'BGGR':
+        return debayer_BGGR_fast(image_data)
+    elif bp == 'GRBG':
+        return debayer_GRBG_fast(image_data)
+    elif bp == 'GBRG':
+        return debayer_GBRG_fast(image_data)
+    else:
+        raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+
+def debayer_raw_fast(raw_image_data, bayer_pattern="RGGB"):
+    # For RAW images, use the same debayering logic.
+    return debayer_fits_fast(raw_image_data, bayer_pattern)
+
 class StackingSuiteDialog(QDialog):
     def __init__(self):
         super().__init__()
@@ -6870,34 +7169,38 @@ class StackingSuiteDialog(QDialog):
         self.sigma_low = self.settings.value("stacking/sigma_low", type=float) or 3.0
 
         # Dictionaries to store file paths
-        self.dark_files = {}   # { "exposure_time": [file_paths] }
-        self.flat_files = {}   # { "filter - exposure_time": [file_paths] }
-        self.light_files = {}  # { "filter - exposure_time": [file_paths] }
-        self.master_files = {} # { "exposure_time": master_file_path }
-        self.master_sizes = {} # { "master_file_path": "widthxheight" } 
+        self.conversion_files = {}  # {group_key: [file_path, ...]}
+        self.dark_files = {}        # { "exposure_time": [file_paths] }
+        self.flat_files = {}        # { "filter - exposure_time": [file_paths] }
+        self.light_files = {}       # { "filter - exposure_time": [file_paths] }
+        self.master_files = {}      # { "exposure_time": master_file_path }
+        self.master_sizes = {}      # { "master_file_path": "widthxheight" }
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        # Tabs for Darks, Flats, and Lights
+        # Create the new Conversion tab.
+        self.conversion_tab = self.create_conversion_tab()
+        # Existing tabs...
         self.dark_tab = self.create_dark_tab()
         self.flat_tab = self.create_flat_tab()
         self.light_tab = self.create_light_tab()
-        self.image_integration_tab = self.create_image_registration_tab()   
+        self.image_integration_tab = self.create_image_registration_tab()
 
+        # Add the tabs in desired order. (Conversion first)
+        self.tabs.addTab(self.conversion_tab, "Debayer && Convert Formats")
         self.tabs.addTab(self.dark_tab, "Darks")
         self.tabs.addTab(self.flat_tab, "Flats")
         self.tabs.addTab(self.light_tab, "Lights")
         self.tabs.addTab(self.image_integration_tab, "Image Integration")
+        self.tabs.setCurrentIndex(1)  # Default to Darks tab
 
-        # Wrench button to open settings
+        # Wrench button, status bar, etc.
         self.wrench_button = QPushButton()
         self.wrench_button.setIcon(QIcon(wrench_path))
         self.wrench_button.setToolTip("Set Stacking Directory & Sigma Clipping")
         self.wrench_button.clicked.connect(self.open_stacking_settings)
-
-        # ✅ Apply styling correctly
         self.wrench_button.setStyleSheet("""
             QPushButton {
                 background-color: #FF4500;
@@ -6911,13 +7214,190 @@ class StackingSuiteDialog(QDialog):
                 background-color: #FF6347;
             }
         """)
-
         layout.addWidget(self.wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
-
-
-        # **🔥 Add Scrollable Status Bar**
-        self.setup_status_bar(layout)  # ⬅️ Call function to set up the status log
+        self.setup_status_bar(layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def create_conversion_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(QLabel("Batch Convert Files to Debayered FITS (.fit)"))
+
+        # Tree widget to list files to convert.
+        self.conversion_tree = QTreeWidget()
+        self.conversion_tree.setColumnCount(2)
+        self.conversion_tree.setHeaderLabels(["File", "Status"])
+        layout.addWidget(self.conversion_tree)
+
+        # Buttons for adding files, adding a directory,
+        # selecting an output directory, and clearing the list.
+        btn_layout = QHBoxLayout()
+        self.add_conversion_files_btn = QPushButton("Add Conversion Files")
+        self.add_conversion_files_btn.clicked.connect(self.add_conversion_files)
+        self.add_conversion_dir_btn = QPushButton("Add Conversion Directory")
+        self.add_conversion_dir_btn.clicked.connect(self.add_conversion_directory)
+        self.select_conversion_output_btn = QPushButton("Select Output Directory")
+        self.select_conversion_output_btn.clicked.connect(self.select_conversion_output_dir)
+        self.clear_conversion_btn = QPushButton("Clear List")
+        self.clear_conversion_btn.clicked.connect(self.clear_conversion_list)
+        btn_layout.addWidget(self.add_conversion_files_btn)
+        btn_layout.addWidget(self.add_conversion_dir_btn)
+        btn_layout.addWidget(self.select_conversion_output_btn)
+        btn_layout.addWidget(self.clear_conversion_btn)
+        layout.addLayout(btn_layout)
+
+        # Convert All button (converts all files in the tree).
+        self.convert_btn = QPushButton("Convert All Files to FITS")
+        self.convert_btn.clicked.connect(self.convert_all_files)
+        layout.addWidget(self.convert_btn)
+
+        return tab
+
+    def add_conversion_files(self):
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files for Conversion", last_dir,
+                                                "Supported Files (*.fits *.fit *.tiff *.tif *.png *.jpg *.jpeg *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef *.xisf)")
+        if files:
+            self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
+            for file in files:
+                item = QTreeWidgetItem([os.path.basename(file), "Pending"])
+                item.setData(0, 1000, file)  # store full path in role 1000
+                self.conversion_tree.addTopLevelItem(item)
+
+    def add_conversion_directory(self):
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory for Conversion", last_dir)
+        if directory:
+            self.settings.setValue("last_opened_folder", directory)
+            for file in os.listdir(directory):
+                if file.lower().endswith((".fits", ".fit", ".tiff", ".tif", ".png", ".jpg", ".jpeg", 
+                                           ".cr2", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".xisf")):
+                    full_path = os.path.join(directory, file)
+                    item = QTreeWidgetItem([file, "Pending"])
+                    item.setData(0, 1000, full_path)
+                    self.conversion_tree.addTopLevelItem(item)
+
+    def select_conversion_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Conversion Output Directory")
+        if directory:
+            self.conversion_output_directory = directory
+            self.update_status(f"Conversion output directory set to: {directory}")
+
+    def clear_conversion_list(self):
+        self.conversion_tree.clear()
+        self.update_status("Conversion list cleared.")
+
+    def convert_all_files(self):
+        if not self.conversion_output_directory:
+            QMessageBox.warning(self, "No Output Directory", "Please select a conversion output directory first.")
+            return
+
+        count = self.conversion_tree.topLevelItemCount()
+        if count == 0:
+            QMessageBox.information(self, "No Files", "There are no files to convert.")
+            return
+
+        for i in range(count):
+            item = self.conversion_tree.topLevelItem(i)
+            file_path = item.data(0, 1000)
+            # Use global load_image to open the file
+            result = load_image(file_path)
+            if result[0] is None:
+                item.setText(1, "Failed to load")
+                self.update_status(f"Failed to load {os.path.basename(file_path)}")
+                continue
+            image, header, bit_depth, is_mono = result
+
+            # Debayer if needed:
+            image = self.debayer_image(image, file_path, header)
+            # For RAW files, after debayering, force is_mono to False.
+            if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                is_mono = False
+
+            # For RAW formats, use exifread to extract additional metadata.
+            if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                try:
+                    import exifread
+                    with open(file_path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                    # Extract common tags (adjust keys as needed):
+                    exptime = tags.get("EXIF ExposureTime")
+                    iso = tags.get("EXIF ISOSpeedRatings")
+                    date_obs = tags.get("EXIF DateTimeOriginal")
+                    # Build a new header for RAW files using exifread data.
+                    new_header = fits.Header()
+                    new_header['SIMPLE'] = True
+                    new_header['BITPIX'] = 16  # Adjust if needed.
+                    # Use processed image dimensions below; for now, leave dimensions unset.
+                    if exptime:
+                        new_header['EXPTIME'] = str(exptime)
+                    if iso:
+                        new_header['ISO'] = str(iso)
+                    if date_obs:
+                        new_header['DATE-OBS'] = str(date_obs)
+                    # Preserve the previously deduced image type (if any) from header.
+                    new_header['IMAGETYP'] = header.get('IMAGETYP', "UNKNOWN")
+                    # Replace the header with the new one.
+                    header = new_header
+                except Exception as e:
+                    self.update_status(f"Warning: Failed to extract RAW header from {os.path.basename(file_path)}: {e}")
+
+            # Append (or update) IMAGETYP based on filename.
+            lower_name = os.path.basename(file_path).lower()
+            if "dark" in lower_name:
+                header['IMAGETYP'] = "DARK"
+            elif "flat" in lower_name:
+                header['IMAGETYP'] = "FLAT"
+            elif "light" in lower_name:
+                header['IMAGETYP'] = "LIGHT"
+            else:
+                header['IMAGETYP'] = "UNKNOWN"
+
+            # Update the header with the dimensions of the processed image.
+            if image.ndim == 2:
+                header['NAXIS'] = 2
+                header['NAXIS1'] = image.shape[1]
+                header['NAXIS2'] = image.shape[0]
+            elif image.ndim == 3:
+                header['NAXIS'] = 3
+                header['NAXIS1'] = image.shape[1]
+                header['NAXIS2'] = image.shape[0]
+                header['NAXIS3'] = image.shape[2]
+
+            # Build output filename: same base name with .fit extension.
+            base = os.path.basename(file_path)
+            name, _ = os.path.splitext(base)
+            output_filename = os.path.join(self.conversion_output_directory, f"{name}.fit")
+            try:
+                save_image(
+                    img_array=image,
+                    filename=output_filename,
+                    original_format="fits",
+                    bit_depth=bit_depth,
+                    original_header=header,
+                    is_mono=is_mono
+                )
+                item.setText(1, "Converted")
+                self.update_status(f"Converted {os.path.basename(file_path)} to FITS with IMAGETYP={header['IMAGETYP']}.")
+            except Exception as e:
+                item.setText(1, f"Error: {e}")
+                self.update_status(f"Error converting {os.path.basename(file_path)}: {e}")
+            QApplication.processEvents()
+        self.update_status("Conversion complete.")
+
+
+
+
+    def debayer_image(self, image, file_path, header):
+        if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            print(f"Debayering RAW image: {file_path}")
+            return debayer_raw_fast(image)
+        elif file_path.lower().endswith(('.fits', '.fit')):
+            bayer_pattern = header.get('BAYERPAT')
+            if bayer_pattern:
+                print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
+                return debayer_fits_fast(image, bayer_pattern)
+        return image
 
     def setup_status_bar(self, layout):
         """ Sets up a scrollable status log at the bottom of the UI. """
@@ -6941,7 +7421,7 @@ class StackingSuiteDialog(QDialog):
         QApplication.processEvents() 
 
     def open_stacking_settings(self):
-        """ Opens a dialog to set the stacking directory and sigma clipping values. """
+        """ Opens a dialog to set the stacking directory, sigma values, rejection algorithm, and algorithm parameters. """
         dialog = QDialog(self)
         dialog.setWindowTitle("Stacking Settings")
         layout = QVBoxLayout(dialog)
@@ -6964,16 +7444,133 @@ class StackingSuiteDialog(QDialog):
         self.sigma_high_spinbox.setRange(0.1, 10.0)
         self.sigma_high_spinbox.setDecimals(2)
         self.sigma_high_spinbox.setValue(self.sigma_high)
-
         sigma_layout.addWidget(self.sigma_high_spinbox)
         sigma_layout.addWidget(QLabel("Sigma Low:"))
         self.sigma_low_spinbox = QDoubleSpinBox()
         self.sigma_low_spinbox.setRange(0.1, 10.0)
         self.sigma_low_spinbox.setDecimals(2)
         self.sigma_low_spinbox.setValue(self.sigma_low)
-
         sigma_layout.addWidget(self.sigma_low_spinbox)
         layout.addLayout(sigma_layout)
+
+        # Rejection algorithm selection
+        algo_layout = QHBoxLayout()
+        algo_label = QLabel("Rejection Algorithm:")
+        self.rejection_algo_combo = QComboBox()
+        self.rejection_algo_combo.addItems([
+            "Weighted Windsorized Sigma Clipping",
+            "Kappa-Sigma Clipping",
+            "Simple Average (No Rejection)",
+            "Simple Median (No Rejection)",
+            "Trimmed Mean",
+            "Extreme Studentized Deviate (ESD)",
+            "Biweight Estimator",
+            "Modified Z-Score Clipping"
+        ])
+        saved_algo = self.settings.value("stacking/rejection_algorithm", "Weighted Windsorized Sigma Clipping")
+        index = self.rejection_algo_combo.findText(saved_algo)
+        if index >= 0:
+            self.rejection_algo_combo.setCurrentIndex(index)
+        algo_layout.addWidget(algo_label)
+        algo_layout.addWidget(self.rejection_algo_combo)
+        layout.addLayout(algo_layout)
+
+        # --- Additional Parameters ---
+
+        # Kappa-Sigma Clipping: Kappa Value
+        kappa_layout = QHBoxLayout()
+        kappa_label = QLabel("Kappa Value:")
+        self.kappa_spinbox = QDoubleSpinBox()
+        self.kappa_spinbox.setRange(0.1, 10.0)
+        self.kappa_spinbox.setDecimals(2)
+        self.kappa_spinbox.setValue(self.settings.value("stacking/kappa", 2.5, type=float))
+        kappa_help = QPushButton("?")
+        kappa_help.setFixedSize(20, 20)
+        kappa_help.clicked.connect(lambda: QMessageBox.information(self, "Kappa Value", 
+            "Kappa determines how many standard deviations away from the median are considered outliers. Higher values are more lenient."))
+        kappa_layout.addWidget(kappa_label)
+        kappa_layout.addWidget(self.kappa_spinbox)
+        kappa_layout.addWidget(kappa_help)
+        layout.addLayout(kappa_layout)
+
+        # Kappa-Sigma Clipping: Iterations
+        iterations_layout = QHBoxLayout()
+        iterations_label = QLabel("Iterations:")
+        self.iterations_spinbox = QSpinBox()
+        self.iterations_spinbox.setRange(1, 10)
+        self.iterations_spinbox.setValue(self.settings.value("stacking/iterations", 3, type=int))
+        iterations_help = QPushButton("?")
+        iterations_help.setFixedSize(20, 20)
+        iterations_help.clicked.connect(lambda: QMessageBox.information(self, "Iterations", 
+            "The number of iterations to perform kappa-sigma clipping. More iterations may remove more outliers."))
+        iterations_layout.addWidget(iterations_label)
+        iterations_layout.addWidget(self.iterations_spinbox)
+        iterations_layout.addWidget(iterations_help)
+        layout.addLayout(iterations_layout)
+
+        # ESD: ESD Threshold
+        esd_layout = QHBoxLayout()
+        esd_label = QLabel("ESD Threshold:")
+        self.esd_spinbox = QDoubleSpinBox()
+        self.esd_spinbox.setRange(0.1, 10.0)
+        self.esd_spinbox.setDecimals(2)
+        self.esd_spinbox.setValue(self.settings.value("stacking/esd_threshold", 3.0, type=float))
+        esd_help = QPushButton("?")
+        esd_help.setFixedSize(20, 20)
+        esd_help.clicked.connect(lambda: QMessageBox.information(self, "ESD Threshold", 
+            "Threshold for the Extreme Studentized Deviate test. Lower values are more aggressive in rejecting outliers."))
+        esd_layout.addWidget(esd_label)
+        esd_layout.addWidget(self.esd_spinbox)
+        esd_layout.addWidget(esd_help)
+        layout.addLayout(esd_layout)
+
+        # Biweight Estimator: Tuning Constant
+        biweight_layout = QHBoxLayout()
+        biweight_label = QLabel("Biweight Tuning Constant:")
+        self.biweight_spinbox = QDoubleSpinBox()
+        self.biweight_spinbox.setRange(1.0, 10.0)
+        self.biweight_spinbox.setDecimals(2)
+        self.biweight_spinbox.setValue(self.settings.value("stacking/biweight_constant", 6.0, type=float))
+        biweight_help = QPushButton("?")
+        biweight_help.setFixedSize(20, 20)
+        biweight_help.clicked.connect(lambda: QMessageBox.information(self, "Biweight Tuning Constant", 
+            "Tuning constant for the biweight estimator; it controls the aggressiveness of down-weighting outliers."))
+        biweight_layout.addWidget(biweight_label)
+        biweight_layout.addWidget(self.biweight_spinbox)
+        biweight_layout.addWidget(biweight_help)
+        layout.addLayout(biweight_layout)
+
+        # Trimmed Mean: Trim Fraction
+        trim_layout = QHBoxLayout()
+        trim_label = QLabel("Trim Fraction:")
+        self.trim_spinbox = QDoubleSpinBox()
+        self.trim_spinbox.setRange(0.0, 0.5)
+        self.trim_spinbox.setDecimals(2)
+        self.trim_spinbox.setValue(self.settings.value("stacking/trim_fraction", 0.1, type=float))
+        trim_help = QPushButton("?")
+        trim_help.setFixedSize(20, 20)
+        trim_help.clicked.connect(lambda: QMessageBox.information(self, "Trim Fraction", 
+            "Fraction of values to trim from each end before averaging. For example, 0.1 will trim 10% from each end."))
+        trim_layout.addWidget(trim_label)
+        trim_layout.addWidget(self.trim_spinbox)
+        trim_layout.addWidget(trim_help)
+        layout.addLayout(trim_layout)
+
+        # Modified Z-Score Clipping: Threshold
+        modz_layout = QHBoxLayout()
+        modz_label = QLabel("Modified Z-Score Threshold:")
+        self.modz_spinbox = QDoubleSpinBox()
+        self.modz_spinbox.setRange(0.1, 10.0)
+        self.modz_spinbox.setDecimals(2)
+        self.modz_spinbox.setValue(self.settings.value("stacking/modz_threshold", 3.5, type=float))
+        modz_help = QPushButton("?")
+        modz_help.setFixedSize(20, 20)
+        modz_help.clicked.connect(lambda: QMessageBox.information(self, "Modified Z-Score Threshold", 
+            "Threshold for the modified z-score clipping using the median absolute deviation. Lower values are more aggressive."))
+        modz_layout.addWidget(modz_label)
+        modz_layout.addWidget(self.modz_spinbox)
+        modz_layout.addWidget(modz_help)
+        layout.addLayout(modz_layout)
 
         # Save button
         save_button = QPushButton("Save Settings")
@@ -6982,27 +7579,42 @@ class StackingSuiteDialog(QDialog):
 
         dialog.exec()
 
+    def save_stacking_settings(self, dialog):
+        """ Saves stacking directory, sigma values, rejection algorithm, and algorithm parameters to QSettings. """
+        self.stacking_directory = self.dir_path_edit.text()
+        self.sigma_high = self.sigma_high_spinbox.value()
+        self.sigma_low = self.sigma_low_spinbox.value()
+        self.rejection_algorithm = self.rejection_algo_combo.currentText()
+        self.kappa = self.kappa_spinbox.value()
+        self.iterations = self.iterations_spinbox.value()
+        self.esd_threshold = self.esd_spinbox.value()
+        self.biweight_constant = self.biweight_spinbox.value()
+        self.trim_fraction = self.trim_spinbox.value()
+        self.modz_threshold = self.modz_spinbox.value()
+
+        # Store in QSettings
+        self.settings.setValue("stacking/dir", self.stacking_directory)
+        self.settings.setValue("stacking/sigma_high", self.sigma_high)
+        self.settings.setValue("stacking/sigma_low", self.sigma_low)
+        self.settings.setValue("stacking/rejection_algorithm", self.rejection_algorithm)
+        self.settings.setValue("stacking/kappa", self.kappa)
+        self.settings.setValue("stacking/iterations", self.iterations)
+        self.settings.setValue("stacking/esd_threshold", self.esd_threshold)
+        self.settings.setValue("stacking/biweight_constant", self.biweight_constant)
+        self.settings.setValue("stacking/trim_fraction", self.trim_fraction)
+        self.settings.setValue("stacking/modz_threshold", self.modz_threshold)
+
+        print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
+        print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
+        self.update_status("✅ Saved stacking settings.")
+        dialog.accept()
+
     def select_stacking_directory(self):
         """ Opens a dialog to choose a stacking directory. """
         directory = QFileDialog.getExistingDirectory(self, "Select Stacking Directory")
         if directory:
             self.stacking_directory = directory
             self.dir_path_edit.setText(directory)
-
-    def save_stacking_settings(self, dialog):
-        """ Saves stacking directory and sigma values to QSettings. """
-        self.stacking_directory = self.dir_path_edit.text()
-        self.sigma_high = self.sigma_high_spinbox.value()
-        self.sigma_low = self.sigma_low_spinbox.value()
-
-        # Store in QSettings
-        self.settings.setValue("stacking/dir", self.stacking_directory)
-        self.settings.setValue("stacking/sigma_high", self.sigma_high)
-        self.settings.setValue("stacking/sigma_low", self.sigma_low)
-
-        print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}")
-        self.update_status(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}")
-        dialog.accept()
 
     def create_dark_tab(self):
         tab = QWidget()
@@ -7287,6 +7899,10 @@ class StackingSuiteDialog(QDialog):
         """)
         self.calibrate_lights_btn.clicked.connect(self.calibrate_lights)
 
+        self.light_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        self.light_tree.customContextMenuRequested.connect(self.light_tree_context_menu)
+
         layout.addWidget(self.calibrate_lights_btn)
 
         return tab
@@ -7360,6 +7976,30 @@ class StackingSuiteDialog(QDialog):
             }
         """)
         layout.addWidget(self.register_images_btn)
+
+        # ─────────────────────────────────────────
+        # New Integration Button (Skips Alignment)
+        # ─────────────────────────────────────────
+        self.integrate_registered_btn = QPushButton("Integrate Previously Registered Images")
+        self.integrate_registered_btn.clicked.connect(self.integrate_registered_images)
+        self.integrate_registered_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;  /* Dark gray */
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;  /* Subtle yellow border */
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+            }
+            QPushButton:pressed {
+                background-color: #222;  /* Darker gray on press */
+                border: 2px solid #FFA500;  /* Orange border when pressed */
+            }
+        """)
+        layout.addWidget(self.integrate_registered_btn)
 
         tab.setLayout(layout)
 
@@ -7639,167 +8279,183 @@ class StackingSuiteDialog(QDialog):
     
     def process_fits_header(self, file_path, tree, expected_type):
         try:
-            with fits.open(file_path) as hdul:
-                header = hdul[0].header
-                data = hdul[0].data
-                # Check for both EXPOSURE and EXPTIME, defaulting to "Unknown" if neither is found
-                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
-                filter_name = header.get("FILTER", "Unknown")
-                image_type = header.get("IMAGETYP", "Unknown").upper()
+            # Read only the FITS header (fast)
+            header = fits.getheader(file_path)
+            
+            try:
+                width = int(header.get("NAXIS1"))
+                height = int(header.get("NAXIS2"))
+            except Exception as e:
+                self.update_status(f"Warning: Could not convert dimensions to int for {file_path}: {e}")
+                width, height = None, None
+            
+            if width is not None and height is not None:
+                image_size = f"{width}x{height}"
+            else:
+                image_size = "Unknown"
 
-                # Extract image dimensions
-                if data is not None:
-                    height, width = data.shape[-2:]  # Handle 2D and possible 3D (e.g., multi-extension FITS)
-                    image_size = f"{width}x{height}"
+            # Retrieve IMAGETYP (default to "UNKNOWN" if not present)
+            imagetyp = header.get("IMAGETYP", "UNKNOWN").lower()
+
+            # Define forbidden keywords per expected type.
+            if expected_type.upper() == "DARK":
+                forbidden = ["light", "flat"]
+            elif expected_type.upper() == "FLAT":
+                forbidden = ["dark", "light"]
+            elif expected_type.upper() == "LIGHT":
+                forbidden = ["dark", "flat"]
+            else:
+                forbidden = []
+
+            # Determine attribute name for auto-confirm decision (per expected type)
+            decision_attr = f"auto_confirm_{expected_type.lower()}"
+            # If a decision has already been made, use it.
+            if hasattr(self, decision_attr):
+                decision = getattr(self, decision_attr)
+                if decision is False:
+                    # Skip this file automatically.
+                    return
+                # If decision is True, then add without prompting.
+            elif any(word in imagetyp for word in forbidden):
+                # Prompt the user with Yes, Yes to All, No, and No to All options.
+                msgBox = QMessageBox(self)
+                msgBox.setWindowTitle("Mismatched Image Type")
+                msgBox.setText(
+                    f"The file:\n{os.path.basename(file_path)}\nhas IMAGETYP = {header.get('IMAGETYP')} "
+                    f"which does not match the expected type ({expected_type}).\n\nDo you want to add it anyway?"
+                )
+                yesButton = msgBox.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+                yesToAllButton = msgBox.addButton("Yes to All", QMessageBox.ButtonRole.YesRole)
+                noButton = msgBox.addButton("No", QMessageBox.ButtonRole.NoRole)
+                noToAllButton = msgBox.addButton("No to All", QMessageBox.ButtonRole.NoRole)
+                msgBox.exec()
+                clicked = msgBox.clickedButton()
+                if clicked == yesToAllButton:
+                    setattr(self, decision_attr, True)
+                elif clicked == noToAllButton:
+                    setattr(self, decision_attr, False)
+                    return
+                elif clicked == noButton:
+                    return
+                
+            if expected_type.upper() == "DARK":
+                key = f"{header.get('EXPOSURE', 'Unknown')} ({image_size})"
+                if key not in self.dark_files:
+                    self.dark_files[key] = []
+                self.dark_files[key].append(file_path)
+                
+                items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                if not items:
+                    exposure_item = QTreeWidgetItem([key])
+                    tree.addTopLevelItem(exposure_item)
                 else:
-                    image_size = "Unknown"
-
-                # Extract metadata
-                sensor_temp = header.get("CCD-TEMP", "N/A")
-                date_obs = header.get("DATE-OBS", "Unknown")
-                metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
-
-                # Ask user if type doesn't match
-                if image_type != expected_type:
-                    response = QMessageBox.question(
-                        self, 
-                        "Mismatched Image Type", 
-                        f"The file:\n{os.path.basename(file_path)}\nhas IMAGETYP = {image_type} "
-                        f"but you are adding it as {expected_type}. \n\nDo you still want to add it?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
-                    if response != QMessageBox.StandardButton.Yes:
-                        return  # User rejected adding the file
-
-                # Ensure exposure is properly formatted as a string with "s" if it's a valid number
-                if isinstance(exposure, (int, float)):
-                    exposure = f"{exposure}s"
-
-                # --- Handle Dark Frames ---
-                if expected_type == "DARK":
-                    key = f"{exposure} ({image_size})"
-                    if key not in self.dark_files:
-                        self.dark_files[key] = []
-                    self.dark_files[key].append(file_path)
-
-                    items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
-                    if not items:
-                        exposure_item = QTreeWidgetItem([key])
-                        tree.addTopLevelItem(exposure_item)
-                    else:
-                        exposure_item = items[0]
-
-                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
-
-                # --- Handle Flat Frames ---
-                elif expected_type == "FLAT":
-                    key = f"{filter_name} - {exposure} ({image_size})"
-                    if key not in self.flat_files:
-                        self.flat_files[key] = []
-                    self.flat_files[key].append(file_path)
-
-                    filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
-                    if not filter_items:
-                        filter_item = QTreeWidgetItem([filter_name])
-                        tree.addTopLevelItem(filter_item)
-                    else:
-                        filter_item = filter_items[0]
-
-                    exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
-                    exposure_item = next((item for item in exposure_items if item.text(0) == f"{exposure} ({image_size})"), None)
-
-                    if not exposure_item:
-                        exposure_item = QTreeWidgetItem([f"{exposure} ({image_size})"])
-                        filter_item.addChild(exposure_item)
-
-                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
-
-                # --- Handle Light Frames ---
-                elif expected_type == "LIGHT":
-                    key = f"{filter_name} - {exposure} ({image_size})"
-                    if key not in self.light_files:
-                        self.light_files[key] = []
-                    self.light_files[key].append(file_path)
-
-                    filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
-                    if not filter_items:
-                        filter_item = QTreeWidgetItem([filter_name])
-                        tree.addTopLevelItem(filter_item)
-                    else:
-                        filter_item = filter_items[0]
-
-                    exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
-                    exposure_item = next((item for item in exposure_items if item.text(0) == f"{exposure} ({image_size})"), None)
-
-                    if not exposure_item:
-                        exposure_item = QTreeWidgetItem([f"{exposure} ({image_size})"])
-                        filter_item.addChild(exposure_item)
-
-                    exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
-
-                print(f"DEBUG: Added {file_path} under {expected_type} with metadata: {metadata}")
-                self.update_status(f"✅ Added {file_path} under {expected_type} with metadata: {metadata}")
-                QApplication.processEvents()
+                    exposure_item = items[0]
+                metadata = f"Size: {image_size}"    
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+                
+            elif expected_type.upper() == "FLAT":
+                filter_name = header.get("FILTER", "Unknown")
+                key = f"{filter_name} - {header.get('EXPOSURE', 'Unknown')} ({image_size})"
+                if key not in self.flat_files:
+                    self.flat_files[key] = []
+                self.flat_files[key].append(file_path)
+                
+                filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                if not filter_items:
+                    filter_item = QTreeWidgetItem([filter_name])
+                    tree.addTopLevelItem(filter_item)
+                else:
+                    filter_item = filter_items[0]
+                exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                exposure_item = next((item for item in exposure_items if item.text(0) == f"{header.get('EXPOSURE', 'Unknown')} ({image_size})"), None)
+                if not exposure_item:
+                    exposure_item = QTreeWidgetItem([f"{header.get('EXPOSURE', 'Unknown')} ({image_size})"])
+                    filter_item.addChild(exposure_item)
+                metadata = f"Size: {image_size}"    
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+                
+            elif expected_type.upper() == "LIGHT":
+                filter_name = header.get("FILTER", "Unknown")
+                key = f"{filter_name} - {header.get('EXPOSURE', 'Unknown')} ({image_size})"
+                if key not in self.light_files:
+                    self.light_files[key] = []
+                self.light_files[key].append(file_path)
+                
+                filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                if not filter_items:
+                    filter_item = QTreeWidgetItem([filter_name])
+                    tree.addTopLevelItem(filter_item)
+                else:
+                    filter_item = filter_items[0]
+                exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                exposure_item = next((item for item in exposure_items if item.text(0) == f"{header.get('EXPOSURE', 'Unknown')} ({image_size})"), None)
+                if not exposure_item:
+                    exposure_item = QTreeWidgetItem([f"{header.get('EXPOSURE', 'Unknown')} ({image_size})"])
+                    filter_item.addChild(exposure_item)
+                metadata = f"Size: {image_size}"    
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+                
+            self.update_status(f"✅ Added {os.path.basename(file_path)} as {expected_type}")
+            QApplication.processEvents()
         except Exception as e:
-            print(f"ERROR: Could not read FITS header for {file_path} - {e}")
             self.update_status(f"❌ ERROR: Could not read FITS header for {file_path} - {e}")
             QApplication.processEvents()
 
 
     def add_master_files(self, tree, file_type, files):
-        """ Adds multiple master calibration files to the correct treebox with metadata including image dimensions. """
+        """ 
+        Adds multiple master calibration files to the correct treebox with metadata including image dimensions.
+        This version only reads the FITS header to extract image dimensions, making it much faster.
+        """
         for file_path in files:
             try:
-                with fits.open(file_path) as hdul:
-                    header = hdul[0].header
-                    data = hdul[0].data
+                # Read only the FITS header (fast)
+                header = fits.getheader(file_path)
+                
+                # Check for both EXPOSURE and EXPTIME
+                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                filter_name = header.get("FILTER", "Unknown")
+                
+                # Extract image dimensions from header keywords NAXIS1 and NAXIS2
+                width = header.get("NAXIS1")
+                height = header.get("NAXIS2")
+                if width is not None and height is not None:
+                    image_size = f"{width}x{height}"
+                else:
+                    image_size = "Unknown"
+                
+                # Construct key based on file type
+                if file_type.upper() == "DARK":
+                    key = f"{exposure}s ({image_size})"
+                    self.master_files[key] = file_path  # Store master dark
+                    self.master_sizes[file_path] = image_size  # Store size
+                elif file_type.upper() == "FLAT":
+                    key = f"{filter_name} ({image_size})"
+                    self.master_files[key] = file_path  # Store master flat
+                    self.master_sizes[file_path] = image_size  # Store size
 
-                    # Check for both EXPOSURE and EXPTIME
-                    exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
-                    filter_name = header.get("FILTER", "Unknown")
+                # Extract additional metadata from header.
+                sensor_temp = header.get("CCD-TEMP", "N/A")
+                date_obs = header.get("DATE-OBS", "Unknown")
+                metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
 
-                    # Extract image dimensions
-                    if data is not None:
-                        height, width = data.shape[-2:]  # Handle 2D and possible 3D images
-                        image_size = f"{width}x{height}"
-                    else:
-                        image_size = "Unknown"
+                # Check if category item already exists in the tree.
+                items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                if not items:
+                    item = QTreeWidgetItem([key])
+                    tree.addTopLevelItem(item)
+                else:
+                    item = items[0]
 
-                    key = f"{exposure} ({image_size})"
+                # Add the master file as a child node with metadata.
+                item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
 
-                    # Extract metadata
-                    sensor_temp = header.get("CCD-TEMP", "N/A")
-                    date_obs = header.get("DATE-OBS", "Unknown")
-                    metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
-
-                    # Construct key based on file type
-                    if file_type == "DARK":
-                        key = f"{exposure}s ({image_size})"
-                        self.master_files[key] = file_path  # Store master dark
-                        self.master_sizes[file_path] = image_size  # ✅ Store size
-
-                    elif file_type == "FLAT":
-                        key = f"{filter_name} ({image_size})"
-                        self.master_files[key] = file_path  # Store master flat
-                        self.master_sizes[file_path] = image_size  # ✅ Store size
-
-                    # Check if category item exists
-                    items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
-                    if not items:
-                        item = QTreeWidgetItem([key])
-                        tree.addTopLevelItem(item)
-                    else:
-                        item = items[0]
-
-                    # Add master file to column 1 with metadata
-                    item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
-
-                    print(f"✅ DEBUG: Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
-                    self.update_status(f"✅ Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
-                    print(f"📂 DEBUG: Master Darks Stored: {self.master_files}")
-                    self.update_status(f"📂 DEBUG: Master Darks Stored: {self.master_files}")
-                    QApplication.processEvents()
-                    self.assign_best_master_files()
+                print(f"✅ DEBUG: Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                self.update_status(f"✅ Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                print(f"📂 DEBUG: Master Files Stored: {self.master_files}")
+                self.update_status(f"📂 DEBUG: Master Files Stored: {self.master_files}")
+                QApplication.processEvents()
+                self.assign_best_master_files()
 
             except Exception as e:
                 print(f"❌ ERROR: Failed to load master file {file_path} - {e}")
@@ -8395,6 +9051,49 @@ class StackingSuiteDialog(QDialog):
                 exposure_item = filter_item.child(j)
                 exposure_item.setText(4, ", ".join(corrections))
 
+    def light_tree_context_menu(self, pos):
+        """
+        Display a context menu for the light tree.
+        If the clicked item is a group node (has children), offer to override master dark/flat.
+        """
+        item = self.light_tree.itemAt(pos)
+        if not item:
+            return
+
+        # Only offer overrides on group nodes; you can define this as nodes with children.
+        if item.childCount() > 0:
+            menu = QMenu(self.light_tree)
+            override_dark_action = menu.addAction("Override Master Dark")
+            override_flat_action = menu.addAction("Override Master Flat")
+            action = menu.exec(self.light_tree.viewport().mapToGlobal(pos))
+            if action == override_dark_action:
+                self.override_master_dark(item)
+            elif action == override_flat_action:
+                self.override_master_flat(item)
+
+    def override_master_dark(self, group_item):
+        """
+        Let the user select a new Master Dark file for the given group.
+        Assumes that the group_item is the exposure-level node whose column 2 shows the assigned Master Dark.
+        """
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Master Dark", "", "FITS Files (*.fits *.fit)")
+        if file_path:
+            # Update the group's Master Dark column (assumed column 2)
+            group_item.setText(2, os.path.basename(file_path))
+            # Optionally, update internal mappings if needed (for example, you might want to store this override)
+            self.update_status(f"Overridden Master Dark for group '{group_item.text(0)}' with {os.path.basename(file_path)}.")
+
+    def override_master_flat(self, group_item):
+        """
+        Let the user select a new Master Flat file for the given group.
+        Assumes that the group_item is the exposure-level node whose column 3 shows the assigned Master Flat.
+        """
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Master Flat", "", "FITS Files (*.fits *.fit)")
+        if file_path:
+            # Update the group's Master Flat column (assumed column 3)
+            group_item.setText(3, os.path.basename(file_path))
+            # Optionally update your internal data structures as needed.
+            self.update_status(f"Overridden Master Flat for group '{group_item.text(0)}' with {os.path.basename(file_path)}.")
 
 
     def calibrate_lights(self):
@@ -8564,7 +9263,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status("⚠️ No light frames found!")
             return
 
-        self.update_status("📊 Measuring frames for weight calculation...")
+        self.update_status("📊 Loading in frame image arrays for weight calculation...")
 
         self.frame_weights = {}  # ✅ Store as an instance variable
         mean_values = {}
@@ -8748,7 +9447,7 @@ class StackingSuiteDialog(QDialog):
                     # Load the aligned image.
                     image_data, header, _, _ = load_image(aligned_file_path)
                     if image_data is None:
-                        self.update_status(f"⚠️ Failed to load {aligned_file_path}")
+                        self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
                         continue
 
                     stacked_data.append(image_data)
@@ -8814,12 +9513,51 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}")
             stacked_data = normalize_images(stacked_data, reference_median)
 
-            self.update_status(f"📊 Applying Weighted Windsorized Sigma Clipping on group '{group_key}'...")
+            # At the point where you apply the rejection algorithm:
+            self.update_status(f"📊 Applying {self.rejection_algorithm} on group '{group_key}'...")
             QApplication.processEvents()
-            clipped_mean = windsorized_sigma_clip_weighted(
-                stacked_data, weights,
-                lower=self.sigma_low, upper=self.sigma_high
-            )
+
+            selected_algo = self.rejection_algorithm
+
+            if selected_algo == "Weighted Windsorized Sigma Clipping":
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data, weights,
+                    lower=self.sigma_low, upper=self.sigma_high
+                )
+            elif selected_algo == "Kappa-Sigma Clipping":
+                clipped_mean = kappa_sigma_clip_weighted(
+                    stacked_data, weights,
+                    kappa=self.kappa, iterations=self.iterations
+                )
+            elif selected_algo == "Simple Average (No Rejection)":
+                clipped_mean = np.average(stacked_data, axis=0, weights=weights)
+            elif selected_algo == "Simple Median (No Rejection)":
+                clipped_mean = np.median(stacked_data, axis=0)
+            elif selected_algo == "Trimmed Mean":
+                clipped_mean = trimmed_mean_weighted(
+                    stacked_data, weights,
+                    trim_fraction=self.trim_fraction
+                )
+            elif selected_algo == "Extreme Studentized Deviate (ESD)":
+                clipped_mean = esd_clip_weighted(
+                    stacked_data, weights,
+                    threshold=self.esd_threshold
+                )
+            elif selected_algo == "Biweight Estimator":
+                clipped_mean = biweight_location_weighted(
+                    stacked_data, weights,
+                    tuning_constant=self.biweight_constant
+                )
+            elif selected_algo == "Modified Z-Score Clipping":
+                clipped_mean = modified_zscore_clip_weighted(
+                    stacked_data, weights,
+                    threshold=self.modz_threshold
+                )
+            else:
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data, weights,
+                    lower=self.sigma_low, upper=self.sigma_high
+                )
 
             # Use the group key as part of the output filename.
             # Alternatively, you could derive the key from the header.
@@ -8848,6 +9586,88 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"✅ Group '{group_key}' stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
 
+    def integrate_registered_images(self):
+        """ Integrates previously registered images (already aligned) without re-aligning them. """
+        self.update_status("🔄 Integrating Previously Registered Images...")
+
+        # Extract the files from the registration tree
+        self.extract_light_files_from_tree()
+        if not self.light_files:
+            self.update_status("⚠️ No registered images found!")
+            return
+
+        # Collect all registered files
+        all_files = [file for file_list in self.light_files.values() for file in file_list]
+        images = []
+        valid_files = []
+        for file in all_files:
+            image_data, _, _, _ = load_image(file)
+            if image_data is not None:
+                images.append(image_data)
+                valid_files.append(file)
+
+        if not images:
+            self.update_status("⚠️ No valid registered images loaded!")
+            return
+
+        self.update_status(f"✅ Loaded {len(images)} valid registered frames for integration.")
+
+        # Compute frame weights (similar to registration but skipping alignment)
+        self.frame_weights = {}
+        mean_values = {}
+        star_counts = {}
+        measured_frames = []
+
+        means = parallel_measure_frames(images)
+
+        for i, file in enumerate(valid_files):
+            self.update_status(f"🌍 Measuring frames... {i+1}/{len(valid_files)} global statistics.")
+            mean_signal = means[i]
+            mean_values[file] = mean_signal
+            measured_frames.append(file)
+
+            self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
+
+            # ✅ Compute Star Count separately
+            star_counts[file] = compute_star_count(images[i])
+
+        if not measured_frames:
+            self.update_status("⚠️ No frames could be measured!")
+            return
+
+        self.update_status("✅ Frame measurements complete!")
+
+        # ✅ Step 5: Compute Weights for Stacking
+        self.update_status("⚖️ Computing frame weights...")
+
+        debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
+
+        for file in measured_frames:
+            star_count = star_counts[file]
+            mean_value = mean_values[file]
+
+            # ✅ Ensure no division by zero
+            star_weight = max(star_count, 1e-6)
+            mean_weight = max(mean_value, 1e-6)
+
+            # ✅ Ratio-based weight calculation
+            self.frame_weights[file] = star_weight / mean_weight  # ✅ Always positive
+
+            # ✅ Add to debug log
+            debug_weight_log += f"📂 {os.path.basename(file)} → Star Count: {star_count}, Mean: {mean_value:.4f}, Final Weight: {self.frame_weights[file]:.4f}\n"
+
+        self.update_status(debug_weight_log)  # ✅ Print weights to the status window
+        self.update_status("✅ Frame weights computed!")
+
+        # ✅ Step 2: Determine the Best Reference Frame
+        if hasattr(self, "reference_frame") and self.reference_frame:
+            self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
+        else:
+            self.reference_frame = max(self.frame_weights, key=self.frame_weights.get)
+            self.update_status(f"📌 Auto-selected reference frame: {self.reference_frame} (Best Weight)")
+
+        # Call the stacking function using the already registered (aligned) images
+        self.stack_registered_images(self.light_files, self.frame_weights)
 
 # --------------------------------------------------
 # MosaicMasterDialog with blending/normalization integrated
@@ -11580,6 +12400,91 @@ class StellarAlignmentDialog(QDialog):
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
 
+#############################################
+# Worker Signals for Registration Workers
+#############################################
+class RegistrationWorkerSignals(QObject):
+    progress = pyqtSignal(str)  # e.g., "Loaded image X"
+    result = pyqtSignal(str)    # e.g., output filename
+    error = pyqtSignal(str)     # e.g., error message
+
+#############################################
+# Worker to Process One Image Registration
+#############################################
+class StarRegistrationWorker(QRunnable):
+    def __init__(self, file_path, ref_stars, ref_triangles, output_directory):
+        super().__init__()
+        self.file_path = file_path
+        self.ref_stars = ref_stars
+        self.ref_triangles = ref_triangles
+        self.output_directory = output_directory
+        self.signals = RegistrationWorkerSignals()
+
+    def run(self):
+        try:
+            # Load image
+            img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
+            if img is None:
+                self.signals.error.emit(f"Could not load {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+            
+            # Detect stars using the static grid method
+            img_stars = StarRegistrationThread.detect_grid_stars_static(img)
+            if len(img_stars) < 9:
+                self.signals.error.emit(f"Not enough stars in {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # Compute affine transform with iterative refinement (static version)
+            transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
+                img_stars, self.ref_stars, self.ref_triangles
+            )
+            if transform is None:
+                self.signals.error.emit(f"Alignment failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Computed transform for {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # Apply the affine transform
+            aligned_image = StarRegistrationThread.apply_affine_transform_static(img, transform)
+            if aligned_image is None:
+                self.signals.error.emit(f"Transform application failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            # Build output filename (force extension to .fits)
+            base = os.path.basename(self.file_path)
+            name, _ = os.path.splitext(base)
+            output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
+            
+            # Save the aligned image
+            save_image(
+                img_array=aligned_image,
+                filename=output_filename,
+                original_format="fits",
+                bit_depth=img_bit_depth,
+                original_header=img_header,
+                is_mono=img_is_mono
+            )
+            self.signals.result.emit(output_filename)
+            self.signals.progress.emit(f"Registered {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+        except Exception as e:
+            self.signals.error.emit(f"Error processing {self.file_path}: {e}")
+            QApplication.processEvents()
+
+#############################################
+# Main Star Registration Thread (Concurrent)
+#############################################
 class StarRegistrationThread(QThread):
     progress_update = pyqtSignal(str)
     registration_complete = pyqtSignal(bool, str)
@@ -11589,153 +12494,60 @@ class StarRegistrationThread(QThread):
         self.reference_image_path = reference_image_path
         self.files_to_align = files_to_align
         self.output_directory = output_directory
-        self.failed_files = []  # Track failed images
 
     def run(self):
         try:
             self.progress_update.emit("Identifying stars in reference image...")
-            print("DEBUG: Loading reference image...")
-
             ref_image, ref_header, ref_bit_depth, ref_is_mono = load_image(self.reference_image_path)
-            print(f"DEBUG: Reference image shape={ref_image.shape}, bit depth={ref_bit_depth}, mono={ref_is_mono}")
-
+            self.progress_update.emit(f"Loaded reference image: shape {ref_image.shape}")
             ref_stars = self.detect_stars(ref_image)
-            print(f"DEBUG: Detected {len(ref_stars)} stars in reference image")
-            self.progress_update.emit(f"Detected {len(ref_stars)} stars in reference image")
-
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
-
             ref_triangles = self.build_triangle_dict(ref_stars)
-            print(f"DEBUG: Built {len(ref_triangles)} triangle entries from reference image")
+            self.progress_update.emit(f"Reference image: {len(ref_stars)} stars, {len(ref_triangles)} triangle entries")
 
-            success_count = 0
+            # Use all available cores.
+            pool = QThreadPool.globalInstance()
+            num_cores = os.cpu_count() or 4
+            pool.setMaxThreadCount(num_cores)
+            self.progress_update.emit(f"Using {num_cores} cores for registration.")
 
-            for i, file_path in enumerate(self.files_to_align):
-                self.progress_update.emit(f"Registering {os.path.basename(file_path)} ({i+1}/{len(self.files_to_align)})...")
-                print(f"DEBUG: Processing {file_path}")
+            total_files = len(self.files_to_align)
+            for file_path in self.files_to_align:
+                worker = StarRegistrationWorker(file_path, ref_stars, ref_triangles, self.output_directory)
+                worker.signals.progress.connect(self.on_worker_progress)
+                worker.signals.error.connect(self.on_worker_error)
+                worker.signals.result.connect(self.on_worker_result)
+                pool.start(worker)
 
-                # Load image
-                img, img_header, img_bit_depth, img_is_mono = load_image(file_path)
-                if img is None:
-                    self.progress_update.emit(f"Skipping {file_path} (could not load).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                print(f"DEBUG: Loaded image shape={img.shape}, bit depth={img_bit_depth}, mono={img_is_mono}")
-
-                # Detect stars using 3x3 grid strategy
-                img_stars = self.detect_grid_stars(img)
-                print(f"DEBUG: Detected {len(img_stars)} stars in image")
-
-                if len(img_stars) < 9:
-                    self.progress_update.emit(f"Skipping {file_path} (not enough stars found).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Compute affine transformation with RANSAC
-                transform_matrix = self.compute_affine_transform_with_ransac(img_stars, ref_stars, ref_triangles)
-                print(f"DEBUG: Transformation matrix: {transform_matrix}")
-
-                if transform_matrix is None:
-                    self.progress_update.emit(f"Skipping {file_path} (alignment failed).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Apply transformation
-                aligned_image = self.apply_affine_transform(img, transform_matrix)
-
-                if aligned_image is None:
-                    self.progress_update.emit(f"Skipping {file_path} (could not apply transformation).")
-                    self.failed_files.append(file_path)
-                    continue
-
-                # Generate output filename
-                output_filename = os.path.join(self.output_directory, os.path.splitext(os.path.basename(file_path))[0] + "_r.fits")
-
-                # Save the aligned image
-                save_image(
-                    img_array=aligned_image,
-                    filename=output_filename,
-                    original_format="fits",
-                    bit_depth=img_bit_depth,
-                    original_header=img_header if img_header else None,
-                    is_mono=img_is_mono
-                )
-
-                print(f"DEBUG: Saved aligned image to {output_filename}")
-                success_count += 1
-
-            self.show_summary(success_count)
-
+            pool.waitForDone()
+            summary_text = f"Concurrent registration complete. Processed {total_files} files."
+            self.registration_complete.emit(True, summary_text)
         except Exception as e:
-            print(f"ERROR: {e}")
-            self.registration_complete.emit(False, f"Error: {str(e)}")
+            self.registration_complete.emit(False, f"Error: {e}")
 
+    def on_worker_progress(self, msg):
+        # Emit the message to the stacking suite's status window.
+        self.progress_update.emit(msg)
 
+    def on_worker_error(self, msg):
+        self.progress_update.emit("Error: " + msg)
+
+    def on_worker_result(self, out):
+        self.progress_update.emit("Saved: " + out)
 
     def detect_stars(self, image):
-        """ Detects stars in an image using DAOStarFinder (FWHM=3.5). """
-        if image.ndim == 3:  # Convert color images to grayscale
+        if image.ndim == 3:
             image = np.mean(image, axis=2)
-
         mean, median, std = sigma_clipped_stats(image)
         daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
         sources = daofind(image - median)
-
         if sources is None or len(sources) == 0:
-            print("DEBUG: No stars detected")
             return np.array([])
-
-        
-        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T  # (N, 2) shape
-
-    def detect_grid_stars(self, image):
-        """ Detects 3 brightest stars per 3x3 grid region while excluding a 5% border margin. """
-        print("DEBUG: Detecting stars in 3x3 grid with 5% border margin")
-        if image.ndim == 3:  
-            image = np.mean(image, axis=2)  # Convert to grayscale
-
-        h, w = image.shape
-        margin_x = int(w * 0.05)  # 5% margin on X
-        margin_y = int(h * 0.05)  # 5% margin on Y
-
-        # Define valid region inside margin
-        valid_x_min, valid_x_max = margin_x, w - margin_x
-        valid_y_min, valid_y_max = margin_y, h - margin_y
-
-        # Define grid within valid region
-        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
-        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
-
-        stars = []
-        
-        for i in range(len(grid_x) - 1):  # Avoid out-of-bounds
-            for j in range(len(grid_y) - 1):  # Avoid out-of-bounds
-                x_min, x_max = grid_x[i], grid_x[i + 1]
-                y_min, y_max = grid_y[j], grid_y[j + 1]
-
-                sub_img = image[y_min:y_max, x_min:x_max]
-                if sub_img.size == 0:
-                    continue  # Skip empty regions
-
-                if np.std(sub_img) > 0:
-                    local_stars = self.detect_stars(sub_img)
-                    if len(local_stars) > 0:
-                        # Convert to original image coordinates, ensuring they remain within valid bounds
-                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max - 1)
-                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max - 1)
-
-                        # Sort stars by brightness and select top 3 per region
-                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:12])  
-
-        return np.array(stars) if stars else np.array([])
-
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
 
     def build_triangle_dict(self, coords):
-        """ Builds a dictionary mapping triangle invariants to star triangle sets. """
         tri = Delaunay(coords)
         tri_dict = {}
         for simplex in tri.simplices:
@@ -11748,7 +12560,6 @@ class StarRegistrationThread(QThread):
         return tri_dict
 
     def compute_triangle_invariant(self, tri_points):
-        """ Computes invariant features for a given triangle. """
         d1 = np.linalg.norm(tri_points[0] - tri_points[1])
         d2 = np.linalg.norm(tri_points[1] - tri_points[2])
         d3 = np.linalg.norm(tri_points[2] - tri_points[0])
@@ -11757,134 +12568,132 @@ class StarRegistrationThread(QThread):
             return None
         return (sides[1] / sides[0], sides[2] / sides[0])
 
-    def compute_affine_transform_with_ransac(self, img_stars, ref_stars, ref_triangles, max_attempts=5, max_iter=5, convergence_thresh=0.3):
-        """
-        Computes an affine transformation using RANSAC followed by iterative refinement.
-        
-        Parameters:
-        img_stars: (N,2) array of star positions in the image to be aligned.
-        ref_stars: (M,2) array of star positions in the reference image.
-        ref_triangles: (unused in this version) dictionary of triangle invariants.
-        max_attempts: maximum number of attempts to get an initial rough transform.
-        max_iter: maximum number of iterative refinement iterations.
-        convergence_thresh: convergence tolerance in pixels (for the translation components).
-        
-        Returns:
-        A 2x3 affine transformation matrix if successful; otherwise, None.
-        """
-        # Initial rough transform using basic RANSAC approach.
+    # --- Static Methods for use in Workers ---
+    @staticmethod
+    def detect_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        mean, median, std = sigma_clipped_stats(image)
+        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        sources = daofind(image - median)
+        if sources is None or len(sources) == 0:
+            return np.array([])
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+    @staticmethod
+    def detect_grid_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        h, w = image.shape
+        margin_x = int(w * 0.05)
+        margin_y = int(h * 0.05)
+        valid_x_min, valid_x_max = margin_x, w - margin_x
+        valid_y_min, valid_y_max = margin_y, h - margin_y
+        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+        stars = []
+        for i in range(len(grid_x) - 1):
+            for j in range(len(grid_y) - 1):
+                x_min, x_max = grid_x[i], grid_x[i+1]
+                y_min, y_max = grid_y[j], grid_y[j+1]
+                sub_img = image[y_min:y_max, x_min:x_max]
+                if sub_img.size == 0:
+                    continue
+                if np.std(sub_img) > 0:
+                    local_stars = StarRegistrationThread.detect_stars_static(sub_img)
+                    if len(local_stars) > 0:
+                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
+                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
+                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+                        stars.extend(sorted_stars[:12])
+        return np.array(stars) if stars else np.array([])
+
+    @staticmethod
+    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=5, max_iter=5, convergence_thresh=0.3):
+        print("DEBUG: Starting compute_affine_transform_with_ransac_static")
         attempt = 0
         transform = None
         while attempt < max_attempts:
             attempt += 1
+            print(f"DEBUG: Initial RANSAC attempt {attempt}")
             matches = []
             for img_star in img_stars:
                 distances = np.linalg.norm(ref_stars - img_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 25:  # initial matching threshold in pixels
+                if distances[closest_idx] < 20:
                     matches.append((img_star, ref_stars[closest_idx]))
+            print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
             if len(matches) < 3:
-                self.progress_update.emit("Not enough matching stars found in initial estimation, skipping image.")
-                return None
-
+                print("DEBUG: Not enough matches; continuing to next attempt.")
+                continue
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
             dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
-
-            rough_transform, inliers = cv2.estimateAffinePartial2D(src_pts.reshape(-1, 1, 2),
-                                                                dst_pts.reshape(-1, 1, 2),
-                                                                method=cv2.LMEDS)
-            if rough_transform is not None and self.is_valid_transform(rough_transform):
+            rough_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
+            if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
                 transform = rough_transform
+                print("DEBUG: Rough transform computed successfully.")
                 break
-
+            else:
+                print("DEBUG: Rough transform invalid; retrying.")
         if transform is None:
-            self.progress_update.emit("Initial affine transform not found.")
+            print("DEBUG: Failed to compute initial rough transform.")
             return None
-
-        # Begin iterative refinement.
         for iter_num in range(max_iter):
-            # Apply current transform to original image star coordinates.
             transformed_img_stars = cv2.transform(img_stars.reshape(-1, 1, 2), transform).reshape(-1, 2)
-
-            # For each transformed star, find the closest reference star with a tighter threshold.
             matches = []
             for idx, t_star in enumerate(transformed_img_stars):
                 distances = np.linalg.norm(ref_stars - t_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 7:  # tighter threshold for refinement
+                if distances[closest_idx] < 7:
                     matches.append((img_stars[idx], ref_stars[closest_idx]))
-
+            print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
             if len(matches) < 3:
-                self.progress_update.emit("Not enough matching stars during refinement; alignment failed.")
-                return None  # Return None to avoid partial alignment
-
+                print("DEBUG: Not enough matches during refinement; aborting transform.")
+                return None
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
             dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
-
-            new_transform, inliers = cv2.estimateAffinePartial2D(src_pts.reshape(-1,1,2),
-                                                                dst_pts.reshape(-1,1,2),
-                                                                method=cv2.LMEDS)
+            new_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
             if new_transform is None:
-                self.progress_update.emit("Refinement failed to compute a new transform; alignment failed.")
+                print("DEBUG: Refinement failed to compute a new transform; aborting.")
                 return None
-
-            # Check convergence by comparing translation components.
             delta = np.linalg.norm(new_transform[:, 2] - transform[:, 2])
+            print(f"DEBUG: Iteration {iter_num+1}: translation delta = {delta:.3f} pixels")
             transform = new_transform
-            self.progress_update.emit(f"Refinement iteration {iter_num+1}: translation delta = {delta:.3f} pixels")
-            QApplication.processEvents()
             if delta < convergence_thresh:
+                print("DEBUG: Convergence reached.")
                 break
-
-        if not self.is_valid_transform(transform):
-            self.progress_update.emit("Final transform did not pass validation; alignment failed.")
+        if not StarRegistrationThread.is_valid_transform_static(transform):
+            print("DEBUG: Final transform failed validation.")
             return None
-
+        print("DEBUG: Final transform computed successfully.")
         return transform
 
-
-
-    def is_valid_transform(self, matrix):
-        """ Ensures affine transform does not over-scale, skew, or flip the image. """
+    @staticmethod
+    def is_valid_transform_static(matrix):
         a, b, tx = matrix[0]
         c, d, ty = matrix[1]
-
-        scale_x = np.sqrt(a ** 2 + c ** 2)
-        scale_y = np.sqrt(b ** 2 + d ** 2)
-        skew = np.abs((a * b + c * d) / (a ** 2 + c ** 2))
-
+        scale_x = np.sqrt(a**2 + c**2)
+        scale_y = np.sqrt(b**2 + d**2)
+        skew = np.abs((a * b + c * d) / (a**2 + c**2))
         if not (0.5 <= scale_x <= 2.0 and 0.5 <= scale_y <= 2.0):
-            print(f"DEBUG: Scale out of bounds: scale_x={scale_x}, scale_y={scale_y}")
             return False
-
         if skew > 0.01:
-            print(f"DEBUG: Skew out of bounds: {skew}")
             return False
-
         return True
 
-    def apply_affine_transform(self, image, transform_matrix):
-        """ Applies affine transformation to align the image. """
+    @staticmethod
+    def apply_affine_transform_static(image, transform_matrix):
         h, w = image.shape[:2]
         return cv2.warpAffine(image, transform_matrix, (w, h), flags=cv2.INTER_LINEAR)
-
-    def show_summary(self, success_count):
-        """ Displays a summary of processed images in a message box. """
-        total = len(self.files_to_align)
-        failed_count = len(self.failed_files)
-
-        summary_text = (
-            f"Star Registration Completed!\n\n"
-            f"Total Images Processed: {total}\n"
-            f"Successfully Aligned: {success_count}\n"
-            f"Failed Alignments: {failed_count}\n"
-        )
-
-        if failed_count > 0:
-            summary_text += "\nFailed Files:\n" + "\n".join([os.path.basename(f) for f in self.failed_files])
-
-        self.registration_complete.emit(True, summary_text)
-
+    
 class StarRegistrationWindow(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -35547,7 +36356,6 @@ def ensure_native_byte_order(array):
     elif array.dtype.byteorder in ('<', '>'):  # Non-native byte order
         return array.byteswap().view(array.dtype.newbyteorder('='))
     return array
-
 
 # Determine if running inside a PyInstaller bundle
 if hasattr(sys, '_MEIPASS'):
