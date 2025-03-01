@@ -3542,13 +3542,24 @@ class AstroEditingSuite(QMainWindow):
             ]
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
-            # macOS does NOT require the stride parameter
-            command = [
-                self.starnet_exe_path,
-                self.input_image_path,
-                self.output_image_path
-            ]
-            print("Preparing command for macOS.")
+            executable_name = os.path.basename(self.starnet_exe_path).lower()
+            if "starnet2" in executable_name:
+                # Using StarNet2's flag-based interface for macOS
+                command = [
+                    self.starnet_exe_path,
+                    "--input", self.input_image_path,
+                    "--output", self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet2 arguments.")
+            else:
+                # Using the older StarNet++ style arguments
+                command = [
+                    self.starnet_exe_path,
+                    self.input_image_path,
+                    self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet++ arguments.")
+
 
         print(f"StarNet command: {' '.join(command)}")
 
@@ -7310,6 +7321,8 @@ class StackingSuiteDialog(QDialog):
 
             # Debayer if needed:
             image = self.debayer_image(image, file_path, header)
+            if image.ndim == 3:
+                is_mono = False
             # For RAW files, after debayering, force is_mono to False.
             if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 is_mono = False
@@ -7353,7 +7366,11 @@ class StackingSuiteDialog(QDialog):
             else:
                 header['IMAGETYP'] = "UNKNOWN"
 
-            # Update the header with the dimensions of the processed image.
+
+            # Remove any existing NAXIS keywords:
+            for key in ["NAXIS", "NAXIS1", "NAXIS2", "NAXIS3"]:
+                header.pop(key, None)
+
             if image.ndim == 2:
                 header['NAXIS'] = 2
                 header['NAXIS1'] = image.shape[1]
@@ -7372,7 +7389,7 @@ class StackingSuiteDialog(QDialog):
                 save_image(
                     img_array=image,
                     filename=output_filename,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth=bit_depth,
                     original_header=header,
                     is_mono=is_mono
@@ -10884,11 +10901,12 @@ class MosaicMasterDialog(QDialog):
         # Compute the absolute translation tolerance in pixels.
         translation_tolerance = translation_tolerance_percent * image_width
 
-        scale_min = settings.value("mosaic/scale_min_tolerance", 0.8, type=float)
-        scale_max = settings.value("mosaic/scale_max_tolerance", 1.25, type=float)
+        scale_min = settings.value("mosaic/scale_min_tolerance", 0.85, type=float)
+        scale_max = settings.value("mosaic/scale_max_tolerance", 1.15, type=float)
         rotation_max_deg = settings.value("mosaic/rotation_max_tolerance", 45.0, type=float)
         rotation_tolerance = np.radians(rotation_max_deg)
-        skew_max = settings.value("mosaic/skew_max_tolerance", 0.1, type=float)  # default: 0.1
+        skew_max = settings.value("mosaic/skew_max_tolerance", 0.05, type=float)  # default: 0.1
+        axis_ratio_threshold = settings.value("mosaic/axis_ratio_tolerance", 1.15, type=float)
 
 
         best_inliers = 0
@@ -10920,6 +10938,10 @@ class MosaicMasterDialog(QDialog):
             if abs(t[0]) > translation_tolerance or abs(t[1]) > translation_tolerance:
                 continue
             
+            # New failsafe: check ratio between scales to avoid squashed images.
+            if (max(scale1, scale2) / (min(scale1, scale2) + 1e-8)) > axis_ratio_threshold:
+                continue
+
             # Failsafe: rotation angle check.
             angle = np.arctan2(A[1, 0], A[0, 0])
             if abs(angle) > rotation_tolerance: #(np.pi / 4):
@@ -23499,6 +23521,11 @@ class BlinkTab(QWidget):
                 image, header, bit_depth, is_mono = load_image(file_path)
             except Exception as e:
                 print(f"Failed to load image {file_path}: {e}")
+                continue
+
+            # Check if the image is None or empty and skip if so.
+            if image is None or image.size == 0:
+                print(f"Image {file_path} is None or empty. Skipping file.")
                 continue
 
             # Debayer the image if needed (for non-mono images)
