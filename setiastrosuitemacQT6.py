@@ -23512,6 +23512,11 @@ class BlinkTab(QWidget):
                 print(f"Failed to load image {file_path}: {e}")
                 continue
 
+            # Check if the image is None or empty and skip if so.
+            if image is None or image.size == 0:
+                print(f"Image {file_path} is None or empty. Skipping file.")
+                continue
+
             # Debayer the image if needed (for non-mono images)
             if is_mono:
                 image = self.debayer_image(image, file_path, header)
@@ -23598,6 +23603,7 @@ class BlinkTab(QWidget):
                         file_name = os.path.basename(file_path)
                         item = QTreeWidgetItem([file_name])
                         exposure_item.addChild(item)
+
 
     def findTopLevelItemByName(self, name):
         """Find a top-level item in the tree by its name."""
