@@ -3542,13 +3542,24 @@ class AstroEditingSuite(QMainWindow):
             ]
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
-            # macOS does NOT require the stride parameter
-            command = [
-                self.starnet_exe_path,
-                self.input_image_path,
-                self.output_image_path
-            ]
-            print("Preparing command for macOS.")
+            executable_name = os.path.basename(self.starnet_exe_path).lower()
+            if "starnet2" in executable_name:
+                # Using StarNet2's flag-based interface for macOS
+                command = [
+                    self.starnet_exe_path,
+                    "--input", self.input_image_path,
+                    "--output", self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet2 arguments.")
+            else:
+                # Using the older StarNet++ style arguments
+                command = [
+                    self.starnet_exe_path,
+                    self.input_image_path,
+                    self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet++ arguments.")
+
 
         print(f"StarNet command: {' '.join(command)}")
 
