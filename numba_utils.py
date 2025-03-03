@@ -3,6 +3,97 @@ from numba import njit, prange
 import cv2 
 
 @njit(parallel=True, fastmath=True)
+def rescale_image_numba(image, factor):
+    """
+    Custom rescale function using bilinear interpolation optimized with numba.
+    """
+    height, width = image.shape[:2]
+    new_width = int(width * factor)
+    new_height = int(height * factor)
+
+    # Create an empty output array
+    output = np.zeros((new_height, new_width, image.shape[2]), dtype=np.float32)
+
+    for y in prange(new_height):
+        for x in prange(new_width):
+            src_x = x / factor
+            src_y = y / factor
+            x0, y0 = int(src_x), int(src_y)
+            x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
+
+            # Bilinear interpolation
+            dx, dy = src_x - x0, src_y - y0
+            for c in range(image.shape[2]):  # Loop over channels
+                output[y, x, c] = (
+                    image[y0, x0, c] * (1 - dx) * (1 - dy)
+                    + image[y0, x1, c] * dx * (1 - dy)
+                    + image[y1, x0, c] * (1 - dx) * dy
+                    + image[y1, x1, c] * dx * dy
+                )
+
+    return output
+
+@njit(parallel=True, fastmath=True)
+def flip_horizontal_numba(image):
+    """
+    Flips an image horizontally using Numba JIT.
+    """
+    height, width, channels = image.shape
+    output = np.empty_like(image)
+    for y in prange(height):
+        for x in prange(width):
+            output[y, x] = image[y, width - x - 1]
+    return output
+
+@njit(parallel=True, fastmath=True)
+def flip_vertical_numba(image):
+    """
+    Flips an image vertically using Numba JIT.
+    """
+    height, width, channels = image.shape
+    output = np.empty_like(image)
+    for y in prange(height):
+        output[y] = image[height - y - 1]
+    return output
+
+@njit(parallel=True, fastmath=True)
+def rotate_90_clockwise_numba(image):
+    """
+    Rotates the image 90 degrees clockwise.
+    """
+    height, width, channels = image.shape
+    output = np.empty((width, height, channels), dtype=image.dtype)
+    for y in prange(height):
+        for x in prange(width):
+            output[x, height - 1 - y] = image[y, x]
+    return output
+
+@njit(parallel=True, fastmath=True)
+def rotate_90_counterclockwise_numba(image):
+    """
+    Rotates the image 90 degrees counterclockwise.
+    """
+    height, width, channels = image.shape
+    output = np.empty((width, height, channels), dtype=image.dtype)
+    for y in prange(height):
+        for x in prange(width):
+            output[width - 1 - x, y] = image[y, x]
+    return output
+
+@njit(parallel=True, fastmath=True)
+def invert_image_numba(image):
+    """
+    Inverts an image (1 - pixel value).
+    """
+    output = np.empty_like(image)
+    for y in prange(image.shape[0]):
+        for x in prange(image.shape[1]):
+            for c in prange(image.shape[2]):
+                output[y, x, c] = 1.0 - image[y, x, c]
+    return output
+
+
+@njit(parallel=True, fastmath=True)
 def apply_flat_division_numba_2d(image, master_flat, master_bias=None):
     """
     Mono version: image.shape == (H,W)
@@ -1229,194 +1320,6 @@ def debayer_raw_fast(raw_image_data, bayer_pattern="RGGB"):
     # For RAW images, use the same debayering logic.
     return debayer_fits_fast(raw_image_data, bayer_pattern)
 
-@njit(fastmath=True)
-def drizzle_deposit_numba(
-    img_data, 
-    transform, 
-    drizzle_buffer, 
-    coverage_buffer,
-    drizzle_factor, 
-    drop_shrink, 
-    frame_weight
-):
-    """
-    Single-thread Numba approach to deposit each pixel into drizzle_buffer,
-    distributing flux over a bounding-box footprint determined by drop_shrink.
-
-    Because we don't do parallel=True, there's no race condition risk.
-    """
-    h, w = img_data.shape
-    out_h, out_w = drizzle_buffer.shape
-
-    # Extract affine matrix
-    a, b, tx = transform[0]
-    c, d, ty = transform[1]
-
-    footprint_radius = drop_shrink * 0.5
-
-    for y in range(h):
-        for x in range(w):
-            val = img_data[y, x]
-            if val == 0:
-                continue
-
-            # 1) Affine transform => (X, Y)
-            X = a*x + b*y + tx
-            Y = c*x + d*y + ty
-
-            # 2) Multiply by drizzle_factor => upsample coords
-            Xo = X * drizzle_factor
-            Yo = Y * drizzle_factor
-
-            # 3) bounding box in output coords
-            min_x = int(np.floor(Xo - footprint_radius))
-            max_x = int(np.floor(Xo + footprint_radius))
-            min_y = int(np.floor(Yo - footprint_radius))
-            max_y = int(np.floor(Yo + footprint_radius))
-
-            # 4) Clip to output image
-            if max_x < 0 or min_x >= out_w or max_y < 0 or min_y >= out_h:
-                continue
-            min_x = max(min_x, 0)
-            max_x = min(max_x, out_w - 1)
-            min_y = max(min_y, 0)
-            max_y = min(max_y, out_h - 1)
-
-            if max_x < min_x or max_y < min_y:
-                continue
-
-            # 5) area of bounding box
-            footprint_width = max_x - min_x + 1
-            footprint_height = max_y - min_y + 1
-            area_pixels = footprint_width * footprint_height
-
-            if area_pixels <= 0:
-                continue
-
-            deposit_val = (val * frame_weight) / area_pixels
-
-            # 6) Deposit flux
-            for outy in range(min_y, max_y+1):
-                for outx in range(min_x, max_x+1):
-                    drizzle_buffer[outy, outx] += deposit_val
-                    coverage_buffer[outy, outx] += frame_weight
-
-    return drizzle_buffer, coverage_buffer
-
-@njit(parallel=True)
-def finalize_drizzle_2d(drizzle_buffer, coverage_buffer, final_out):
-    """
-    Computes final_out[y,x] = drizzle_buffer[y,x] / coverage_buffer[y,x],
-    handling coverage < 1e-8 by setting output=0.
-
-    parallel=True is safe here because each output pixel is written exactly once.
-    """
-    out_h, out_w = drizzle_buffer.shape
-    for y in prange(out_h):
-        for x in range(out_w):
-            cov = coverage_buffer[y, x]
-            if cov < 1e-8:
-                final_out[y, x] = 0.0
-            else:
-                final_out[y, x] = drizzle_buffer[y, x] / cov
-    return final_out
-
-@njit(parallel=True)
-def finalize_drizzle_3d(drizzle_buffer, coverage_buffer, final_out):
-    """
-    3D version for color stacks: shape=(H,W,C).
-    """
-    out_h, out_w, channels = drizzle_buffer.shape
-    for y in prange(out_h):
-        for x in range(out_w):
-            for c in range(channels):
-                cov = coverage_buffer[y, x, c]
-                if cov < 1e-8:
-                    final_out[y, x, c] = 0.0
-                else:
-                    final_out[y, x, c] = drizzle_buffer[y, x, c] / cov
-    return final_out
-
-@njit(parallel=True, fastmath=True)
-def _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma):
-    """
-    Optimized Numba-compiled local outlier correction.
-    - Computes median and standard deviation from 8 surrounding pixels (excluding center).
-    - If the center pixel is greater than (median + hot_sigma * std_dev), it is replaced with the median.
-    - If the center pixel is less than (median - cold_sigma * std_dev), it is replaced with the median.
-    - Edge pixels are skipped (avoiding padding artifacts).
-    """
-    local_vals = np.empty(9, dtype=np.float32)  # Holds 8 surrounding pixels
-
-    # Process pixels in parallel, skipping edges
-    for y in prange(1, H - 1):  # Skip first and last rows
-        for x in range(1, W - 1):  # Skip first and last columns
-            # If the image is grayscale, set C=1 and handle accordingly
-            for c_i in prange(C if corrected.ndim == 3 else 1):
-                k = 0
-                for dy in range(-1, 2):  # -1, 0, +1
-                    for dx in range(-1, 2):  # -1, 0, +1
-                        if corrected.ndim == 3:  # Color image
-                            local_vals[k] = corrected[y + dy, x + dx, c_i]
-                        else:  # Grayscale image
-                            local_vals[k] = corrected[y + dy, x + dx]
-                        k += 1
-
-                # Compute median
-                M = np.median(local_vals)
-
-                # Compute MAD manually
-                abs_devs = np.abs(local_vals - M)
-                MAD = np.median(abs_devs)
-
-                # Convert MAD to an approximation of standard deviation
-                sigma_mad = 1.4826 * MAD  
-
-                # Get center pixel
-                if corrected.ndim == 3:
-                    T = corrected[y, x, c_i]
-                else:
-                    T = corrected[y, x]
-
-                threshold_high = M + (hot_sigma * sigma_mad)
-                threshold_low = M - (cold_sigma * sigma_mad)
-
-                # **Apply correction ONLY if center pixel is an outlier**
-                if T > threshold_high or T < threshold_low:
-                    if corrected.ndim == 3:
-                        corrected[y, x, c_i] = M  # Replace center pixel in color image
-                    else:
-                        corrected[y, x] = M  # Replace center pixel in grayscale image
-
-@njit(parallel=True, fastmath=True)
-def _numba_unstretch(image: np.ndarray, stretch_original_medians: np.ndarray, stretch_original_mins: np.ndarray) -> np.ndarray:
-    """
-    Numba-optimized function to undo the unlinked stretch.
-    Restores each channel separately.
-    """
-    H, W, C = image.shape
-    out = np.empty_like(image, dtype=np.float32)
-
-    for c in prange(C):  # Parallelize per channel
-        cmed_stretched = np.median(image[..., c])
-        orig_med = stretch_original_medians[c]
-        orig_min = stretch_original_mins[c]
-
-        if cmed_stretched != 0 and orig_med != 0:
-            for y in prange(H):
-                for x in range(W):
-                    r = image[y, x, c]
-                    numerator = (cmed_stretched - 1) * orig_med * r
-                    denominator = cmed_stretched * (orig_med + r - 1) - orig_med * r
-                    if denominator == 0:
-                        denominator = 1e-6  # Avoid division by zero
-                    out[y, x, c] = numerator / denominator
-
-            # Restore the original black point
-            out[..., c] += orig_min
-
-    return np.clip(out, 0, 1)  # Clip to valid range
-
 
 @njit(parallel=True, fastmath=True)
 def applyPixelMath_numba(image_array, amount):
@@ -1802,6 +1705,276 @@ def hsv_to_rgb_numba(hsv):
             out[y,x,2] = (b + m)
     return out
 
+@njit(parallel=True, fastmath=True)
+def _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma):
+    """
+    Optimized Numba-compiled local outlier correction.
+    - Computes median and standard deviation from 8 surrounding pixels (excluding center).
+    - If the center pixel is greater than (median + hot_sigma * std_dev), it is replaced with the median.
+    - If the center pixel is less than (median - cold_sigma * std_dev), it is replaced with the median.
+    - Edge pixels are skipped (avoiding padding artifacts).
+    """
+    local_vals = np.empty(9, dtype=np.float32)  # Holds 8 surrounding pixels
+
+    # Process pixels in parallel, skipping edges
+    for y in prange(1, H - 1):  # Skip first and last rows
+        for x in range(1, W - 1):  # Skip first and last columns
+            # If the image is grayscale, set C=1 and handle accordingly
+            for c_i in prange(C if corrected.ndim == 3 else 1):
+                k = 0
+                for dy in range(-1, 2):  # -1, 0, +1
+                    for dx in range(-1, 2):  # -1, 0, +1
+                        if corrected.ndim == 3:  # Color image
+                            local_vals[k] = corrected[y + dy, x + dx, c_i]
+                        else:  # Grayscale image
+                            local_vals[k] = corrected[y + dy, x + dx]
+                        k += 1
+
+                # Compute median
+                M = np.median(local_vals)
+
+                # Compute MAD manually
+                abs_devs = np.abs(local_vals - M)
+                MAD = np.median(abs_devs)
+
+                # Convert MAD to an approximation of standard deviation
+                sigma_mad = 1.4826 * MAD  
+
+                # Get center pixel
+                if corrected.ndim == 3:
+                    T = corrected[y, x, c_i]
+                else:
+                    T = corrected[y, x]
+
+                threshold_high = M + (hot_sigma * sigma_mad)
+                threshold_low = M - (cold_sigma * sigma_mad)
+
+                # **Apply correction ONLY if center pixel is an outlier**
+                if T > threshold_high or T < threshold_low:
+                    if corrected.ndim == 3:
+                        corrected[y, x, c_i] = M  # Replace center pixel in color image
+                    else:
+                        corrected[y, x] = M  # Replace center pixel in grayscale image
+
+
+def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
+    """
+    Optimized local outlier correction using Numba.
+    - Identifies hot and cold outliers based on local neighborhood statistics.
+    - Uses median and standard deviation from surrounding pixels to detect and replace outliers.
+    - Applies separate hot_sigma and cold_sigma thresholds.
+    - Skips edge pixels to avoid padding artifacts.
+    """
+
+    was_gray = False
+
+    if image.ndim == 2:  # Convert grayscale to 3D
+        H, W = image.shape
+        C = 1
+        was_gray = True
+        image = image[:, :, np.newaxis]  # Explicitly add a color channel dimension
+
+    else:
+        H, W, C = image.shape
+
+    # Copy the image for modification
+    corrected = image.astype(np.float32).copy()
+
+    # Apply fast correction (no padding, edges skipped)
+    _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma)
+
+    if was_gray:
+        corrected = corrected[:, :, 0]  # Convert back to 2D if originally grayscale
+
+    return corrected
+
+def evaluate_polynomial(H: int, W: int, coeffs: np.ndarray, degree: int) -> np.ndarray:
+    """
+    Evaluates the polynomial function over the entire image domain.
+    """
+    xx, yy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy")
+    A_full = build_poly_terms(xx.ravel(), yy.ravel(), degree)
+    return (A_full @ coeffs).reshape(H, W)
+
+
+
+@njit(parallel=True, fastmath=True)
+def numba_mono_final_formula(rescaled, median_rescaled, target_median):
+    """
+    Applies the final formula *after* we already have the rescaled values.
+    
+    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
+    median_rescaled = median(rescaled)
+    
+    out_val = ((median_rescaled - 1) * target_median * r) /
+              ( median_rescaled*(target_median + r -1) - target_median*r )
+    """
+    H, W = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            r = rescaled[y, x]
+            numer = (median_rescaled - 1.0) * target_median * r
+            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+            if np.abs(denom) < 1e-12:
+                denom = 1e-12
+            out[y, x] = numer / denom
+
+    return out
+
+@njit(parallel=True, fastmath=True)
+def numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
+    """
+    Linked color transform: we use one median_rescaled for all channels.
+    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
+    median_rescaled = median of *all* pixels in rescaled
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                numer = (median_rescaled - 1.0) * target_median * r
+                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
+                if np.abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
+
+@njit(parallel=True, fastmath=True)
+def numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
+    """
+    Unlinked color transform: a separate median_rescaled per channel.
+    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
+    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
+    """
+    H, W, C = rescaled.shape
+    out = np.empty_like(rescaled)
+
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                r = rescaled[y, x, c]
+                med = medians_rescaled[c]
+                numer = (med - 1.0) * target_median * r
+                denom = med * (target_median + r - 1.0) - target_median * r
+                if np.abs(denom) < 1e-12:
+                    denom = 1e-12
+                out[y, x, c] = numer / denom
+
+    return out
+
+
+def build_poly_terms(x_array: np.ndarray, y_array: np.ndarray, degree: int) -> np.ndarray:
+    """
+    Precomputes polynomial basis terms efficiently using NumPy, supporting up to degree 6.
+    """
+    ones = np.ones_like(x_array, dtype=np.float32)
+
+    if degree == 1:
+        return np.column_stack((ones, x_array, y_array))
+
+    elif degree == 2:
+        return np.column_stack((ones, x_array, y_array, 
+                                x_array**2, x_array * y_array, y_array**2))
+
+    elif degree == 3:
+        return np.column_stack((ones, x_array, y_array, 
+                                x_array**2, x_array * y_array, y_array**2, 
+                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3))
+
+    elif degree == 4:
+        return np.column_stack((ones, x_array, y_array, 
+                                x_array**2, x_array * y_array, y_array**2, 
+                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
+                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4))
+
+    elif degree == 5:
+        return np.column_stack((ones, x_array, y_array, 
+                                x_array**2, x_array * y_array, y_array**2, 
+                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
+                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
+                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5))
+
+    elif degree == 6:
+        return np.column_stack((ones, x_array, y_array, 
+                                x_array**2, x_array * y_array, y_array**2, 
+                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
+                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
+                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5,
+                                x_array**6, x_array**5 * y_array, x_array**4 * y_array**2, x_array**3 * y_array**3, x_array**2 * y_array**4, x_array * y_array**5, y_array**6))
+
+    else:
+        raise ValueError(f"Unsupported polynomial degree={degree}. Max supported is 6.")
+
+
+
+
+def generate_sample_points(image: np.ndarray, num_points: int = 100) -> np.ndarray:
+    """
+    Generates sample points uniformly across the image.
+
+    - Places points in a uniform grid (no randomization).
+    - Avoids border pixels.
+    - Skips any points with value 0.000 or above 0.85.
+
+    Returns:
+        np.ndarray: Array of shape (N, 2) containing (x, y) coordinates of sample points.
+    """
+    H, W = image.shape[:2]
+    points = []
+
+    # Create a uniform grid (avoiding the border)
+    grid_size = int(np.sqrt(num_points))  # Roughly equal spacing
+    x_vals = np.linspace(10, W - 10, grid_size, dtype=int)  # Avoids border
+    y_vals = np.linspace(10, H - 10, grid_size, dtype=int)
+
+    for y in y_vals:
+        for x in x_vals:
+            # Skip values that are too dark (0.000) or too bright (> 0.85)
+            if np.any(image[int(y), int(x)] == 0.000) or np.any(image[int(y), int(x)] > 0.85):
+                continue  # Skip this pixel
+
+            points.append((int(x), int(y)))
+
+            if len(points) >= num_points:
+                return np.array(points, dtype=np.int32)  # Return only valid points
+
+    return np.array(points, dtype=np.int32)  # Return all collected points
+
+@njit(parallel=True, fastmath=True)
+def numba_unstretch(image: np.ndarray, stretch_original_medians: np.ndarray, stretch_original_mins: np.ndarray) -> np.ndarray:
+    """
+    Numba-optimized function to undo the unlinked stretch.
+    Restores each channel separately.
+    """
+    H, W, C = image.shape
+    out = np.empty_like(image, dtype=np.float32)
+
+    for c in prange(C):  # Parallelize per channel
+        cmed_stretched = np.median(image[..., c])
+        orig_med = stretch_original_medians[c]
+        orig_min = stretch_original_mins[c]
+
+        if cmed_stretched != 0 and orig_med != 0:
+            for y in prange(H):
+                for x in range(W):
+                    r = image[y, x, c]
+                    numerator = (cmed_stretched - 1) * orig_med * r
+                    denominator = cmed_stretched * (orig_med + r - 1) - orig_med * r
+                    if denominator == 0:
+                        denominator = 1e-6  # Avoid division by zero
+                    out[y, x, c] = numerator / denominator
+
+            # Restore the original black point
+            out[..., c] += orig_min
+
+    return np.clip(out, 0, 1)  # Clip to valid range
+
 
 @njit(fastmath=True)
 def drizzle_deposit_numba_naive(img_data, transform, drizzle_buffer, coverage_buffer,
@@ -1904,6 +2077,71 @@ def finalize_drizzle_2d(drizzle_buffer, coverage_buffer, final_out):
     return final_out
 
 @njit(fastmath=True)
+def drizzle_deposit_color_naive(
+    img_data,          # shape (H,W,C)
+    transform,         # shape (2,3)
+    drizzle_buffer,    # shape (outH,outW,C)
+    coverage_buffer,   # shape (outH,outW,C)
+    drizzle_factor,
+    drop_shrink,       # not used here, but included for signature consistency
+    frame_weight
+):
+    """
+    Naive color deposit:
+    Each input pixel (for each channel) is mapped to exactly one output pixel in (outH,outW,C).
+    We ignore drop_shrink and place all flux into a single pixel.
+
+    Parameters
+    ----------
+    img_data : np.ndarray, shape (H,W,C)
+        The color input image data for one frame.
+    transform : np.ndarray, shape (2,3)
+        The affine matrix [ [a,b,tx], [c,d,ty] ] from registration.
+    drizzle_buffer : np.ndarray, shape (outH,outW,C)
+        The upsampled output array where we accumulate flux.
+    coverage_buffer : np.ndarray, shape (outH,outW,C)
+        Parallel buffer tracking coverage for each channel.
+    drizzle_factor : float
+        E.g. 2.0 for 2× upsampling.
+    drop_shrink : float
+        Not used in this naive approach, but included for function signature compatibility.
+    frame_weight : float
+        A per-frame weight (e.g. from star-count weighting).
+
+    Returns
+    -------
+    drizzle_buffer, coverage_buffer : updated arrays with the newly deposited flux.
+    """
+
+    H, W, channels = img_data.shape
+    outH, outW, outC = drizzle_buffer.shape
+
+    # Unpack affine transform
+    a, b, tx = transform[0]
+    c_, d, ty = transform[1]
+
+    for y in range(H):
+        for x in range(W):
+            # 1) Compute transformed coordinates
+            X = a*x + b*y + tx
+            Y = c_*x + d*y + ty
+
+            # 2) Upsample
+            Xo = int(X * drizzle_factor)
+            Yo = int(Y * drizzle_factor)
+
+            # 3) Bounds check
+            if 0 <= Xo < outW and 0 <= Yo < outH:
+                # 4) Loop over channels
+                for cidx in range(channels):
+                    val = img_data[y, x, cidx]
+                    if val != 0:
+                        drizzle_buffer[Yo, Xo, cidx] += val * frame_weight
+                        coverage_buffer[Yo, Xo, cidx] += frame_weight
+
+    return drizzle_buffer, coverage_buffer
+
+@njit(fastmath=True)
 def drizzle_deposit_color_footprint(
     img_data,          # shape (H,W,C)
     transform,         # shape (2,3)
@@ -1996,75 +2234,7 @@ def finalize_drizzle_3d(drizzle_buffer, coverage_buffer, final_out):
                     final_out[y, x, cidx] = drizzle_buffer[y, x, cidx] / cov
     return final_out
 
-@njit(parallel=True, fastmath=True)
-def _numba_mono_final_formula(rescaled, median_rescaled, target_median):
-    """
-    Applies the final formula *after* we already have the rescaled values.
-    
-    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
-    median_rescaled = median(rescaled)
-    
-    out_val = ((median_rescaled - 1) * target_median * r) /
-              ( median_rescaled*(target_median + r -1) - target_median*r )
-    """
-    H, W = rescaled.shape
-    out = np.empty_like(rescaled)
 
-    for y in prange(H):
-        for x in range(W):
-            r = rescaled[y, x]
-            numer = (median_rescaled - 1.0) * target_median * r
-            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-            if np.abs(denom) < 1e-12:
-                denom = 1e-12
-            out[y, x] = numer / denom
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def _numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
-    """
-    Linked color transform: we use one median_rescaled for all channels.
-    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
-    median_rescaled = median of *all* pixels in rescaled
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                numer = (median_rescaled - 1.0) * target_median * r
-                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-                if np.abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def _numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
-    """
-    Unlinked color transform: a separate median_rescaled per channel.
-    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
-    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                med = medians_rescaled[c]
-                numer = (med - 1.0) * target_median * r
-                denom = med * (target_median + r - 1.0) - target_median * r
-                if np.abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
 
 @njit
 def piecewise_linear(val, xvals, yvals):
