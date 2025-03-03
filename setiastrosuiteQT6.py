@@ -40,6 +40,8 @@ from astropy.table import Table, vstack
 from numba import njit, prange
 from scipy.optimize import curve_fit
 import exifread
+from numba_utils import *
+
 
 
 from astropy.wcs.utils import skycoord_to_pixel
@@ -211,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.6"
+VERSION = "2.11.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -4332,95 +4334,6 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
-@njit(parallel=True, fastmath=True)
-def rescale_image_numba(image, factor):
-    """
-    Custom rescale function using bilinear interpolation optimized with numba.
-    """
-    height, width = image.shape[:2]
-    new_width = int(width * factor)
-    new_height = int(height * factor)
-
-    # Create an empty output array
-    output = np.zeros((new_height, new_width, image.shape[2]), dtype=np.float32)
-
-    for y in prange(new_height):
-        for x in prange(new_width):
-            src_x = x / factor
-            src_y = y / factor
-            x0, y0 = int(src_x), int(src_y)
-            x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-
-            # Bilinear interpolation
-            dx, dy = src_x - x0, src_y - y0
-            for c in range(image.shape[2]):  # Loop over channels
-                output[y, x, c] = (
-                    image[y0, x0, c] * (1 - dx) * (1 - dy)
-                    + image[y0, x1, c] * dx * (1 - dy)
-                    + image[y1, x0, c] * (1 - dx) * dy
-                    + image[y1, x1, c] * dx * dy
-                )
-
-    return output
-
-@njit(parallel=True, fastmath=True)
-def flip_horizontal_numba(image):
-    """
-    Flips an image horizontally using Numba JIT.
-    """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        for x in prange(width):
-            output[y, x] = image[y, width - x - 1]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def flip_vertical_numba(image):
-    """
-    Flips an image vertically using Numba JIT.
-    """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        output[y] = image[height - y - 1]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def rotate_90_clockwise_numba(image):
-    """
-    Rotates the image 90 degrees clockwise.
-    """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[x, height - 1 - y] = image[y, x]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def rotate_90_counterclockwise_numba(image):
-    """
-    Rotates the image 90 degrees counterclockwise.
-    """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[width - 1 - x, y] = image[y, x]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def invert_image_numba(image):
-    """
-    Inverts an image (1 - pixel value).
-    """
-    output = np.empty_like(image)
-    for y in prange(image.shape[0]):
-        for x in prange(image.shape[1]):
-            for c in prange(image.shape[2]):
-                output[y, x, c] = 1.0 - image[y, x, c]
-    return output
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
@@ -6681,511 +6594,39 @@ class HistogramDialog(QDialog):
 # --------------------------------------------------
 # Stacking Suite
 # --------------------------------------------------
-@njit(parallel=True, fastmath=True)
-def apply_flat_division_numba(image, master_flat, master_bias=None):
-    """
-    Applies correct flat field correction:
-    (Image - Bias) / ((Flat - Bias) / median(Flat - Bias))
-    - Bias is optional (can be None)
-    - Uses parallel processing for speed
-    """
-    height, width = image.shape
-    if master_bias is not None:
-        master_flat = master_flat - master_bias
-        image = image - master_bias
-    
-    median_flat = np.median(master_flat)
-
-    for y in prange(height):
-        for x in range(width):
-            image[y, x] /= (master_flat[y, x] / median_flat)  # Standard flat-field correction
-
-    return image
-
-@njit(parallel=True)
-def subtract_dark(frames, dark_frame):
-    """
-    Applies dark subtraction to each frame in a set of flat frames.
-    Args:
-        frames (np.ndarray): 3D array of shape (num_frames, height, width).
-        dark_frame (np.ndarray): 2D array (height, width) for the master dark.
-
-    Returns:
-        np.ndarray: Dark-subtracted flat frames.
-    """
-    num_frames, height, width = frames.shape
-    result = np.empty_like(frames, dtype=np.float32)
-
-    for i in prange(num_frames):  # Parallel loop
-        result[i] = frames[i] - dark_frame  # Element-wise subtraction
-
-    return result
-
-@njit(parallel=True, fastmath=True)
-def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5):
-    """Windsorized Sigma Clipping weighted average with exclusion of zeros."""
-    num_frames, height, width = stack.shape
-    clipped = np.zeros((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in prange(width):
-            pixel_values = stack[:, i, j]
-            median_val = np.median(pixel_values)
-            std_dev = np.std(pixel_values)
-            lower_bound = median_val - lower * std_dev
-            upper_bound = median_val + upper * std_dev
-            # Exclude zeros in addition to out-of-bound values
-            valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
-            valid_values = pixel_values[valid_mask]
-            valid_weights = weights[valid_mask]
-            weight_sum = np.sum(valid_weights)
-            if weight_sum > 0:
-                clipped[i, j] = np.sum(valid_values * valid_weights) / weight_sum
-            else:
-                clipped[i, j] = median_val
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def kappa_sigma_clip_weighted(stack, weights, kappa=2.5, iterations=3):
-    """
-    Kappa-Sigma Clipping: Iteratively removes pixels outside [median - kappa*std, median + kappa*std]
-    and returns a weighted average of the remaining pixels.
-    """
-    num_frames, height, width = stack.shape
-    clipped = np.empty((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in range(width):
-            # Make copies of the full pixel stack and weights
-            values = stack[:, i, j].copy()
-            w = weights.copy()
-            for it in range(iterations):
-                if values.size == 0:
-                    break
-                med = np.median(values)
-                std = np.std(values)
-                lower_bound = med - kappa * std
-                upper_bound = med + kappa * std
-                valid = (values != 0) & (values >= lower_bound) & (values <= upper_bound)
-                values = values[valid]
-                w = w[valid]
-            if w.sum() > 0:
-                clipped[i, j] = np.sum(values * w) / w.sum()
-            else:
-                clipped[i, j] = med  # Use last computed median as fallback
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def trimmed_mean_weighted(stack, weights, trim_fraction=0.1):
-    """
-    Trimmed Mean: Sorts the pixel values, removes a fraction of the lowest and highest values,
-    then returns a weighted average of the remaining pixels.
-    """
-    num_frames, height, width = stack.shape
-    clipped = np.empty((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in range(width):
-            pix = stack[:, i, j]
-            # Exclude zeros
-            valid_mask = pix != 0
-            pix = pix[valid_mask]
-            w = weights[valid_mask]
-            n = pix.size
-            if n == 0:
-                clipped[i, j] = 0.0
-            else:
-                trim = int(trim_fraction * n)
-                idx = np.argsort(pix)
-                # Only trim if there are enough values
-                if n > 2 * trim:
-                    trimmed_values = pix[idx][trim:n - trim]
-                    trimmed_weights = w[idx][trim:n - trim]
-                else:
-                    trimmed_values = pix[idx]
-                    trimmed_weights = w[idx]
-                if trimmed_weights.sum() > 0:
-                    clipped[i, j] = np.sum(trimmed_values * trimmed_weights) / trimmed_weights.sum()
-                else:
-                    clipped[i, j] = np.median(trimmed_values)
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def esd_clip_weighted(stack, weights, threshold=3.0):
-    """
-    Extreme Studentized Deviate (ESD) Clipping: Computes z-scores and removes pixels with absolute z-score above threshold.
-    """
-    num_frames, height, width = stack.shape
-    clipped = np.empty((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in range(width):
-            pix = stack[:, i, j]
-            valid_mask = pix != 0
-            values = pix[valid_mask]
-            w = weights[valid_mask]
-            if values.size == 0:
-                clipped[i, j] = 0.0
-                continue
-            mean_val = np.mean(values)
-            std_val = np.std(values)
-            if std_val == 0:
-                clipped[i, j] = mean_val
-                continue
-            z_scores = np.abs((values - mean_val) / std_val)
-            valid2 = z_scores < threshold
-            values = values[valid2]
-            w = w[valid2]
-            if w.sum() > 0:
-                clipped[i, j] = np.sum(values * w) / w.sum()
-            else:
-                clipped[i, j] = mean_val
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def biweight_location_weighted(stack, weights, tuning_constant=6.0):
-    """
-    Biweight Location: Computes a robust estimator of the central value using a biweight function.
-    """
-    num_frames, height, width = stack.shape
-    clipped = np.empty((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in range(width):
-            x = stack[:, i, j]
-            valid_mask = x != 0
-            x = x[valid_mask]
-            w = weights[valid_mask]
-            n = x.size
-            if n == 0:
-                clipped[i, j] = 0.0
-                continue
-            M = np.median(x)
-            mad = np.median(np.abs(x - M))
-            if mad == 0:
-                clipped[i, j] = M
-                continue
-            u = (x - M) / (tuning_constant * mad)
-            mask = np.abs(u) < 1
-            u = u[mask]
-            x_masked = x[mask]
-            w_masked = w[mask]
-            numerator = ((x_masked - M) * (1 - u**2)**2 * w_masked).sum()
-            denominator = ((1 - u**2)**2 * w_masked).sum()
-            if denominator != 0:
-                biweight = M + numerator / denominator
-            else:
-                biweight = M
-            clipped[i, j] = biweight
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def modified_zscore_clip_weighted(stack, weights, threshold=3.5):
-    """
-    Modified Z-Score Clipping: Uses the median absolute deviation (MAD) to compute modified z-scores,
-    then excludes pixels with a modified z-score above the threshold.
-    """
-    num_frames, height, width = stack.shape
-    clipped = np.empty((height, width), dtype=np.float32)
-    for i in prange(height):
-        for j in range(width):
-            x = stack[:, i, j]
-            valid_mask = x != 0
-            x = x[valid_mask]
-            w = weights[valid_mask]
-            n = x.size
-            if n == 0:
-                clipped[i, j] = 0.0
-                continue
-            median_val = np.median(x)
-            mad = np.median(np.abs(x - median_val))
-            if mad == 0:
-                clipped[i, j] = median_val
-                continue
-            modified_z = 0.6745 * (x - median_val) / mad
-            valid2 = np.abs(modified_z) < threshold
-            x = x[valid2]
-            w = w[valid2]
-            if w.sum() > 0:
-                clipped[i, j] = np.sum(x * w) / w.sum()
-            else:
-                clipped[i, j] = median_val
-    return clipped
-
-@njit(parallel=True, fastmath=True)
-def windsorized_sigma_clip(stack, lower=2.5, upper=2.5):
-    """ Applies Windsorized Sigma Clipping to remove outliers before averaging. """
-    num_frames, height, width = stack.shape
-    clipped = np.zeros((height, width), dtype=np.float32)
-
-    for i in prange(height):
-        for j in prange(width):
-            pixel_values = stack[:, i, j]
-
-            # Ensure pixel values are not empty
-            if pixel_values.size == 0:
-                continue
-
-            median_val = np.median(pixel_values)
-            std_dev = np.std(pixel_values)
-
-            lower_bound = median_val - lower * std_dev
-            upper_bound = median_val + upper * std_dev
-
-            # Apply the clipping without altering the scale
-            valid_values = pixel_values[(pixel_values >= lower_bound) & (pixel_values <= upper_bound)]
-            
-            # Ensure we do not introduce any bias
-            if valid_values.size > 0:
-                clipped[i, j] = np.mean(valid_values)
-            else:
-                clipped[i, j] = median_val  # Fallback to median if all values are clipped
-
-    return clipped
-
-
-@njit(parallel=True, fastmath=True)
-def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5):
-    """ Applies Windsorized Sigma Clipping with weights to remove outliers before weighted averaging. """
-    num_frames, height, width = stack.shape
-    clipped = np.zeros((height, width), dtype=np.float32)
-
-    for i in prange(height):
-        for j in prange(width):
-            pixel_values = stack[:, i, j]  # Extract pixel stack at (i, j)
-            weight_values = weights[:]  # Copy of weights (we will filter it later)
-
-            median_val = np.median(pixel_values)
-            std_dev = np.std(pixel_values)
-
-            lower_bound = median_val - lower * std_dev
-            upper_bound = median_val + upper * std_dev
-
-            valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
-
-            valid_values = pixel_values[valid_mask]
-            valid_weights = weights[valid_mask]  # ✅ Select the correct weights
-
-            # ✅ Prevent division by zero
-            weight_sum = np.sum(valid_weights)
-            if weight_sum > 0:
-                clipped[i, j] = np.sum(valid_values * valid_weights) / weight_sum
-            else:
-                clipped[i, j] = median_val  # ✅ Fall back to median if no valid weights
-
-    return clipped
-
-
-@njit(parallel=True)
-def subtract_dark_with_pedestal(frames, dark_frame, pedestal):
-    """
-    Applies dark subtraction and pedestal adjustment to a set of frames.
-    """
-    num_frames, height, width = frames.shape
-    result = np.empty_like(frames, dtype=np.float32)
-
-    for i in prange(num_frames):  # Parallel loop
-        result[i] = frames[i] - dark_frame + pedestal  # Subtract dark, add pedestal
-
-    return result
-
-
-@njit(parallel=True, fastmath=True)
-def parallel_measure_frames(images):
-    """ Parallel processing for measuring simple stats (mean only). """
-    means = np.zeros(len(images), dtype=np.float32)
-
-    for i in prange(len(images)):
-        means[i] = np.mean(images[i])  # ✅ Just compute the mean
-
-    return means
-
-@njit(fastmath=True)
-def fast_mad(image):
-    """ Computes the Median Absolute Deviation (MAD) as a robust noise estimator. """
-    flat_image = image.ravel()  # ✅ Flatten the 2D array into 1D
-    median_val = np.median(flat_image)  # Compute median
-    mad = np.median(np.abs(flat_image - median_val))  # Compute MAD
-    return mad * 1.4826  # ✅ Scale MAD to match standard deviation (for Gaussian noise)
-
-
-
-@njit(fastmath=True)
-def compute_snr(image):
-    """ Computes the Signal-to-Noise Ratio (SNR) using fast Numba std. """
-    mean_signal = np.mean(image)
-    noise = compute_noise(image)
-    return mean_signal / noise if noise > 0 else 0
-
-
-
-
-@njit(fastmath=True)
-def compute_noise(image):
-    """ Estimates noise using Median Absolute Deviation (MAD). """
-    return fast_mad(image)
-
-
-
-
-def compute_star_count(image):
-    """ Uses fast star detection instead of DAOStarFinder. """
-    return fast_star_count(image)
-
-
-def fast_star_count(image, blur_size=5, threshold_factor=2.5):
-    """ Fast star detection using local contrast and Otsu thresholding. """
-    
-    # ✅ Step 1: Convert to 8-bit (scale intensity to 0-255)
-    norm_img = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255.0
-    norm_img = norm_img.astype(np.uint8)
-
-    # ✅ Step 2: Apply Gaussian Blur to create background model
-    blurred = cv2.GaussianBlur(norm_img, (blur_size, blur_size), 0)
-
-    # ✅ Step 3: Subtract to enhance stars
-    enhanced = cv2.absdiff(norm_img, blurred)
-
-    # ✅ Step 4: Otsu’s thresholding for adaptive star detection
-    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # ✅ Step 5: Count connected components (stars)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
-
-    return num_labels - 1  # Subtract 1 because the first label is the background
-
-@njit(parallel=True, fastmath=True)
-def normalize_images(stack, ref_median):
-    """ Normalizes images to match the median of the reference frame. """
-    num_frames, height, width = stack.shape
-    normalized_stack = np.zeros((num_frames, height, width), dtype=np.float32)
-
-    for i in prange(num_frames):
-        img = stack[i]
-        img_median = np.median(img)
-
-        # ✅ Prevent division by zero
-        scale_factor = ref_median / max(img_median, 1e-6)
-        normalized_stack[i] = img * scale_factor
-
-    return normalized_stack
-
-@njit(fastmath=True, parallel=True)
-def debayer_RGGB_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # RGGB: top-left red, top-right green, bottom-left green, bottom-right blue.
-            r = image[i2, j2]
-            g1 = image[i2, j2 + 1]
-            g2 = image[i2 + 1, j2]
-            b = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
-    return out
-
-@njit(fastmath=True, parallel=True)
-def debayer_BGGR_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # BGGR: top-left blue, top-right green, bottom-left green, bottom-right red.
-            b = image[i2, j2]
-            g1 = image[i2, j2 + 1]
-            g2 = image[i2 + 1, j2]
-            r = image[i2 + 1, j2 + 1]
-            out[i, j, 2] = b
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 0] = r
-    return out
-
-@njit(fastmath=True, parallel=True)
-def debayer_GRBG_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # GRBG: top-left green, top-right red, bottom-left blue, bottom-right green.
-            g1 = image[i2, j2]
-            r = image[i2, j2 + 1]
-            b = image[i2 + 1, j2]
-            g2 = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
-    return out
-
-@njit(fastmath=True, parallel=True)
-def debayer_GBRG_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # GBRG: top-left green, top-right blue, bottom-left red, bottom-right green.
-            g1 = image[i2, j2]
-            b = image[i2, j2 + 1]
-            r = image[i2 + 1, j2]
-            g2 = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
-    return out
-
-def debayer_fits_fast(image_data, bayer_pattern):
-    bp = bayer_pattern.upper()
-    if bp == 'RGGB':
-        return debayer_RGGB_fast(image_data)
-    elif bp == 'BGGR':
-        return debayer_BGGR_fast(image_data)
-    elif bp == 'GRBG':
-        return debayer_GRBG_fast(image_data)
-    elif bp == 'GBRG':
-        return debayer_GBRG_fast(image_data)
-    else:
-        raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
-
-def debayer_raw_fast(raw_image_data, bayer_pattern="RGGB"):
-    # For RAW images, use the same debayering logic.
-    return debayer_fits_fast(raw_image_data, bayer_pattern)
-
 class StackingSuiteDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Stacking Suite")
         self.setGeometry(300, 200, 800, 600)
+        self.per_group_drizzle = {}
 
-        # Load settings
+        # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
-        self.stacking_directory = self.settings.value("stacking/dir", type=str) or ""
-        self.sigma_high = self.settings.value("stacking/sigma_high", type=float) or 3.0
-        self.sigma_low = self.settings.value("stacking/sigma_low", type=float) or 3.0
+
+        # Load or default these
+        self.stacking_directory = self.settings.value("stacking/dir", "", type=str)
+        self.sigma_high = self.settings.value("stacking/sigma_high", 3.0, type=float)
+        self.sigma_low = self.settings.value("stacking/sigma_low", 3.0, type=float)
+        self.rejection_algorithm = self.settings.value(
+            "stacking/rejection_algorithm",
+            "Weighted Windsorized Sigma Clipping",
+            type=str
+        )
+        self.kappa = self.settings.value("stacking/kappa", 2.5, type=float)
+        self.iterations = self.settings.value("stacking/iterations", 3, type=int)
+        self.esd_threshold = self.settings.value("stacking/esd_threshold", 3.0, type=float)
+        self.biweight_constant = self.settings.value("stacking/biweight_constant", 6.0, type=float)
+        self.trim_fraction = self.settings.value("stacking/trim_fraction", 0.1, type=float)
+        self.modz_threshold = self.settings.value("stacking/modz_threshold", 3.5, type=float)
 
         # Dictionaries to store file paths
-        self.conversion_files = {}  # {group_key: [file_path, ...]}
-        self.dark_files = {}        # { "exposure_time": [file_paths] }
-        self.flat_files = {}        # { "filter - exposure_time": [file_paths] }
-        self.light_files = {}       # { "filter - exposure_time": [file_paths] }
-        self.master_files = {}      # { "exposure_time": master_file_path }
-        self.master_sizes = {}      # { "master_file_path": "widthxheight" }
+        self.conversion_files = {}
+        self.dark_files = {}
+        self.flat_files = {}
+        self.light_files = {}
+        self.master_files = {}
+        self.master_sizes = {}
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -7234,11 +6675,19 @@ class StackingSuiteDialog(QDialog):
         layout = QVBoxLayout(tab)
         layout.addWidget(QLabel("Batch Convert Files to Debayered FITS (.fit)"))
 
-        # Tree widget to list files to convert.
+        # 1) Create the tree
         self.conversion_tree = QTreeWidget()
         self.conversion_tree.setColumnCount(2)
         self.conversion_tree.setHeaderLabels(["File", "Status"])
-        layout.addWidget(self.conversion_tree)
+
+        # 2) Make columns user-resizable (Interactive)
+        header = self.conversion_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+
+        # 3) After populating the tree, do an initial auto-resize
+        self.conversion_tree.resizeColumnToContents(0)
+        self.conversion_tree.resizeColumnToContents(1)
 
         # Buttons for adding files, adding a directory,
         # selecting an output directory, and clearing the list.
@@ -7311,51 +6760,73 @@ class StackingSuiteDialog(QDialog):
         for i in range(count):
             item = self.conversion_tree.topLevelItem(i)
             file_path = item.data(0, 1000)
-            # Use global load_image to open the file
             result = load_image(file_path)
             if result[0] is None:
                 item.setText(1, "Failed to load")
                 self.update_status(f"Failed to load {os.path.basename(file_path)}")
                 continue
+
             image, header, bit_depth, is_mono = result
 
             # Debayer if needed:
             image = self.debayer_image(image, file_path, header)
             if image.ndim == 3:
                 is_mono = False
-            # For RAW files, after debayering, force is_mono to False.
+
+            # If it's a RAW format, definitely treat as color
             if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 is_mono = False
 
-            # For RAW formats, use exifread to extract additional metadata.
-            if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                # Try extracting EXIF metadata
                 try:
                     import exifread
                     with open(file_path, 'rb') as f:
                         tags = exifread.process_file(f, details=False)
-                    # Extract common tags (adjust keys as needed):
-                    exptime = tags.get("EXIF ExposureTime")
-                    iso = tags.get("EXIF ISOSpeedRatings")
-                    date_obs = tags.get("EXIF DateTimeOriginal")
-                    # Build a new header for RAW files using exifread data.
+
+                    exptime_tag = tags.get("EXIF ExposureTime")  # e.g. "1/125"
+                    iso_tag = tags.get("EXIF ISOSpeedRatings")
+                    date_obs_tag = tags.get("EXIF DateTimeOriginal")
+
+                    # Create or replace with a fresh header, but keep some existing fields if desired
                     new_header = fits.Header()
                     new_header['SIMPLE'] = True
-                    new_header['BITPIX'] = 16  # Adjust if needed.
-                    # Use processed image dimensions below; for now, leave dimensions unset.
-                    if exptime:
-                        new_header['EXPTIME'] = str(exptime)
-                    if iso:
-                        new_header['ISO'] = str(iso)
-                    if date_obs:
-                        new_header['DATE-OBS'] = str(date_obs)
-                    # Preserve the previously deduced image type (if any) from header.
+                    new_header['BITPIX'] = 16
                     new_header['IMAGETYP'] = header.get('IMAGETYP', "UNKNOWN")
-                    # Replace the header with the new one.
+
+                    # Attempt to parse exptime. If fraction or numeric fails, store 'Unknown'.
+                    if exptime_tag:
+                        exptime_str = str(exptime_tag.values)  # or exptime_tag.printable
+                        # Attempt fraction or float
+                        try:
+                            if '/' in exptime_str:  
+                                # e.g. "1/125"
+                                top, bot = exptime_str.split('/', 1)
+                                fexp = float(top) / float(bot)
+                                new_header['EXPTIME'] = (fexp, "Exposure Time in seconds")
+                            else:
+                                # e.g. "0.008" or "8"
+                                fexp = float(exptime_str)
+                                new_header['EXPTIME'] = (fexp, "Exposure Time in seconds")
+                        except (ValueError, ZeroDivisionError):
+                            new_header['EXPTIME'] = 'Unknown'
+                    # If no exptime_tag, set Unknown
+                    else:
+                        new_header['EXPTIME'] = 'Unknown'
+
+                    if iso_tag:
+                        new_header['ISO'] = str(iso_tag.values)
+                    if date_obs_tag:
+                        new_header['DATE-OBS'] = str(date_obs_tag.values)
+
+                    # Replace old header with new
                     header = new_header
+
                 except Exception as e:
+                    # If exif extraction fails for any reason, we just keep the existing header
+                    # but ensure we set EXPTIME if missing
                     self.update_status(f"Warning: Failed to extract RAW header from {os.path.basename(file_path)}: {e}")
 
-            # Append (or update) IMAGETYP based on filename.
+            # Append or update IMAGETYP based on filename
             lower_name = os.path.basename(file_path).lower()
             if "dark" in lower_name:
                 header['IMAGETYP'] = "DARK"
@@ -7364,10 +6835,9 @@ class StackingSuiteDialog(QDialog):
             elif "light" in lower_name:
                 header['IMAGETYP'] = "LIGHT"
             else:
-                header['IMAGETYP'] = "UNKNOWN"
+                header['IMAGETYP'] = header.get('IMAGETYP', "UNKNOWN")
 
-
-            # Remove any existing NAXIS keywords:
+            # Remove any existing NAXIS keywords
             for key in ["NAXIS", "NAXIS1", "NAXIS2", "NAXIS3"]:
                 header.pop(key, None)
 
@@ -7381,10 +6851,16 @@ class StackingSuiteDialog(QDialog):
                 header['NAXIS2'] = image.shape[0]
                 header['NAXIS3'] = image.shape[2]
 
-            # Build output filename: same base name with .fit extension.
+            # -- Ensure EXPTIME is defined --
+            if 'EXPTIME' not in header:
+                # If the camera or exif didn't provide it, we set it to 'Unknown'
+                header['EXPTIME'] = 'Unknown'
+
+            # Build output filename and save
             base = os.path.basename(file_path)
             name, _ = os.path.splitext(base)
             output_filename = os.path.join(self.conversion_output_directory, f"{name}.fit")
+
             try:
                 save_image(
                     img_array=image,
@@ -7395,13 +6871,17 @@ class StackingSuiteDialog(QDialog):
                     is_mono=is_mono
                 )
                 item.setText(1, "Converted")
-                self.update_status(f"Converted {os.path.basename(file_path)} to FITS with IMAGETYP={header['IMAGETYP']}.")
+                self.update_status(
+                    f"Converted {os.path.basename(file_path)} to FITS with "
+                    f"IMAGETYP={header['IMAGETYP']}, EXPTIME={header['EXPTIME']}."
+                )
             except Exception as e:
                 item.setText(1, f"Error: {e}")
                 self.update_status(f"Error converting {os.path.basename(file_path)}: {e}")
-            QApplication.processEvents()
-        self.update_status("Conversion complete.")
 
+            QApplication.processEvents()
+
+        self.update_status("Conversion complete.")
 
 
 
@@ -7643,10 +7123,22 @@ class StackingSuiteDialog(QDialog):
         # Left Side - Dark Frames
         dark_frames_layout = QVBoxLayout()
         dark_frames_layout.addWidget(QLabel("Dark Frames"))
+        # 1) Create the tree
         self.dark_tree = QTreeWidget()
         self.dark_tree.setColumnCount(2)
         self.dark_tree.setHeaderLabels(["Exposure Time", "Metadata"])
         self.dark_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # 2) Make columns user-resizable
+        header = self.dark_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+
+        # 3) After you fill the tree with items, auto-resize
+        self.dark_tree.resizeColumnToContents(0)
+        self.dark_tree.resizeColumnToContents(1)
+
+        # Then add it to the layout
         dark_frames_layout.addWidget(self.dark_tree)
 
         # Buttons to Add Dark Files & Directories
@@ -7925,45 +7417,83 @@ class StackingSuiteDialog(QDialog):
         return tab
 
     def create_image_registration_tab(self):
-        """ Creates the Image Registration tab with auto-populated calibrated light frames. """
+        """
+        Creates an Image Registration tab that mimics how the Light tab handles
+        cosmetic corrections—i.e., we have global Drizzle controls (checkbox, combo, spin),
+        and we update a text column in the QTreeWidget to show each group's drizzle state.
+        """
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         # ─────────────────────────────────────────
-        # Calibrated Light Frames Tree
+        # 1) QTreeWidget
         # ─────────────────────────────────────────
         self.reg_tree = QTreeWidget()
-        self.reg_tree.setColumnCount(2)
-        self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata"])
+        self.reg_tree.setColumnCount(3)
+        self.reg_tree.setHeaderLabels([
+            "Filter - Exposure - Size",
+            "Metadata",
+            "Drizzle"  # We'll display "Drizzle: True, Scale: 2x, Drop:0.65" here
+        ])
         self.reg_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # Optional: make columns resize nicely
+        header = self.reg_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+
         layout.addWidget(QLabel("Calibrated Light Frames"))
         layout.addWidget(self.reg_tree)
 
-        # ✅ Load the calibrated files automatically
+        # Populate the tree from your calibrated folder
         self.populate_calibrated_lights()
 
         # ─────────────────────────────────────────
-        # Buttons for Managing Files
+        # 2) Buttons for Managing Files
         # ─────────────────────────────────────────
         btn_layout = QHBoxLayout()
-
         self.add_reg_files_btn = QPushButton("Add Light Files")
         self.add_reg_files_btn.clicked.connect(self.add_light_files_to_registration)
         btn_layout.addWidget(self.add_reg_files_btn)
 
-        self.clear_selection_btn = QPushButton("Clear Selection")
+        self.clear_selection_btn = QPushButton("Remove Selected")
         self.clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.reg_tree))
         btn_layout.addWidget(self.clear_selection_btn)
 
         layout.addLayout(btn_layout)
 
         # ─────────────────────────────────────────
-        # Reference Frame Selection (Fixed)
+        # 3) Global Drizzle Controls
+        # ─────────────────────────────────────────
+        drizzle_layout = QHBoxLayout()
+
+        self.drizzle_checkbox = QCheckBox("Enable Drizzle")
+        self.drizzle_checkbox.stateChanged.connect(self.update_drizzle_settings)  # <─ connect signal
+        drizzle_layout.addWidget(self.drizzle_checkbox)
+
+        drizzle_layout.addWidget(QLabel("Scale:"))
+        self.drizzle_scale_combo = QComboBox()
+        self.drizzle_scale_combo.addItems(["1x", "2x", "3x"])
+        self.drizzle_scale_combo.currentIndexChanged.connect(self.update_drizzle_settings)  # <─ connect
+        drizzle_layout.addWidget(self.drizzle_scale_combo)
+
+        drizzle_layout.addWidget(QLabel("Drop Shrink:"))
+        self.drizzle_drop_shrink_spin = QDoubleSpinBox()
+        self.drizzle_drop_shrink_spin.setRange(0.0, 1.0)
+        self.drizzle_drop_shrink_spin.setSingleStep(0.05)
+        self.drizzle_drop_shrink_spin.setValue(0.65)
+        self.drizzle_drop_shrink_spin.valueChanged.connect(self.update_drizzle_settings)  # <─ connect
+        drizzle_layout.addWidget(self.drizzle_drop_shrink_spin)
+
+        layout.addLayout(drizzle_layout)
+
+        # ─────────────────────────────────────────
+        # 4) Reference Frame Selection
         # ─────────────────────────────────────────
         self.ref_frame_label = QLabel("Select Reference Frame:")
         self.ref_frame_path = QLabel("No file selected")
         self.ref_frame_path.setWordWrap(True)
-
         self.select_ref_frame_btn = QPushButton("Select Reference Frame")
         self.select_ref_frame_btn.clicked.connect(self.select_reference_frame)
 
@@ -7971,11 +7501,10 @@ class StackingSuiteDialog(QDialog):
         ref_layout.addWidget(self.ref_frame_label)
         ref_layout.addWidget(self.ref_frame_path)
         ref_layout.addWidget(self.select_ref_frame_btn)
-
         layout.addLayout(ref_layout)
 
         # ─────────────────────────────────────────
-        # Start Registration Button
+        # 5) Register & Integrate Buttons
         # ─────────────────────────────────────────
         self.register_images_btn = QPushButton("🔥🚀Register and Integrate Images🔥🚀")
         self.register_images_btn.clicked.connect(self.register_images)
@@ -7994,35 +7523,28 @@ class StackingSuiteDialog(QDialog):
         """)
         layout.addWidget(self.register_images_btn)
 
-        # ─────────────────────────────────────────
-        # New Integration Button (Skips Alignment)
-        # ─────────────────────────────────────────
         self.integrate_registered_btn = QPushButton("Integrate Previously Registered Images")
         self.integrate_registered_btn.clicked.connect(self.integrate_registered_images)
         self.integrate_registered_btn.setStyleSheet("""
             QPushButton {
-                background-color: #333;  /* Dark gray */
+                background-color: #333;
                 color: white;
                 font-size: 14px;
                 padding: 8px;
                 border-radius: 5px;
-                border: 2px solid yellow;  /* Subtle yellow border */
+                border: 2px solid yellow;
             }
             QPushButton:hover {
-                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+                border: 2px solid #FFD700;
             }
             QPushButton:pressed {
-                background-color: #222;  /* Darker gray on press */
-                border: 2px solid #FFA500;  /* Orange border when pressed */
+                background-color: #222;
+                border: 2px solid #FFA500;
             }
         """)
         layout.addWidget(self.integrate_registered_btn)
 
         tab.setLayout(layout)
-
-        # ✅ Call `populate_calibrated_lights()` after the layout is fully built
-        QTimer.singleShot(100, self.populate_calibrated_lights)  
-
         return tab
 
     def select_reference_frame(self):
@@ -8077,43 +7599,48 @@ class StackingSuiteDialog(QDialog):
 
 
     def populate_calibrated_lights(self, manual_addition=False):
-        """ Populates the tree with calibrated light frames grouped by filter, exposure, and dimensions. """
+        """
+        Populates the tree with 3 columns:
+        0: "Filter - Exposure - Size"
+        1: "Metadata"
+        2: "Drizzle" (e.g. "Drizzle: False" or "Drizzle: True, Scale: 2x, Drop: 0.65")
+        """
         if manual_addition:
-            return  # ✅ Skip auto-loading if files were manually added
+            return
 
         self.reg_tree.clear()
-        
-        # ✅ Preserve manually added files
-        existing_manual_files = self.light_files.copy()
-        self.light_files = {}  # ✅ Reset auto-loaded light files
+        self.reg_tree.setColumnCount(3)
+        self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
 
+        # Preserve manually added files
+        existing_manual_files = self.light_files.copy()
+        self.light_files = {}
+
+        # Ensure stacking directory is set
         if not self.stacking_directory:
-            QMessageBox.warning(self, "Error", "Output directory is not set. Please define an output directory first.")
+            QMessageBox.warning(self, "Error", "Output directory is not set.")
             return
 
         calibrated_folder = os.path.join(self.stacking_directory, "Calibrated")
         if not os.path.exists(calibrated_folder):
-            
             return
 
-        files = [f for f in os.listdir(calibrated_folder) if f.lower().endswith((".fits", ".fit"))]
-        if not files:
-            
+        fits_files = [
+            f for f in os.listdir(calibrated_folder)
+            if f.lower().endswith((".fits", ".fit"))
+        ]
+        if not fits_files:
             return
 
-        grouped_files = {}  # Dict to store grouped files
-
-        for file in files:
-            file_path = os.path.join(calibrated_folder, file)
-
+        # Group files by filter/exposure/dimensions
+        grouped_files = {}
+        for filename in fits_files:
+            file_path = os.path.join(calibrated_folder, filename)
             try:
-                # Read FITS header to extract metadata
                 with fits.open(file_path) as hdul:
-                    header = hdul[0].header
-                    filter_name = header.get("FILTER", "Unknown")
-                    exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
-
-                    # Extract image dimensions
+                    hdr = hdul[0].header
+                    filter_name = hdr.get("FILTER", "Unknown")
+                    exposure = hdr.get("EXPOSURE", hdr.get("EXPTIME", "Unknown"))
                     data = hdul[0].data
                     if data is not None:
                         height, width = data.shape[-2:]
@@ -8122,31 +7649,143 @@ class StackingSuiteDialog(QDialog):
                         image_size = "Unknown"
 
                     group_key = f"{filter_name} - {exposure}s ({image_size})"
-
                     if group_key not in grouped_files:
                         grouped_files[group_key] = []
                     grouped_files[group_key].append(file_path)
 
             except Exception as e:
-                self.update_status(f"⚠️ Skipped {file}: {e}")
+                self.update_status(f"⚠️ Skipped {filename}: {e}")
 
-        # ✅ Populate Tree (Ensure proper grouping)
+        # Populate the tree with top-level items
         for group_key, file_list in grouped_files.items():
-            group_item = QTreeWidgetItem([group_key, f"{len(file_list)} files"])
-            self.reg_tree.addTopLevelItem(group_item)
+            top_item = QTreeWidgetItem()
+            top_item.setText(0, group_key)
+            top_item.setText(1, f"{len(file_list)} files")
+            # By default, Drizzle is off -> just show "Drizzle: False"
+            top_item.setText(2, "Drizzle: False")
 
-            for file_path in file_list:
-                file_name = os.path.basename(file_path)
-                file_item = QTreeWidgetItem([file_name, "Loaded"])
-                group_item.addChild(file_item)
+            # Store file_list in UserRole
+            top_item.setData(0, Qt.ItemDataRole.UserRole, file_list)
+            self.reg_tree.addTopLevelItem(top_item)
 
-            group_item.setExpanded(True)  # ✅ Expand group by default for visibility
+            # Child items for each file
+            for fp in file_list:
+                child = QTreeWidgetItem([
+                    os.path.basename(fp),
+                    f"Size: {image_size}"
+                ])
+                top_item.addChild(child)
+            top_item.setExpanded(True)
 
-        # ✅ Restore manually added files
-        for group_key, file_list in existing_manual_files.items():
-            if group_key not in self.light_files:
-                self.light_files[group_key] = file_list
+        # Update self.light_files
+        self.light_files.update(grouped_files)
 
+        # Restore any manually added files
+        for gkey, flist in existing_manual_files.items():
+            if gkey not in self.light_files:
+                self.light_files[gkey] = flist
+
+
+    def update_drizzle_settings(self):
+        """
+        Called whenever the user toggles the 'Enable Drizzle' checkbox,
+        changes the scale combo, or changes the drop shrink spinbox.
+        Applies to all *selected* top-level items in the reg_tree.
+        """
+        # Current states from global controls
+        drizzle_enabled = self.drizzle_checkbox.isChecked()
+        scale_str = self.drizzle_scale_combo.currentText()  # e.g. "1x","2x","3x"
+        drop_val = self.drizzle_drop_shrink_spin.value()    # e.g. 0.65
+
+        # Gather selected items
+        selected_items = self.reg_tree.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            # If the user selected a child row, go up to its parent group
+            if item.parent() is not None:
+                item = item.parent()
+
+            group_key = item.text(0)
+
+            if drizzle_enabled:
+                # Show scale + drop shrink
+                drizzle_text = (f"Drizzle: True, "
+                                f"Scale: {scale_str}, "
+                                f"Drop: {drop_val:.2f}")
+            else:
+                # Just show "Drizzle: False"
+                drizzle_text = "Drizzle: False"
+
+            # Update column 2 with the new text
+            item.setText(2, drizzle_text)
+
+            # If you also store it in a dictionary:
+            self.per_group_drizzle[group_key] = {
+                "enabled": drizzle_enabled,
+                "scale": float(scale_str.replace("x","", 1)),
+                "drop": drop_val
+            }
+
+
+    def gather_drizzle_settings_from_tree(self):
+        """
+        Returns a dict of the form:
+        {
+        "L - 120s (8288x5644)": {
+            "files": [...],
+            "drizzle_enabled": True,
+            "scale_factor": 2.0,
+            "drop_shrink": 0.65
+        },
+        ...
+        }
+        """
+        drizzle_dict = {}
+        top_count = self.reg_tree.topLevelItemCount()
+
+        for i in range(top_count):
+            item = self.reg_tree.topLevelItem(i)
+            if not item:
+                continue
+
+            group_key = item.text(0)
+            file_list = item.data(0, Qt.ItemDataRole.UserRole)
+            drizzle_text = item.text(2)  # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65" or "Drizzle: False"
+
+            # Default
+            drizzle_enabled = False
+            scale_factor = 1.0
+            drop_shrink = 0.65
+
+            if drizzle_text.startswith("Drizzle: False"):
+                # Drizzle is off
+                drizzle_enabled = False
+            else:
+                # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65"
+                parts = drizzle_text.split(",")
+                # parts[0] -> "Drizzle: True"
+                # parts[1] -> " Scale: 2x"
+                # parts[2] -> " Drop: 0.65"
+                if len(parts) == 3:
+                    drizzle_enabled_str = parts[0].split(":")[-1].strip()  # "True"
+                    drizzle_enabled = (drizzle_enabled_str.lower() == "true")
+
+                    scale_str = parts[1].split(":")[-1].strip()  # "2x"
+                    scale_factor = float(scale_str.replace("x",""))
+
+                    drop_str = parts[2].split(":")[-1].strip()
+                    drop_shrink = float(drop_str)
+
+            drizzle_dict[group_key] = {
+                "files": file_list,
+                "drizzle_enabled": drizzle_enabled,
+                "scale_factor": scale_factor,
+                "drop_shrink": drop_shrink
+            }
+
+        return drizzle_dict
 
 
     def add_light_files_to_registration(self):
@@ -8496,6 +8135,8 @@ class StackingSuiteDialog(QDialog):
         for exposure_key, file_list in self.dark_files.items():
             exposure_time_str, image_size = exposure_key.split(" (")  # Extract exposure and size
             image_size = image_size.rstrip(")")  # Remove trailing parenthesis
+            if "Unknown" in exposure_time_str:
+                exposure_time_str = "0"  # use 0 as fallback
             exposure_time = float(exposure_time_str.replace("s", ""))  # Convert to float
 
             matched_group = None
@@ -9201,6 +8842,8 @@ class StackingSuiteDialog(QDialog):
                         flat_data, _, _, _ = load_image(master_flat_path)
                         if flat_data is not None:
                             flat_data[flat_data == 0] = 1.0  # ✅ Prevent division by zero
+                            print("DEBUG: light_data.shape =", light_data.shape)
+                            print("DEBUG: flat_data.shape  =", flat_data.shape)
                             light_data = apply_flat_division_numba(light_data, flat_data)  # ✅ Parallelized Flat Division
                             self.update_status(f"Flat Applied: {os.path.basename(master_flat_path)}")  # 🔹 Status update
                             QApplication.processEvents()  # 🔹 Ensure UI updates
@@ -9326,27 +8969,43 @@ class StackingSuiteDialog(QDialog):
 
         self.update_status("✅ Frame measurements complete!")
 
-        # ✅ Step 5: Compute Weights for Stacking
+        # 5) Compute Weights for Stacking
         self.update_status("⚖️ Computing frame weights...")
-
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
 
         for file in measured_frames:
             star_count = star_counts[file]
             mean_value = mean_values[file]
 
-            # ✅ Ensure no division by zero
+            # Avoid division by zero
             star_weight = max(star_count, 1e-6)
             mean_weight = max(mean_value, 1e-6)
 
-            # ✅ Ratio-based weight calculation
-            self.frame_weights[file] = star_weight / mean_weight  # ✅ Always positive
+            # Ratio-based weight
+            raw_weight = star_weight / mean_weight
+            self.frame_weights[file] = raw_weight
 
-            # ✅ Add to debug log
-            debug_weight_log += f"📂 {os.path.basename(file)} → Star Count: {star_count}, Mean: {mean_value:.4f}, Final Weight: {self.frame_weights[file]:.4f}\n"
+            debug_weight_log += (
+                f"📂 {os.path.basename(file)} → "
+                f"Star Count: {star_count}, "
+                f"Mean: {mean_value:.4f}, "
+                f"Raw Weight: {raw_weight:.4f}\n"
+            )
 
-        self.update_status(debug_weight_log)  # ✅ Print weights to the status window
-        self.update_status("✅ Frame weights computed!")
+        # 6) Normalize Weights so max = 1.0 (optional but recommended)
+        max_w = max(self.frame_weights.values())
+        if max_w > 0:
+            for k in self.frame_weights:
+                self.frame_weights[k] /= max_w
+
+        debug_weight_log += "\n🔧 Normalizing Weights so maximum is 1.0:\n"
+        for file in measured_frames:
+            debug_weight_log += (
+                f"{os.path.basename(file)} => Normalized Weight: {self.frame_weights[file]:.4f}\n"
+            )
+
+        self.update_status(debug_weight_log)
+        self.update_status("✅ Frame weights computed and normalized!")
 
         # ✅ Step 2: Determine the Best Reference Frame
         if hasattr(self, "reference_frame") and self.reference_frame:
@@ -9368,21 +9027,149 @@ class StackingSuiteDialog(QDialog):
 
         self.alignment_thread.start()
 
+    def save_alignment_matrices_sasd(self, transforms_dict):
+        out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        try:
+            with open(out_path, "w") as f:
+                for file_path, matrix in transforms_dict.items():
+                    # *** KEY FIX: normalize the file_path before writing
+                    norm_file = os.path.normpath(file_path)
 
+                    a, b, tx = matrix[0]
+                    c, d, ty = matrix[1]
 
+                    f.write(f"FILE: {norm_file}\n")
+                    f.write("MATRIX:\n")
+                    f.write(f"{a:.4f}, {b:.4f}, {tx:.4f}\n")
+                    f.write(f"{c:.4f}, {d:.4f}, {ty:.4f}\n")
+                    f.write("\n")  # blank line
+            self.update_status(f"✅ Transform file saved as {os.path.basename(out_path)}")
+        except Exception as e:
+            self.update_status(f"⚠️ Failed to save transform file: {e}")
+
+    def load_alignment_matrices_custom(self, file_path):
+
+        transforms = {}
+        with open(file_path, "r") as f:
+            content = f.read()
+
+        blocks = re.split(r"\n\s*\n", content.strip())
+
+        for block in blocks:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            if lines[0].startswith("FILE:"):
+                raw_file_path = lines[0].replace("FILE:", "").strip()
+                # *** KEY FIX: normalize here
+                curr_file = os.path.normpath(raw_file_path)
+            else:
+                continue
+            
+            if len(lines) < 4 or not lines[1].startswith("MATRIX:"):
+                continue
+
+            row0 = lines[2].split(",")
+            row1 = lines[3].split(",")
+            a, b, tx = [float(x) for x in row0]
+            c, d, ty = [float(x) for x in row1]
+
+            transforms[curr_file] = np.array([[a, b, tx],
+                                            [c, d, ty]], dtype=np.float32)
+        return transforms
 
     def on_registration_complete(self, success, msg):
         """ Handles thread completion and prevents premature destruction. """
         self.update_status(msg)
 
         if success:
-            self.update_status("✅ Registration complete! Proceeding to save aligned images.")
-            self.save_registered_images(success, msg, self.frame_weights)
+            self.update_status("✅ Registration complete! Proceeding with post-processing...")
+
+            # 1) Pull out transforms from the alignment thread
+            all_transforms = self.alignment_thread.alignment_matrices
+
+            # 2) Save them if desired
+            self.save_alignment_matrices_sasd(all_transforms)
+
+            # 3) Gather the per-group drizzle info from the tree
+            drizzle_dict = self.gather_drizzle_settings_from_tree()
+
+            # 4) Do a per-group stacking approach (some may drizzle, some may not)
+            self.stack_images_mixed_drizzle(
+                grouped_files=self.light_files,
+                frame_weights=self.frame_weights,
+                transforms_dict=all_transforms,
+                drizzle_dict=drizzle_dict
+            )
+
         else:
             self.update_status("⚠️ Registration failed.")
-        
-        # ✅ Explicitly delete the thread reference
+
+        # Explicitly delete the thread reference
         self.alignment_thread = None
+
+    def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
+        """
+        Goes group by group. If drizzle_enabled, do drizzle on that group.
+        Otherwise do the normal stacking.
+        
+        Parameters:
+        -----------
+        grouped_files : dict
+            { group_key: [file_list], ... }
+        frame_weights : dict
+            { orig_file_path: float_weight, ... }
+        transforms_dict : dict
+            { orig_file_path: 2x3_affine_matrix, ... }
+        drizzle_dict : dict
+            {
+            group_key: {
+                "files": [...],
+                "drizzle_enabled": bool,
+                "scale_factor": float,
+                "drop_shrink": float
+            },
+            ...
+            }
+        """
+        for group_key, file_list in grouped_files.items():
+            # 1) Retrieve drizzle config from drizzle_dict
+            dconf = drizzle_dict.get(group_key, None)
+            if not dconf:
+                # Fallback: no drizzle data => normal stack
+                self.stack_one_group_normal(group_key, file_list, frame_weights)
+                continue
+
+            drizzle_enabled = dconf["drizzle_enabled"]
+            scale_factor = dconf["scale_factor"]
+            drop_shrink = dconf["drop_shrink"]
+
+            if drizzle_enabled:
+                self.update_status(f"📐 Drizzle for group '{group_key}' at {scale_factor}× (drop={drop_shrink}).")
+                self.drizzle_stack_one_group(
+                    group_key=group_key,
+                    file_list=file_list,
+                    transforms_dict=transforms_dict,
+                    frame_weights=frame_weights,  # <-- Pass weights here
+                    scale_factor=scale_factor,
+                    drop_shrink=drop_shrink
+                )
+            else:
+                self.update_status(f"🌀 Normal stacking for group '{group_key}'.")
+                self.stack_one_group_normal(group_key, file_list, frame_weights)
+
+
+    def stack_one_group_normal(self, group_key, file_list, frame_weights):
+        """
+        Stacks a single group using the same code as 'stack_registered_images()',
+        but restricted to one group.
+        """
+        # Build a tiny dict with just one entry
+        single_group_dict = { group_key: file_list }
+
+        # Reuse your existing method
+        self.stack_registered_images(single_group_dict, frame_weights)
+
 
     def save_registered_images(self, success, msg, frame_weights):
         if not success:
@@ -9685,6 +9472,152 @@ class StackingSuiteDialog(QDialog):
 
         # Call the stacking function using the already registered (aligned) images
         self.stack_registered_images(self.light_files, self.frame_weights)
+
+    def drizzle_stack_one_group(
+        self,
+        group_key,
+        file_list,
+        transforms_dict,
+        frame_weights,
+        scale_factor=2.0,
+        drop_shrink=0.65
+    ):
+        """
+        Drizzle a single group, handling both mono (H,W) and color (H,W,C).
+        We choose naive vs. footprint deposit based on drop_shrink.
+        Then we do a final combination with the appropriate finalize function.
+        """
+
+        self.update_status(
+            f"🔭 Starting drizzle stacking for group '{group_key}' "
+            f"at {scale_factor}× with drop shrink={drop_shrink}"
+        )
+
+        # 1) Check we have enough frames
+        if len(file_list) < 2:
+            self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to drizzle.")
+            return
+
+        # 2) Load transforms from disk (assuming we always do it this way)
+        transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        if not os.path.exists(transforms_path):
+            self.update_status(f"⚠️ No alignment_transforms.sasd found at {transforms_path}!")
+            return
+
+        new_transforms_dict = self.load_alignment_matrices_custom(transforms_path)
+        self.update_status(f"✅ Loaded {len(new_transforms_dict)} transforms from disk for drizzle.")
+
+        # 3) Load the first file to determine shape + color/mono
+        first_file = file_list[0]
+        first_img, hdr, _, _ = load_image(first_file)
+        if first_img is None:
+            self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
+            return
+
+
+        if first_img.ndim == 2:
+            # MONO (H,W)
+            is_mono = True
+            h, w = first_img.shape
+        else:
+            # COLOR (H,W,C)
+            is_mono = False
+            h, w, c = first_img.shape
+
+        # 4) Decide deposit function (naive vs footprint) for mono or color
+        if drop_shrink >= 0.99:
+            # Naive deposit
+            if is_mono:
+                deposit_func = drizzle_deposit_numba_naive  # your mono naive
+                self.update_status("Using naive drizzle deposit (mono).")
+            else:
+                deposit_func = drizzle_deposit_color_naive  # you'd need to define drizzle_deposit_color_naive
+                self.update_status("Using naive drizzle deposit (color).")
+        else:
+            # Footprint deposit
+            if is_mono:
+                deposit_func = drizzle_deposit_numba_footprint  # your mono footprint
+                self.update_status("Using footprint drizzle deposit (mono).")
+            else:
+                deposit_func = drizzle_deposit_color_footprint # your color footprint
+                self.update_status("Using footprint drizzle deposit (color).")
+
+        # 5) Prepare the drizzle/coverage buffers
+        if is_mono:
+            # first_img.shape => (H, W)
+            h, w = first_img.shape
+            out_h = int(h * scale_factor)
+            out_w = int(w * scale_factor)
+
+            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+
+            finalize_func = finalize_drizzle_2d  # 2D final combination
+        else:
+            # color => (H, W, C)
+            h, w, c = first_img.shape
+            out_h = int(h * scale_factor)
+            out_w = int(w * scale_factor)
+
+            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+
+            finalize_func = finalize_drizzle_3d  # 3D final combination
+
+        # 6) Deposit each file
+        for orig_file in file_list:
+            img_data, _, _, _ = load_image(orig_file)
+            if img_data is None:
+                self.update_status(f"⚠️ Could not load {orig_file} for drizzle!")
+                continue
+
+            norm_orig = os.path.normpath(orig_file)
+            transform = new_transforms_dict.get(norm_orig, None)
+            if transform is None:
+                self.update_status(f"⚠️ No transform found for {orig_file}! Skipping drizzle.")
+                continue
+
+            weight = frame_weights.get(orig_file, 1.0)
+
+            drizzle_buffer, coverage_buffer = deposit_func(
+                img_data,
+                transform,
+                drizzle_buffer,
+                coverage_buffer,
+                scale_factor,
+                drop_shrink,
+                weight
+            )
+
+        # 7) Final combination
+        #    Allocate final array matching drizzle_buffer's shape
+        final_drizzle = np.zeros_like(drizzle_buffer, dtype=np.float32)
+        final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
+
+        # 8) Save
+        out_filename = f"MasterLight_{group_key}_drizzle.fits"
+        out_path = os.path.join(self.stacking_directory, out_filename)
+
+        if hdr is None:
+            hdr = fits.Header()
+        hdr["IMAGETYP"]  = "MASTER STACK - DRIZZLE"
+        hdr["DRIZFACTOR"] = (scale_factor, "Drizzle scale factor")
+        hdr["DROPFRAC"]   = (drop_shrink, "Drizzle drop shrink/pixfrac")
+        hdr["CREATOR"]    = "SetiAstroSuite"
+        hdr["DATE-OBS"]   = datetime.utcnow().isoformat()
+
+        save_image(
+            img_array=final_drizzle,
+            filename=out_path,
+            original_format="fits",
+            bit_depth="32-bit floating point",
+            original_header=hdr,
+            # If it's color, presumably is_mono=False
+            is_mono=(is_mono),
+        )
+
+        self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
+
 
 # --------------------------------------------------
 # MosaicMasterDialog with blending/normalization integrated
@@ -12426,9 +12359,12 @@ class StellarAlignmentDialog(QDialog):
 # Worker Signals for Registration Workers
 #############################################
 class RegistrationWorkerSignals(QObject):
-    progress = pyqtSignal(str)  # e.g., "Loaded image X"
-    result = pyqtSignal(str)    # e.g., output filename
-    error = pyqtSignal(str)     # e.g., error message
+    progress = pyqtSignal(str)           # e.g., "Loaded image X"
+    result = pyqtSignal(str)             # e.g., "Saved aligned file path"
+    error = pyqtSignal(str)              # e.g., error message
+    result_transform = pyqtSignal(str, object)  
+    #          ^^^^^^^^^^^^^^^^^^^^^^^
+    #  We'll emit (orig_file_path, transform_matrix)
 
 #############################################
 # Worker to Process One Image Registration
@@ -12444,7 +12380,7 @@ class StarRegistrationWorker(QRunnable):
 
     def run(self):
         try:
-            # Load image
+            # 1) Load image
             img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
             if img is None:
                 self.signals.error.emit(f"Could not load {self.file_path}")
@@ -12454,7 +12390,7 @@ class StarRegistrationWorker(QRunnable):
             self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
             QApplication.processEvents()
             
-            # Detect stars using the static grid method
+            # 2) Detect stars
             img_stars = StarRegistrationThread.detect_grid_stars_static(img)
             if len(img_stars) < 9:
                 self.signals.error.emit(f"Not enough stars in {self.file_path}")
@@ -12464,7 +12400,7 @@ class StarRegistrationWorker(QRunnable):
             self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
             QApplication.processEvents()
 
-            # Compute affine transform with iterative refinement (static version)
+            # 3) Compute affine transform
             transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
                 img_stars, self.ref_stars, self.ref_triangles
             )
@@ -12476,19 +12412,22 @@ class StarRegistrationWorker(QRunnable):
             self.signals.progress.emit(f"Computed transform for {os.path.basename(self.file_path)}")
             QApplication.processEvents()
 
-            # Apply the affine transform
+            # 4) Emit the transform so the main thread can store it
+            self.signals.result_transform.emit(self.file_path, transform)
+
+            # 5) Apply the transform
             aligned_image = StarRegistrationThread.apply_affine_transform_static(img, transform)
             if aligned_image is None:
                 self.signals.error.emit(f"Transform application failed for {self.file_path}")
                 QApplication.processEvents()
                 return
 
-            # Build output filename (force extension to .fits)
+            # 6) Build output filename (force extension to .fits)
             base = os.path.basename(self.file_path)
             name, _ = os.path.splitext(base)
             output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
             
-            # Save the aligned image
+            # 7) Save the aligned image
             save_image(
                 img_array=aligned_image,
                 filename=output_filename,
@@ -12504,6 +12443,7 @@ class StarRegistrationWorker(QRunnable):
             self.signals.error.emit(f"Error processing {self.file_path}: {e}")
             QApplication.processEvents()
 
+
 #############################################
 # Main Star Registration Thread (Concurrent)
 #############################################
@@ -12516,20 +12456,27 @@ class StarRegistrationThread(QThread):
         self.reference_image_path = reference_image_path
         self.files_to_align = files_to_align
         self.output_directory = output_directory
+        # A dictionary {normalized_file_path: 2x3 np.array transform}
+        self.alignment_matrices = {}
 
     def run(self):
         try:
             self.progress_update.emit("Identifying stars in reference image...")
-            ref_image, ref_header, ref_bit_depth, ref_is_mono = load_image(self.reference_image_path)
+            ref_image, _, _, _ = load_image(self.reference_image_path)
+            if ref_image is None:
+                self.registration_complete.emit(False, "Reference image failed to load!")
+                return
+
             self.progress_update.emit(f"Loaded reference image: shape {ref_image.shape}")
             ref_stars = self.detect_stars(ref_image)
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
+
             ref_triangles = self.build_triangle_dict(ref_stars)
             self.progress_update.emit(f"Reference image: {len(ref_stars)} stars, {len(ref_triangles)} triangle entries")
 
-            # Use all available cores.
+            # Use all available cores
             pool = QThreadPool.globalInstance()
             num_cores = os.cpu_count() or 4
             pool.setMaxThreadCount(num_cores)
@@ -12541,6 +12488,10 @@ class StarRegistrationThread(QThread):
                 worker.signals.progress.connect(self.on_worker_progress)
                 worker.signals.error.connect(self.on_worker_error)
                 worker.signals.result.connect(self.on_worker_result)
+
+                # CRITICAL: connect the result_transform signal to store the transform
+                worker.signals.result_transform.connect(self.on_worker_result_transform)
+
                 pool.start(worker)
 
             pool.waitForDone()
@@ -12550,7 +12501,6 @@ class StarRegistrationThread(QThread):
             self.registration_complete.emit(False, f"Error: {e}")
 
     def on_worker_progress(self, msg):
-        # Emit the message to the stacking suite's status window.
         self.progress_update.emit(msg)
 
     def on_worker_error(self, msg):
@@ -12558,6 +12508,16 @@ class StarRegistrationThread(QThread):
 
     def on_worker_result(self, out):
         self.progress_update.emit("Saved: " + out)
+
+    def on_worker_result_transform(self, file_path, transform):
+        """
+        Called whenever the worker emits `result_transform`.
+        We store the transform in `self.alignment_matrices`.
+        """
+
+        norm_path = os.path.normpath(file_path)
+        self.alignment_matrices[norm_path] = transform
+        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     def detect_stars(self, image):
         if image.ndim == 3:
@@ -12589,6 +12549,11 @@ class StarRegistrationThread(QThread):
         if sides[0] == 0:
             return None
         return (sides[1] / sides[0], sides[2] / sides[0])
+
+    # NEW METHOD: store transforms in self.alignment_matrices
+    def on_worker_result_transform(self, file_path, transform):
+        self.alignment_matrices[file_path] = transform
+        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     # --- Static Methods for use in Workers ---
     @staticmethod
@@ -12631,7 +12596,7 @@ class StarRegistrationThread(QThread):
         return np.array(stars) if stars else np.array([])
 
     @staticmethod
-    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=5, max_iter=5, convergence_thresh=0.3):
+    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=10, max_iter=10, convergence_thresh=0.2):
         print("DEBUG: Starting compute_affine_transform_with_ransac_static")
         attempt = 0
         transform = None
@@ -14725,88 +14690,6 @@ class PSFViewer(QDialog):
                 self.stats_table.setItem(row_index, col_index, item)
 
 
-@njit(parallel=True, fastmath=True)
-def _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma):
-    """
-    Optimized Numba-compiled local outlier correction.
-    - Computes median and standard deviation from 8 surrounding pixels (excluding center).
-    - If the center pixel is greater than (median + hot_sigma * std_dev), it is replaced with the median.
-    - If the center pixel is less than (median - cold_sigma * std_dev), it is replaced with the median.
-    - Edge pixels are skipped (avoiding padding artifacts).
-    """
-    local_vals = np.empty(9, dtype=np.float32)  # Holds 8 surrounding pixels
-
-    # Process pixels in parallel, skipping edges
-    for y in prange(1, H - 1):  # Skip first and last rows
-        for x in range(1, W - 1):  # Skip first and last columns
-            # If the image is grayscale, set C=1 and handle accordingly
-            for c_i in prange(C if corrected.ndim == 3 else 1):
-                k = 0
-                for dy in range(-1, 2):  # -1, 0, +1
-                    for dx in range(-1, 2):  # -1, 0, +1
-                        if corrected.ndim == 3:  # Color image
-                            local_vals[k] = corrected[y + dy, x + dx, c_i]
-                        else:  # Grayscale image
-                            local_vals[k] = corrected[y + dy, x + dx]
-                        k += 1
-
-                # Compute median
-                M = np.median(local_vals)
-
-                # Compute MAD manually
-                abs_devs = np.abs(local_vals - M)
-                MAD = np.median(abs_devs)
-
-                # Convert MAD to an approximation of standard deviation
-                sigma_mad = 1.4826 * MAD  
-
-                # Get center pixel
-                if corrected.ndim == 3:
-                    T = corrected[y, x, c_i]
-                else:
-                    T = corrected[y, x]
-
-                threshold_high = M + (hot_sigma * sigma_mad)
-                threshold_low = M - (cold_sigma * sigma_mad)
-
-                # **Apply correction ONLY if center pixel is an outlier**
-                if T > threshold_high or T < threshold_low:
-                    if corrected.ndim == 3:
-                        corrected[y, x, c_i] = M  # Replace center pixel in color image
-                    else:
-                        corrected[y, x] = M  # Replace center pixel in grayscale image
-
-
-def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
-    """
-    Optimized local outlier correction using Numba.
-    - Identifies hot and cold outliers based on local neighborhood statistics.
-    - Uses median and standard deviation from surrounding pixels to detect and replace outliers.
-    - Applies separate hot_sigma and cold_sigma thresholds.
-    - Skips edge pixels to avoid padding artifacts.
-    """
-
-    was_gray = False
-
-    if image.ndim == 2:  # Convert grayscale to 3D
-        H, W = image.shape
-        C = 1
-        was_gray = True
-        image = image[:, :, np.newaxis]  # Explicitly add a color channel dimension
-
-    else:
-        H, W, C = image.shape
-
-    # Copy the image for modification
-    corrected = image.astype(np.float32).copy()
-
-    # Apply fast correction (no padding, edges skipped)
-    _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma)
-
-    if was_gray:
-        corrected = corrected[:, :, 0]  # Convert back to 2D if originally grayscale
-
-    return corrected
 
 
 
@@ -15303,7 +15186,7 @@ class SupernovaAsteroidHunterTab(QWidget):
         This example uses your 'save_image' function from earlier or can
         directly use tiff.imwrite or similar.
         """
-        import os
+
         # Ensure the image is float32 in [0..1] before saving
         image = image.astype(np.float32, copy=False)
 
@@ -17274,128 +17157,6 @@ class BlemishBlasterDialog(QDialog):
 
         super().closeEvent(event)
 
-
-
-def evaluate_polynomial(H: int, W: int, coeffs: np.ndarray, degree: int) -> np.ndarray:
-    """
-    Evaluates the polynomial function over the entire image domain.
-    """
-    xx, yy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy")
-    A_full = build_poly_terms(xx.ravel(), yy.ravel(), degree)
-    return (A_full @ coeffs).reshape(H, W)
-
-
-
-
-
-
-def build_poly_terms(x_array: np.ndarray, y_array: np.ndarray, degree: int) -> np.ndarray:
-    """
-    Precomputes polynomial basis terms efficiently using NumPy, supporting up to degree 6.
-    """
-    ones = np.ones_like(x_array, dtype=np.float32)
-
-    if degree == 1:
-        return np.column_stack((ones, x_array, y_array))
-
-    elif degree == 2:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2))
-
-    elif degree == 3:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3))
-
-    elif degree == 4:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4))
-
-    elif degree == 5:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
-                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5))
-
-    elif degree == 6:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
-                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5,
-                                x_array**6, x_array**5 * y_array, x_array**4 * y_array**2, x_array**3 * y_array**3, x_array**2 * y_array**4, x_array * y_array**5, y_array**6))
-
-    else:
-        raise ValueError(f"Unsupported polynomial degree={degree}. Max supported is 6.")
-
-
-
-
-def generate_sample_points(image: np.ndarray, num_points: int = 100) -> np.ndarray:
-    """
-    Generates sample points uniformly across the image.
-
-    - Places points in a uniform grid (no randomization).
-    - Avoids border pixels.
-    - Skips any points with value 0.000 or above 0.85.
-
-    Returns:
-        np.ndarray: Array of shape (N, 2) containing (x, y) coordinates of sample points.
-    """
-    H, W = image.shape[:2]
-    points = []
-
-    # Create a uniform grid (avoiding the border)
-    grid_size = int(np.sqrt(num_points))  # Roughly equal spacing
-    x_vals = np.linspace(10, W - 10, grid_size, dtype=int)  # Avoids border
-    y_vals = np.linspace(10, H - 10, grid_size, dtype=int)
-
-    for y in y_vals:
-        for x in x_vals:
-            # Skip values that are too dark (0.000) or too bright (> 0.85)
-            if np.any(image[int(y), int(x)] == 0.000) or np.any(image[int(y), int(x)] > 0.85):
-                continue  # Skip this pixel
-
-            points.append((int(x), int(y)))
-
-            if len(points) >= num_points:
-                return np.array(points, dtype=np.int32)  # Return only valid points
-
-    return np.array(points, dtype=np.int32)  # Return all collected points
-
-@njit(parallel=True, fastmath=True)
-def _numba_unstretch(image: np.ndarray, stretch_original_medians: np.ndarray, stretch_original_mins: np.ndarray) -> np.ndarray:
-    """
-    Numba-optimized function to undo the unlinked stretch.
-    Restores each channel separately.
-    """
-    H, W, C = image.shape
-    out = np.empty_like(image, dtype=np.float32)
-
-    for c in prange(C):  # Parallelize per channel
-        cmed_stretched = np.median(image[..., c])
-        orig_med = stretch_original_medians[c]
-        orig_min = stretch_original_mins[c]
-
-        if cmed_stretched != 0 and orig_med != 0:
-            for y in prange(H):
-                for x in range(W):
-                    r = image[y, x, c]
-                    numerator = (cmed_stretched - 1) * orig_med * r
-                    denominator = cmed_stretched * (orig_med + r - 1) - orig_med * r
-                    if denominator == 0:
-                        denominator = 1e-6  # Avoid division by zero
-                    out[y, x, c] = numerator / denominator
-
-            # Restore the original black point
-            out[..., c] += orig_min
-
-    return np.clip(out, 0, 1)  # Clip to valid range
-
-
 class PolyGradientRemoval:
     """
     A headless class that replicates the polynomial background removal
@@ -17503,9 +17264,9 @@ class PolyGradientRemoval:
         2) For each channel c: subtract the channel's min => data is >= 0.
         3) Compute the median after min subtraction for that channel.
         4) Call the appropriate Numba function:
-            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            - If single-channel (was originally 1-ch), call numba_mono_final_formula
             on the 1-ch array.
-            - If 3-ch color, call _numba_color_final_formula_unlinked.
+            - If 3-ch color, call numba_color_final_formula_unlinked.
         5) Clip to [0,1].
         6) Store self.stretch_original_mins / medians so we can unstretch later.
         """
@@ -17542,7 +17303,7 @@ class PolyGradientRemoval:
 
         # 4) Apply the final formula with your Numba functions
         if self.was_single_channel:
-            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # If originally single-channel, let's do a single pass with numba_mono_final_formula
             # on the single channel. We can do that by extracting one channel from image_3ch.
             # Then replicate the result to 3 channels, or keep it as 1-ch?
             # Typically we keep it as 1-ch in the end, so let's do that.
@@ -17551,7 +17312,7 @@ class PolyGradientRemoval:
             mono_array = image_3ch[..., 0]  # shape (H,W)
             cmed = medians_after_sub[0]     # The median for that channel
             # We call the numba function
-            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+            stretched_mono = numba_mono_final_formula(mono_array, cmed, target_median)
 
             # Now place it back into image_3ch for consistency
             for c in range(3):
@@ -17560,7 +17321,7 @@ class PolyGradientRemoval:
             # 3-channel unlinked
             medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
             # 'image_3ch' is our 'rescaled'
-            stretched_3ch = _numba_color_final_formula_unlinked(
+            stretched_3ch = numba_color_final_formula_unlinked(
                 image_3ch, medians_rescaled, target_median
             )
             image_3ch = stretched_3ch
@@ -17580,9 +17341,9 @@ class PolyGradientRemoval:
         2) For each channel c: subtract the channel's min => data is >= 0.
         3) Compute the median after min subtraction for that channel.
         4) Call the appropriate Numba function:
-            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            - If single-channel (was originally 1-ch), call numba_mono_final_formula
             on the 1-ch array.
-            - If 3-ch color, call _numba_color_final_formula_unlinked.
+            - If 3-ch color, call numba_color_final_formula_unlinked.
         5) Clip to [0,1].
         6) Store self.stretch_original_mins / medians so we can unstretch later.
         """
@@ -17619,7 +17380,7 @@ class PolyGradientRemoval:
 
         # 4) Apply the final formula with your Numba functions
         if self.was_single_channel:
-            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # If originally single-channel, let's do a single pass with numba_mono_final_formula
             # on the single channel. We can do that by extracting one channel from image_3ch.
             # Then replicate the result to 3 channels, or keep it as 1-ch?
             # Typically we keep it as 1-ch in the end, so let's do that.
@@ -17628,7 +17389,7 @@ class PolyGradientRemoval:
             mono_array = image_3ch[..., 0]  # shape (H,W)
             cmed = medians_after_sub[0]     # The median for that channel
             # We call the numba function
-            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+            stretched_mono = numba_mono_final_formula(mono_array, cmed, target_median)
 
             # Now place it back into image_3ch for consistency
             for c in range(3):
@@ -17637,7 +17398,7 @@ class PolyGradientRemoval:
             # 3-channel unlinked
             medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
             # 'image_3ch' is our 'rescaled'
-            stretched_3ch = _numba_color_final_formula_unlinked(
+            stretched_3ch = numba_color_final_formula_unlinked(
                 image_3ch, medians_rescaled, target_median
             )
             image_3ch = stretched_3ch
@@ -17659,7 +17420,7 @@ class PolyGradientRemoval:
         stretch_original_mins = np.array(self.stretch_original_mins, dtype=np.float32)
 
         # Call the Numba function
-        unstretched = _numba_unstretch(image, stretch_original_medians, stretch_original_mins)
+        unstretched = numba_unstretch(image, stretch_original_medians, stretch_original_mins)
 
         if self.was_single_channel:
             # Convert back to grayscale
@@ -27450,100 +27211,6 @@ class StatisticalStretchProcessingThread(QThread):
         # Emit the result once done
         self.preview_generated.emit(stretched_image)
 
-@njit(parallel=True, fastmath=True)
-def applyPixelMath_numba(image_array, amount):
-    factor = 3 ** amount
-    denom_factor = 3 ** amount - 1
-    height, width, channels = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(height):
-        for x in prange(width):
-            for c in prange(channels):
-                val = (factor * image_array[y, x, c]) / (denom_factor * image_array[y, x, c] + 1)
-                output[y, x, c] = min(max(val, 0.0), 1.0)  # Equivalent to np.clip()
-    
-    return output
-
-@njit(parallel=True, fastmath=True)
-def adjust_saturation_numba(image_array, saturation_factor):
-    height, width, channels = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(int(height)):  # Ensure y is an integer
-        for x in prange(int(width)):  # Ensure x is an integer
-            r, g, b = image_array[int(y), int(x)]  # Force integer indexing
-
-            # Convert RGB to HSV manually
-            max_val = max(r, g, b)
-            min_val = min(r, g, b)
-            delta = max_val - min_val
-
-            # Compute Hue (H)
-            if delta == 0:
-                h = 0
-            elif max_val == r:
-                h = (60 * ((g - b) / delta) + 360) % 360
-            elif max_val == g:
-                h = (60 * ((b - r) / delta) + 120) % 360
-            else:
-                h = (60 * ((r - g) / delta) + 240) % 360
-
-            # Compute Saturation (S)
-            s = (delta / max_val) if max_val != 0 else 0
-            s *= saturation_factor  # Apply saturation adjustment
-            s = min(max(s, 0.0), 1.0)  # Clip saturation
-
-            # Convert back to RGB
-            if s == 0:
-                r, g, b = max_val, max_val, max_val
-            else:
-                c = s * max_val
-                x_val = c * (1 - abs((h / 60) % 2 - 1))
-                m = max_val - c
-
-                if 0 <= h < 60:
-                    r, g, b = c, x_val, 0
-                elif 60 <= h < 120:
-                    r, g, b = x_val, c, 0
-                elif 120 <= h < 180:
-                    r, g, b = 0, c, x_val
-                elif 180 <= h < 240:
-                    r, g, b = 0, x_val, c
-                elif 240 <= h < 300:
-                    r, g, b = x_val, 0, c
-                else:
-                    r, g, b = c, 0, x_val
-
-                r, g, b = r + m, g + m, b + m  # Add m to shift brightness
-
-            # ✅ Fix: Explicitly cast indices to integers
-            output[int(y), int(x), 0] = r
-            output[int(y), int(x), 1] = g
-            output[int(y), int(x), 2] = b
-
-    return output
-
-
-
-
-@njit(parallel=True, fastmath=True)
-def applySCNR_numba(image_array):
-    height, width, _ = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(int(height)):
-        for x in prange(int(width)):
-            r, g, b = image_array[y, x]
-            g = min(g, (r + b) / 2)  # Reduce green to the average of red & blue
-            
-            # ✅ Fix: Assign channels individually instead of a tuple
-            output[int(y), int(x), 0] = r
-            output[int(y), int(x), 1] = g
-            output[int(y), int(x), 2] = b
-
-
-    return output
 
 
 # Thread for star stretch background processing
@@ -29658,86 +29325,6 @@ class CurveEditor(QGraphicsView):
             self.b_line.setVisible(True)
 
 
-
-
-@njit(parallel=True, fastmath=True)
-def apply_lut_gray(image_in, lut):
-    """
-    Numba-accelerated application of 'lut' to a single-channel image_in in [0..1].
-    'lut' is a 1D array of shape (size,) also in [0..1].
-    """
-    out = np.empty_like(image_in)
-    height, width = image_in.shape
-    size_lut = len(lut) - 1
-
-    for y in prange(height):
-        for x in range(width):
-            v = image_in[y, x]
-            idx = int(v * size_lut + 0.5)
-            if idx < 0: idx = 0
-            elif idx > size_lut: idx = size_lut
-            out[y, x] = lut[idx]
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def apply_lut_color(image_in, lut):
-    """
-    Numba-accelerated application of 'lut' to a 3-channel image_in in [0..1].
-    'lut' is a 1D array of shape (size,) also in [0..1].
-    """
-    out = np.empty_like(image_in)
-    height, width, channels = image_in.shape
-    size_lut = len(lut) - 1
-
-    for y in prange(height):
-        for x in range(width):
-            for c in range(channels):
-                v = image_in[y, x, c]
-                idx = int(v * size_lut + 0.5)
-                if idx < 0: idx = 0
-                elif idx > size_lut: idx = size_lut
-                out[y, x, c] = lut[idx]
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def apply_lut_mono_inplace(array2d, lut):
-    """
-    In-place LUT application on a single-channel 2D array in [0..1].
-    'lut' has shape (size,) also in [0..1].
-    """
-    H, W = array2d.shape
-    size_lut = len(lut) - 1
-    for y in prange(H):
-        for x in prange(W):
-            v = array2d[y, x]
-            idx = int(v * size_lut + 0.5)
-            if idx < 0:
-                idx = 0
-            elif idx > size_lut:
-                idx = size_lut
-            array2d[y, x] = lut[idx]
-
-@njit(parallel=True, fastmath=True)
-def apply_lut_color_inplace(array3d, lut):
-    """
-    In-place LUT application on a 3-channel array in [0..1].
-    'lut' has shape (size,) also in [0..1].
-    """
-    H, W, C = array3d.shape
-    size_lut = len(lut) - 1
-    for y in prange(H):
-        for x in prange(W):
-            for c in range(C):
-                v = array3d[y, x, c]
-                idx = int(v * size_lut + 0.5)
-                if idx < 0:
-                    idx = 0
-                elif idx > size_lut:
-                    idx = size_lut
-                array3d[y, x, c] = lut[idx]
-
 def build_curve_lut(curve_func, size=65536):
     """
     Build a LUT of length 'size' that maps float in [0..1] to [0..1],
@@ -29746,7 +29333,6 @@ def build_curve_lut(curve_func, size=65536):
        mapped = 360 - curve_func(x)
        out = clamp( mapped / 360, [0..1] )
     """
-    import numpy as np
     lut = np.zeros(size, dtype=np.float32)
     for i in range(size):
         v = i / (size - 1)  # in [0..1]
@@ -29758,214 +29344,6 @@ def build_curve_lut(curve_func, size=65536):
         lut[i] = outv
     return lut
 
-# D65 reference
-_Xn, _Yn, _Zn = 0.95047, 1.00000, 1.08883
-
-# Matrix for RGB -> XYZ (sRGB => D65)
-_M_rgb2xyz = np.array([
-    [0.4124564, 0.3575761, 0.1804375],
-    [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.1191920, 0.9503041]
-], dtype=np.float32)
-
-# Matrix for XYZ -> RGB (sRGB => D65)
-_M_xyz2rgb = np.array([
-    [ 3.2404542, -1.5371385, -0.4985314],
-    [-0.9692660,  1.8760108,  0.0415560],
-    [ 0.0556434, -0.2040259,  1.0572252]
-], dtype=np.float32)
-
-@njit(parallel=True, fastmath=True)
-def rgb_to_xyz_numba(rgb):
-    """
-    Convert an image from sRGB to XYZ (D65).
-    rgb: float32 array in [0..1], shape (H,W,3)
-    returns xyz in [0..maybe >1], shape (H,W,3)
-    """
-    H, W, _ = rgb.shape
-    out = np.empty((H, W, 3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            r = rgb[y, x, 0]
-            g = rgb[y, x, 1]
-            b = rgb[y, x, 2]
-            # Multiply by M_rgb2xyz
-            X = _M_rgb2xyz[0,0]*r + _M_rgb2xyz[0,1]*g + _M_rgb2xyz[0,2]*b
-            Y = _M_rgb2xyz[1,0]*r + _M_rgb2xyz[1,1]*g + _M_rgb2xyz[1,2]*b
-            Z = _M_rgb2xyz[2,0]*r + _M_rgb2xyz[2,1]*g + _M_rgb2xyz[2,2]*b
-            out[y, x, 0] = X
-            out[y, x, 1] = Y
-            out[y, x, 2] = Z
-    return out
-
-@njit(parallel=True, fastmath=True)
-def xyz_to_rgb_numba(xyz):
-    """
-    Convert an image from XYZ (D65) to sRGB.
-    xyz: float32 array, shape (H,W,3)
-    returns rgb in [0..1], shape (H,W,3)
-    """
-    H, W, _ = xyz.shape
-    out = np.empty((H, W, 3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            X = xyz[y, x, 0]
-            Y = xyz[y, x, 1]
-            Z = xyz[y, x, 2]
-            # Multiply by M_xyz2rgb
-            r = _M_xyz2rgb[0,0]*X + _M_xyz2rgb[0,1]*Y + _M_xyz2rgb[0,2]*Z
-            g = _M_xyz2rgb[1,0]*X + _M_xyz2rgb[1,1]*Y + _M_xyz2rgb[1,2]*Z
-            b = _M_xyz2rgb[2,0]*X + _M_xyz2rgb[2,1]*Y + _M_xyz2rgb[2,2]*Z
-            # Clip to [0..1]
-            if r < 0: r = 0
-            elif r > 1: r = 1
-            if g < 0: g = 0
-            elif g > 1: g = 1
-            if b < 0: b = 0
-            elif b > 1: b = 1
-            out[y, x, 0] = r
-            out[y, x, 1] = g
-            out[y, x, 2] = b
-    return out
-
-@njit
-def f_lab_numba(t):
-    delta = 6/29
-    out = np.empty_like(t, dtype=np.float32)
-    for i in range(t.size):
-        val = t.flat[i]
-        if val > delta**3:
-            out.flat[i] = val**(1/3)
-        else:
-            out.flat[i] = val/(3*delta*delta) + (4/29)
-    return out
-
-@njit(parallel=True, fastmath=True)
-def xyz_to_lab_numba(xyz):
-    """
-    xyz => shape(H,W,3), in D65. 
-    returns lab in shape(H,W,3): L in [0..100], a,b in ~[-128..127].
-    """
-    H, W, _ = xyz.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            X = xyz[y, x, 0] / _Xn
-            Y = xyz[y, x, 1] / _Yn
-            Z = xyz[y, x, 2] / _Zn
-            fx = (X)**(1/3) if X > (6/29)**3 else X/(3*(6/29)**2) + 4/29
-            fy = (Y)**(1/3) if Y > (6/29)**3 else Y/(3*(6/29)**2) + 4/29
-            fz = (Z)**(1/3) if Z > (6/29)**3 else Z/(3*(6/29)**2) + 4/29
-            L = 116*fy - 16
-            a = 500*(fx - fy)
-            b = 200*(fy - fz)
-            out[y, x, 0] = L
-            out[y, x, 1] = a
-            out[y, x, 2] = b
-    return out
-
-@njit(parallel=True, fastmath=True)
-def lab_to_xyz_numba(lab):
-    """
-    lab => shape(H,W,3): L in [0..100], a,b in ~[-128..127].
-    returns xyz shape(H,W,3).
-    """
-    H, W, _ = lab.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    delta = 6/29
-    for y in prange(H):
-        for x in prange(W):
-            L = lab[y, x, 0]
-            a = lab[y, x, 1]
-            b = lab[y, x, 2]
-            fy = (L+16)/116
-            fx = fy + a/500
-            fz = fy - b/200
-
-            if fx > delta:
-                xr = fx**3
-            else:
-                xr = 3*delta*delta*(fx - 4/29)
-            if fy > delta:
-                yr = fy**3
-            else:
-                yr = 3*delta*delta*(fy - 4/29)
-            if fz > delta:
-                zr = fz**3
-            else:
-                zr = 3*delta*delta*(fz - 4/29)
-
-            X = _Xn * xr
-            Y = _Yn * yr
-            Z = _Zn * zr
-            out[y, x, 0] = X
-            out[y, x, 1] = Y
-            out[y, x, 2] = Z
-    return out
-
-@njit(parallel=True, fastmath=True)
-def rgb_to_hsv_numba(rgb):
-    H, W, _ = rgb.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            r = rgb[y,x,0]
-            g = rgb[y,x,1]
-            b = rgb[y,x,2]
-            cmax = max(r,g,b)
-            cmin = min(r,g,b)
-            delta = cmax - cmin
-            # Hue
-            h = 0.0
-            if delta != 0.0:
-                if cmax == r:
-                    h = 60*(((g-b)/delta) % 6)
-                elif cmax == g:
-                    h = 60*(((b-r)/delta) + 2)
-                else:
-                    h = 60*(((r-g)/delta) + 4)
-            # Saturation
-            s = 0.0
-            if cmax > 0.0:
-                s = delta / cmax
-            v = cmax
-            out[y,x,0] = h
-            out[y,x,1] = s
-            out[y,x,2] = v
-    return out
-
-@njit(parallel=True, fastmath=True)
-def hsv_to_rgb_numba(hsv):
-    H, W, _ = hsv.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            h = hsv[y,x,0]
-            s = hsv[y,x,1]
-            v = hsv[y,x,2]
-            c = v*s
-            hh = (h/60.0) % 6
-            x_ = c*(1 - abs(hh % 2 - 1))
-            m = v - c
-            r = 0.0
-            g = 0.0
-            b = 0.0
-            if 0 <= hh < 1:
-                r,g,b = c,x_,0
-            elif 1 <= hh < 2:
-                r,g,b = x_,c,0
-            elif 2 <= hh < 3:
-                r,g,b = 0,c,x_
-            elif 3 <= hh < 4:
-                r,g,b = 0,x_,c
-            elif 4 <= hh < 5:
-                r,g,b = x_,0,c
-            else:
-                r,g,b = c,0,x_
-            out[y,x,0] = (r + m)
-            out[y,x,1] = (g + m)
-            out[y,x,2] = (b + m)
-    return out
 
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
@@ -36068,76 +35446,6 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
 
 
-@njit(parallel=True, fastmath=True)
-def _numba_mono_final_formula(rescaled, median_rescaled, target_median):
-    """
-    Applies the final formula *after* we already have the rescaled values.
-    
-    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
-    median_rescaled = median(rescaled)
-    
-    out_val = ((median_rescaled - 1) * target_median * r) /
-              ( median_rescaled*(target_median + r -1) - target_median*r )
-    """
-    H, W = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            r = rescaled[y, x]
-            numer = (median_rescaled - 1.0) * target_median * r
-            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-            if np.abs(denom) < 1e-12:
-                denom = 1e-12
-            out[y, x] = numer / denom
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def _numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
-    """
-    Linked color transform: we use one median_rescaled for all channels.
-    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
-    median_rescaled = median of *all* pixels in rescaled
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                numer = (median_rescaled - 1.0) * target_median * r
-                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-                if np.abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
-
-@njit(parallel=True, fastmath=True)
-def _numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
-    """
-    Unlinked color transform: a separate median_rescaled per channel.
-    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
-    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                med = medians_rescaled[c]
-                numer = (med - 1.0) * target_median * r
-                denom = med * (target_median + r - 1.0) - target_median * r
-                if np.abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
-
 
 def stretch_mono_image(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
     """
@@ -36156,7 +35464,7 @@ def stretch_mono_image(image, target_median, normalize=False, apply_curves=False
     median_rescaled = np.median(rescaled_image)
 
     # 4) Final stretch in Numba
-    stretched_image = _numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
+    stretched_image = numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
 
     # 5) Optional curves
     if apply_curves:
@@ -36214,7 +35522,7 @@ def stretch_color_image_linked(image, target_median, normalize=False, apply_curv
     median_rescaled = np.median(rescaled_image)
 
     # 4) Final formula in Numba
-    stretched_image = _numba_color_final_formula_linked(
+    stretched_image = numba_color_final_formula_linked(
         rescaled_image, 
         median_rescaled, 
         target_median
@@ -36260,7 +35568,7 @@ def stretch_color_image_unlinked(image, target_median, normalize=False, apply_cu
         medians_rescaled[c] = np.median(rescaled_image[..., c])
 
     # 3) Final formula in Numba
-    stretched_image = _numba_color_final_formula_unlinked(
+    stretched_image = numba_color_final_formula_unlinked(
         rescaled_image,
         medians_rescaled,
         target_median
@@ -36279,56 +35587,6 @@ def stretch_color_image_unlinked(image, target_median, normalize=False, apply_cu
     return np.clip(stretched_image, 0, 1)
 
 
-@njit
-def piecewise_linear(val, xvals, yvals):
-    """
-    Performs piecewise linear interpolation:
-    Given a scalar 'val', and arrays xvals, yvals (each of length N),
-    finds i s.t. xvals[i] <= val < xvals[i+1],
-    then returns the linear interpolation between yvals[i], yvals[i+1].
-    If val < xvals[0], returns yvals[0].
-    If val > xvals[-1], returns yvals[-1].
-    """
-    if val <= xvals[0]:
-        return yvals[0]
-    for i in range(len(xvals)-1):
-        if val < xvals[i+1]:
-            # Perform a linear interpolation in interval [xvals[i], xvals[i+1]]
-            dx = xvals[i+1] - xvals[i]
-            dy = yvals[i+1] - yvals[i]
-            ratio = (val - xvals[i]) / dx
-            return yvals[i] + ratio * dy
-    return yvals[-1]
-
-@njit(parallel=True, fastmath=True)
-def apply_curves_numba(image, xvals, yvals):
-    """
-    Numba-accelerated routine to apply piecewise linear interpolation 
-    to each pixel in 'image'.
-    - image can be (H,W) or (H,W,3).
-    - xvals, yvals are the curve arrays in ascending order.
-    Returns the adjusted image as float32.
-    """
-    if image.ndim == 2:
-        H, W = image.shape
-        out = np.empty((H, W), dtype=np.float32)
-        for y in prange(H):
-            for x in range(W):
-                val = image[y, x]
-                out[y, x] = piecewise_linear(val, xvals, yvals)
-        return out
-    elif image.ndim == 3:
-        H, W, C = image.shape
-        out = np.empty((H, W, C), dtype=np.float32)
-        for y in prange(H):
-            for x in range(W):
-                for c in range(C):
-                    val = image[y, x, c]
-                    out[y, x, c] = piecewise_linear(val, xvals, yvals)
-        return out
-    else:
-        # Unexpected shape
-        return image  # Fallback
 
 def apply_curves_adjustment(image, target_median, curves_boost):
     """
