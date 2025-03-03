@@ -41,6 +41,7 @@ a = Analysis(
         ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
          ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
+        ('numba_utils.py', '.'),
         ('wimilogo.png', '.'), 
         ('wrench_icon.png', '.'), 
         ('platesolve.png', '.'),
