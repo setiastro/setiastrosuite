@@ -1,9 +1,9 @@
 {
-  "version": "2.11.6",
+  "version": "2.11.7",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.6/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.6/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.6/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Project now clears all slot names. Stacking Suite beta further parallization for speed improvements, batch debayer and convert tab, and much much more, just say the magic word"
+  "notes": "Further improvements with Stacking. OSC support. Bug corrections. Drizzle support and more, just say the magic word"
 }
