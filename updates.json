@@ -1,9 +1,9 @@
 {
-  "version": "2.11.7",
+  "version": "2.11.8",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.7/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.8/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.8/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.11.8/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Further improvements with Stacking. OSC support. Bug corrections. Drizzle support and more, just say the magic word"
+  "notes": "Lots of fixes.  Stacking should fully work with debayered OSC images.  See release notes for full details on fixes."
 }
