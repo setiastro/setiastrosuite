@@ -39,7 +39,7 @@ from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
 from numba import njit, prange
-
+from numba_utils import *
 
 from astropy.wcs.utils import skycoord_to_pixel
 from astropy.coordinates import SkyCoord
@@ -85,6 +85,7 @@ from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import Rbf
 from scipy.ndimage import median_filter
 from scipy.ndimage import convolve
+import exifread
 
 
 import rawpy
@@ -114,12 +115,13 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.2"
+VERSION = "2.11.8"
+
 
 if hasattr(sys, '_MEIPASS'):
     # PyInstaller path
     icon_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
-    windowslogo_path = os.path.join(sys._MEIPASS, 'astrosuite.png')
+    windowslogo_path = os.path.join(sys._MEIPASS, 'astrosuite.ico')
     green_path = os.path.join(sys._MEIPASS, 'green.png')
     neutral_path = os.path.join(sys._MEIPASS, 'neutral.png')
     whitebalance_path = os.path.join(sys._MEIPASS, 'whitebalance.png')
@@ -135,7 +137,7 @@ if hasattr(sys, '_MEIPASS'):
     slot3_path = os.path.join(sys._MEIPASS, 'slot3.png')
     slot4_path = os.path.join(sys._MEIPASS, 'slot4.png')
     rgbcombo_path = os.path.join(sys._MEIPASS, 'rgbcombo.png')
-    rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')    
+    rgbextract_path = os.path.join(sys._MEIPASS, 'rgbextract.png')
     copyslot_path = os.path.join(sys._MEIPASS, 'copyslot.png')
     graxperticon_path = os.path.join(sys._MEIPASS, 'graxpert.png')
     cropicon_path = os.path.join(sys._MEIPASS, 'cropicon.png')
@@ -149,29 +151,30 @@ if hasattr(sys, '_MEIPASS'):
     fliphorizontal_path = os.path.join(sys._MEIPASS, 'fliphorizontal.png')
     flipvertical_path = os.path.join(sys._MEIPASS, 'flipvertical.png')
     rotateclockwise_path = os.path.join(sys._MEIPASS, 'rotateclockwise.png')
-    rotatecounterclockwise_path = os.path.join(sys._MEIPASS, 'rotatecounterclockwise.png')   
+    rotatecounterclockwise_path = os.path.join(sys._MEIPASS, 'rotatecounterclockwise.png')
     maskcreate_path = os.path.join(sys._MEIPASS, 'maskcreate.png')
     maskapply_path = os.path.join(sys._MEIPASS, 'maskapply.png')
-    maskremove_path = os.path.join(sys._MEIPASS, 'maskremove.png')     
+    maskremove_path = os.path.join(sys._MEIPASS, 'maskremove.png')
     slot5_path = os.path.join(sys._MEIPASS, 'slot5.png')
     slot6_path = os.path.join(sys._MEIPASS, 'slot6.png')
     slot7_path = os.path.join(sys._MEIPASS, 'slot7.png')
     slot8_path = os.path.join(sys._MEIPASS, 'slot8.png')
     slot9_path = os.path.join(sys._MEIPASS, 'slot9.png') 
-    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')     
-    histogram_path = os.path.join(sys._MEIPASS, 'histogram.png')   
-    mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')     
+    pixelmath_path = os.path.join(sys._MEIPASS, 'pixelmath.png')   
+    histogram_path = os.path.join(sys._MEIPASS, 'histogram.png') 
     mosaic_path = os.path.join(sys._MEIPASS, 'mosaic.png')
     rescale_path = os.path.join(sys._MEIPASS, 'rescale.png')
     staralign_path = os.path.join(sys._MEIPASS, 'staralign.png')
-    mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')      
+    mask_path = os.path.join(sys._MEIPASS, 'maskapply.png')
     platesolve_path = os.path.join(sys._MEIPASS, 'platesolve.png')
-    psf_path = os.path.join(sys._MEIPASS, 'psf.png')   
-    supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')       
+    psf_path = os.path.join(sys._MEIPASS, 'psf.png')
+    supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')
+    starregistration_path = os.path.join(sys._MEIPASS, 'starregistration.png')
+    stacking_path = os.path.join(sys._MEIPASS, 'stacking.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
-    windowslogo_path = 'astrosuite.png'
+    windowslogo_path = 'astrosuite.ico'
     green_path = 'green.png'
     neutral_path = 'neutral.png'
     whitebalance_path = 'whitebalance.png'
@@ -194,7 +197,7 @@ else:
     openfile_path = 'openfile.png'
     abeicon_path = 'abeicon.png'
     undoicon_path = 'undoicon.png'
-    redoicon_path = 'redoicon.png'   
+    redoicon_path = 'redoicon.png'
     blastericon_path = 'blaster.png'
     hdr_path = 'hdr.png'
     invert_path = 'invert.png'
@@ -211,14 +214,16 @@ else:
     slot8_path  = 'slot8.png'
     slot9_path  = 'slot9.png'
     pixelmath_path = 'pixelmath.png'
-    histogram_path = 'histogram.png' 
-    mosaic_path = 'mosaic.png'   
+    histogram_path = 'histogram.png'
+    mosaic_path = 'mosaic.png'
     rescale_path = 'rescale.png'
     staralign_path = 'staralign.png'
-    mask_path = 'maskapply.png'    
+    mask_path = 'maskapply.png'
     platesolve_path = 'platesolve.png'
-    psf_path = 'psf.png'   
-    supernova_path = 'supernova.png'     
+    psf_path = 'psf.png'
+    supernova_path = 'supernova.png'
+    starregistration_path = 'starregistration.png'
+    stacking_path = 'stacking.png'
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -555,26 +560,29 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         slot_menu = menubar.addMenu("Slots")
 
+        # Dictionary to store menubar slot actions
+        self.menubar_slot_actions = {}
+
         num_slots = self.image_manager.max_slots
 
         for slot in range(num_slots):
-            # Get the slot icon (or use a default if not defined)
             slot_icon_path = getattr(sys.modules[__name__], f'slot{slot}_path', 'slot0.png')
             slot_icon = QIcon(slot_icon_path)
-
-            # Use the custom name (default is "Slot {slot}")
+            
             slot_name = self.slot_names.get(slot, f"Slot {slot}")
 
-            # Create the QAction for this slot using the custom name
+            # Create QAction for the menubar slot
             slot_action = QAction(slot_icon, slot_name, self)
             slot_action.setStatusTip(f"Open preview for {slot_name}")
-            # Connect the action to open the preview for the slot
             slot_action.triggered.connect(lambda checked, s=slot: self.open_preview_window(s))
-            slot_menu.addAction(slot_action)
-            # Save the action so we can update its text later
-            self.slot_actions[slot] = slot_action
+            
+            # Store menubar slot actions for later updates
+            self.menubar_slot_actions[slot] = slot_action
 
-        # Add a separator and a "Rename Slot" action
+            # Add to menu
+            slot_menu.addAction(slot_action)
+
+        # Separator & Rename Slot Action
         slot_menu.addSeparator()
         rename_slot_action = QAction("Rename Slot", self)
         rename_slot_action.setStatusTip("Rename a slot with a custom name")
@@ -643,9 +651,15 @@ class AstroEditingSuite(QMainWindow):
         mask_slots_menu.addAction(rename_mask_slot_action)
 
         # --------------------
-        # Mosaic Menu
+        # Star Stuff Menu
         # --------------------
         mosaic_menu = menubar.addMenu("Star Stuff")
+
+        # Stacking Suite Action (New!)
+        stacking_suite_action = QAction(QIcon(stacking_path), "Stacking Suite", self)
+        stacking_suite_action.setStatusTip("Calibrate and stack images with advanced methods")
+        stacking_suite_action.triggered.connect(self.stacking_suite_action)
+        mosaic_menu.addAction(stacking_suite_action)
 
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
@@ -658,6 +672,11 @@ class AstroEditingSuite(QMainWindow):
         stellar_align_action.setStatusTip("Align the target image to the source image using star alignment")
         stellar_align_action.triggered.connect(self.stellar_alignment)
         mosaic_menu.addAction(stellar_align_action)
+
+        star_registration_action = QAction(QIcon(starregistration_path), "Star Registration", self)
+        star_registration_action.setStatusTip("Register multiple images based on star alignment")
+        star_registration_action.triggered.connect(self.star_registration)
+        mosaic_menu.addAction(star_registration_action)        
 
         plate_solver_action = QAction(QIcon(platesolve_path), "Plate Solver", self)
         plate_solver_action.setStatusTip("Perform plate solving on an image")
@@ -812,13 +831,15 @@ class AstroEditingSuite(QMainWindow):
         geometrybar.addAction(rescale_action)
 
         # --------------------
-        # Mosaic Toolbar
+        # Star Stuff Toolbar
         # --------------------        
-        mosaictoolbar = QToolBar("Mosaic Toolbar")
+        mosaictoolbar = QToolBar("Star Stuff Toolbar")
         mosaictoolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)        
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)  
+        mosaictoolbar.addAction(stacking_suite_action)      
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
+        mosaictoolbar.addAction(star_registration_action)
         mosaictoolbar.addAction(plate_solver_action)
         mosaictoolbar.addAction(psf_viewer_action)     
         mosaictoolbar.addAction(supernova_action)   
@@ -1001,11 +1022,16 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # Window Properties
         # --------------------
-        self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT5')
+        self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
         self.setGeometry(100, 100, 800, 600)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+
+
+    def star_registration(self):
+        self.star_registration_window = StarRegistrationWindow(self.image_manager)
+        self.star_registration_window.show()
 
     def show_about_dialog(self):
         dialog = AboutDialog(self)
@@ -1016,6 +1042,20 @@ class AstroEditingSuite(QMainWindow):
         self.supernova_hunter_tab = SupernovaAsteroidHunterTab()
         # Show the new window (or tab)
         self.supernova_hunter_tab.show()
+
+    def stacking_suite_action(self):
+        """ Opens the Stacking Suite window only if the correct secret code is entered. """
+
+        # Create input dialog
+        text, ok = QInputDialog.getText(None, "Stacking Suite - beta",
+                                        "If you really want to view it, just say the magic word (please):")
+
+        if ok and text.strip().lower() == "please":
+            self.stackingsuitewindow = StackingSuiteDialog()
+            self.stackingsuitewindow.show()
+        else:
+            QMessageBox.information(None, "Access Denied", "Incorrect code or action canceled.")
+
 
     def open_preview_window(self, slot):
         """Opens a separate preview window for the specified image slot."""
@@ -1101,33 +1141,32 @@ class AstroEditingSuite(QMainWindow):
 
     def show_slot_context_menu(self, pos, slot):
         """
-        Shows a context menu for the slot button, with options to show the slot preview or rename the slot.
+        Shows a context menu for the slot button, with options to show the slot preview, rename the slot, or clear its contents.
         """
-        # Retrieve the corresponding button.
+        # Retrieve the corresponding button
         button = self.slot_actions.get(slot)
         if not button:
             return
 
-        # Create a QMenu for this button.
-        menu = QMenu(button)
+        # Create a QMenu for this button
+        menu = QMenu(self)  # In Qt6, pass self as the parent
         
-        # Add an action for "Show Slot Preview".
+        # Add actions
         action_show_preview = menu.addAction("Show Slot Preview")
-        
-        # Add an action for "Rename".
         action_rename = menu.addAction("Rename")
+        action_clear = menu.addAction("Clear Slot")  # New clear slot option
+
+        # Execute the menu at the global position
+        selected_action = menu.exec(button.mapToGlobal(pos))
         
-        # Map the position (which is relative to the button) to global coordinates.
-        global_pos = button.mapToGlobal(pos)
-        
-        # Execute the menu.
-        selected_action = menu.exec(global_pos)
-        
-        # Call the appropriate method based on the user's choice.
+        # Perform actions based on selection
         if selected_action == action_show_preview:
             self.open_preview_window(slot)
         elif selected_action == action_rename:
             self.rename_slot_by_context(slot)
+        elif selected_action == action_clear:
+            self.clear_slot_contents(slot)  # Call the new clear function
+
 
     def rename_slot_by_context(self, slot):
         """
@@ -1148,16 +1187,70 @@ class AstroEditingSuite(QMainWindow):
         # Update the custom name in our dictionary.
         self.slot_names[slot] = new_name
 
-        # Update the corresponding QToolButton's text and status tip.
+        # --- Update Toolbar Slot Name ---
         if slot in self.slot_actions:
             self.slot_actions[slot].setText(new_name)
             self.slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
 
-        # If there is an open preview window for this slot, update its title.
+        # --- Update Menubar Slot Name (NEW FIX) ---
+        if slot in self.menubar_slot_actions:
+            self.menubar_slot_actions[slot].setText(new_name)
+            self.menubar_slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
+
+        # --- If there is an open preview window for this slot, update its title ---
         if slot in self.preview_windows:
             self.preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
 
+        # Refresh Menubar
+        self.menuBar().update()
+
         QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
+
+    def clear_slot_contents(self, slot):
+        """
+        Completely clears the contents of the specified slot and resets the UI in Qt6.
+        """
+        # Confirm with the user before clearing
+        reply = QMessageBox.question(
+            self,
+            "Clear Slot",
+            f"Are you sure you want to clear slot {slot}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.No:
+            return  # User canceled
+
+        # Ensure the ImageManager exists
+        if not hasattr(self, 'image_manager'):
+            QMessageBox.warning(self, "Error", "ImageManager is not available.")
+            return
+
+        # Remove image and metadata from ImageManager
+        self.image_manager._images[slot] = None  # Remove image
+        self.image_manager._metadata[slot] = {}  # Clear metadata
+        self.image_manager._undo_stacks[slot] = []  # Clear undo history
+        self.image_manager._redo_stacks[slot] = []  # Clear redo history
+
+
+        # Close preview window if it exists
+        if slot in self.preview_windows:
+            self.preview_windows[slot].close()
+            del self.preview_windows[slot]
+
+        # Reset slot button UI
+        if slot in self.slot_actions:
+            button = self.slot_actions[slot]
+            button.setText(f"Slot {slot}")  # Reset text
+            button.setToolTip("No content available")  # Reset tooltip
+
+        # Emit signal to update the UI and trigger the image refresh
+        self.image_manager.image_changed.emit(slot, np.zeros((1, 1), dtype=np.uint8), {})
+
+        # Notify user that the slot was cleared
+        QMessageBox.information(self, "Slot Cleared", f"Slot {slot} has been completely cleared.")
+
 
 
     def stellar_alignment(self):
@@ -1381,8 +1474,6 @@ class AstroEditingSuite(QMainWindow):
         Clears all current project data (images, masks, undo/redo stacks, etc.)
         after warning the user that this operation is destructive.
         """
-        
-
         reply = QMessageBox.question(
             self,
             "New Project",
@@ -1414,6 +1505,17 @@ class AstroEditingSuite(QMainWindow):
         self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
         self.mask_slot_names = {i: f"Mask Slot {i}" for i in range(5)}
 
+        # Update UI elements for slot names (e.g., QToolButtons)
+        for slot, action in self.slot_actions.items():
+            default_name = self.slot_names.get(slot, f"Slot {slot}")
+            action.setText(default_name)
+            action.setStatusTip(f"Open preview for {default_name}")
+
+        # Update any open preview windows
+        for slot, window in self.preview_windows.items():
+            default_name = self.slot_names.get(slot, f"Slot {slot}")
+            window.setWindowTitle(f"Preview - {default_name}")
+
         # Update UI elements that are managed outside of ImageManager
         # For instance, update file name label or other status indicators.
         # Here we call update_file_name with default parameters.
@@ -1423,6 +1525,7 @@ class AstroEditingSuite(QMainWindow):
         self.clear_all_tabs()
 
         print("New project created: All image, mask, and undo/redo data have been cleared.")
+
 
     def clear_all_tabs(self):
         """
@@ -1505,14 +1608,22 @@ class AstroEditingSuite(QMainWindow):
         # Update the custom name in our dictionary
         self.slot_names[slot] = new_name
 
-        # Update the corresponding QAction's text and tooltip
+        # --- Update Toolbar Slot Name ---
         if slot in self.slot_actions:
             self.slot_actions[slot].setText(new_name)
             self.slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
 
-        # If there is an open preview window for this slot, update its title
+        # --- Update Menubar Slot Name (NEW FIX) ---
+        if slot in self.menubar_slot_actions:
+            self.menubar_slot_actions[slot].setText(new_name)
+            self.menubar_slot_actions[slot].setStatusTip(f"Open preview for {new_name}")
+
+        # --- If there is an open preview window for this slot, update its title ---
         if slot in self.preview_windows:
             self.preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
+
+        # Refresh Menubar
+        self.menuBar().update()
 
         QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
 
@@ -2150,60 +2261,68 @@ class AstroEditingSuite(QMainWindow):
         gradient_dialog.exec()
 
 
-    def handle_gradient_removal(self, corrected_image, gradient_background, save_to_slot_1):
+    def handle_gradient_removal(self, corrected_image, gradient_background, save_to_slot_1, selected_slot):
         """
         Handle the processed image after gradient removal.
 
         Args:
             corrected_image (np.ndarray): The image after gradient removal.
-            gradient_background (np.ndarray): The gradient background that was removed.
+            gradient_background (np.ndarray): The extracted gradient.
+            save_to_slot_1 (bool): Whether the user wants to save the gradient background.
+            selected_slot (str): The slot number selected (e.g., "Slot 1").
         """
         try:
-            # Update the image in ImageManager for the current slot
+            # Store the corrected image in the current slot
             current_slot = self.image_manager.current_slot
             metadata = self.image_manager._metadata.get(current_slot, {}).copy()
             metadata['description'] = "Gradient removed"
-            metadata['gradient_background'] = gradient_background  # Store gradient background
-
-            # Call set_image with corrected_image and metadata only
             self.image_manager.set_image(new_image=corrected_image, metadata=metadata)
 
+            # **Save gradient background only if requested**
             if save_to_slot_1:
-                # Assign gradient_background to Slot 1
-                slot_1 = 1  # Slot 1 is typically reserved
-                metadata_slot1 = {
-                    'file_path': "Gradient Background",
-                    'description': "Gradient background extracted",
+                slot_number = int(selected_slot.split(" ")[1])  # Convert "Slot 1" -> 1
+
+                metadata_slot = {
+                    'file_path': f"Gradient Background ({selected_slot})",
+                    'description': "Extracted Gradient Background",
                     'bit_depth': "32-bit floating point",
                     'is_mono': len(gradient_background.shape) < 3,
                     'gradient_background': gradient_background
                 }
 
-                # Store the gradient background in Slot 1
-                self.image_manager._images[slot_1] = gradient_background
-                self.image_manager._metadata[slot_1] = metadata_slot1
+                # Save gradient background in the selected slot
+                self.image_manager._images[slot_number] = gradient_background
+                self.image_manager._metadata[slot_number] = metadata_slot
 
-                print(f"Gradient background stored in Slot {slot_1}.")
+                print(f"[INFO] Gradient background stored in {selected_slot}.")
 
-                # --- Update custom slot name for Slot 1 ---
+                # --- Update slot UI Labels ---
                 if hasattr(self, 'slot_names'):
-                    self.slot_names[slot_1] = "Extracted Gradient"
-                if hasattr(self, 'slot_actions') and slot_1 in self.slot_actions:
-                    self.slot_actions[slot_1].setText("Extracted Gradient")
-                    self.slot_actions[slot_1].setStatusTip("Open preview for Extracted Gradient")
-                if hasattr(self, 'preview_windows') and slot_1 in self.preview_windows:
-                    self.preview_windows[slot_1].setWindowTitle("Preview - Extracted Gradient")
+                    self.slot_names[slot_number] = f"Extracted Gradient ({selected_slot})"
+                if hasattr(self, 'slot_actions') and slot_number in self.slot_actions:
+                    self.slot_actions[slot_number].setText(f"Extracted Gradient ({selected_slot})")
+                    self.slot_actions[slot_number].setStatusTip(f"Open preview for Extracted Gradient ({selected_slot})")
+                # --- Update Menubar Slot Name (FIX) ---
+                if hasattr(self, 'menubar_slot_actions') and slot_number in self.menubar_slot_actions:
+                    self.menubar_slot_actions[slot_number].setText(f"Extracted Gradient ({selected_slot})")
+                    self.menubar_slot_actions[slot_number].setStatusTip(f"Open preview for Extracted Gradient ({selected_slot})")
+
+                if hasattr(self, 'preview_windows') and slot_number in self.preview_windows:
+                    self.preview_windows[slot_number].setWindowTitle(f"Preview - Extracted Gradient ({selected_slot})")
+
+                self.menuBar().update()
+                print(f"[INFO] Gradient removal completed and saved to {selected_slot}.")
             else:
-                print("Gradient background was not saved to Slot 1 as per user choice.")
+                print("[INFO] User chose not to save the extracted gradient.")
 
             # Notify the user
             QMessageBox.information(self, "Success", "Gradient removal completed successfully.")
-            print(f"Gradient removal completed and image updated in Slot {current_slot}.")
-
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply gradient removal:\n{e}")
             print(f"Error in handle_gradient_removal: {e}")
+
+
 
 
     def check_for_updates(self):
@@ -2342,48 +2461,47 @@ class AstroEditingSuite(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Preferences")
         layout = QVBoxLayout(dialog)
-        
+
         # Display stored settings using a form layout.
         settings_form = QFormLayout()
-        
-        # Add settings fields dynamically.
-        # For folder selection (or file selection) use the button method below.
+
+        # Define settings fields with appropriate selection methods.
         settings_fields = {
-            "GraXpert Path": ("graxpert/path", self.settings.value("graxpert/path", "")),
-            "StarNet Executable Path": ("starnet/exe_path", self.settings.value("starnet/exe_path", "")),
-            "ASTAP Executable Path": ("astap/exe_path", self.settings.value("astap/exe_path", "")),
-            "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", "")),
-            "Working Directory": ("working_directory", self.settings.value("working_directory", ""))
+            "GraXpert Path": ("graxpert/path", self.settings.value("graxpert/path", "")),  # Needs FILE selection
+            "StarNet Executable Path": ("starnet/exe_path", self.settings.value("starnet/exe_path", "")),  # FILE
+            "ASTAP Executable Path": ("astap/exe_path", self.settings.value("astap/exe_path", "")),  # FILE
+            "Cosmic Clarity Folder": ("cosmic_clarity_folder", self.settings.value("cosmic_clarity_folder", "")),  # FOLDER
+            "Working Directory": ("working_directory", self.settings.value("working_directory", ""))  # FOLDER
         }
-        
-        # Create fields for each setting with folder or file selection buttons.
+
+        # Create input fields dynamically with file/folder selection buttons.
         input_fields = {}
         for label, (key, value) in settings_fields.items():
             field_widget = QWidget()
             field_layout = QHBoxLayout(field_widget)
             field_layout.setContentsMargins(0, 0, 0, 0)
-            
+
             # Create the QLineEdit with the stored value.
             field = QLineEdit(str(value))
             input_fields[key] = field
             field_layout.addWidget(field)
-            
-            # Create a selection button.
+
+            # Create selection button.
             select_button = QPushButton("...")
             select_button.setFixedWidth(30)
-            # For executable paths, use file selection.
-            if label in ["StarNet Executable Path", "ASTAP Executable Path"]:
+
+            # **Use file selection for executable paths, folder selection for directories**
+            if label in ["GraXpert Path", "StarNet Executable Path", "ASTAP Executable Path"]:
                 select_button.setToolTip(f"Select file for {label}")
                 select_button.clicked.connect(lambda _, f=field: self.select_file(f))
             else:
-                # For the other fields, use folder selection.
                 select_button.setToolTip(f"Select folder for {label}")
                 select_button.clicked.connect(lambda _, f=field: self.select_folder(f))
+
             field_layout.addWidget(select_button)
-            
             settings_form.addRow(label, field_widget)
-        
-        # Add additional fields without folder/file selection.
+
+        # Additional settings fields (without selection buttons).
         additional_fields = {
             "Astrometry API Key": ("astrometry_api_key", self.settings.value("astrometry_api_key", "")),
             "Latitude": ("latitude", self.settings.value("latitude", "")),
@@ -2393,36 +2511,44 @@ class AstroEditingSuite(QMainWindow):
             "Timezone": ("timezone", self.settings.value("timezone", "")),
             "Minimum Altitude": ("min_altitude", self.settings.value("min_altitude", ""))
         }
+
         for label, (key, value) in additional_fields.items():
             field = QLineEdit(str(value))
             settings_form.addRow(label, field)
             input_fields[key] = field
-        
+
         layout.addLayout(settings_form)
-        
-        # Add Clear, Save, and Cancel buttons.
+
+        # **Add Save, Reset, and Cancel buttons**
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save |
                                 QDialogButtonBox.StandardButton.Reset |
                                 QDialogButtonBox.StandardButton.Cancel)
-        
-        # Save button: call your save_preferences method.
+
+        # Save button: Save preferences
         buttons.accepted.connect(lambda: self.save_preferences(input_fields, dialog))
-        
-        # Clear button: call your clear_preferences method.
+
+        # Reset button: Clear preferences
         buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(lambda: self.clear_preferences(input_fields))
-        
-        # Cancel button: simply reject/close the dialog.
+
+        # Cancel button: Close the dialog
         buttons.rejected.connect(dialog.reject)
-        
+
         layout.addWidget(buttons)
         dialog.exec()
 
     def select_file(self, field):
-        file_path = QFileDialog.getOpenFileName(self, "Select File", "", "Executables (*);;All Files (*)")[0]
+        """Open file selection dialog for executable files."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Executable File",
+            "",
+            "Executables (*.exe *.AppImage *.sh *.bin *.run);;All Files (*)"
+        )
         if file_path:
             field.setText(file_path)
 
     def select_folder(self, field):
+        """Open folder selection dialog."""
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder_path:
             field.setText(folder_path)
@@ -2550,24 +2676,20 @@ class AstroEditingSuite(QMainWindow):
             self.slot_names[3] = "Green"
             self.slot_names[4] = "Blue"
             
-            # Update the associated QAction texts and tooltips if they exist
-            if 2 in self.slot_actions:
-                self.slot_actions[2].setText("Red")
-                self.slot_actions[2].setStatusTip("Open preview for Red")
-            if 3 in self.slot_actions:
-                self.slot_actions[3].setText("Green")
-                self.slot_actions[3].setStatusTip("Open preview for Green")
-            if 4 in self.slot_actions:
-                self.slot_actions[4].setText("Blue")
-                self.slot_actions[4].setStatusTip("Open preview for Blue")
-                
-            # Optionally, update any open preview windows for these slots
-            if 2 in self.preview_windows:
-                self.preview_windows[2].setWindowTitle("Preview - Red")
-            if 3 in self.preview_windows:
-                self.preview_windows[3].setWindowTitle("Preview - Green")
-            if 4 in self.preview_windows:
-                self.preview_windows[4].setWindowTitle("Preview - Blue")
+            for slot, name in zip([2, 3, 4], ["Red", "Green", "Blue"]):
+                if slot in self.slot_actions:
+                    self.slot_actions[slot].setText(name)
+                    self.slot_actions[slot].setStatusTip(f"Open preview for {name}")
+
+                if slot in self.preview_windows:
+                    self.preview_windows[slot].setWindowTitle(f"Preview - {name}")
+
+                # --- ✅ Update Menubar Slot Names ---
+                if hasattr(self, 'menubar_slot_actions') and slot in self.menubar_slot_actions:
+                    self.menubar_slot_actions[slot].setText(name)
+                    self.menubar_slot_actions[slot].setStatusTip(f"Open preview for {name}")
+
+            self.menuBar().update()
                 
             print(f"Extracted R, G, B channels from Slot {slot_to_extract} and stored in Slots 2, 3, 4 as Red, Green, and Blue respectively.")
             QMessageBox.information(self, "Success", "RGB channels extracted and stored in Slots 2 (Red), 3 (Green), and 4 (Blue).")
@@ -2629,6 +2751,13 @@ class AstroEditingSuite(QMainWindow):
             self.slot_actions[1].setStatusTip("Open preview for Luminance")
         if hasattr(self, 'preview_windows') and 1 in self.preview_windows:
             self.preview_windows[1].setWindowTitle("Preview - Luminance")
+
+        # --- ✅ Update Menubar Slot Name ---
+        if hasattr(self, 'menubar_slot_actions') and 1 in self.menubar_slot_actions:
+            self.menubar_slot_actions[1].setText("Luminance")
+            self.menubar_slot_actions[1].setStatusTip("Open preview for Luminance")
+
+        self.menuBar().update()
 
         # Open a preview for the luminance image in Slot 1.
         self.open_preview_window(slot=1)
@@ -3353,13 +3482,24 @@ class AstroEditingSuite(QMainWindow):
             ]
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
-            # macOS does NOT require the stride parameter
-            command = [
-                self.starnet_exe_path,
-                self.input_image_path,
-                self.output_image_path
-            ]
-            print("Preparing command for macOS.")
+            executable_name = os.path.basename(self.starnet_exe_path).lower()
+            if "starnet2" in executable_name:
+                # Using StarNet2's flag-based interface for macOS
+                command = [
+                    self.starnet_exe_path,
+                    "--input", self.input_image_path,
+                    "--output", self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet2 arguments.")
+            else:
+                # Using the older StarNet++ style arguments
+                command = [
+                    self.starnet_exe_path,
+                    self.input_image_path,
+                    self.output_image_path
+                ]
+                print("Preparing command for macOS using StarNet++ arguments.")
+
 
         print(f"StarNet command: {' '.join(command)}")
 
@@ -4132,95 +4272,6 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
-@njit(parallel=True, fastmath=True)
-def rescale_image_numba(image, factor):
-    """
-    Custom rescale function using bilinear interpolation optimized with numba.
-    """
-    height, width = image.shape[:2]
-    new_width = int(width * factor)
-    new_height = int(height * factor)
-
-    # Create an empty output array
-    output = np.zeros((new_height, new_width, image.shape[2]), dtype=np.float32)
-
-    for y in prange(new_height):
-        for x in prange(new_width):
-            src_x = x / factor
-            src_y = y / factor
-            x0, y0 = int(src_x), int(src_y)
-            x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-
-            # Bilinear interpolation
-            dx, dy = src_x - x0, src_y - y0
-            for c in range(image.shape[2]):  # Loop over channels
-                output[y, x, c] = (
-                    image[y0, x0, c] * (1 - dx) * (1 - dy)
-                    + image[y0, x1, c] * dx * (1 - dy)
-                    + image[y1, x0, c] * (1 - dx) * dy
-                    + image[y1, x1, c] * dx * dy
-                )
-
-    return output
-
-@njit(parallel=True, fastmath=True)
-def flip_horizontal_numba(image):
-    """
-    Flips an image horizontally using Numba JIT.
-    """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        for x in prange(width):
-            output[y, x] = image[y, width - x - 1]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def flip_vertical_numba(image):
-    """
-    Flips an image vertically using Numba JIT.
-    """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        output[y] = image[height - y - 1]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def rotate_90_clockwise_numba(image):
-    """
-    Rotates the image 90 degrees clockwise.
-    """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[x, height - 1 - y] = image[y, x]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def rotate_90_counterclockwise_numba(image):
-    """
-    Rotates the image 90 degrees counterclockwise.
-    """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[width - 1 - x, y] = image[y, x]
-    return output
-
-@njit(parallel=True, fastmath=True)
-def invert_image_numba(image):
-    """
-    Inverts an image (1 - pixel value).
-    """
-    output = np.empty_like(image)
-    for y in prange(image.shape[0]):
-        for x in prange(image.shape[1]):
-            for c in prange(image.shape[2]):
-                output[y, x, c] = 1.0 - image[y, x, c]
-    return output
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
@@ -6478,6 +6529,3290 @@ class HistogramDialog(QDialog):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row, col, item)
 
+# --------------------------------------------------
+# Stacking Suite
+# --------------------------------------------------
+class StackingSuiteDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Stacking Suite")
+        self.setGeometry(300, 200, 800, 600)
+        self.per_group_drizzle = {}
+        self.manual_dark_overrides = {}  
+        self.manual_flat_overrides = {}
+
+        # QSettings for your app
+        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        
+
+        # Load or default these
+        self.stacking_directory = self.settings.value("stacking/dir", "", type=str)
+        self.sigma_high = self.settings.value("stacking/sigma_high", 3.0, type=float)
+        self.sigma_low = self.settings.value("stacking/sigma_low", 3.0, type=float)
+        self.rejection_algorithm = self.settings.value(
+            "stacking/rejection_algorithm",
+            "Weighted Windsorized Sigma Clipping",
+            type=str
+        )
+        self.kappa = self.settings.value("stacking/kappa", 2.5, type=float)
+        self.iterations = self.settings.value("stacking/iterations", 3, type=int)
+        self.esd_threshold = self.settings.value("stacking/esd_threshold", 3.0, type=float)
+        self.biweight_constant = self.settings.value("stacking/biweight_constant", 6.0, type=float)
+        self.trim_fraction = self.settings.value("stacking/trim_fraction", 0.1, type=float)
+        self.modz_threshold = self.settings.value("stacking/modz_threshold", 3.5, type=float)
+
+        # Dictionaries to store file paths
+        self.conversion_files = {}
+        self.dark_files = {}
+        self.flat_files = {}
+        self.light_files = {}
+        self.master_files = {}
+        self.master_sizes = {}
+
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        self.dir_path_edit = QLineEdit(self.stacking_directory)  # Add this here
+        # Create the new Conversion tab.
+        self.conversion_tab = self.create_conversion_tab()
+        # Existing tabs...
+        self.dark_tab = self.create_dark_tab()
+        self.flat_tab = self.create_flat_tab()
+        self.light_tab = self.create_light_tab()
+        self.image_integration_tab = self.create_image_registration_tab()
+
+        # Add the tabs in desired order. (Conversion first)
+        self.tabs.addTab(self.conversion_tab, "Debayer && Convert Formats")
+        self.tabs.addTab(self.dark_tab, "Darks")
+        self.tabs.addTab(self.flat_tab, "Flats")
+        self.tabs.addTab(self.light_tab, "Lights")
+        self.tabs.addTab(self.image_integration_tab, "Image Integration")
+        self.tabs.setCurrentIndex(1)  # Default to Darks tab
+
+        # Wrench button, status bar, etc.
+        self.wrench_button = QPushButton()
+        self.wrench_button.setIcon(QIcon(wrench_path))
+        self.wrench_button.setToolTip("Set Stacking Directory & Sigma Clipping")
+        self.wrench_button.clicked.connect(self.open_stacking_settings)
+        self.wrench_button.setStyleSheet("""
+            QPushButton {
+                background-color: #FF4500;
+                color: white;
+                font-size: 16px;
+                padding: 8px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        layout.addWidget(self.wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.setup_status_bar(layout)
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def create_conversion_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(QLabel("Batch Convert Files to Debayered FITS (.fit)"))
+
+        # 1) Create the tree
+        self.conversion_tree = QTreeWidget()
+        self.conversion_tree.setColumnCount(2)
+        self.conversion_tree.setHeaderLabels(["File", "Status"])
+
+        # 2) Make columns user-resizable (Interactive)
+        header = self.conversion_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+
+        # 3) After populating the tree, do an initial auto-resize
+        self.conversion_tree.resizeColumnToContents(0)
+        self.conversion_tree.resizeColumnToContents(1)
+        layout.addWidget(self.conversion_tree)
+
+        # Buttons for adding files, adding a directory,
+        # selecting an output directory, and clearing the list.
+        btn_layout = QHBoxLayout()
+        self.add_conversion_files_btn = QPushButton("Add Conversion Files")
+        self.add_conversion_files_btn.clicked.connect(self.add_conversion_files)
+        self.add_conversion_dir_btn = QPushButton("Add Conversion Directory")
+        self.add_conversion_dir_btn.clicked.connect(self.add_conversion_directory)
+        self.select_conversion_output_btn = QPushButton("Select Output Directory")
+        self.select_conversion_output_btn.clicked.connect(self.select_conversion_output_dir)
+        self.clear_conversion_btn = QPushButton("Clear List")
+        self.clear_conversion_btn.clicked.connect(self.clear_conversion_list)
+        btn_layout.addWidget(self.add_conversion_files_btn)
+        btn_layout.addWidget(self.add_conversion_dir_btn)
+        btn_layout.addWidget(self.select_conversion_output_btn)
+        btn_layout.addWidget(self.clear_conversion_btn)
+        layout.addLayout(btn_layout)
+
+        # Convert All button (converts all files in the tree).
+        self.convert_btn = QPushButton("Convert All Files to FITS")
+        self.convert_btn.clicked.connect(self.convert_all_files)
+        layout.addWidget(self.convert_btn)
+
+        return tab
+
+    def add_conversion_files(self):
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files for Conversion", last_dir,
+                                                "Supported Files (*.fits *.fit *.tiff *.tif *.png *.jpg *.jpeg *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef *.xisf)")
+        if files:
+            self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
+            for file in files:
+                item = QTreeWidgetItem([os.path.basename(file), "Pending"])
+                item.setData(0, 1000, file)  # store full path in role 1000
+                self.conversion_tree.addTopLevelItem(item)
+
+    def add_conversion_directory(self):
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory for Conversion", last_dir)
+        if directory:
+            self.settings.setValue("last_opened_folder", directory)
+            for file in os.listdir(directory):
+                if file.lower().endswith((".fits", ".fit", ".tiff", ".tif", ".png", ".jpg", ".jpeg", 
+                                           ".cr2", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".xisf")):
+                    full_path = os.path.join(directory, file)
+                    item = QTreeWidgetItem([file, "Pending"])
+                    item.setData(0, 1000, full_path)
+                    self.conversion_tree.addTopLevelItem(item)
+
+    def select_conversion_output_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Conversion Output Directory")
+        if directory:
+            self.conversion_output_directory = directory
+            self.update_status(f"Conversion output directory set to: {directory}")
+
+    def clear_conversion_list(self):
+        self.conversion_tree.clear()
+        self.update_status("Conversion list cleared.")
+
+    def convert_all_files(self):
+        if not self.conversion_output_directory:
+            QMessageBox.warning(self, "No Output Directory", "Please select a conversion output directory first.")
+            return
+
+        count = self.conversion_tree.topLevelItemCount()
+        if count == 0:
+            QMessageBox.information(self, "No Files", "There are no files to convert.")
+            return
+
+        for i in range(count):
+            item = self.conversion_tree.topLevelItem(i)
+            file_path = item.data(0, 1000)
+            result = load_image(file_path)
+            if result[0] is None:
+                item.setText(1, "Failed to load")
+                self.update_status(f"Failed to load {os.path.basename(file_path)}")
+                continue
+
+            image, header, bit_depth, is_mono = result
+
+            # Debayer if needed:
+            image = self.debayer_image(image, file_path, header)
+            if image.ndim == 3:
+                is_mono = False
+
+            # If it's a RAW format, definitely treat as color
+            if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+                is_mono = False
+
+                # Try extracting EXIF metadata
+                try:
+                    import exifread
+                    with open(file_path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+
+                    exptime_tag = tags.get("EXIF ExposureTime")  # e.g. "1/125"
+                    iso_tag = tags.get("EXIF ISOSpeedRatings")
+                    date_obs_tag = tags.get("EXIF DateTimeOriginal")
+
+                    # Create or replace with a fresh header, but keep some existing fields if desired
+                    new_header = fits.Header()
+                    new_header['SIMPLE'] = True
+                    new_header['BITPIX'] = 16
+                    new_header['IMAGETYP'] = header.get('IMAGETYP', "UNKNOWN")
+
+                    # Attempt to parse exptime. If fraction or numeric fails, store 'Unknown'.
+                    if exptime_tag:
+                        exptime_str = str(exptime_tag.values)  # or exptime_tag.printable
+                        # Attempt fraction or float
+                        try:
+                            if '/' in exptime_str:  
+                                # e.g. "1/125"
+                                top, bot = exptime_str.split('/', 1)
+                                fexp = float(top) / float(bot)
+                                new_header['EXPTIME'] = (fexp, "Exposure Time in seconds")
+                            else:
+                                # e.g. "0.008" or "8"
+                                fexp = float(exptime_str)
+                                new_header['EXPTIME'] = (fexp, "Exposure Time in seconds")
+                        except (ValueError, ZeroDivisionError):
+                            new_header['EXPTIME'] = 'Unknown'
+                    # If no exptime_tag, set Unknown
+                    else:
+                        new_header['EXPTIME'] = 'Unknown'
+
+                    if iso_tag:
+                        new_header['ISO'] = str(iso_tag.values)
+                    if date_obs_tag:
+                        new_header['DATE-OBS'] = str(date_obs_tag.values)
+
+                    # Replace old header with new
+                    header = new_header
+
+                except Exception as e:
+                    # If exif extraction fails for any reason, we just keep the existing header
+                    # but ensure we set EXPTIME if missing
+                    self.update_status(f"Warning: Failed to extract RAW header from {os.path.basename(file_path)}: {e}")
+
+            # Append or update IMAGETYP based on filename
+            lower_name = os.path.basename(file_path).lower()
+            if "dark" in lower_name:
+                header['IMAGETYP'] = "DARK"
+            elif "flat" in lower_name:
+                header['IMAGETYP'] = "FLAT"
+            elif "light" in lower_name:
+                header['IMAGETYP'] = "LIGHT"
+            else:
+                header['IMAGETYP'] = header.get('IMAGETYP', "UNKNOWN")
+
+            # Remove any existing NAXIS keywords
+            for key in ["NAXIS", "NAXIS1", "NAXIS2", "NAXIS3"]:
+                header.pop(key, None)
+
+            if image.ndim == 2:
+                header['NAXIS'] = 2
+                header['NAXIS1'] = image.shape[1]
+                header['NAXIS2'] = image.shape[0]
+            elif image.ndim == 3:
+                header['NAXIS'] = 3
+                header['NAXIS1'] = image.shape[1]
+                header['NAXIS2'] = image.shape[0]
+                header['NAXIS3'] = image.shape[2]
+
+            # -- Ensure EXPTIME is defined --
+            if 'EXPTIME' not in header:
+                # If the camera or exif didn't provide it, we set it to 'Unknown'
+                header['EXPTIME'] = 'Unknown'
+
+            # Build output filename and save
+            base = os.path.basename(file_path)
+            name, _ = os.path.splitext(base)
+            output_filename = os.path.join(self.conversion_output_directory, f"{name}.fit")
+
+            try:
+                save_image(
+                    img_array=image,
+                    filename=output_filename,
+                    original_format="fit",
+                    bit_depth=bit_depth,
+                    original_header=header,
+                    is_mono=is_mono
+                )
+                item.setText(1, "Converted")
+                self.update_status(
+                    f"Converted {os.path.basename(file_path)} to FITS with "
+                    f"IMAGETYP={header['IMAGETYP']}, EXPTIME={header['EXPTIME']}."
+                )
+            except Exception as e:
+                item.setText(1, f"Error: {e}")
+                self.update_status(f"Error converting {os.path.basename(file_path)}: {e}")
+
+            QApplication.processEvents()
+
+        self.update_status("Conversion complete.")
+
+
+
+    def debayer_image(self, image, file_path, header):
+        if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            print(f"Debayering RAW image: {file_path}")
+            return debayer_raw_fast(image)
+        elif file_path.lower().endswith(('.fits', '.fit')):
+            bayer_pattern = header.get('BAYERPAT')
+            if bayer_pattern:
+                print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
+                return debayer_fits_fast(image, bayer_pattern)
+        return image
+
+    def setup_status_bar(self, layout):
+        """ Sets up a scrollable status log at the bottom of the UI. """
+        self.status_text = QTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setMaximumHeight(100)  # Limits visible lines (~5 lines)
+        self.status_text.setStyleSheet("background-color: black; color: white; font-family: Monospace; padding: 4px;")
+        
+        # Wrap in a scroll area for scrolling
+        self.status_scroll = QScrollArea()
+        self.status_scroll.setWidgetResizable(True)
+        self.status_scroll.setWidget(self.status_text)
+        
+        # Add to the main layout
+        layout.addWidget(self.status_scroll)
+
+    def update_status(self, message):
+        """ Updates the status log with a scrolling history. """
+        self.status_text.append(message)  # Adds new message at the bottom
+        self.status_text.verticalScrollBar().setValue(self.status_text.verticalScrollBar().maximum())  # Auto-scroll to bottom
+        QApplication.processEvents() 
+
+    def open_stacking_settings(self):
+        """ Opens a dialog to set the stacking directory, sigma values, rejection algorithm, and algorithm parameters. """
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Stacking Settings")
+        layout = QVBoxLayout(dialog)
+
+        # Stacking directory selection
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Stacking Directory:")
+        self.dir_path_edit = QLineEdit(self.stacking_directory)
+        dir_button = QPushButton("Browse")
+        dir_button.clicked.connect(self.select_stacking_directory)
+        dir_layout.addWidget(dir_label)
+        dir_layout.addWidget(self.dir_path_edit)
+        dir_layout.addWidget(dir_button)
+        layout.addLayout(dir_layout)
+
+        # Sigma High & Low settings
+        sigma_layout = QHBoxLayout()
+        sigma_layout.addWidget(QLabel("Sigma High:"))
+        self.sigma_high_spinbox = QDoubleSpinBox()
+        self.sigma_high_spinbox.setRange(0.1, 10.0)
+        self.sigma_high_spinbox.setDecimals(2)
+        self.sigma_high_spinbox.setValue(self.sigma_high)
+        sigma_layout.addWidget(self.sigma_high_spinbox)
+        sigma_layout.addWidget(QLabel("Sigma Low:"))
+        self.sigma_low_spinbox = QDoubleSpinBox()
+        self.sigma_low_spinbox.setRange(0.1, 10.0)
+        self.sigma_low_spinbox.setDecimals(2)
+        self.sigma_low_spinbox.setValue(self.sigma_low)
+        sigma_layout.addWidget(self.sigma_low_spinbox)
+        layout.addLayout(sigma_layout)
+
+        # Rejection algorithm selection
+        algo_layout = QHBoxLayout()
+        algo_label = QLabel("Rejection Algorithm:")
+        self.rejection_algo_combo = QComboBox()
+        self.rejection_algo_combo.addItems([
+            "Weighted Windsorized Sigma Clipping",
+            "Kappa-Sigma Clipping",
+            "Simple Average (No Rejection)",
+            "Simple Median (No Rejection)",
+            "Trimmed Mean",
+            "Extreme Studentized Deviate (ESD)",
+            "Biweight Estimator",
+            "Modified Z-Score Clipping"
+        ])
+        saved_algo = self.settings.value("stacking/rejection_algorithm", "Weighted Windsorized Sigma Clipping")
+        index = self.rejection_algo_combo.findText(saved_algo)
+        if index >= 0:
+            self.rejection_algo_combo.setCurrentIndex(index)
+        algo_layout.addWidget(algo_label)
+        algo_layout.addWidget(self.rejection_algo_combo)
+        layout.addLayout(algo_layout)
+
+        # --- Additional Parameters ---
+
+        # Kappa-Sigma Clipping: Kappa Value
+        kappa_layout = QHBoxLayout()
+        kappa_label = QLabel("Kappa Value:")
+        self.kappa_spinbox = QDoubleSpinBox()
+        self.kappa_spinbox.setRange(0.1, 10.0)
+        self.kappa_spinbox.setDecimals(2)
+        self.kappa_spinbox.setValue(self.settings.value("stacking/kappa", 2.5, type=float))
+        kappa_help = QPushButton("?")
+        kappa_help.setFixedSize(20, 20)
+        kappa_help.clicked.connect(lambda: QMessageBox.information(self, "Kappa Value", 
+            "Kappa determines how many standard deviations away from the median are considered outliers. Higher values are more lenient."))
+        kappa_layout.addWidget(kappa_label)
+        kappa_layout.addWidget(self.kappa_spinbox)
+        kappa_layout.addWidget(kappa_help)
+        layout.addLayout(kappa_layout)
+
+        # Kappa-Sigma Clipping: Iterations
+        iterations_layout = QHBoxLayout()
+        iterations_label = QLabel("Iterations:")
+        self.iterations_spinbox = QSpinBox()
+        self.iterations_spinbox.setRange(1, 10)
+        self.iterations_spinbox.setValue(self.settings.value("stacking/iterations", 3, type=int))
+        iterations_help = QPushButton("?")
+        iterations_help.setFixedSize(20, 20)
+        iterations_help.clicked.connect(lambda: QMessageBox.information(self, "Iterations", 
+            "The number of iterations to perform kappa-sigma clipping. More iterations may remove more outliers."))
+        iterations_layout.addWidget(iterations_label)
+        iterations_layout.addWidget(self.iterations_spinbox)
+        iterations_layout.addWidget(iterations_help)
+        layout.addLayout(iterations_layout)
+
+        # ESD: ESD Threshold
+        esd_layout = QHBoxLayout()
+        esd_label = QLabel("ESD Threshold:")
+        self.esd_spinbox = QDoubleSpinBox()
+        self.esd_spinbox.setRange(0.1, 10.0)
+        self.esd_spinbox.setDecimals(2)
+        self.esd_spinbox.setValue(self.settings.value("stacking/esd_threshold", 3.0, type=float))
+        esd_help = QPushButton("?")
+        esd_help.setFixedSize(20, 20)
+        esd_help.clicked.connect(lambda: QMessageBox.information(self, "ESD Threshold", 
+            "Threshold for the Extreme Studentized Deviate test. Lower values are more aggressive in rejecting outliers."))
+        esd_layout.addWidget(esd_label)
+        esd_layout.addWidget(self.esd_spinbox)
+        esd_layout.addWidget(esd_help)
+        layout.addLayout(esd_layout)
+
+        # Biweight Estimator: Tuning Constant
+        biweight_layout = QHBoxLayout()
+        biweight_label = QLabel("Biweight Tuning Constant:")
+        self.biweight_spinbox = QDoubleSpinBox()
+        self.biweight_spinbox.setRange(1.0, 10.0)
+        self.biweight_spinbox.setDecimals(2)
+        self.biweight_spinbox.setValue(self.settings.value("stacking/biweight_constant", 6.0, type=float))
+        biweight_help = QPushButton("?")
+        biweight_help.setFixedSize(20, 20)
+        biweight_help.clicked.connect(lambda: QMessageBox.information(self, "Biweight Tuning Constant", 
+            "Tuning constant for the biweight estimator; it controls the aggressiveness of down-weighting outliers."))
+        biweight_layout.addWidget(biweight_label)
+        biweight_layout.addWidget(self.biweight_spinbox)
+        biweight_layout.addWidget(biweight_help)
+        layout.addLayout(biweight_layout)
+
+        # Trimmed Mean: Trim Fraction
+        trim_layout = QHBoxLayout()
+        trim_label = QLabel("Trim Fraction:")
+        self.trim_spinbox = QDoubleSpinBox()
+        self.trim_spinbox.setRange(0.0, 0.5)
+        self.trim_spinbox.setDecimals(2)
+        self.trim_spinbox.setValue(self.settings.value("stacking/trim_fraction", 0.1, type=float))
+        trim_help = QPushButton("?")
+        trim_help.setFixedSize(20, 20)
+        trim_help.clicked.connect(lambda: QMessageBox.information(self, "Trim Fraction", 
+            "Fraction of values to trim from each end before averaging. For example, 0.1 will trim 10% from each end."))
+        trim_layout.addWidget(trim_label)
+        trim_layout.addWidget(self.trim_spinbox)
+        trim_layout.addWidget(trim_help)
+        layout.addLayout(trim_layout)
+
+        # Modified Z-Score Clipping: Threshold
+        modz_layout = QHBoxLayout()
+        modz_label = QLabel("Modified Z-Score Threshold:")
+        self.modz_spinbox = QDoubleSpinBox()
+        self.modz_spinbox.setRange(0.1, 10.0)
+        self.modz_spinbox.setDecimals(2)
+        self.modz_spinbox.setValue(self.settings.value("stacking/modz_threshold", 3.5, type=float))
+        modz_help = QPushButton("?")
+        modz_help.setFixedSize(20, 20)
+        modz_help.clicked.connect(lambda: QMessageBox.information(self, "Modified Z-Score Threshold", 
+            "Threshold for the modified z-score clipping using the median absolute deviation. Lower values are more aggressive."))
+        modz_layout.addWidget(modz_label)
+        modz_layout.addWidget(self.modz_spinbox)
+        modz_layout.addWidget(modz_help)
+        layout.addLayout(modz_layout)
+
+        # Save button
+        save_button = QPushButton("Save Settings")
+        save_button.clicked.connect(lambda: self.save_stacking_settings(dialog))
+        layout.addWidget(save_button)
+
+        dialog.exec()
+
+    def save_stacking_settings(self, dialog):
+        """ Saves stacking directory, sigma values, rejection algorithm, and algorithm parameters to QSettings. """
+        self.stacking_directory = self.dir_path_edit.text()
+        self.sigma_high = self.sigma_high_spinbox.value()
+        self.sigma_low = self.sigma_low_spinbox.value()
+        self.rejection_algorithm = self.rejection_algo_combo.currentText()
+        self.kappa = self.kappa_spinbox.value()
+        self.iterations = self.iterations_spinbox.value()
+        self.esd_threshold = self.esd_spinbox.value()
+        self.biweight_constant = self.biweight_spinbox.value()
+        self.trim_fraction = self.trim_spinbox.value()
+        self.modz_threshold = self.modz_spinbox.value()
+
+        # Store in QSettings
+        self.settings.setValue("stacking/dir", self.stacking_directory)
+        self.settings.setValue("stacking/sigma_high", self.sigma_high)
+        self.settings.setValue("stacking/sigma_low", self.sigma_low)
+        self.settings.setValue("stacking/rejection_algorithm", self.rejection_algorithm)
+        self.settings.setValue("stacking/kappa", self.kappa)
+        self.settings.setValue("stacking/iterations", self.iterations)
+        self.settings.setValue("stacking/esd_threshold", self.esd_threshold)
+        self.settings.setValue("stacking/biweight_constant", self.biweight_constant)
+        self.settings.setValue("stacking/trim_fraction", self.trim_fraction)
+        self.settings.setValue("stacking/modz_threshold", self.modz_threshold)
+
+        print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
+        print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
+        self.update_status("✅ Saved stacking settings.")
+        dialog.accept()
+
+    def select_stacking_directory(self):
+        """ Opens a dialog to choose a stacking directory. """
+        directory = QFileDialog.getExistingDirectory(self, "Select Stacking Directory")
+        if directory:
+            self.stacking_directory = directory
+            self.dir_path_edit.setText(directory)  # No more AttributeError
+            self.settings.setValue("stacking/dir", directory)  # Save the new directory
+
+
+    def create_dark_tab(self):
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)  # Vertical layout to separate sections
+
+        # --- DARK FRAMES TREEBOX (TOP) ---
+        darks_layout = QHBoxLayout()  # Left = Dark Tree, Right = Controls
+
+        # Left Side - Dark Frames
+        dark_frames_layout = QVBoxLayout()
+        dark_frames_layout.addWidget(QLabel("Dark Frames"))
+        # 1) Create the tree
+        self.dark_tree = QTreeWidget()
+        self.dark_tree.setColumnCount(2)
+        self.dark_tree.setHeaderLabels(["Exposure Time", "Metadata"])
+        self.dark_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # 2) Make columns user-resizable
+        header = self.dark_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+
+        # 3) After you fill the tree with items, auto-resize
+        self.dark_tree.resizeColumnToContents(0)
+        self.dark_tree.resizeColumnToContents(1)
+
+        # Then add it to the layout
+        dark_frames_layout.addWidget(self.dark_tree)
+
+        # Buttons to Add Dark Files & Directories
+        btn_layout = QHBoxLayout()
+        self.add_dark_files_btn = QPushButton("Add Dark Files")
+        self.add_dark_files_btn.clicked.connect(self.add_dark_files)
+        self.add_dark_dir_btn = QPushButton("Add Dark Directory")
+        self.add_dark_dir_btn.clicked.connect(self.add_dark_directory)
+        btn_layout.addWidget(self.add_dark_files_btn)
+        btn_layout.addWidget(self.add_dark_dir_btn)
+        dark_frames_layout.addLayout(btn_layout)
+
+        self.clear_dark_selection_btn = QPushButton("Clear Selection")
+        self.clear_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.dark_tree))
+        dark_frames_layout.addWidget(self.clear_dark_selection_btn)
+
+        darks_layout.addLayout(dark_frames_layout, 2)  # Dark Frames Tree takes more space
+
+
+        # --- RIGHT SIDE: Exposure Tolerance & Master Darks Button ---
+        right_controls_layout = QVBoxLayout()
+
+        # Exposure Tolerance
+        exposure_tolerance_layout = QHBoxLayout()
+        exposure_tolerance_label = QLabel("Exposure Tolerance (seconds):")
+        self.exposure_tolerance_spinbox = QSpinBox()
+        self.exposure_tolerance_spinbox.setRange(0, 30)  # Acceptable range
+        self.exposure_tolerance_spinbox.setValue(5)  # Default: ±5 sec
+        exposure_tolerance_layout.addWidget(exposure_tolerance_label)
+        exposure_tolerance_layout.addWidget(self.exposure_tolerance_spinbox)
+        right_controls_layout.addLayout(exposure_tolerance_layout)
+
+        # --- "Turn Those Darks Into Master Darks" Button ---
+        self.create_master_dark_btn = QPushButton("Turn Those Darks Into Master Darks")
+        self.create_master_dark_btn.clicked.connect(self.create_master_dark)
+
+        # Apply a bold font, padding, and a highlighted effect
+        self.create_master_dark_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;  /* Dark gray */
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;  /* Subtle yellow border */
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+            }
+            QPushButton:pressed {
+                background-color: #222;  /* Darker gray on press */
+                border: 2px solid #FFA500;  /* Orange border when pressed */
+            }
+        """)
+
+        right_controls_layout.addWidget(self.create_master_dark_btn)
+
+
+        darks_layout.addLayout(right_controls_layout, 1)  # Right side takes less space
+
+        main_layout.addLayout(darks_layout)
+
+        # --- MASTER DARKS TREEBOX (BOTTOM) ---
+        main_layout.addWidget(QLabel("Master Darks"))
+        self.master_dark_tree = QTreeWidget()
+        self.master_dark_tree.setColumnCount(2)
+        self.master_dark_tree.setHeaderLabels(["Exposure Time", "Master File"])
+        self.master_dark_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        main_layout.addWidget(self.master_dark_tree)
+
+        # Master Dark Selection Button
+        self.master_dark_btn = QPushButton("Load Master Dark")
+        self.master_dark_btn.clicked.connect(self.load_master_dark)
+        main_layout.addWidget(self.master_dark_btn)
+
+        # Add "Clear Selection" button for Master Darks
+        self.clear_master_dark_selection_btn = QPushButton("Clear Selection")
+        self.clear_master_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_dark_tree))
+        main_layout.addWidget(self.clear_master_dark_selection_btn)
+
+        return tab
+
+
+
+    def create_flat_tab(self):
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)  # Main layout to organize sections
+
+        # --- FLAT FRAMES TREEBOX (TOP) ---
+        flats_layout = QHBoxLayout()  # Left = Flat Tree, Right = Controls
+
+        # Left Side - Flat Frames
+        flat_frames_layout = QVBoxLayout()
+        flat_frames_layout.addWidget(QLabel("Flat Frames"))
+
+        self.flat_tree = QTreeWidget()
+        self.flat_tree.setColumnCount(3)  # Added 3rd column for Master Dark Used
+        self.flat_tree.setHeaderLabels(["Filter & Exposure", "Metadata", "Master Dark Used"])
+        self.flat_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        flat_frames_layout.addWidget(self.flat_tree)
+
+        # Buttons to Add Flat Files & Directories
+        btn_layout = QHBoxLayout()
+        self.add_flat_files_btn = QPushButton("Add Flat Files")
+        self.add_flat_files_btn.clicked.connect(self.add_flat_files)
+        self.add_flat_dir_btn = QPushButton("Add Flat Directory")
+        self.add_flat_dir_btn.clicked.connect(self.add_flat_directory)
+        btn_layout.addWidget(self.add_flat_files_btn)
+        btn_layout.addWidget(self.add_flat_dir_btn)
+        flat_frames_layout.addLayout(btn_layout)
+
+        # Add "Clear Selection" button for Flat Frames
+        self.clear_flat_selection_btn = QPushButton("Clear Selection")
+        self.clear_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.flat_tree))
+        flat_frames_layout.addWidget(self.clear_flat_selection_btn)
+
+        flats_layout.addLayout(flat_frames_layout, 2)  # Left side takes more space
+
+        # --- RIGHT SIDE: Exposure Tolerance & Master Dark Selection ---
+        right_controls_layout = QVBoxLayout()
+
+        # Exposure Tolerance
+        exposure_tolerance_layout = QHBoxLayout()
+        exposure_tolerance_label = QLabel("Exposure Tolerance (seconds):")
+        self.flat_exposure_tolerance_spinbox = QSpinBox()
+        self.flat_exposure_tolerance_spinbox.setRange(0, 30)  # Allow ±0 to 30 seconds
+        self.flat_exposure_tolerance_spinbox.setValue(5)  # Default: ±5 sec
+        exposure_tolerance_layout.addWidget(exposure_tolerance_label)
+        exposure_tolerance_layout.addWidget(self.flat_exposure_tolerance_spinbox)
+        right_controls_layout.addLayout(exposure_tolerance_layout)
+
+        # Auto-Select Master Dark
+        self.auto_select_dark_checkbox = QCheckBox("Auto-Select Closest Master Dark")
+        self.auto_select_dark_checkbox.setChecked(True)  # Default enabled
+        right_controls_layout.addWidget(self.auto_select_dark_checkbox)
+
+        # Manual Override: Select a Master Dark
+        self.override_dark_combo = QComboBox()
+        self.override_dark_combo.addItem("None (Use Auto-Select)")
+        self.override_dark_combo.currentIndexChanged.connect(self.override_selected_master_dark)
+        right_controls_layout.addWidget(QLabel("Override Master Dark Selection"))
+        right_controls_layout.addWidget(self.override_dark_combo)
+
+        self.create_master_flat_btn = QPushButton("Turn Those Flats Into Master Flats")
+        self.create_master_flat_btn.clicked.connect(self.create_master_flat)
+
+        # Apply a bold font, padding, and a glowing effect
+        self.create_master_flat_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;  /* Dark gray */
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;  /* Subtle yellow border */
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;  /* Brighter yellow on hover */
+            }
+            QPushButton:pressed {
+                background-color: #222;  /* Darker gray on press */
+                border: 2px solid #FFA500;  /* Orange border when pressed */
+            }
+        """)
+
+
+        right_controls_layout.addWidget(self.create_master_flat_btn)
+
+        flats_layout.addLayout(right_controls_layout, 1)  # Right side takes less space
+
+        main_layout.addLayout(flats_layout)
+
+        # --- MASTER FLATS TREEBOX (BOTTOM) ---
+        main_layout.addWidget(QLabel("Master Flats"))
+        self.master_flat_tree = QTreeWidget()
+        self.master_flat_tree.setColumnCount(2)
+        self.master_flat_tree.setHeaderLabels(["Filter", "Master File"])
+        self.master_flat_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        main_layout.addWidget(self.master_flat_tree)
+
+        # Master Flat Selection Button
+        self.master_flat_btn = QPushButton("Load Master Flat")
+        self.master_flat_btn.clicked.connect(self.load_master_flat)
+        main_layout.addWidget(self.master_flat_btn)
+
+        self.clear_master_flat_selection_btn = QPushButton("Clear Selection")
+        self.clear_master_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_flat_tree))
+        main_layout.addWidget(self.clear_master_flat_selection_btn)
+
+        return tab
+
+    def create_light_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Tree widget for light frames
+        self.light_tree = QTreeWidget()
+        self.light_tree.setColumnCount(5)  # Added columns for Master Dark and Flat
+        self.light_tree.setHeaderLabels(["Filter & Exposure", "Metadata", "Master Dark", "Master Flat", "Corrections"])
+        self.light_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        layout.addWidget(QLabel("Light Frames"))
+        layout.addWidget(self.light_tree)
+
+        # Buttons for adding files and directories
+        btn_layout = QHBoxLayout()
+        self.add_light_files_btn = QPushButton("Add Light Files")
+        self.add_light_files_btn.clicked.connect(self.add_light_files)
+        self.add_light_dir_btn = QPushButton("Add Light Directory")
+        self.add_light_dir_btn.clicked.connect(self.add_light_directory)
+        btn_layout.addWidget(self.add_light_files_btn)
+        btn_layout.addWidget(self.add_light_dir_btn)
+        layout.addLayout(btn_layout)
+
+        clear_selection_btn = QPushButton("Remove Selected")
+        clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.light_tree))
+        layout.addWidget(clear_selection_btn)
+
+        # Cosmetic Correction & Pedestal Controls
+        correction_layout = QHBoxLayout()
+
+        self.cosmetic_checkbox = QCheckBox("Enable Cosmetic Correction")
+        self.pedestal_checkbox = QCheckBox("Apply Pedestal")
+        self.bias_checkbox = QCheckBox("Apply Bias Subtraction (For CCD Users)")
+
+        # Pedestal Value (0-1000, converted to 0-1)
+        pedestal_layout = QHBoxLayout()
+        self.pedestal_spinbox = QSpinBox()
+        self.pedestal_spinbox.setRange(0, 1000)
+        self.pedestal_spinbox.setValue(50)  # Default pedestal
+        pedestal_layout.addWidget(QLabel("Pedestal (0-1000):"))
+        pedestal_layout.addWidget(self.pedestal_spinbox)
+        layout.addLayout(pedestal_layout)        
+
+        # ✅ Add Tooltip to Bias Checkbox
+        self.bias_checkbox.setToolTip(
+            "CMOS users: Bias Subtraction is not needed.\n"
+            "Modern CMOS cameras use Correlated Double Sampling (CDS),\n"
+            "meaning bias is already subtracted at the sensor level."
+        )
+
+        # Connect checkboxes to update function
+        self.cosmetic_checkbox.stateChanged.connect(self.update_light_corrections)
+        self.pedestal_checkbox.stateChanged.connect(self.update_light_corrections)
+        self.bias_checkbox.stateChanged.connect(self.update_light_corrections)
+
+        # Add checkboxes to layout
+        correction_layout.addWidget(self.cosmetic_checkbox)
+        correction_layout.addWidget(self.pedestal_checkbox)
+        correction_layout.addWidget(self.bias_checkbox)
+
+        layout.addLayout(correction_layout)        
+
+        # --- RIGHT SIDE CONTROLS: Override Dark & Flat ---
+        override_layout = QHBoxLayout()
+
+        # Override Dark Frame Button
+        self.override_dark_btn = QPushButton("Override Dark Frame")
+        self.override_dark_btn.clicked.connect(self.override_selected_master_dark)
+        override_layout.addWidget(self.override_dark_btn)
+
+        # Override Flat Frame Button
+        self.override_flat_btn = QPushButton("Override Flat Frame")
+        self.override_flat_btn.clicked.connect(self.override_selected_master_flat)
+        override_layout.addWidget(self.override_flat_btn)
+
+        layout.addLayout(override_layout)
+
+        # Calibrate Lights Button
+        self.calibrate_lights_btn = QPushButton("🚀 Calibrate Light Frames 🚀")
+        self.calibrate_lights_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF4500;
+                color: white;
+                font-size: 16px;
+                padding: 8px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        self.calibrate_lights_btn.clicked.connect(self.calibrate_lights)
+        layout.addWidget(self.calibrate_lights_btn)
+
+        # Enable Context Menu
+        self.light_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.light_tree.customContextMenuRequested.connect(self.light_tree_context_menu)
+
+        return tab
+
+
+
+    def create_image_registration_tab(self):
+        """
+        Creates an Image Registration tab that mimics how the Light tab handles
+        cosmetic corrections—i.e., we have global Drizzle controls (checkbox, combo, spin),
+        and we update a text column in the QTreeWidget to show each group's drizzle state.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # ─────────────────────────────────────────
+        # 1) QTreeWidget
+        # ─────────────────────────────────────────
+        self.reg_tree = QTreeWidget()
+        self.reg_tree.setColumnCount(3)
+        self.reg_tree.setHeaderLabels([
+            "Filter - Exposure - Size",
+            "Metadata",
+            "Drizzle"  # We'll display "Drizzle: True, Scale: 2x, Drop:0.65" here
+        ])
+        self.reg_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # Optional: make columns resize nicely
+        header = self.reg_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+
+        layout.addWidget(QLabel("Calibrated Light Frames"))
+        layout.addWidget(self.reg_tree)
+
+        # Populate the tree from your calibrated folder
+        self.populate_calibrated_lights()
+
+        # ─────────────────────────────────────────
+        # 2) Buttons for Managing Files
+        # ─────────────────────────────────────────
+        btn_layout = QHBoxLayout()
+        self.add_reg_files_btn = QPushButton("Add Light Files")
+        self.add_reg_files_btn.clicked.connect(self.add_light_files_to_registration)
+        btn_layout.addWidget(self.add_reg_files_btn)
+
+        self.clear_selection_btn = QPushButton("Remove Selected")
+        self.clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.reg_tree))
+        btn_layout.addWidget(self.clear_selection_btn)
+
+        layout.addLayout(btn_layout)
+
+        # ─────────────────────────────────────────
+        # 3) Global Drizzle Controls
+        # ─────────────────────────────────────────
+        drizzle_layout = QHBoxLayout()
+
+        self.drizzle_checkbox = QCheckBox("Enable Drizzle")
+        self.drizzle_checkbox.stateChanged.connect(self.update_drizzle_settings)  # <─ connect signal
+        drizzle_layout.addWidget(self.drizzle_checkbox)
+
+        drizzle_layout.addWidget(QLabel("Scale:"))
+        self.drizzle_scale_combo = QComboBox()
+        self.drizzle_scale_combo.addItems(["1x", "2x", "3x"])
+        self.drizzle_scale_combo.currentIndexChanged.connect(self.update_drizzle_settings)  # <─ connect
+        drizzle_layout.addWidget(self.drizzle_scale_combo)
+
+        drizzle_layout.addWidget(QLabel("Drop Shrink:"))
+        self.drizzle_drop_shrink_spin = QDoubleSpinBox()
+        self.drizzle_drop_shrink_spin.setRange(0.0, 1.0)
+        self.drizzle_drop_shrink_spin.setSingleStep(0.05)
+        self.drizzle_drop_shrink_spin.setValue(0.65)
+        self.drizzle_drop_shrink_spin.valueChanged.connect(self.update_drizzle_settings)  # <─ connect
+        drizzle_layout.addWidget(self.drizzle_drop_shrink_spin)
+
+        layout.addLayout(drizzle_layout)
+
+        # ─────────────────────────────────────────
+        # 4) Reference Frame Selection
+        # ─────────────────────────────────────────
+        self.ref_frame_label = QLabel("Select Reference Frame:")
+        self.ref_frame_path = QLabel("No file selected")
+        self.ref_frame_path.setWordWrap(True)
+        self.select_ref_frame_btn = QPushButton("Select Reference Frame")
+        self.select_ref_frame_btn.clicked.connect(self.select_reference_frame)
+
+        ref_layout = QHBoxLayout()
+        ref_layout.addWidget(self.ref_frame_label)
+        ref_layout.addWidget(self.ref_frame_path)
+        ref_layout.addWidget(self.select_ref_frame_btn)
+        layout.addLayout(ref_layout)
+
+        # ─────────────────────────────────────────
+        # 5) Register & Integrate Buttons
+        # ─────────────────────────────────────────
+        self.register_images_btn = QPushButton("🔥🚀Register and Integrate Images🔥🚀")
+        self.register_images_btn.clicked.connect(self.register_images)
+        self.register_images_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF4500;
+                color: white;
+                font-size: 16px;
+                padding: 8px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        layout.addWidget(self.register_images_btn)
+
+        self.integrate_registered_btn = QPushButton("Integrate Previously Registered Images")
+        self.integrate_registered_btn.clicked.connect(self.integrate_registered_images)
+        self.integrate_registered_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;
+                color: white;
+                font-size: 14px;
+                padding: 8px;
+                border-radius: 5px;
+                border: 2px solid yellow;
+            }
+            QPushButton:hover {
+                border: 2px solid #FFD700;
+            }
+            QPushButton:pressed {
+                background-color: #222;
+                border: 2px solid #FFA500;
+            }
+        """)
+        layout.addWidget(self.integrate_registered_btn)
+
+        tab.setLayout(layout)
+        return tab
+
+    def select_reference_frame(self):
+        """ Opens a file dialog to select the reference frame. """
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Frame", "", 
+                                                "FITS Images (*.fits *.fit);;All Files (*)")
+        if file_path:
+            self.reference_frame = file_path
+            self.ref_frame_path.setText(os.path.basename(file_path))
+
+
+    def clear_tree_selection(self, tree):
+        """ Clears the selection in the given tree widget and removes items from dictionaries. """
+        
+        selected_items = tree.selectedItems()
+        if not selected_items:
+            return  # Nothing to remove
+
+        removed_keys = []
+
+        for item in selected_items:
+            parent = item.parent()
+            if parent:
+                # ✅ Handle child items (specific files)
+                group_key = parent.text(0)
+                filename = item.text(0)
+
+                if group_key in self.light_files:
+                    self.light_files[group_key] = [
+                        f for f in self.light_files[group_key] if os.path.basename(f) != filename
+                    ]
+                    if not self.light_files[group_key]:  # If empty, mark for deletion
+                        removed_keys.append(group_key)
+
+                parent.removeChild(item)
+
+            else:
+                # ✅ Handle parent groups (remove entire category)
+                group_key = item.text(0)
+                if group_key in self.light_files:
+                    del self.light_files[group_key]  # Remove all associated files
+                removed_keys.append(group_key)
+
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+
+        # ✅ Ensure removed groups are deleted from dictionary
+        for key in removed_keys:
+            self.light_files.pop(key, None)
+
+        print(f"✅ Cleared selection. Remaining files: {sum(len(v) for v in self.light_files.values())} total")
+
+
+
+    def populate_calibrated_lights(self, manual_addition=False):
+        """
+        Populates the tree with 3 columns:
+        0: "Filter - Exposure - Size"
+        1: "Metadata"
+        2: "Drizzle" (e.g. "Drizzle: False" or "Drizzle: True, Scale: 2x, Drop: 0.65")
+        """
+        if manual_addition:
+            return
+
+        self.reg_tree.clear()
+        self.reg_tree.setColumnCount(3)
+        self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
+
+        # Preserve manually added files
+        existing_manual_files = self.light_files.copy()
+        self.light_files = {}
+
+        # Ensure stacking directory is set
+        if not self.stacking_directory:
+            # 1) Prompt user to pick a directory
+            self.select_stacking_directory()
+
+            # 2) If user still didn't choose one, show warning and return
+            if not self.stacking_directory:
+                QMessageBox.warning(self, "Error", "Output directory is not set.")
+                return
+
+        calibrated_folder = os.path.join(self.stacking_directory, "Calibrated")
+        if not os.path.exists(calibrated_folder):
+            return
+
+        fits_files = [
+            f for f in os.listdir(calibrated_folder)
+            if f.lower().endswith((".fits", ".fit"))
+        ]
+        if not fits_files:
+            return
+
+        # Group files by filter/exposure/dimensions
+        grouped_files = {}
+        for filename in fits_files:
+            file_path = os.path.join(calibrated_folder, filename)
+            try:
+                with fits.open(file_path) as hdul:
+                    hdr = hdul[0].header
+                    filter_name = hdr.get("FILTER", "Unknown")
+                    exposure = hdr.get("EXPOSURE", hdr.get("EXPTIME", "Unknown"))
+                    data = hdul[0].data
+                    if data is not None:
+                        height, width = data.shape[-2:]
+                        image_size = f"{width}x{height}"
+                    else:
+                        image_size = "Unknown"
+
+                    group_key = f"{filter_name} - {exposure}s ({image_size})"
+                    if group_key not in grouped_files:
+                        grouped_files[group_key] = []
+                    grouped_files[group_key].append(file_path)
+
+            except Exception as e:
+                self.update_status(f"⚠️ Skipped {filename}: {e}")
+
+        # Populate the tree with top-level items
+        for group_key, file_list in grouped_files.items():
+            top_item = QTreeWidgetItem()
+            top_item.setText(0, group_key)
+            top_item.setText(1, f"{len(file_list)} files")
+            # By default, Drizzle is off -> just show "Drizzle: False"
+            top_item.setText(2, "Drizzle: False")
+
+            # Store file_list in UserRole
+            top_item.setData(0, Qt.ItemDataRole.UserRole, file_list)
+            self.reg_tree.addTopLevelItem(top_item)
+
+            # Child items for each file
+            for fp in file_list:
+                child = QTreeWidgetItem([
+                    os.path.basename(fp),
+                    f"Size: {image_size}"
+                ])
+                top_item.addChild(child)
+            top_item.setExpanded(True)
+
+        # Update self.light_files
+        self.light_files.update(grouped_files)
+
+        # Restore any manually added files
+        for gkey, flist in existing_manual_files.items():
+            if gkey not in self.light_files:
+                self.light_files[gkey] = flist
+
+
+    def update_drizzle_settings(self):
+        """
+        Called whenever the user toggles the 'Enable Drizzle' checkbox,
+        changes the scale combo, or changes the drop shrink spinbox.
+        Applies to all *selected* top-level items in the reg_tree.
+        """
+        # Current states from global controls
+        drizzle_enabled = self.drizzle_checkbox.isChecked()
+        scale_str = self.drizzle_scale_combo.currentText()  # e.g. "1x","2x","3x"
+        drop_val = self.drizzle_drop_shrink_spin.value()    # e.g. 0.65
+
+        # Gather selected items
+        selected_items = self.reg_tree.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            # If the user selected a child row, go up to its parent group
+            if item.parent() is not None:
+                item = item.parent()
+
+            group_key = item.text(0)
+
+            if drizzle_enabled:
+                # Show scale + drop shrink
+                drizzle_text = (f"Drizzle: True, "
+                                f"Scale: {scale_str}, "
+                                f"Drop: {drop_val:.2f}")
+            else:
+                # Just show "Drizzle: False"
+                drizzle_text = "Drizzle: False"
+
+            # Update column 2 with the new text
+            item.setText(2, drizzle_text)
+
+            # If you also store it in a dictionary:
+            self.per_group_drizzle[group_key] = {
+                "enabled": drizzle_enabled,
+                "scale": float(scale_str.replace("x","", 1)),
+                "drop": drop_val
+            }
+
+
+    def gather_drizzle_settings_from_tree(self):
+        """
+        Returns a dict of the form:
+        {
+        "L - 120s (8288x5644)": {
+            "files": [...],
+            "drizzle_enabled": True,
+            "scale_factor": 2.0,
+            "drop_shrink": 0.65
+        },
+        ...
+        }
+        """
+        drizzle_dict = {}
+        top_count = self.reg_tree.topLevelItemCount()
+
+        for i in range(top_count):
+            item = self.reg_tree.topLevelItem(i)
+            if not item:
+                continue
+
+            group_key = item.text(0)
+            file_list = item.data(0, Qt.ItemDataRole.UserRole)
+            drizzle_text = item.text(2)  # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65" or "Drizzle: False"
+
+            # Default
+            drizzle_enabled = False
+            scale_factor = 1.0
+            drop_shrink = 0.65
+
+            if drizzle_text.startswith("Drizzle: False"):
+                # Drizzle is off
+                drizzle_enabled = False
+            else:
+                # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65"
+                parts = drizzle_text.split(",")
+                # parts[0] -> "Drizzle: True"
+                # parts[1] -> " Scale: 2x"
+                # parts[2] -> " Drop: 0.65"
+                if len(parts) == 3:
+                    drizzle_enabled_str = parts[0].split(":")[-1].strip()  # "True"
+                    drizzle_enabled = (drizzle_enabled_str.lower() == "true")
+
+                    scale_str = parts[1].split(":")[-1].strip()  # "2x"
+                    scale_factor = float(scale_str.replace("x",""))
+
+                    drop_str = parts[2].split(":")[-1].strip()
+                    drop_shrink = float(drop_str)
+
+            drizzle_dict[group_key] = {
+                "files": file_list,
+                "drizzle_enabled": drizzle_enabled,
+                "scale_factor": scale_factor,
+                "drop_shrink": drop_shrink
+            }
+
+        return drizzle_dict
+
+
+    def add_light_files_to_registration(self):
+        """ Adds manually selected light frames while preserving grouping. """
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Light Frames", last_dir, "FITS Files (*.fits *.fit)")
+        
+        if not files:
+            return
+
+        self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
+
+        # ✅ Only clear tree if no manual files exist yet
+        if not self.light_files:
+            self.reg_tree.clear()
+
+        for file in files:
+            filename = os.path.basename(file)
+
+            # ✅ Extract metadata (filter, exposure, size)
+            try:
+                with fits.open(file) as hdul:
+                    header = hdul[0].header
+                    filter_name = header.get("FILTER", "Unknown")
+                    exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+
+                    # Extract image size
+                    data = hdul[0].data
+                    if data is not None:
+                        height, width = data.shape[-2:]
+                        image_size = f"{width}x{height}"
+                    else:
+                        image_size = "Unknown"
+
+                    group_key = f"{filter_name} - {exposure}s ({image_size})"
+            except Exception:
+                group_key = "Unknown - Unknown"
+
+            # ✅ Ensure group exists in tree
+            existing_groups = {self.reg_tree.topLevelItem(i).text(0) for i in range(self.reg_tree.topLevelItemCount())}
+            if group_key not in existing_groups:
+                group_item = QTreeWidgetItem([group_key, f"{len(files)} files"])
+                self.reg_tree.addTopLevelItem(group_item)
+            else:
+                for i in range(self.reg_tree.topLevelItemCount()):
+                    if self.reg_tree.topLevelItem(i).text(0) == group_key:
+                        group_item = self.reg_tree.topLevelItem(i)
+                        break
+
+            # ✅ Add file to tree
+            file_item = QTreeWidgetItem([file, "Loaded"])
+            group_item.addChild(file_item)
+
+            # ✅ Ensure it's stored for processing
+            if group_key not in self.light_files:
+                self.light_files[group_key] = []
+            self.light_files[group_key].append(file)
+
+        print(f"✅ Added {len(files)} light frames.")
+
+
+
+
+    def on_tab_changed(self, index):
+        """ Detects when user switches to the Flats tab and triggers auto-assign. """
+        if self.tabs.tabText(index) == "Flats":
+            print("🔄 Auto-checking best Master Darks for Flats...")
+            self.assign_best_master_dark()
+
+
+    def add_dark_files(self):
+        self.add_files(self.dark_tree, "Select Dark Files", "DARK")
+    
+    def add_dark_directory(self):
+        self.add_directory(self.dark_tree, "Select Dark Directory", "DARK")
+
+    def add_flat_files(self):
+        self.add_files(self.flat_tree, "Select Flat Files", "FLAT")
+        self.assign_best_master_dark()  # Assign best dark after adding flats
+
+    def add_flat_directory(self):
+        self.add_directory(self.flat_tree, "Select Flat Directory", "FLAT")
+        self.assign_best_master_dark()  # Assign best dark after adding flats
+
+    
+    def add_light_files(self):
+        self.add_files(self.light_tree, "Select Light Files", "LIGHT")
+    
+    def add_light_directory(self):
+        self.add_directory(self.light_tree, "Select Light Directory", "LIGHT")
+
+    def load_master_dark(self):
+        """ Loads a Master Dark and updates the UI. """
+        last_dir = self.settings.value("last_opened_folder", "", type=str)  # Get last folder
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Master Dark", last_dir, "FITS Files (*.fits *.fit)")
+        
+        if files:
+            self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))  # Save last used folder
+            self.add_master_files(self.master_dark_tree, "DARK", files)
+
+        self.update_override_dark_combo()
+        self.assign_best_master_dark()
+        print("DEBUG: Loaded Master Darks and updated assignments.")
+
+
+    def load_master_flat(self):
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Master Flat", last_dir, "FITS Files (*.fits *.fit)")
+
+        if files:
+            self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
+            self.add_master_files(self.master_flat_tree, "FLAT", files)
+
+
+    def add_files(self, tree, title, expected_type):
+        """ Adds FITS files and assigns best master files if needed. """
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        files, _ = QFileDialog.getOpenFileNames(self, title, last_dir, "FITS Files (*.fits *.fit)")
+
+        if files:
+            self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))  # Save last opened folder
+            for file in files:
+                self.process_fits_header(file, tree, expected_type)
+
+            # 🔥 Auto-assign Master Dark & Flat **if adding LIGHTS**
+            if expected_type == "LIGHT":
+                self.assign_best_master_files()
+
+
+
+    def add_directory(self, tree, title, expected_type):
+        """ Adds all FITS files from a directory and assigns best master files if needed. """
+        last_dir = self.settings.value("last_opened_folder", "", type=str)
+        directory = QFileDialog.getExistingDirectory(self, title, last_dir)
+
+        if directory:
+            self.settings.setValue("last_opened_folder", directory)  # Save last opened folder
+            for file in os.listdir(directory):
+                if file.lower().endswith((".fits", ".fit")):
+                    self.process_fits_header(os.path.join(directory, file), tree, expected_type)
+
+            # 🔥 Auto-assign Master Dark & Flat **if adding LIGHTS**
+            if expected_type == "LIGHT":
+                self.assign_best_master_files()
+
+
+    
+    def process_fits_header(self, file_path, tree, expected_type):
+        try:
+            # Read only the FITS header (fast)
+            header = fits.getheader(file_path)
+
+            try:
+                width = int(header.get("NAXIS1"))
+                height = int(header.get("NAXIS2"))
+            except Exception as e:
+                self.update_status(f"Warning: Could not convert dimensions to int for {file_path}: {e}")
+                width, height = None, None
+
+            if width is not None and height is not None:
+                image_size = f"{width}x{height}"
+            else:
+                image_size = "Unknown"
+
+            # Retrieve IMAGETYP (default to "UNKNOWN" if not present)
+            imagetyp = header.get("IMAGETYP", "UNKNOWN").lower()
+
+            # Retrieve exposure from either EXPOSURE or EXPTIME
+            exposure_val = header.get("EXPOSURE")
+            if not exposure_val:
+                exposure_val = header.get("EXPTIME")
+            if not exposure_val:
+                exposure_val = "Unknown"  # fallback if neither keyword is present
+
+            # Define forbidden keywords per expected type.
+            if expected_type.upper() == "DARK":
+                forbidden = ["light", "flat"]
+            elif expected_type.upper() == "FLAT":
+                forbidden = ["dark", "light"]
+            elif expected_type.upper() == "LIGHT":
+                forbidden = ["dark", "flat"]
+            else:
+                forbidden = []
+
+            # Determine attribute name for auto-confirm decision (per expected type)
+            decision_attr = f"auto_confirm_{expected_type.lower()}"
+            # If a decision has already been made, use it.
+            if hasattr(self, decision_attr):
+                decision = getattr(self, decision_attr)
+                if decision is False:
+                    # Skip this file automatically.
+                    return
+                # If decision is True, then add without prompting.
+            elif any(word in imagetyp for word in forbidden):
+                # Prompt the user with Yes, Yes to All, No, and No to All options.
+                msgBox = QMessageBox(self)
+                msgBox.setWindowTitle("Mismatched Image Type")
+                msgBox.setText(
+                    f"The file:\n{os.path.basename(file_path)}\n"
+                    f"has IMAGETYP = {header.get('IMAGETYP')} "
+                    f"which does not match the expected type ({expected_type}).\n\n"
+                    f"Do you want to add it anyway?"
+                )
+                yesButton = msgBox.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+                yesToAllButton = msgBox.addButton("Yes to All", QMessageBox.ButtonRole.YesRole)
+                noButton = msgBox.addButton("No", QMessageBox.ButtonRole.NoRole)
+                noToAllButton = msgBox.addButton("No to All", QMessageBox.ButtonRole.NoRole)
+                msgBox.exec()
+                clicked = msgBox.clickedButton()
+                if clicked == yesToAllButton:
+                    setattr(self, decision_attr, True)
+                elif clicked == noToAllButton:
+                    setattr(self, decision_attr, False)
+                    return
+                elif clicked == noButton:
+                    return
+
+            # Now handle each expected type
+            if expected_type.upper() == "DARK":
+                key = f"{exposure_val} ({image_size})"
+                if key not in self.dark_files:
+                    self.dark_files[key] = []
+                self.dark_files[key].append(file_path)
+
+                items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                if not items:
+                    exposure_item = QTreeWidgetItem([key])
+                    tree.addTopLevelItem(exposure_item)
+                else:
+                    exposure_item = items[0]
+                metadata = f"Size: {image_size}"
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+            elif expected_type.upper() == "FLAT":
+                filter_name = header.get("FILTER", "Unknown")
+                key = f"{filter_name} - {exposure_val} ({image_size})"
+                if key not in self.flat_files:
+                    self.flat_files[key] = []
+                self.flat_files[key].append(file_path)
+
+                filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                if not filter_items:
+                    filter_item = QTreeWidgetItem([filter_name])
+                    tree.addTopLevelItem(filter_item)
+                else:
+                    filter_item = filter_items[0]
+                exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                exposure_item = next((item for item in exposure_items
+                                    if item.text(0) == f"{exposure_val} ({image_size})"), None)
+                if not exposure_item:
+                    exposure_item = QTreeWidgetItem([f"{exposure_val} ({image_size})"])
+                    filter_item.addChild(exposure_item)
+                metadata = f"Size: {image_size}"
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+            elif expected_type.upper() == "LIGHT":
+                filter_name = header.get("FILTER", "Unknown")
+                key = f"{filter_name} - {exposure_val} ({image_size})"
+                if key not in self.light_files:
+                    self.light_files[key] = []
+                self.light_files[key].append(file_path)
+
+                filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+                if not filter_items:
+                    filter_item = QTreeWidgetItem([filter_name])
+                    tree.addTopLevelItem(filter_item)
+                else:
+                    filter_item = filter_items[0]
+                exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
+                exposure_item = next((item for item in exposure_items
+                                    if item.text(0) == f"{exposure_val} ({image_size})"), None)
+                if not exposure_item:
+                    exposure_item = QTreeWidgetItem([f"{exposure_val} ({image_size})"])
+                    filter_item.addChild(exposure_item)
+                metadata = f"Size: {image_size}"
+                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+            self.update_status(f"✅ Added {os.path.basename(file_path)} as {expected_type}")
+            QApplication.processEvents()
+
+        except Exception as e:
+            self.update_status(f"❌ ERROR: Could not read FITS header for {file_path} - {e}")
+            QApplication.processEvents()
+
+
+    def add_master_files(self, tree, file_type, files):
+        """ 
+        Adds multiple master calibration files to the correct treebox with metadata including image dimensions.
+        This version only reads the FITS header to extract image dimensions, making it much faster.
+        """
+        for file_path in files:
+            try:
+                # Read only the FITS header (fast)
+                header = fits.getheader(file_path)
+                
+                # Check for both EXPOSURE and EXPTIME
+                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                filter_name = header.get("FILTER", "Unknown")
+                
+                # Extract image dimensions from header keywords NAXIS1 and NAXIS2
+                width = header.get("NAXIS1")
+                height = header.get("NAXIS2")
+                if width is not None and height is not None:
+                    image_size = f"{width}x{height}"
+                else:
+                    image_size = "Unknown"
+                
+                # Construct key based on file type
+                if file_type.upper() == "DARK":
+                    key = f"{exposure}s ({image_size})"
+                    self.master_files[key] = file_path  # Store master dark
+                    self.master_sizes[file_path] = image_size  # Store size
+                elif file_type.upper() == "FLAT":
+                    key = f"{filter_name} ({image_size})"
+                    self.master_files[key] = file_path  # Store master flat
+                    self.master_sizes[file_path] = image_size  # Store size
+
+                # Extract additional metadata from header.
+                sensor_temp = header.get("CCD-TEMP", "N/A")
+                date_obs = header.get("DATE-OBS", "Unknown")
+                metadata = f"Size: {image_size}, Temp: {sensor_temp}°C, Date: {date_obs}"
+
+                # Check if category item already exists in the tree.
+                items = tree.findItems(key, Qt.MatchFlag.MatchExactly, 0)
+                if not items:
+                    item = QTreeWidgetItem([key])
+                    tree.addTopLevelItem(item)
+                else:
+                    item = items[0]
+
+                # Add the master file as a child node with metadata.
+                item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                print(f"✅ DEBUG: Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                self.update_status(f"✅ Added Master {file_type} -> {file_path} under {key} with metadata: {metadata}")
+                print(f"📂 DEBUG: Master Files Stored: {self.master_files}")
+                self.update_status(f"📂 DEBUG: Master Files Stored: {self.master_files}")
+                QApplication.processEvents()
+                self.assign_best_master_files()
+
+            except Exception as e:
+                print(f"❌ ERROR: Failed to load master file {file_path} - {e}")
+                self.update_status(f"❌ ERROR: Failed to load master file {file_path} - {e}")
+                QApplication.processEvents()
+
+
+
+    def create_master_dark(self):
+        """ Creates master darks using stacking and saves them in the stacking directory. """
+
+        # Ensure stacking directory is set
+        if not self.stacking_directory:
+            self.select_stacking_directory()
+            if not self.stacking_directory:
+                QMessageBox.warning(self, "Error", "Output directory is not set.")
+                return
+
+        exposure_tolerance = self.exposure_tolerance_spinbox.value()
+        dark_files_by_group = {}  # ✅ Groups by exposure time & image size
+
+        # ✅ Step 1: Group dark files by exposure time & image size within tolerance
+        for exposure_key, file_list in self.dark_files.items():
+            exposure_time_str, image_size = exposure_key.split(" (")  # Extract exposure and size
+            image_size = image_size.rstrip(")")  # Remove trailing parenthesis
+            exposure_time = float(exposure_time_str.replace("s", "")) if "Unknown" not in exposure_time_str else 0
+
+            matched_group = None
+            for (existing_exposure, existing_size) in dark_files_by_group.keys():
+                if abs(existing_exposure - exposure_time) <= exposure_tolerance and existing_size == image_size:
+                    matched_group = (existing_exposure, existing_size)
+                    break
+
+            if matched_group is None:
+                matched_group = (exposure_time, image_size)
+                dark_files_by_group[matched_group] = []
+
+            dark_files_by_group[matched_group].extend(file_list)
+
+        # ✅ Step 2: Create Master Calibration Directory
+        master_dir = os.path.join(self.stacking_directory, "Master_Calibration_Files")
+        os.makedirs(master_dir, exist_ok=True)
+
+        # ✅ Step 3: Stack Each Group
+        for (exposure_time, image_size), file_list in dark_files_by_group.items():
+            if len(file_list) < 2:
+                self.update_status(f"⚠️ Skipping {exposure_time}s ({image_size}) - Not enough frames to stack.")
+                QApplication.processEvents()
+                continue
+
+            self.update_status(f"🟢 Processing {len(file_list)} darks for {exposure_time}s ({image_size}) exposure...")
+            QApplication.processEvents()
+
+            # ✅ Load dark frames and detect color/mono
+            stacked_data = []
+            is_mono = True  # Default assumption
+
+            for file in file_list:
+                image, original_header, bit_depth, img_is_mono = load_image(file)
+
+                if image is not None:
+                    stacked_data.append(image)
+                    is_mono = img_is_mono  # Store if it's mono or color
+                    self.update_status(f"📂 Loaded {os.path.basename(file)} (Bit Depth: {bit_depth}, Mono: {img_is_mono})")
+                else:
+                    self.update_status(f"❌ Failed to load {os.path.basename(file)}")
+
+                QApplication.processEvents()
+
+            # ✅ Convert to numpy array with correct shape
+            stacked_data = np.stack(stacked_data, axis=0)  # (N, H, W) for mono, (N, H, W, C) for OSC
+
+            # ✅ Step 4: Apply Windsorized Sigma Clipping
+            self.update_status(f"📊 Stacking {len(file_list)} frames using sigma clipping...")
+            QApplication.processEvents()
+            if not is_mono:
+                clipped_mean = windsorized_sigma_clip_4d(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
+            else:
+                clipped_mean = windsorized_sigma_clip_3d(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
+
+            # ✅ Step 5: Save Master Dark
+            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s_{image_size}.fits")
+            self.save_master_dark(clipped_mean, master_dark_path, exposure_time, is_mono)
+
+            # ✅ Step 6: Add to Master Dark Tree
+            self.add_master_dark_to_tree(f"{exposure_time}s ({image_size})", master_dark_path)
+
+            self.update_status(f"✅ Master Dark saved: {master_dark_path}")
+            QApplication.processEvents()
+
+        # ✅ Assign best master darks after creation
+        self.assign_best_master_dark()
+        self.update_override_dark_combo()
+        self.assign_best_master_files()
+
+
+    def save_master_dark(self, master_dark, output_path, exposure_time, is_mono):
+        """ Saves the master dark as 32-bit floating point FITS while maintaining OSC structure. """
+
+        # ✅ Ensure correct shape for OSC darks
+        if is_mono:
+            hdu = fits.PrimaryHDU(master_dark.astype(np.float32))  # Mono: (H, W)
+            image_size = f"{master_dark.shape[1]}x{master_dark.shape[0]}"  # (W x H)
+        else:
+            h, w, c = master_dark.shape  # Get the correct dimensions for OSC
+            hdu = fits.PrimaryHDU(master_dark.transpose(2, 0, 1).astype(np.float32))  # Save as (C, H, W)
+            image_size = f"{w}x{h}"  # ✅ Store (Width x Height), ignore channels
+
+        # ✅ Proper FITS Header
+        hdr = hdu.header
+        hdr["SIMPLE"] = True  
+        hdr["BITPIX"] = -32   
+        hdr["NAXIS"] = 3 if not is_mono else 2  # ✅ 3D for OSC, 2D for mono
+        hdr["NAXIS1"] = w  # Width
+        hdr["NAXIS2"] = h  # Height
+        if not is_mono:
+            hdr["NAXIS3"] = c  # ✅ RGB channels for OSC
+        hdr["BSCALE"] = 1.0  
+        hdr["BZERO"] = 0.0    
+        hdr["IMAGETYP"] = "MASTER DARK"
+        hdr["EXPOSURE"] = exposure_time
+        hdr["DATE-OBS"] = datetime.utcnow().isoformat()
+        hdr["CREATOR"] = "SetiAstroSuite"
+
+        # ✅ Write the FITS file
+        hdu.writeto(output_path, overwrite=True)
+
+        # ✅ Store Master Dark Path with Correct Key
+        key = f"{exposure_time}s ({image_size})"  # Always store as Width x Height
+        self.master_files[key] = output_path  
+        self.master_sizes[output_path] = image_size  # ✅ Ensure size is stored correctly
+
+        print(f"✅ Master Dark FITS saved: {output_path}")
+        self.update_status(f"✅ Stored Master Dark -> {key}: {output_path}")
+
+
+            
+    def add_master_dark_to_tree(self, exposure_time, master_dark_path):
+        """ Adds the newly created Master Dark to the Master Dark TreeBox and updates the dropdown. """
+
+        exposure_key = f"{exposure_time}s"
+
+        # ✅ Store in the dictionary
+        self.master_files[exposure_key] = master_dark_path  # Store master dark
+        print(f"📝 DEBUG: Stored Master Dark -> {exposure_key}: {master_dark_path}")
+
+        # ✅ Update UI Tree
+        existing_items = self.master_dark_tree.findItems(exposure_key, Qt.MatchFlag.MatchExactly, 0)
+
+        if existing_items:
+            exposure_item = existing_items[0]
+        else:
+            exposure_item = QTreeWidgetItem([exposure_key])
+            self.master_dark_tree.addTopLevelItem(exposure_item)
+
+        master_item = QTreeWidgetItem([os.path.basename(master_dark_path)])
+        exposure_item.addChild(master_item)
+
+        # ✅ Refresh the override dropdown
+        self.update_override_dark_combo()
+        self.assign_best_master_dark()  # 🔥 Ensure auto-selection works
+
+        self.update_status(f"✅ Master Dark saved and added to UI: {master_dark_path}")
+
+
+
+    def assign_best_master_dark(self):
+        """ Assigns the closest matching master dark based on exposure & image size. """
+        print("\n🔍 DEBUG: Assigning best master darks to flats...\n")
+
+        if not self.master_files:
+            print("⚠️ WARNING: No Master Darks available.")
+            self.update_status("⚠️ WARNING: No Master Darks available.")
+            return  # Exit early if there are no master darks
+
+        print(f"📂 Loaded Master Darks ({len(self.master_files)} total):")
+        for key, value in self.master_files.items():
+            print(f"   📌 {key} -> {value}")
+
+        # Iterate through all flat filters
+        for i in range(self.flat_tree.topLevelItemCount()):
+            filter_item = self.flat_tree.topLevelItem(i)
+
+            for j in range(filter_item.childCount()):
+                exposure_item = filter_item.child(j)
+                exposure_text = exposure_item.text(0)  # Example: "0.0007s (8288x5644)"
+
+                # Extract exposure time
+                match = re.match(r"([\d.]+)s?", exposure_text)
+                if not match:
+                    print(f"⚠️ WARNING: Could not parse exposure time from {exposure_text}")
+                    continue  # Skip if exposure is invalid
+
+                exposure_time = float(match.group(1))  # Extracted number
+                print(f"🟢 Checking Flat Group: {exposure_text} (Parsed: {exposure_time}s)")
+
+                # Extract image size from metadata
+                if exposure_item.childCount() > 0:
+                    metadata_text = exposure_item.child(0).text(1)  # Metadata column
+                    size_match = re.search(r"Size: (\d+x\d+)", metadata_text)
+                    image_size = size_match.group(1) if size_match else "Unknown"
+                else:
+                    image_size = "Unknown"
+
+                print(f"✅ Parsed Flat Size: {image_size}")
+
+                # Find the best matching master dark
+                best_match = None
+                best_diff = float("inf")
+
+                for master_dark_exposure, master_dark_path in self.master_files.items():
+                    master_dark_exposure_match = re.match(r"([\d.]+)s?", master_dark_exposure)
+                    if not master_dark_exposure_match:
+                        continue  # Skip if master dark exposure is invalid
+
+                    master_dark_exposure_time = float(master_dark_exposure_match.group(1))
+                    master_dark_size = self.master_sizes.get(master_dark_path, "Unknown")
+                    if master_dark_size == "Unknown":
+                        with fits.open(master_dark_path) as hdul:
+                            master_dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
+                            self.master_sizes[master_dark_path] = master_dark_size  # ✅ Store it
+
+                    print(f"🔎 Comparing with Master Dark: {master_dark_exposure_time}s ({master_dark_size})")
+
+                    # Match both image size and exposure time
+                    if image_size == master_dark_size:
+                        diff = abs(master_dark_exposure_time - exposure_time)
+                        if diff < best_diff:
+                            best_match = master_dark_path
+                            best_diff = diff
+
+                # Assign best match in column 3
+                if best_match:
+                    exposure_item.setText(2, os.path.basename(best_match))
+                    print(f"🔵 Assigned Master Dark: {os.path.basename(best_match)}")
+                else:
+                    exposure_item.setText(2, "None")
+                    print(f"⚠️ No matching Master Dark found for {exposure_text}")
+
+        # 🔥 Force UI update to reflect changes
+        self.flat_tree.viewport().update()
+
+        print("\n✅ DEBUG: Finished assigning best matching Master Darks to Flats.\n")
+
+
+
+    def update_override_dark_combo(self):
+        """ Populates the dropdown with available Master Darks and prevents duplicate entries. """
+        self.override_dark_combo.clear()
+        self.override_dark_combo.addItem("None (Use Auto-Select)")
+        self.override_dark_combo.addItem("None (Use no Dark to Calibrate)")
+
+        seen_files = set()
+        for exposure, path in self.master_files.items():
+            file_name = os.path.basename(path)
+            if file_name not in seen_files:
+                self.override_dark_combo.addItem(f"{file_name} ({exposure})")
+                seen_files.add(file_name)
+
+        print("✅ DEBUG: Updated Override Master Dark dropdown with unique entries.")
+
+
+    def override_selected_master_dark(self):
+        """ Overrides the selected master dark for the currently highlighted flat group. """
+        selected_items = self.flat_tree.selectedItems()
+        if not selected_items:
+            return
+
+        new_dark = self.override_dark_combo.currentText()
+
+        # ✅ Handle "None (Use no Dark to Calibrate)" explicitly
+        if new_dark == "None (Use no Dark to Calibrate)":
+            new_dark = "No Calibration"  # Show "No Calibration" in the UI
+        elif new_dark == "None (Use Auto-Select)":
+            new_dark = None  # Auto-select behavior
+
+        for item in selected_items:
+            if item.parent():  # Ensure it's an exposure group, not the top filter name
+                item.setText(2, new_dark if new_dark else "Auto")
+
+        print(f"✅ DEBUG: Override Master Dark set to: {new_dark}")
+
+
+
+
+    def create_master_flat(self):
+        """ Creates master flats using per-frame dark subtraction before stacking. """
+
+        if not self.stacking_directory:
+            QMessageBox.warning(self, "Error", "Please set the stacking directory first using the wrench button.")
+            return
+
+        exposure_tolerance = self.flat_exposure_tolerance_spinbox.value()
+        flat_files_by_group = {}  # ✅ Group by (Exposure, Image Size, Filter)
+
+        # ✅ Group Flats by Filter, Exposure & Size within Tolerance
+        for filter_exposure, file_list in self.flat_files.items():
+            try:
+                filter_name, exposure_size = filter_exposure.split(" - ")
+                exposure_time_str, image_size = exposure_size.split(" (")
+                image_size = image_size.rstrip(")")  # Remove trailing parenthesis
+            except ValueError:
+                self.update_status(f"⚠️ ERROR: Could not parse {filter_exposure}")
+                continue  # Skip invalid entries
+
+            # Extract only the exposure time
+            match = re.match(r"([\d.]+)s?", exposure_time_str)
+            if not match:
+                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}")
+                continue  # Skip invalid entries
+
+            exposure_time = float(match.group(1))  # Extracted number
+
+            matched_group = None
+            for key in flat_files_by_group.keys():
+                existing_exposure, existing_size, existing_filter = key
+                if (
+                    abs(existing_exposure - exposure_time) <= exposure_tolerance
+                    and existing_size == image_size
+                    and existing_filter == filter_name
+                ):
+                    matched_group = key
+                    break
+
+            if matched_group is None:
+                matched_group = (exposure_time, image_size, filter_name)
+                flat_files_by_group[matched_group] = []
+
+            flat_files_by_group[matched_group].extend(file_list)
+
+        # ✅ Create Master Calibration Directory
+        master_dir = os.path.join(self.stacking_directory, "Master_Calibration_Files")
+        os.makedirs(master_dir, exist_ok=True)
+
+        # ✅ Stack Each Group
+        for (exposure_time, image_size, filter_name), file_list in flat_files_by_group.items():
+            if len(file_list) < 2:
+                self.update_status(f"⚠️ Skipping {exposure_time}s ({image_size}) - Not enough frames to stack.")
+                QApplication.processEvents()
+                continue
+
+            self.update_status(f"🟢 Processing {len(file_list)} flats for {exposure_time}s ({image_size}) exposure...")
+            QApplication.processEvents()
+
+            # ✅ Extract best-matching Master Dark
+            selected_master_dark = None
+            master_dark_data = None
+
+            # Find the best master dark in the treebox
+            for i in range(self.flat_tree.topLevelItemCount()):
+                filter_item = self.flat_tree.topLevelItem(i)
+
+                if filter_item.text(0) == filter_name:
+                    for j in range(filter_item.childCount()):
+                        exposure_item = filter_item.child(j)
+                        if f"{exposure_time}s" in exposure_item.text(0):
+                            master_dark_filename = exposure_item.text(2).strip()
+
+                            if master_dark_filename and master_dark_filename not in ["None", "No Calibration"]:
+                                # ✅ Fix: Get the full path from self.master_files
+                                for key, full_path in self.master_files.items():
+                                    if master_dark_filename in full_path:
+                                        selected_master_dark = full_path
+                                        break
+
+                            break  # Exit after finding a match
+
+            # ✅ Load the Master Dark file if one was assigned
+            if selected_master_dark:
+                master_dark_data, _, bit_depth, is_mono = load_image(selected_master_dark)
+
+                if master_dark_data is not None:
+                    self.update_status(f"✅ Using Master Dark: {selected_master_dark} (Bit Depth: {bit_depth}, Mono: {is_mono})")
+                    print(f"✅ Loaded Master Dark with shape: {master_dark_data.shape}, Bit Depth: {bit_depth}, Mono: {is_mono}")
+                else:
+                    self.update_status(f"❌ ERROR: Could not load Master Dark {selected_master_dark}")
+                    master_dark_data = None
+
+
+            # ✅ Load flats and apply dark subtraction
+            stacked_data = []
+            self.update_status(f"📂 Loading flat frames for calibration")
+            QApplication.processEvents()
+
+            for file in file_list:
+                data, _, _, _ = load_image(file)  # Ignore metadata values
+
+                if data is not None:
+                    stacked_data.append(data)
+                    self.update_status(f"📂 Loaded {os.path.basename(file)}")
+
+            if not stacked_data:
+                self.update_status("⚠️ No valid images loaded for master flat creation!")
+                return
+
+            stacked_data = np.stack(stacked_data, axis=0)  # ✅ Convert list to NumPy array (NumFrames, H, W)
+
+            # ✅ Apply Dark Subtraction using optimized `subtract_dark()` method
+            if master_dark_data is not None:
+                if stacked_data.shape[1:] == master_dark_data.shape:  # ✅ Ensure shape match
+                    stacked_data = subtract_dark(stacked_data, master_dark_data)  # ✅ Parallelized dark subtraction
+                    self.update_status(f"⚡ Applied dark subtraction to all {stacked_data.shape[0]} flat frames")
+                else:
+                    self.update_status(
+                        f"⚠️ Shape Mismatch: Flats {stacked_data.shape[1:]} vs Master Dark {master_dark_data.shape}"
+                    )
+                    print(
+                        f"❌ ERROR: Skipping dark subtraction due to shape mismatch: {stacked_data.shape[1:]} vs {master_dark_data.shape}"
+                    )
+
+
+            # Ensure we have data before stacking
+            if len(stacked_data) == 0:
+                self.update_status(f"❌ ERROR: No valid frames to stack for {exposure_time}s ({image_size}).")
+                continue
+
+            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
+
+
+            # ✅ Apply Windsorized Sigma Clipping
+            self.update_status(f"📊 Stacking {len(file_list)} frames using sigma clipping...")
+            QApplication.processEvents()
+            clipped_mean = windsorized_sigma_clip(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
+
+            # ✅ Save Master Flat
+            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fits")
+            self.save_master_flat(clipped_mean, master_flat_path, exposure_time, filter_name)
+
+            # ✅ Store Master Flat properly
+            key = f"{filter_name} ({image_size})"
+            self.master_files[key] = master_flat_path  # ✅ Ensures correct retrieval
+            self.master_sizes[master_flat_path] = image_size  # ✅ Store size
+
+            # ✅ Add to Master Flat Tree
+            self.add_master_flat_to_tree(filter_name, master_flat_path)
+            self.update_status(f"✅ Master Flat saved: {master_flat_path}")
+
+            # ✅ Auto-run best matching Master Dark
+            self.assign_best_master_dark()
+
+            # ✅ Ensure Lights See Master Flat
+            self.assign_best_master_files()
+
+
+
+    def save_master_flat(self, master_flat, output_path, exposure_time, filter_name):
+        """ Saves master flat as both a 32-bit floating point FITS and TIFF while ensuring no unintended normalization. """
+
+        # ✅ Retrieve FITS header from a sample flat (to check if it's mono or color)
+        original_header = None
+        is_mono = True  # Default to mono
+
+        if self.flat_files:
+            sample_flat = next(iter(self.flat_files.values()))[0]  # Get the first flat file
+            try:
+                with fits.open(sample_flat) as hdul:
+                    original_header = hdul[0].header
+
+                    # **🔍 Detect if the flat is color by checking NAXIS3**
+                    if original_header.get("NAXIS", 2) == 3 and original_header.get("NAXIS3", 1) == 3:
+                        is_mono = False  # ✅ It's a color flat
+
+            except Exception as e:
+                print(f"⚠️ Warning: Could not retrieve FITS header from {sample_flat}: {e}")
+
+        # ✅ Explicitly ensure we are saving raw values (NO normalization)
+        fits_header = original_header if original_header else fits.Header()
+        fits_header["BSCALE"] = 1.0  # 🔹 Prevent rescaling
+        fits_header["BZERO"] = 0.0   # 🔹 Prevent offset
+
+        # ✅ Save as FITS
+        save_image(
+            img_array=master_flat,
+            filename=output_path,
+            original_format="fits",
+            bit_depth="32-bit floating point",
+            original_header=fits_header,
+            is_mono=is_mono
+        )
+
+        print(f"✅ Master Flat FITS saved: {output_path}")
+
+
+
+
+    def add_master_flat_to_tree(self, filter_name, master_flat_path):
+        """ Adds the newly created Master Flat to the Master Flat TreeBox and stores it. """
+
+        key = f"{filter_name} ({self.master_sizes[master_flat_path]})"
+        self.master_files[key] = master_flat_path  # ✅ Store the flat file for future use
+        print(f"📝 DEBUG: Stored Master Flat -> {key}: {master_flat_path}")
+
+        existing_items = self.master_flat_tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
+
+        if existing_items:
+            filter_item = existing_items[0]
+        else:
+            filter_item = QTreeWidgetItem([filter_name])
+            self.master_flat_tree.addTopLevelItem(filter_item)
+
+        master_item = QTreeWidgetItem([os.path.basename(master_flat_path)])
+        filter_item.addChild(master_item)
+
+    def assign_best_master_files(self):
+        """ Assigns the best matching Master Dark and Master Flat to each Light Frame. """
+        print("\n🔍 DEBUG: Assigning best Master Darks & Flats to Lights...\n")
+
+        if not self.master_files:
+            print("⚠️ WARNING: No Master Calibration Files available.")
+            self.update_status("⚠️ WARNING: No Master Calibration Files available.")
+            return  
+
+        print(f"📂 Loaded Master Files ({len(self.master_files)} total):")
+        for key, value in self.master_files.items():
+            print(f"   📌 {key} -> {value}")
+
+        for i in range(self.light_tree.topLevelItemCount()):
+            filter_item = self.light_tree.topLevelItem(i)
+            filter_name = filter_item.text(0)  # Example: "L" or "Ha"
+
+            for j in range(filter_item.childCount()):
+                exposure_item = filter_item.child(j)
+                exposure_text = exposure_item.text(0)  # Example: "120s (8288x5644)"
+
+                # Extract exposure time and image size
+                match = re.match(r"([\d.]+)s?", exposure_text)
+                if not match:
+                    print(f"⚠️ WARNING: Could not parse exposure time from {exposure_text}")
+                    continue  
+
+                exposure_time = float(match.group(1))  # Normalize exposure time
+                print(f"🟢 Checking Light Frame: {exposure_text} (Parsed: {exposure_time}s)")
+
+                # Get image size from metadata
+                if exposure_item.childCount() > 0:
+                    metadata_text = exposure_item.child(0).text(1)  # Metadata column
+                    size_match = re.search(r"Size: (\d+x\d+)", metadata_text)
+                    image_size = size_match.group(1) if size_match else "Unknown"
+                else:
+                    image_size = "Unknown"
+
+                print(f"✅ Light Frame Size: {image_size}")
+
+                # 🔍 Find best Master Dark (match exposure & size)
+                best_match = None
+                best_diff = float("inf")
+
+                print("🔹 Stored Master Darks:")
+                for stored_key in self.master_files.keys():
+                    if "Dark" in stored_key:
+                        print(f"   🗄️ {stored_key}")
+
+                for master_dark_exposure, master_dark_path in self.master_files.items():
+                    master_dark_exposure_match = re.match(r"([\d.]+)s?", master_dark_exposure)
+                    if not master_dark_exposure_match:
+                        continue  # Skip if master dark exposure is invalid
+
+                    master_dark_exposure_time = float(master_dark_exposure_match.group(1))
+                    master_dark_size = self.master_sizes.get(master_dark_path, "Unknown")
+                    
+                    # If size is unknown, extract from FITS header
+                    if master_dark_size == "Unknown":
+                        with fits.open(master_dark_path) as hdul:
+                            master_dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
+                            self.master_sizes[master_dark_path] = master_dark_size  # ✅ Store it
+
+                    print(f"   🔎 Comparing with Master Dark: {master_dark_exposure_time}s ({master_dark_size}) vs {exposure_time}s ({image_size})")
+
+                    # Match both image size and exposure time
+                    if image_size == master_dark_size:
+                        diff = abs(master_dark_exposure_time - exposure_time)
+                        if diff < best_diff:
+                            best_match = master_dark_path
+                            best_diff = diff
+
+                # 🔍 Find best Master Flat (match filter & size)
+                best_flat_match = self.master_files.get(f"{filter_name} ({image_size})", None)
+
+                # Assign best matches
+                exposure_item.setText(2, os.path.basename(best_match) if best_match else "None")
+                exposure_item.setText(3, os.path.basename(best_flat_match) if best_flat_match else "None")
+
+                print(f"✅ Final Assignment: Dark -> {os.path.basename(best_match) if best_match else 'None'}, Flat -> {os.path.basename(best_flat_match) if best_flat_match else 'None'}")
+
+        self.light_tree.viewport().update()
+        print("\n✅ DEBUG: Finished assigning best Master Files to Lights.\n")
+
+    def update_light_corrections(self):
+        """ Updates the light frame corrections when checkboxes change. """
+        corrections = []
+        if self.cosmetic_checkbox.isChecked():
+            corrections.append("Cosmetic: True")
+        else:
+            corrections.append("Cosmetic: False")
+
+        if self.pedestal_checkbox.isChecked():
+            corrections.append("Pedestal: True")
+        else:
+            corrections.append("Pedestal: False")
+
+        if self.bias_checkbox.isChecked():
+            # Show file dialog to select a Master Bias
+            bias_file, _ = QFileDialog.getOpenFileName(self, "Select Master Bias Frame", "", "FITS Files (*.fits *.fit)")
+            if bias_file:
+                self.master_files["Bias"] = bias_file  # ✅ Store bias path
+                corrections.append(f"Bias: {os.path.basename(bias_file)}")
+            else:
+                self.bias_checkbox.setChecked(False)  # If no file selected, uncheck
+                return
+
+        # Update all rows
+        for i in range(self.light_tree.topLevelItemCount()):
+            filter_item = self.light_tree.topLevelItem(i)
+            for j in range(filter_item.childCount()):
+                exposure_item = filter_item.child(j)
+                exposure_item.setText(4, ", ".join(corrections))
+
+    def light_tree_context_menu(self, pos):
+        """
+        Display a context menu for the light tree.
+        If the clicked item is a group node (has children),
+        offer to override assigned Master Darks/Flats.
+        """
+        item = self.light_tree.itemAt(pos)
+        if not item or item.childCount() == 0:
+            return  # Only show menu for group nodes
+
+        menu = QMenu(self.light_tree)
+        override_dark_action = menu.addAction("Override Dark Frame")
+        override_flat_action = menu.addAction("Override Flat Frame")
+
+        action = menu.exec(self.light_tree.viewport().mapToGlobal(pos))
+
+        if action == override_dark_action:
+            self.override_selected_master_dark()
+        elif action == override_flat_action:
+            self.override_selected_master_flat()
+
+
+    def override_selected_master_dark(self):
+        """ Opens a file dialog to manually select a Master Dark for the selected group and stores it. """
+        selected_items = self.light_tree.selectedItems()
+        if not selected_items:
+            print("⚠️ No light group selected for dark frame override.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Master Dark", "", "FITS Files (*.fits *.fit)")
+        if not file_path:
+            return  # User canceled
+
+        for item in selected_items:
+            if item.parent():  # Ensure it's an exposure group, not the top filter name
+                item.setText(2, os.path.basename(file_path))  # Update tree UI
+                self.manual_dark_overrides[item.text(0)] = file_path  # Store override
+
+        print(f"✅ DEBUG: Overrode Master Dark for {item.text(0)} with {file_path}")
+
+
+
+    def override_selected_master_flat(self):
+        """ Opens a file dialog to manually select a Master Flat for the selected group and stores it. """
+        selected_items = self.light_tree.selectedItems()
+        if not selected_items:
+            print("⚠️ No light group selected for flat frame override.")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Master Flat", "", "FITS Files (*.fits *.fit)")
+        if not file_path:
+            return  # User canceled
+
+        for item in selected_items:
+            if item.parent():  # Ensure it's an exposure group, not the top filter name
+                item.setText(3, os.path.basename(file_path))  # Update tree UI
+                self.manual_flat_overrides[item.text(0)] = file_path  # Store override
+
+        print(f"✅ DEBUG: Overrode Master Flat for {item.text(0)} with {file_path}")
+
+
+    def toggle_group_correction(self, group_item, which):
+        """
+        group_item: a top-level item in the light_tree
+        which: either "cosmetic" or "pedestal"
+        """
+        old_text = group_item.text(4)  # e.g. "Cosmetic: True, Pedestal: False"
+        # If there's nothing, default them to False
+        if not old_text:
+            old_text = "Cosmetic: False, Pedestal: False"
+
+        # Parse
+        # old_text might be "Cosmetic: True, Pedestal: False"
+        # split by comma
+        # part[0] => "Cosmetic: True"
+        # part[1] => " Pedestal: False"
+        parts = old_text.split(",")
+        cosmetic_str = "False"
+        pedestal_str = "False"
+        if len(parts) == 2:
+            # parse cosmetic
+            cos_part = parts[0].split(":")[-1].strip()  # "True" or "False"
+            cosmetic_str = cos_part
+            # parse pedestal
+            ped_part = parts[1].split(":")[-1].strip()
+            pedestal_str = ped_part
+
+        # Convert to bool
+        cosmetic_bool = (cosmetic_str.lower() == "true")
+        pedestal_bool = (pedestal_str.lower() == "true")
+
+        # Toggle whichever was requested
+        if which == "cosmetic":
+            cosmetic_bool = not cosmetic_bool
+        elif which == "pedestal":
+            pedestal_bool = not pedestal_bool
+
+        # Rebuild the new text
+        new_text = f"Cosmetic: {str(cosmetic_bool)}, Pedestal: {str(pedestal_bool)}"
+        group_item.setText(4, new_text)
+
+
+
+    def calibrate_lights(self):
+        """Performs calibration on selected light frames using Master Darks and Flats, considering overrides."""
+        if not self.stacking_directory:
+            QMessageBox.warning(self, "Error", "Please set the stacking directory first.")
+            return
+
+        calibrated_dir = os.path.join(self.stacking_directory, "Calibrated")
+        os.makedirs(calibrated_dir, exist_ok=True)
+
+        total_files = sum(len(files) for files in self.light_files.values())
+        processed_files = 0
+
+        # ✅ Load Master Bias if it exists
+        master_bias_path = self.master_files.get("Bias", None)
+        master_bias = None
+        if master_bias_path:
+            with fits.open(master_bias_path) as bias_hdul:
+                master_bias = bias_hdul[0].data.astype(np.float32)
+            self.update_status(f"Using Master Bias: {os.path.basename(master_bias_path)}")  
+
+        for i in range(self.light_tree.topLevelItemCount()):
+            filter_item = self.light_tree.topLevelItem(i)
+
+            for j in range(filter_item.childCount()):
+                exposure_item = filter_item.child(j)
+                exposure_text = exposure_item.text(0)
+
+                # Extract corrections (Cosmetic & Pedestal)
+                correction_text = exposure_item.text(4)  
+                apply_cosmetic = False
+                apply_pedestal = False
+                if correction_text:
+                    parts = correction_text.split(",")
+                    if len(parts) == 2:
+                        apply_cosmetic = parts[0].split(":")[-1].strip().lower() == "true"
+                        apply_pedestal = parts[1].split(":")[-1].strip().lower() == "true"
+
+                # Determine pedestal value dynamically
+                pedestal_value = self.pedestal_spinbox.value() / 65535 if apply_pedestal else 0  
+
+                # 🔹 Master Dark: Use override if available
+                master_dark_text = exposure_item.text(2)
+                master_dark_path = self.manual_dark_overrides.get(exposure_text)
+                if not master_dark_path:
+                    for key, path in self.master_files.items():
+                        if os.path.basename(path) == master_dark_text:
+                            master_dark_path = path
+                            break
+
+                if not master_dark_path:
+                    self.update_status(f"⚠️ No matching Master Dark found for '{master_dark_text}'")
+
+                # 🔹 Master Flat: Use override if available
+                master_flat_text = exposure_item.text(3)
+                master_flat_path = self.manual_flat_overrides.get(exposure_text)
+                if not master_flat_path:
+                    for key, path in self.master_files.items():
+                        if os.path.basename(path) == master_flat_text:
+                            master_flat_path = path
+                            break
+
+                if not master_flat_path:
+                    self.update_status(f"⚠️ No matching Master Flat found for '{master_flat_text}'")
+
+                # Process each light file
+                for light_file in self.light_files.get(f"{filter_item.text(0)} - {exposure_text}", []):
+                    self.update_status(f"Processing: {os.path.basename(light_file)}")  
+                    QApplication.processEvents()  
+
+                    # ✅ Use load_image() while preserving the header
+                    light_data, hdr, bit_depth, is_mono = load_image(light_file)
+
+                    if light_data is None or hdr is None:
+                        self.update_status(f"❌ ERROR: Failed to load {os.path.basename(light_file)}")
+                        continue  
+
+                    # ✅ Ensure correct orientation for OSC images
+                    if not is_mono and light_data.shape[-1] == 3:
+                        light_data = light_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
+
+                    # 🔹 Subtract Master Bias (if available)
+                    if master_bias is not None:
+                        if is_mono:
+                            light_data -= master_bias
+                        else:
+                            light_data -= master_bias[np.newaxis, :, :]  # Ensure correct broadcasting
+                        self.update_status("Bias Subtracted")  
+                        QApplication.processEvents()  
+
+                    # 🔹 Subtract Master Dark
+                    if master_dark_path:
+                        dark_data, _, _, dark_is_mono = load_image(master_dark_path)
+                        if dark_data is not None:
+                            if not dark_is_mono and dark_data.shape[-1] == 3:
+                                dark_data = dark_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
+                            light_data = subtract_dark_with_pedestal(
+                                light_data[np.newaxis, :, :], dark_data, pedestal_value
+                            )[0]  
+                            self.update_status(f"Dark Subtracted: {os.path.basename(master_dark_path)}")  
+                            QApplication.processEvents()  
+
+                    # 🔹 Apply Flat Division
+                    if master_flat_path:
+                        flat_data, _, _, flat_is_mono = load_image(master_flat_path)
+                        if flat_data is not None:
+                            if not flat_is_mono and flat_data.shape[-1] == 3:
+                                flat_data = flat_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
+                            flat_data[flat_data == 0] = 1.0  
+                            light_data = apply_flat_division_numba(light_data, flat_data)  
+                            self.update_status(f"Flat Applied: {os.path.basename(master_flat_path)}")  
+                            QApplication.processEvents()  
+
+                    # 🔹 Apply Cosmetic Correction
+                    if apply_cosmetic:
+                        light_data = bulk_cosmetic_correction_numba(light_data)
+                        self.update_status("Cosmetic Correction Applied")  
+                        QApplication.processEvents()  
+
+                    # ✅ Convert back to (H, W, C) before saving if OSC
+                    if not is_mono and light_data.shape[0] == 3:
+                        light_data = light_data.transpose(1, 2, 0)  # Convert back (C, H, W) → (H, W, C)
+
+                    # 🔹 Save using global `save_image()`
+                    calibrated_filename = os.path.join(
+                        calibrated_dir, os.path.basename(light_file).replace(".fits", "_c.fits")
+                    )
+
+                    save_image(
+                        img_array=light_data,
+                        filename=calibrated_filename,
+                        original_format="fits",
+                        bit_depth=bit_depth,
+                        original_header=hdr,
+                        is_mono=is_mono
+                    )  
+
+                    processed_files += 1
+
+                    self.update_status(f"Saved: {os.path.basename(calibrated_filename)} ({processed_files}/{total_files})")  
+                    QApplication.processEvents()  
+
+        self.update_status("✅ Calibration Complete!")  
+        QApplication.processEvents()  
+        self.populate_calibrated_lights()
+
+    def extract_light_files_from_tree(self):
+        """ Extracts the selected light frames from the registration tree and ensures only selected files are processed. """
+        new_light_files = {}  # Temporary dictionary for extracted files
+
+        # ✅ Clear light_files before repopulating
+        self.light_files = {}
+
+        for i in range(self.reg_tree.topLevelItemCount()):
+            group_item = self.reg_tree.topLevelItem(i)
+            group_key = group_item.text(0)  # Example: "L - 120s (8288x5644)"
+
+            for j in range(group_item.childCount()):
+                child_item = group_item.child(j)
+                filename = child_item.text(0)
+
+                # ✅ If it's an absolute path, use it as-is
+                if os.path.isabs(filename):
+                    full_path = filename
+                else:
+                    # ✅ Try to find in the Calibrated folder
+                    calibrated_path = os.path.join(self.stacking_directory, "Calibrated", filename)
+                    full_path = calibrated_path if os.path.exists(calibrated_path) else filename
+
+                if os.path.exists(full_path):
+                    if group_key not in new_light_files:
+                        new_light_files[group_key] = []
+                    new_light_files[group_key].append(full_path)
+                else:
+                    print(f"⚠️ WARNING: File not found: {full_path}")
+
+        self.light_files = new_light_files  # ✅ Only use extracted files
+        print(f"✅ Extracted Light Files: {sum(len(v) for v in self.light_files.values())} total")
+
+    def select_reference_frame_robust(self, frame_weights, sigma_threshold=2.0):
+        """
+        Return the file path of a more robustly chosen reference frame.
+        We exclude outlier frames whose weights are too far from the cluster,
+        then pick the max from what remains.
+
+        Parameters
+        ----------
+        frame_weights : dict
+            { file_path: weight_value }
+        sigma_threshold : float
+            How many std devs away from the median to consider an outlier.
+
+        Returns
+        -------
+        best_frame : str
+            The file path of the chosen reference frame.
+        """
+
+        # 1) Convert weights to a list
+        items = list(frame_weights.items())  # [(file_path, weight), ...]
+        if not items:
+            return None  # No frames
+
+        # 2) Compute median & std
+        weights_array = np.array([w for (_, w) in items], dtype=np.float32)
+        median_w = np.median(weights_array)
+        std_w = np.std(weights_array)
+
+        # If std == 0, everything is the same. Just pick any.
+        if std_w < 1e-12:
+            # everything is identical
+            # pick any arbitrary item
+            return items[0][0]
+
+        # 3) Create a filtered list that excludes frames whose weights
+        #    are far above/below the cluster:
+        lower_bound = median_w - sigma_threshold * std_w
+        upper_bound = median_w + sigma_threshold * std_w
+
+        filtered = []
+        for fp, w in items:
+            if lower_bound <= w <= upper_bound:
+                filtered.append((fp, w))
+
+        if not filtered:
+            # If everything was excluded, just fallback to the median or something.
+            # or pick a random frame
+            self.update_status("⚠️ All frames are outliers? Falling back to median!")
+            # fallback: pick the one with weight closest to the median
+            best = min(items, key=lambda x: abs(x[1] - median_w))
+            return best[0]
+
+        # 4) Among filtered frames, pick the max weight
+        best_frame, best_weight = max(filtered, key=lambda x: x[1])
+        return best_frame
+
+
+    def register_images(self):
+        """ Measures all frames, aligns them, and performs weighted stacking with Windsorized Sigma Clipping. """
+        self.update_status("🔄 Image Registration Started...")
+
+        # ✅ Extract files from tree before processing
+        self.extract_light_files_from_tree()
+        if not self.light_files:
+            self.update_status("⚠️ No light frames found!")
+            return
+
+        self.update_status("📊 Loading in frame image arrays for weight calculation...")
+
+        self.frame_weights = {}  # ✅ Store as an instance variable
+        mean_values = {}
+        star_counts = {}
+        measured_frames = []
+
+        all_files = [file for file_list in self.light_files.values() for file in file_list]
+
+        images = []  # ✅ List to store successfully loaded images
+        valid_files = []  # ✅ List to track corresponding file names
+
+        # ✅ Load images using global `load_image()` function
+        for file in all_files:
+            image_data, _, _, _ = load_image(file)
+            self.update_status(f"Loaded {file}")
+            QApplication.processEvents
+
+            if image_data is not None:
+                images.append(image_data)
+                valid_files.append(file)  # Only keep valid files
+
+        if not images:
+            self.update_status("⚠️ No valid images loaded!")
+            return
+
+        self.update_status(f"✅ Loaded {len(images)} valid frames for registration.")
+
+        # ✅ Step 1: Parallel Processing for Mean Pixel Value
+        means = parallel_measure_frames(images)
+
+        for i, file in enumerate(valid_files):
+            self.update_status(f"🌍 Measuring frames... {i+1}/{len(valid_files)} global statistics.")
+            mean_signal = means[i]
+            mean_values[file] = mean_signal
+            measured_frames.append(file)
+
+            self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
+
+            # ✅ Compute Star Count separately
+            star_counts[file] = compute_star_count(images[i])
+
+        if not measured_frames:
+            self.update_status("⚠️ No frames could be measured!")
+            return
+
+        self.update_status("✅ Frame measurements complete!")
+
+        # 5) Compute Weights for Stacking
+        self.update_status("⚖️ Computing frame weights...")
+        debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
+
+        for file in measured_frames:
+            star_count = star_counts[file]
+            mean_value = mean_values[file]
+
+            # Avoid division by zero
+            star_weight = max(star_count, 1e-6)
+            mean_weight = max(mean_value, 1e-6)
+
+            # Ratio-based weight
+            raw_weight = star_weight / mean_weight
+            self.frame_weights[file] = raw_weight
+
+            debug_weight_log += (
+                f"📂 {os.path.basename(file)} → "
+                f"Star Count: {star_count}, "
+                f"Mean: {mean_value:.4f}, "
+                f"Raw Weight: {raw_weight:.4f}\n"
+            )
+
+        # 6) Normalize Weights so max = 1.0 (optional but recommended)
+        max_w = max(self.frame_weights.values())
+        if max_w > 0:
+            for k in self.frame_weights:
+                self.frame_weights[k] /= max_w
+
+        debug_weight_log += "\n🔧 Normalizing Weights so maximum is 1.0:\n"
+        for file in measured_frames:
+            debug_weight_log += (
+                f"{os.path.basename(file)} => Normalized Weight: {self.frame_weights[file]:.4f}\n"
+            )
+
+        self.update_status(debug_weight_log)
+        self.update_status("✅ Frame weights computed and normalized!")
+
+        # ✅ Step 2: Determine the Best Reference Frame
+        if hasattr(self, "reference_frame") and self.reference_frame:
+            self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
+        else:
+            # new robust approach
+            self.reference_frame = self.select_reference_frame_robust(self.frame_weights, sigma_threshold=2.0)
+            self.update_status(f"📌 Auto-selected robust reference frame: {self.reference_frame}")
+
+
+        # ✅ Step 3: Align All Frames to the Reference
+        output_directory = os.path.join(self.stacking_directory, "Aligned_Images")
+        os.makedirs(output_directory, exist_ok=True)
+
+        # ✅ Fix: Store thread in instance variable to prevent early destruction
+        self.alignment_thread = StarRegistrationThread(self.reference_frame, measured_frames, output_directory)
+        self.alignment_thread.progress_update.connect(self.update_status)
+
+        # ✅ Ensure proper cleanup after completion
+        self.alignment_thread.registration_complete.connect(self.on_registration_complete)
+
+        self.alignment_thread.start()
+
+    def save_alignment_matrices_sasd(self, transforms_dict):
+        out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        try:
+            with open(out_path, "w") as f:
+                for file_path, matrix in transforms_dict.items():
+                    # *** KEY FIX: normalize the file_path before writing
+                    norm_file = os.path.normpath(file_path)
+
+                    a, b, tx = matrix[0]
+                    c, d, ty = matrix[1]
+
+                    f.write(f"FILE: {norm_file}\n")
+                    f.write("MATRIX:\n")
+                    f.write(f"{a:.4f}, {b:.4f}, {tx:.4f}\n")
+                    f.write(f"{c:.4f}, {d:.4f}, {ty:.4f}\n")
+                    f.write("\n")  # blank line
+            self.update_status(f"✅ Transform file saved as {os.path.basename(out_path)}")
+        except Exception as e:
+            self.update_status(f"⚠️ Failed to save transform file: {e}")
+
+    def load_alignment_matrices_custom(self, file_path):
+
+        transforms = {}
+        with open(file_path, "r") as f:
+            content = f.read()
+
+        blocks = re.split(r"\n\s*\n", content.strip())
+
+        for block in blocks:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            if lines[0].startswith("FILE:"):
+                raw_file_path = lines[0].replace("FILE:", "").strip()
+                # *** KEY FIX: normalize here
+                curr_file = os.path.normpath(raw_file_path)
+            else:
+                continue
+            
+            if len(lines) < 4 or not lines[1].startswith("MATRIX:"):
+                continue
+
+            row0 = lines[2].split(",")
+            row1 = lines[3].split(",")
+            a, b, tx = [float(x) for x in row0]
+            c, d, ty = [float(x) for x in row1]
+
+            transforms[curr_file] = np.array([[a, b, tx],
+                                            [c, d, ty]], dtype=np.float32)
+        return transforms
+
+    def on_registration_complete(self, success, msg):
+        self.update_status(msg)
+
+        # Get the final transforms (all normalized paths)
+        all_transforms = self.alignment_thread.alignment_matrices
+        self.alignment_thread = None
+
+        # Filter out any None transforms
+        valid_transforms = {
+            path: mat for (path, mat) in all_transforms.items() if mat is not None
+        }
+
+        n_valid = len(valid_transforms)
+        n_total = len(all_transforms)
+        self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} failed.")
+
+        if n_valid == 0:
+            self.update_status("⚠️ No frames to stack; aborting.")
+            return
+
+        # Optionally save transforms
+        self.save_alignment_matrices_sasd(valid_transforms)
+
+        # Gather drizzle
+        drizzle_dict = self.gather_drizzle_settings_from_tree()
+
+        # Filter your light_files so you only pass files that appear in valid_transforms
+        # Make sure the keys match exactly, i.e. do the same normalization:
+        filtered_light_files = {}
+        for group, file_list in self.light_files.items():
+            filtered_light_files[group] = [
+                f for f in file_list
+                if os.path.normpath(f) in valid_transforms
+            ]
+            self.update_status(
+                f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
+            )
+
+        # Now do the stacking
+        self.stack_images_mixed_drizzle(
+            grouped_files=filtered_light_files,
+            frame_weights=self.frame_weights,
+            transforms_dict=valid_transforms,
+            drizzle_dict=drizzle_dict
+        )
+
+        # Explicitly delete the thread reference
+        self.alignment_thread = None
+
+    def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
+        """
+        Goes group by group. If drizzle_enabled, do drizzle on that group.
+        Otherwise do the normal stacking.
+        
+        Parameters:
+        -----------
+        grouped_files : dict
+            { group_key: [file_list], ... }
+        frame_weights : dict
+            { orig_file_path: float_weight, ... }
+        transforms_dict : dict
+            { orig_file_path: 2x3_affine_matrix, ... }
+        drizzle_dict : dict
+            {
+            group_key: {
+                "files": [...],
+                "drizzle_enabled": bool,
+                "scale_factor": float,
+                "drop_shrink": float
+            },
+            ...
+            }
+        """
+        for group_key, file_list in grouped_files.items():
+            # 1) Retrieve drizzle config from drizzle_dict
+            dconf = drizzle_dict.get(group_key, None)
+            if not dconf:
+                # Fallback: no drizzle data => normal stack
+                self.stack_one_group_normal(group_key, file_list, frame_weights)
+                continue
+
+            drizzle_enabled = dconf["drizzle_enabled"]
+            scale_factor = dconf["scale_factor"]
+            drop_shrink = dconf["drop_shrink"]
+
+            if drizzle_enabled:
+                self.update_status(f"📐 Drizzle for group '{group_key}' at {scale_factor}× (drop={drop_shrink}).")
+                self.drizzle_stack_one_group(
+                    group_key=group_key,
+                    file_list=file_list,
+                    transforms_dict=transforms_dict,
+                    frame_weights=frame_weights,  # <-- Pass weights here
+                    scale_factor=scale_factor,
+                    drop_shrink=drop_shrink
+                )
+            else:
+                self.update_status(f"🌀 Normal stacking for group '{group_key}'.")
+                self.stack_one_group_normal(group_key, file_list, frame_weights)
+
+
+    def stack_one_group_normal(self, group_key, file_list, frame_weights):
+        """
+        Stacks a single group using the same code as 'stack_registered_images()',
+        but restricted to one group.
+        """
+        # Build a tiny dict with just one entry
+        single_group_dict = { group_key: file_list }
+
+        # Reuse your existing method
+        self.stack_registered_images(single_group_dict, frame_weights)
+
+
+    def save_registered_images(self, success, msg, frame_weights):
+        if not success:
+            self.update_status(f"⚠️ Image registration failed: {msg}")
+            return
+
+        self.update_status("✅ All frames registered successfully!")
+        
+        # Use the grouped files already stored from the tree view.
+        if not self.light_files:
+            self.update_status("⚠️ No light frames available for stacking!")
+            return
+        
+        self.update_status(f"📂 Preparing to stack {sum(len(v) for v in self.light_files.values())} frames in {len(self.light_files)} groups.")
+        
+        # Pass the dictionary (grouped by filter, exposure, dimensions) to the stacking function.
+        self.stack_registered_images(self.light_files, frame_weights)
+
+
+    def stack_registered_images(self, grouped_files, frame_weights):
+        """
+        Stacks registered images by group.
+        
+        Parameters:
+        grouped_files (dict): A dictionary where each key represents a grouping
+            (for example, a combination of filter, exposure, dimensions) and the value
+            is a list of original file paths (as selected in the tree view) in that group.
+        frame_weights (dict): A dictionary mapping original file paths to computed weights.
+        
+        For each group, the function maps the original file to its corresponding aligned file 
+        (located in the Aligned_Images folder) – if the file isn’t already there, the "_r" suffix
+        is appended (if not already present). Then it stacks the group’s images using weighted
+        Windsorized Sigma Clipping and saves the resulting master stack with a dynamic filename.
+        """
+        # Directory where aligned images are stored.
+        aligned_dir = os.path.join(self.stacking_directory, "Aligned_Images")
+        
+        # Process each group separately.
+        for group_key, file_list in grouped_files.items():
+            self.update_status(f"📊 Stacking group '{group_key}' with {len(file_list)} files...")
+            if len(file_list) < 2:
+                self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
+                continue
+
+            stacked_data = []
+            weights = []
+            reference_median = None
+            reference_header = None
+
+            # Determine the reference frame for this group:
+            # If self.reference_frame is in this group, use it; otherwise, use the first file.
+            group_ref = self.reference_frame if self.reference_frame in file_list else file_list[0]
+
+            for orig_file in file_list:
+                try:
+                    # Map the original file to its aligned version.
+                    if os.path.dirname(orig_file) == aligned_dir:
+                        # Already in the aligned directory.
+                        aligned_file_path = orig_file
+                    else:
+                        base = os.path.basename(orig_file)
+                        name, ext = os.path.splitext(base)
+                        # Force extension to ".fits" (even if the tree shows ".fit")
+                        if ext.lower() not in [".fits", ".fit"]:
+                            ext = ".fits"
+                        else:
+                            ext = ".fits"  # Always use .fits for aligned images
+
+                        if os.path.dirname(orig_file) == aligned_dir:
+                            # Already in the aligned directory.
+                            aligned_file_path = orig_file
+                        else:
+                            if not name.endswith("_r"):
+                                name_aligned = f"{name}_r"
+                            else:
+                                name_aligned = name
+                            aligned_file_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
+
+                    # Load the aligned image.
+                    image_data, header, _, _ = load_image(aligned_file_path)
+                    if image_data is None:
+                        self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
+                        continue
+
+                    stacked_data.append(image_data)
+                    weight = frame_weights.get(orig_file, 1.0)
+                    weights.append(weight)
+
+                    # If this file is the designated reference, capture its median and header.
+                    if orig_file == group_ref:
+                        reference_median = np.median(image_data)
+                        reference_header = header.copy()
+
+                except Exception as e:
+                    self.update_status(f"⚠️ Error processing '{orig_file}' (mapped to '{aligned_file_path}'): {e}")
+
+            if len(stacked_data) < 2:
+                self.update_status(f"⚠️ Not enough valid frames in group '{group_key}' to stack.")
+                continue
+
+            # If we did not capture the reference header/median, try loading the reference frame directly.
+            if reference_median is None:
+                try:
+                    self.update_status("ℹ️ Reference frame median not found in loop. Loading reference frame directly...")
+                    if os.path.dirname(group_ref) == aligned_dir:
+                        ref_aligned_path = group_ref
+                    else:
+                        base = os.path.basename(group_ref)
+                        name, ext = os.path.splitext(base)
+                        if not name.endswith("_r"):
+                            name_aligned = f"{name}_r"
+                        else:
+                            name_aligned = name
+                        ref_aligned_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
+                    ref_data, ref_header, _, _ = load_image(ref_aligned_path)
+                    if ref_data is None:
+                        raise ValueError("Reference image data is None")
+                    reference_median = np.median(ref_data)
+                    reference_header = ref_header.copy()
+                except Exception as e:
+                    self.update_status(f"⚠️ Failed to load reference frame for group '{group_key}': {e}. Using first frame as fallback.")
+                    reference_median = np.median(stacked_data[0])
+                    # Try to set reference_header from the first valid frame.
+                    try:
+                        first_file = file_list[0]
+                        if os.path.dirname(first_file) == aligned_dir:
+                            first_aligned = first_file
+                        else:
+                            base = os.path.basename(first_file)
+                            name, ext = os.path.splitext(base)
+                            if not name.endswith("_r"):
+                                name_aligned = f"{name}_r"
+                            else:
+                                name_aligned = name
+                            first_aligned = os.path.join(aligned_dir, f"{name_aligned}{ext}")
+                        _, first_header, _, _ = load_image(first_aligned)
+                        reference_header = first_header.copy()
+                    except Exception:
+                        reference_header = fits.Header()
+
+            # Stack the images.
+            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
+            weights = np.array(weights, dtype=np.float32)
+
+            self.update_status(f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}")
+            stacked_data = normalize_images(stacked_data, reference_median)
+
+            # At the point where you apply the rejection algorithm:
+            self.update_status(f"📊 Applying {self.rejection_algorithm} on group '{group_key}'...")
+            QApplication.processEvents()
+
+            selected_algo = self.rejection_algorithm
+
+            if selected_algo == "Weighted Windsorized Sigma Clipping":
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data, weights,
+                    lower=self.sigma_low, upper=self.sigma_high
+                )
+            elif selected_algo == "Kappa-Sigma Clipping":
+                clipped_mean = kappa_sigma_clip_weighted(
+                    stacked_data, weights,
+                    kappa=self.kappa, iterations=self.iterations
+                )
+            elif selected_algo == "Simple Average (No Rejection)":
+                clipped_mean = np.average(stacked_data, axis=0, weights=weights)
+            elif selected_algo == "Simple Median (No Rejection)":
+                clipped_mean = np.median(stacked_data, axis=0)
+            elif selected_algo == "Trimmed Mean":
+                clipped_mean = trimmed_mean_weighted(
+                    stacked_data, weights,
+                    trim_fraction=self.trim_fraction
+                )
+            elif selected_algo == "Extreme Studentized Deviate (ESD)":
+                clipped_mean = esd_clip_weighted(
+                    stacked_data, weights,
+                    threshold=self.esd_threshold
+                )
+            elif selected_algo == "Biweight Estimator":
+                clipped_mean = biweight_location_weighted(
+                    stacked_data, weights,
+                    tuning_constant=self.biweight_constant
+                )
+            elif selected_algo == "Modified Z-Score Clipping":
+                clipped_mean = modified_zscore_clip_weighted(
+                    stacked_data, weights,
+                    threshold=self.modz_threshold
+                )
+            else:
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data, weights,
+                    lower=self.sigma_low, upper=self.sigma_high
+                )
+
+            # Use the group key as part of the output filename.
+            # Alternatively, you could derive the key from the header.
+            output_filename = f"MasterLight_{group_key}.fits"
+            output_path = os.path.join(self.stacking_directory, output_filename)
+
+            # Determine if the stacked image is color or mono
+            if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 3:
+                is_mono = False  # Color (H, W, C)
+            else:
+                is_mono = True   # Mono (H, W)
+
+            # Update the FITS header
+            if reference_header is None:
+                reference_header = fits.Header()
+                
+            reference_header["IMAGETYP"] = "MASTER STACK"
+            reference_header["BITPIX"] = -32  # 32-bit floating point
+            reference_header["STACKED"] = (True, "Stacked using rejection algorithm")
+            reference_header["CREATOR"] = "SetiAstroSuite"
+            reference_header["DATE-OBS"] = datetime.utcnow().isoformat()
+
+            # ✅ Ensure header matches image dimensions
+            if is_mono:
+                reference_header["NAXIS"] = 2
+                reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
+                reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
+            else:
+                reference_header["NAXIS"] = 3
+                reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
+                reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
+                reference_header["NAXIS3"] = 3  # OSC: 3 color channels
+
+            # ✅ Save using the global save_image() method.
+            save_image(
+                img_array=clipped_mean,
+                filename=output_path,
+                original_format="fits",
+                bit_depth="32-bit floating point",
+                original_header=reference_header,
+                is_mono=is_mono  # Pass corrected flag
+            )
+
+            self.update_status(f"✅ Group '{group_key}' stacking complete! Saved: {output_path}")
+            print(f"✅ Master Light saved for group '{group_key}': {output_path}")
+
+    def integrate_registered_images(self):
+        """ Integrates previously registered images (already aligned) without re-aligning them. """
+        self.update_status("🔄 Integrating Previously Registered Images...")
+
+        # Extract the files from the registration tree
+        self.extract_light_files_from_tree()
+        if not self.light_files:
+            self.update_status("⚠️ No registered images found!")
+            return
+
+        # Collect all registered files
+        all_files = [file for file_list in self.light_files.values() for file in file_list]
+        images = []
+        valid_files = []
+        for file in all_files:
+            image_data, _, _, _ = load_image(file)
+            if image_data is not None:
+                images.append(image_data)
+                valid_files.append(file)
+
+        if not images:
+            self.update_status("⚠️ No valid registered images loaded!")
+            return
+
+        self.update_status(f"✅ Loaded {len(images)} valid registered frames for integration.")
+
+        # Compute frame weights (similar to registration but skipping alignment)
+        self.frame_weights = {}
+        mean_values = {}
+        star_counts = {}
+        measured_frames = []
+
+        means = parallel_measure_frames(images)
+
+        for i, file in enumerate(valid_files):
+            self.update_status(f"🌍 Measuring frames... {i+1}/{len(valid_files)} global statistics.")
+            mean_signal = means[i]
+            mean_values[file] = mean_signal
+            measured_frames.append(file)
+
+            self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
+
+            # ✅ Compute Star Count separately
+            star_counts[file] = compute_star_count(images[i])
+
+        if not measured_frames:
+            self.update_status("⚠️ No frames could be measured!")
+            return
+
+        self.update_status("✅ Frame measurements complete!")
+
+        # ✅ Step 5: Compute Weights for Stacking
+        self.update_status("⚖️ Computing frame weights...")
+
+        debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
+
+        for file in measured_frames:
+            star_count = star_counts[file]
+            mean_value = mean_values[file]
+
+            # ✅ Ensure no division by zero
+            star_weight = max(star_count, 1e-6)
+            mean_weight = max(mean_value, 1e-6)
+
+            # ✅ Ratio-based weight calculation
+            self.frame_weights[file] = star_weight / mean_weight  # ✅ Always positive
+
+            # ✅ Add to debug log
+            debug_weight_log += f"📂 {os.path.basename(file)} → Star Count: {star_count}, Mean: {mean_value:.4f}, Final Weight: {self.frame_weights[file]:.4f}\n"
+
+        self.update_status(debug_weight_log)  # ✅ Print weights to the status window
+        self.update_status("✅ Frame weights computed!")
+
+        # ✅ Step 2: Determine the Best Reference Frame
+        if hasattr(self, "reference_frame") and self.reference_frame:
+            self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
+        else:
+            self.reference_frame = max(self.frame_weights, key=self.frame_weights.get)
+            self.update_status(f"📌 Auto-selected reference frame: {self.reference_frame} (Best Weight)")
+
+        # Call the stacking function using the already registered (aligned) images
+        self.stack_registered_images(self.light_files, self.frame_weights)
+
+    def drizzle_stack_one_group(
+        self,
+        group_key,
+        file_list,
+        transforms_dict,
+        frame_weights,
+        scale_factor=2.0,
+        drop_shrink=0.65
+    ):
+        """
+        Drizzle a single group, handling both mono (H,W) and color (H,W,C).
+        We choose naive vs. footprint deposit based on drop_shrink.
+        Then we do a final combination with the appropriate finalize function.
+        """
+
+        self.update_status(
+            f"🔭 Starting drizzle stacking for group '{group_key}' "
+            f"at {scale_factor}× with drop shrink={drop_shrink}"
+        )
+
+        # 1) Check we have enough frames
+        if len(file_list) < 2:
+            self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to drizzle.")
+            return
+
+        # 2) Load transforms from disk (assuming we always do it this way)
+        transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        if not os.path.exists(transforms_path):
+            self.update_status(f"⚠️ No alignment_transforms.sasd found at {transforms_path}!")
+            return
+
+        new_transforms_dict = self.load_alignment_matrices_custom(transforms_path)
+        self.update_status(f"✅ Loaded {len(new_transforms_dict)} transforms from disk for drizzle.")
+
+        # 3) Load the first file to determine shape + color/mono
+        first_file = file_list[0]
+        first_img, hdr, _, _ = load_image(first_file)
+        if first_img is None:
+            self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
+            return
+
+
+        if first_img.ndim == 2:
+            # MONO (H,W)
+            is_mono = True
+            h, w = first_img.shape
+        else:
+            # COLOR (H,W,C)
+            is_mono = False
+            h, w, c = first_img.shape
+
+        # 4) Decide deposit function (naive vs footprint) for mono or color
+        if drop_shrink >= 0.99:
+            # Naive deposit
+            if is_mono:
+                deposit_func = drizzle_deposit_numba_naive  # your mono naive
+                self.update_status("Using naive drizzle deposit (mono).")
+            else:
+                deposit_func = drizzle_deposit_color_naive  # you'd need to define drizzle_deposit_color_naive
+                self.update_status("Using naive drizzle deposit (color).")
+        else:
+            # Footprint deposit
+            if is_mono:
+                deposit_func = drizzle_deposit_numba_footprint  # your mono footprint
+                self.update_status("Using footprint drizzle deposit (mono).")
+            else:
+                deposit_func = drizzle_deposit_color_footprint # your color footprint
+                self.update_status("Using footprint drizzle deposit (color).")
+
+        # 5) Prepare the drizzle/coverage buffers
+        if is_mono:
+            # first_img.shape => (H, W)
+            h, w = first_img.shape
+            out_h = int(h * scale_factor)
+            out_w = int(w * scale_factor)
+
+            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+
+            finalize_func = finalize_drizzle_2d  # 2D final combination
+        else:
+            # color => (H, W, C)
+            h, w, c = first_img.shape
+            out_h = int(h * scale_factor)
+            out_w = int(w * scale_factor)
+
+            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+
+            finalize_func = finalize_drizzle_3d  # 3D final combination
+
+        # 6) Deposit each file
+        for orig_file in file_list:
+            img_data, _, _, _ = load_image(orig_file)
+            if img_data is None:
+                self.update_status(f"⚠️ Could not load {orig_file} for drizzle!")
+                continue
+
+            norm_orig = os.path.normpath(orig_file)
+            transform = new_transforms_dict.get(norm_orig, None)
+            if transform is None:
+                self.update_status(f"⚠️ No transform found for {orig_file}! Skipping drizzle.")
+                continue
+
+            weight = frame_weights.get(orig_file, 1.0)
+
+            drizzle_buffer, coverage_buffer = deposit_func(
+                img_data,
+                transform,
+                drizzle_buffer,
+                coverage_buffer,
+                scale_factor,
+                drop_shrink,
+                weight
+            )
+
+        # 7) Final combination
+        #    Allocate final array matching drizzle_buffer's shape
+        final_drizzle = np.zeros_like(drizzle_buffer, dtype=np.float32)
+        final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
+
+        # 8) Save
+        out_filename = f"MasterLight_{group_key}_drizzle.fits"
+        out_path = os.path.join(self.stacking_directory, out_filename)
+
+        if hdr is None:
+            hdr = fits.Header()
+        hdr["IMAGETYP"]  = "MASTER STACK - DRIZZLE"
+        hdr["DRIZFACTOR"] = (scale_factor, "Drizzle scale factor")
+        hdr["DROPFRAC"]   = (drop_shrink, "Drizzle drop shrink/pixfrac")
+        hdr["CREATOR"]    = "SetiAstroSuite"
+        hdr["DATE-OBS"]   = datetime.utcnow().isoformat()
+
+        # Determine if the drizzle-stacked image is color or mono
+        if final_drizzle.ndim == 3 and final_drizzle.shape[-1] == 3:
+            is_mono = False  # Color (H, W, C)
+        else:
+            is_mono = True   # Mono (H, W)
+
+        # ✅ Ensure header matches image dimensions
+        if is_mono:
+            hdr["NAXIS"] = 2
+            hdr["NAXIS1"] = final_drizzle.shape[1]  # Width
+            hdr["NAXIS2"] = final_drizzle.shape[0]  # Height
+        else:
+            hdr["NAXIS"] = 3
+            hdr["NAXIS1"] = final_drizzle.shape[1]  # Width
+            hdr["NAXIS2"] = final_drizzle.shape[0]  # Height
+            hdr["NAXIS3"] = 3  # OSC: 3 color channels
+
+        # ✅ Save using the global save_image() method.
+        save_image(
+            img_array=final_drizzle,
+            filename=out_path,
+            original_format="fits",
+            bit_depth="32-bit floating point",
+            original_header=hdr,
+            is_mono=is_mono  # Pass corrected flag
+        )
+
+
+        self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
+
+# --------------------------------------------------
+# MosaicMasterDialog with blending/normalization integrated
+# --------------------------------------------------
 def get_wcs_from_header(header):
     """Attempt to create a WCS from a FITS header."""
     if not header:
@@ -6928,9 +10263,7 @@ class MosaicSettingsDialog(QDialog):
         self.settings.setValue("mosaic/star_sigma", self.sigmaSpin.value())
         super().accept()
 
-# --------------------------------------------------
-# MosaicMasterDialog with blending/normalization integrated
-# --------------------------------------------------
+
 class MosaicMasterDialog(QDialog):
     def __init__(self, settings: QSettings, parent=None, image_manager=None):
         super().__init__(parent)
@@ -7179,27 +10512,14 @@ class MosaicMasterDialog(QDialog):
         QApplication.processEvents()
 
         # Step 1: Force blind solve if requested.
-        # Determine which images to process:
         force_blind = self.forceBlindCheckBox.isChecked()
-        if force_blind:
-            images_to_process = self.loaded_images
-        else:
-            images_to_process = [item for item in self.loaded_images if item.get("wcs") is None]
+        images_to_process = self.loaded_images if force_blind else [item for item in self.loaded_images if item.get("wcs") is None]
 
         for item in images_to_process:
-            # Before attempting ASTAP, check if the ASTAP executable is set.
+            # Check if ASTAP is set.
             if not self.astap_exe or not os.path.exists(self.astap_exe):
-                # Determine filter based on platform.
-                if sys.platform.startswith("win"):
-                    executable_filter = "Executables (*.exe);;All Files (*)"
-                else:
-                    executable_filter = "Executables (astap);;All Files (*)"
-                new_path, _ = QFileDialog.getOpenFileName(
-                    self,
-                    "Select ASTAP Executable",
-                    "",
-                    executable_filter
-                )
+                executable_filter = "Executables (*.exe);;All Files (*)" if sys.platform.startswith("win") else "Executables (astap);;All Files (*)"
+                new_path, _ = QFileDialog.getOpenFileName(self, "Select ASTAP Executable", "", executable_filter)
                 if new_path:
                     self.astap_exe = new_path
                     self.settings.setValue("astap/exe_path", self.astap_exe)
@@ -7211,20 +10531,35 @@ class MosaicMasterDialog(QDialog):
                         item["wcs"] = WCS(solved_header)
                     continue  # Move to next image
 
+            # Attempt ASTAP solve.
             self.status_label.setText(f"Attempting ASTAP solve for {item['path']}...")
             QApplication.processEvents()
             solved_header = self.attempt_astap_solve(item)
+
             if solved_header is None:
                 self.status_label.setText(f"ASTAP failed for {item['path']}. Falling back to blind solve...")
                 QApplication.processEvents()
                 solved_header = self.perform_blind_solve(item)
             else:
                 self.status_label.setText(f"Plate solve successful using ASTAP for {item['path']}.")
+
             if solved_header:
+                # Remove any unnecessary 3D-related keywords
+                for k in list(solved_header.keys()):
+                    if (k.startswith("NAXIS3") or k.startswith("CTYPE3") or k.startswith("CUNIT3") or
+                        k.startswith("CRVAL3") or k.startswith("CRPIX3") or k.startswith("CDELT3") or
+                        k.startswith("CD3_") or k.startswith("PC3_") or k.startswith("PC_3")):
+                        del solved_header[k]
+
+                # Ensure mandatory WCS keys are present
+                solved_header.setdefault("CTYPE1", "RA---TAN")
+                solved_header.setdefault("CTYPE2", "DEC--TAN")
+                solved_header.setdefault("RADECSYS", "ICRS")
+                solved_header.setdefault("WCSAXES", 2)
+
                 item["wcs"] = WCS(solved_header)
             else:
                 print(f"Plate solving failed for {item['path']}.")
-
 
         # After processing, get all images with valid WCS.
         wcs_items = [x for x in self.loaded_images if x.get("wcs") is not None]
@@ -7239,6 +10574,7 @@ class MosaicMasterDialog(QDialog):
         min_x, min_y, max_x, max_y = self.compute_mosaic_bounding_box(wcs_items, reference_wcs)
         mosaic_width = int(max_x - min_x)
         mosaic_height = int(max_y - min_y)
+
         if mosaic_width < 1 or mosaic_height < 1:
             print("ERROR: Computed mosaic size is invalid. Check WCS or inputs.")
             return
@@ -7469,8 +10805,8 @@ class MosaicMasterDialog(QDialog):
         self.status_label.setText("Refinement: Detecting stars in mosaic and affine-aligned images...")
         QApplication.processEvents()
         # Increase max_stars to 50 for debugging purposes.
-        mosaic_stars_masked = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=200)
-        new_stars_aligned = self.detect_stars(np.where(overlap_mask, affine_aligned_gray, 0), max_stars=200)
+        mosaic_stars_masked = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=300)
+        new_stars_aligned = self.detect_stars(np.where(overlap_mask, affine_aligned_gray, 0), max_stars=300)
 
         # Debug: Print out the star lists.
         print("Mosaic stars (refined alignment):")
@@ -7692,11 +11028,12 @@ class MosaicMasterDialog(QDialog):
         # Compute the absolute translation tolerance in pixels.
         translation_tolerance = translation_tolerance_percent * image_width
 
-        scale_min = settings.value("mosaic/scale_min_tolerance", 0.8, type=float)
-        scale_max = settings.value("mosaic/scale_max_tolerance", 1.25, type=float)
+        scale_min = settings.value("mosaic/scale_min_tolerance", 0.85, type=float)
+        scale_max = settings.value("mosaic/scale_max_tolerance", 1.15, type=float)
         rotation_max_deg = settings.value("mosaic/rotation_max_tolerance", 45.0, type=float)
         rotation_tolerance = np.radians(rotation_max_deg)
-        skew_max = settings.value("mosaic/skew_max_tolerance", 0.1, type=float)  # default: 0.1
+        skew_max = settings.value("mosaic/skew_max_tolerance", 0.05, type=float)  # default: 0.1
+        axis_ratio_threshold = settings.value("mosaic/axis_ratio_tolerance", 1.15, type=float)
 
 
         best_inliers = 0
@@ -7728,6 +11065,10 @@ class MosaicMasterDialog(QDialog):
             if abs(t[0]) > translation_tolerance or abs(t[1]) > translation_tolerance:
                 continue
             
+            # New failsafe: check ratio between scales to avoid squashed images.
+            if (max(scale1, scale2) / (min(scale1, scale2) + 1e-8)) > axis_ratio_threshold:
+                continue
+
             # Failsafe: rotation angle check.
             angle = np.arctan2(A[1, 0], A[0, 0])
             if abs(angle) > rotation_tolerance: #(np.pi / 4):
@@ -7817,7 +11158,7 @@ class MosaicMasterDialog(QDialog):
             arr = np.zeros_like(arr)
         return (arr * 255).clip(0, 255).astype(np.uint8)
 
-    def detect_stars(self, image2d, max_stars=25):
+    def detect_stars(self, image2d, max_stars=50):
         # Retrieve user-defined values for sigma and fwhm.
         sigma_val = self.settings.value("mosaic/star_sigma", 3.0, type=float)
         fwhm_val = self.settings.value("mosaic/star_fwhm", 3.0, type=float)
@@ -8327,17 +11668,17 @@ class MosaicMasterDialog(QDialog):
         Attempt to plate-solve the image using ASTAP.
         Returns a solved header (as a dict) on success or None on failure.
         """
-        # Normalize the image (using MosaicMaster's stretch_image)
+        # 1) Normalize the image (using your stretch_image).
         normalized_image = self.stretch_image(item["image"])
         
-        # Save normalized image to a temporary FITS file.
+        # 2) Save normalized image to a temporary FITS file for ASTAP.
         try:
             tmp_path = self.save_temp_fits_image(normalized_image, item["path"])
         except Exception as e:
             print("Failed to save temporary FITS file:", e)
             return None
 
-        # Run ASTAP on the temporary file.
+        # 3) Run ASTAP on the temporary file.
         process = QProcess(self)
         args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
         print("Running ASTAP with arguments:", args)
@@ -8365,11 +11706,11 @@ class MosaicMasterDialog(QDialog):
                 print("Error removing temporary file:", e)
             return None
 
-        # Retrieve updated header from the temporary file.
+        # 4) Retrieve updated header from the temporary file.
         try:
             with fits.open(tmp_path, memmap=False) as hdul:
                 solved_header = dict(hdul[0].header)
-            # Remove problematic keywords.
+            # Remove some extraneous keywords
             solved_header.pop("COMMENT", None)
             solved_header.pop("HISTORY", None)
         except Exception as e:
@@ -8377,7 +11718,7 @@ class MosaicMasterDialog(QDialog):
             os.remove(tmp_path)
             return None
 
-        # Check for a .wcs file and merge its contents.
+        # 5) Merge .wcs file (if ASTAP wrote one) into the solved_header.
         wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
         if os.path.exists(wcs_path):
             try:
@@ -8397,14 +11738,24 @@ class MosaicMasterDialog(QDialog):
                     os.remove(wcs_path)
                 except Exception as e:
                     print("Error removing .wcs file:", e)
-        
-        # Remove END keyword if present.
-        solved_header.pop("END", None)
-        for keyword in ["RANGE_LOW", "RANGE_HIGH"]:
-            solved_header.pop(keyword, None)  
-        solved_header.pop("HISTORY", None)          
 
-        # --- Ensure required WCS keys are present with proper numeric types ---
+        # Remove the END keyword if present
+        solved_header.pop("END", None)
+        # Remove any unneeded keywords
+        for keyword in ["RANGE_LOW", "RANGE_HIGH", "HISTORY"]:
+            solved_header.pop(keyword, None)
+
+        # --- Ensure required WCS keys are present ---
+        if "CTYPE1" not in solved_header or not solved_header["CTYPE1"].strip():
+            solved_header["CTYPE1"] = "RA---TAN"
+        if "CTYPE2" not in solved_header or not solved_header["CTYPE2"].strip():
+            solved_header["CTYPE2"] = "DEC--TAN"
+        if "RADECSYS" not in solved_header:
+            solved_header["RADECSYS"] = "ICRS"
+        if "WCSAXES" not in solved_header:
+            solved_header["WCSAXES"] = 2
+
+        # Convert known WCS keys to float or int
         expected_float_keys = {"CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"}
         expected_int_keys = {"NAXIS", "WCSAXES"}
 
@@ -8413,46 +11764,38 @@ class MosaicMasterDialog(QDialog):
                 try:
                     solved_header[key] = float(solved_header[key])
                 except ValueError:
-                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to float.")
+                    print(f"Warning: Could not convert {key}='{solved_header[key]}' to float.")
 
         for key in expected_int_keys:
             if key in solved_header:
                 try:
-                    solved_header[key] = int(float(solved_header[key]))  # Use float first in case it is a string like "2.0"
+                    solved_header[key] = int(float(solved_header[key]))
                 except ValueError:
-                    print(f"Warning: Could not convert {key} value '{solved_header[key]}' to int.")
+                    print(f"Warning: Could not convert {key}='{solved_header[key]}' to int.")
 
-        # --- Compute CROTA1 and CROTA2 if not present ---
-        if 'CROTA1' not in solved_header or 'CROTA2' not in solved_header:
-            if 'CD1_1' in solved_header and 'CD1_2' in solved_header:
-                rotation = math.degrees(math.atan2(solved_header['CD1_2'], solved_header['CD1_1']))
-                solved_header['CROTA1'] = rotation
-                solved_header['CROTA2'] = rotation
-                print(f"Computed CROTA1 and CROTA2 as {rotation:.2f} degrees.")
-            else:
-                print("CD matrix elements not available; cannot compute CROTA values.")
+        try:
+            save_image(
+                img_array=normalized_image,
+                filename=item["path"],  # Overwrite the original file
+                original_format="fit",
+                bit_depth="32",
+                original_header=solved_header,  # Updated WCS header
+                is_mono=False
+            )
+            print(f"✅ Updated FITS header with full WCS solution for {item['path']}.")
+        except Exception as e:
+            print("Error saving updated FITS file using save_image():", e)
+            raise e
 
+
+        # Remove the temporary FITS
         try:
             os.remove(tmp_path)
         except Exception as e:
             print("Error removing temporary file:", e)
-        
-        if item["path"].lower().endswith((".fits", ".fit")):
-            try:
-                with fits.open(item["path"], mode="update", memmap=False) as hdul:
-                    header = hdul[0].header
-                    # Update the original header with the solved header.
-                    for key, value in solved_header.items():
-                        header[key] = value
-                    hdul.flush()  # Write changes back to disk.
-                print("Updated original FITS header with new WCS solution.")
-            except Exception as e:
-                print("Error updating original FITS header:", e)
 
-        print("ASTAP plate solving successful. Solved header:")
-        for key, value in solved_header.items():
-            print(f"{key} = {value}")
         return solved_header
+
 
     def save_temp_fits_image(self, normalized_image, image_path: str):
         """
@@ -8525,7 +11868,7 @@ class MosaicMasterDialog(QDialog):
             header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
         header['BZERO'] = 0.0  # No offset
         header['BSCALE'] = 1.0  # No scaling
-        header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
+
 
         return header
 
@@ -8616,7 +11959,10 @@ class MosaicMasterDialog(QDialog):
         if was_single_channel and image.ndim == 3:
             image = np.mean(image, axis=2, keepdims=True)
         return image
-      
+
+# --------------------------------------------------
+# Star Stuff
+# --------------------------------------------------      
 class StellarAlignmentDialog(QDialog):
     def __init__(self, parent, settings, image_manager):
         """
@@ -9203,6 +12549,599 @@ class StellarAlignmentDialog(QDialog):
         self.image_manager.image_changed.emit(self.image_manager.current_slot, self.aligned_image, {"description": "Stellar aligned image"})
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
+
+#############################################
+# Worker Signals for Registration Workers
+#############################################
+class RegistrationWorkerSignals(QObject):
+    progress = pyqtSignal(str)           # e.g., "Loaded image X"
+    result = pyqtSignal(str)             # e.g., "Saved aligned file path"
+    error = pyqtSignal(str)              # e.g., error message
+    result_transform = pyqtSignal(str, object)  
+    #          ^^^^^^^^^^^^^^^^^^^^^^^
+    #  We'll emit (orig_file_path, transform_matrix)
+
+#############################################
+# Worker to Process One Image Registration
+#############################################
+class StarRegistrationWorker(QRunnable):
+    def __init__(self, file_path, ref_stars, ref_triangles, output_directory):
+        super().__init__()
+        self.file_path = file_path
+        self.ref_stars = ref_stars
+        self.ref_triangles = ref_triangles
+        self.output_directory = output_directory
+        self.signals = RegistrationWorkerSignals()
+
+    def run(self):
+        try:
+            # 1) Load image
+            img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
+            if img is None:
+                self.signals.error.emit(f"Could not load {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+            
+            # 2) Detect stars
+            img_stars = StarRegistrationThread.detect_grid_stars_static(img)
+            if len(img_stars) < 9:
+                self.signals.error.emit(f"Not enough stars in {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # 3) Compute affine transform
+            transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
+                img_stars, self.ref_stars, self.ref_triangles
+            )
+            if transform is None:
+                self.signals.error.emit(f"Alignment failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            self.signals.progress.emit(f"Computed transform for {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+
+            # 4) Emit the transform so the main thread can store it
+            self.signals.result_transform.emit(self.file_path, transform)
+
+            # 5) Apply the transform
+            aligned_image = StarRegistrationThread.apply_affine_transform_static(img, transform)
+            if aligned_image is None:
+                self.signals.error.emit(f"Transform application failed for {self.file_path}")
+                QApplication.processEvents()
+                return
+
+            # 6) Build output filename (force extension to .fits)
+            base = os.path.basename(self.file_path)
+            name, _ = os.path.splitext(base)
+            output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
+            
+            # 7) Save the aligned image
+            save_image(
+                img_array=aligned_image,
+                filename=output_filename,
+                original_format="fits",
+                bit_depth=img_bit_depth,
+                original_header=img_header,
+                is_mono=img_is_mono
+            )
+            self.signals.result.emit(output_filename)
+            self.signals.progress.emit(f"Registered {os.path.basename(self.file_path)}")
+            QApplication.processEvents()
+        except Exception as e:
+            self.signals.error.emit(f"Error processing {self.file_path}: {e}")
+            QApplication.processEvents()
+
+
+#############################################
+# Main Star Registration Thread (Concurrent)
+#############################################
+
+class StarRegistrationThread(QThread):
+    progress_update = pyqtSignal(str)
+    registration_complete = pyqtSignal(bool, str)
+
+    def __init__(self, reference_image_path, files_to_align, output_directory, 
+                 max_refinement_passes=3, shift_tolerance=0.1):
+        super().__init__()
+        # Always store reference as normalized
+        self.reference_image_path = os.path.normpath(reference_image_path)
+        # Normalize each file in the list
+        self.files_to_align = [os.path.normpath(f) for f in files_to_align]
+        self.output_directory = os.path.normpath(output_directory)
+        self.max_refinement_passes = max_refinement_passes
+        self.shift_tolerance = shift_tolerance
+
+        # alignment_matrices: { normalized_path: 2x3 transform or None }
+        self.alignment_matrices = {}
+        self.transform_deltas = []
+
+    def run(self):
+        try:
+            # Load reference
+            ref_image, _, _, _ = load_image(self.reference_image_path)
+            if ref_image is None:
+                self.registration_complete.emit(False, "Reference image failed to load!")
+                return
+
+            # Detect reference stars, etc...
+            ref_stars = self.detect_stars(ref_image)
+            if len(ref_stars) < 10:
+                self.registration_complete.emit(False, "Insufficient stars in reference image!")
+                return
+            ref_triangles = self.build_triangle_dict(ref_stars)
+
+            # Do multiple passes
+            for pass_idx in range(self.max_refinement_passes):
+                self.progress_update.emit(
+                    f"⏳ Refinement Pass {pass_idx+1}/{self.max_refinement_passes}..."
+                )
+                success, msg = self.run_one_registration_pass(
+                    ref_stars, ref_triangles, pass_idx
+                )
+                if not success:
+                    # If everything failed, abort
+                    any_aligned = any(
+                        x is not None for x in self.alignment_matrices.values()
+                    )
+                    if not any_aligned:
+                        self.registration_complete.emit(False, "No frames could be aligned. Aborting.")
+                        return
+                    else:
+                        self.progress_update.emit("Partial success: some frames permanently failed.")
+                        break
+
+                # Check convergence
+                if self.transform_deltas and max(self.transform_deltas[-1]) < self.shift_tolerance:
+                    self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
+                    break
+
+            # Finished passes
+            aligned_count = sum(1 for v in self.alignment_matrices.values() if v is not None)
+            total_count = len(self.alignment_matrices)
+            summary = f"Registration complete. Valid frames: {aligned_count}/{total_count}."
+            self.registration_complete.emit(True, summary)
+
+        except Exception as e:
+            self.registration_complete.emit(False, f"Error: {e}")
+
+    def run_one_registration_pass(self, ref_stars, ref_triangles, pass_index):
+        pool = QThreadPool.globalInstance()
+        num_cores = os.cpu_count() or 4
+        pool.setMaxThreadCount(num_cores)
+        self.progress_update.emit(f"Using {num_cores} cores for pass {pass_index+1}.")
+
+        # Launch a worker for each file
+        for file_path in self.files_to_align:
+            worker = StarRegistrationWorker(
+                file_path, ref_stars, ref_triangles, self.output_directory
+            )
+            worker.signals.progress.connect(self.on_worker_progress)
+            worker.signals.error.connect(self.on_worker_error)
+            worker.signals.result_transform.connect(self.on_worker_result_transform)
+            pool.start(worker)
+        pool.waitForDone()
+
+        pass_deltas = []
+        aligned_count = 0
+        for fpath in self.files_to_align:
+            transform = self.alignment_matrices.get(fpath, None)
+            if transform is not None:
+                aligned_count += 1
+                tx, ty = transform[0,2], transform[1,2]
+                pass_deltas.append(np.sqrt(tx*tx + ty*ty))
+
+        self.transform_deltas.append(pass_deltas)
+        self.progress_update.emit(
+            f"Pass {pass_index+1} shift deltas: {[f'{d:.2f}' for d in pass_deltas]}"
+        )
+
+        if aligned_count == 0:
+            return False, "All frames failed alignment this pass."
+
+        failed_count = len(self.files_to_align) - aligned_count
+        if failed_count > 0:
+            return True, f"Pass complete. {failed_count} frame(s) failed."
+        return True, "Pass complete (all succeeded)."
+    
+    def on_worker_progress(self, msg):
+        self.progress_update.emit(msg)
+
+    def on_worker_error(self, msg):
+        self.progress_update.emit("Error: " + msg)
+
+    def on_worker_result(self, out):
+        self.progress_update.emit("Saved: " + out)
+
+    def on_worker_result_transform(self, file_path, transform):
+        """
+        Called whenever the worker emits `result_transform`.
+        We store the transform in `self.alignment_matrices`.
+        """
+
+        norm_path = os.path.normpath(file_path)
+        self.alignment_matrices[norm_path] = transform
+        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
+
+    def detect_stars(self, image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        mean, median, std = sigma_clipped_stats(image)
+        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        sources = daofind(image - median)
+        if sources is None or len(sources) == 0:
+            return np.array([])
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+    def build_triangle_dict(self, coords):
+        tri = Delaunay(coords)
+        tri_dict = {}
+        for simplex in tri.simplices:
+            pts = coords[simplex]
+            inv = self.compute_triangle_invariant(pts)
+            if inv is None:
+                continue
+            inv_key = (round(inv[0], 2), round(inv[1], 2))
+            tri_dict.setdefault(inv_key, []).append(simplex)
+        return tri_dict
+
+    def compute_triangle_invariant(self, tri_points):
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1] / sides[0], sides[2] / sides[0])
+
+    # NEW METHOD: store transforms in self.alignment_matrices
+    def on_worker_result_transform(self, file_path, transform):
+        self.alignment_matrices[file_path] = transform
+        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
+
+    # --- Static Methods for use in Workers ---
+    @staticmethod
+    def detect_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        mean, median, std = sigma_clipped_stats(image)
+        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        sources = daofind(image - median)
+        if sources is None or len(sources) == 0:
+            return np.array([])
+        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+    @staticmethod
+    def detect_grid_stars_static(image):
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+        h, w = image.shape
+        margin_x = int(w * 0.05)
+        margin_y = int(h * 0.05)
+        valid_x_min, valid_x_max = margin_x, w - margin_x
+        valid_y_min, valid_y_max = margin_y, h - margin_y
+        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+        stars = []
+        for i in range(len(grid_x) - 1):
+            for j in range(len(grid_y) - 1):
+                x_min, x_max = grid_x[i], grid_x[i+1]
+                y_min, y_max = grid_y[j], grid_y[j+1]
+                sub_img = image[y_min:y_max, x_min:x_max]
+                if sub_img.size == 0:
+                    continue
+                if np.std(sub_img) > 0:
+                    local_stars = StarRegistrationThread.detect_stars_static(sub_img)
+                    if len(local_stars) > 0:
+                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
+                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
+                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+                        stars.extend(sorted_stars[:12])
+        return np.array(stars) if stars else np.array([])
+
+    @staticmethod
+    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=10, max_iter=10, convergence_thresh=0.2):
+        print("DEBUG: Starting compute_affine_transform_with_ransac_static")
+        attempt = 0
+        transform = None
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"DEBUG: Initial RANSAC attempt {attempt}")
+            matches = []
+            for img_star in img_stars:
+                distances = np.linalg.norm(ref_stars - img_star, axis=1)
+                closest_idx = np.argmin(distances)
+                if distances[closest_idx] < 20:
+                    matches.append((img_star, ref_stars[closest_idx]))
+            print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
+            if len(matches) < 3:
+                print("DEBUG: Not enough matches; continuing to next attempt.")
+                continue
+            src_pts = np.array([m[0] for m in matches], dtype=np.float32)
+            dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
+            rough_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
+            if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
+                transform = rough_transform
+                print("DEBUG: Rough transform computed successfully.")
+                break
+            else:
+                print("DEBUG: Rough transform invalid; retrying.")
+        if transform is None:
+            print("DEBUG: Failed to compute initial rough transform.")
+            return None
+        for iter_num in range(max_iter):
+            transformed_img_stars = cv2.transform(img_stars.reshape(-1, 1, 2), transform).reshape(-1, 2)
+            matches = []
+            for idx, t_star in enumerate(transformed_img_stars):
+                distances = np.linalg.norm(ref_stars - t_star, axis=1)
+                closest_idx = np.argmin(distances)
+                if distances[closest_idx] < 7:
+                    matches.append((img_stars[idx], ref_stars[closest_idx]))
+            print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
+            if len(matches) < 3:
+                print("DEBUG: Not enough matches during refinement; aborting transform.")
+                return None
+            src_pts = np.array([m[0] for m in matches], dtype=np.float32)
+            dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
+            new_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.LMEDS
+            )
+            if new_transform is None:
+                print("DEBUG: Refinement failed to compute a new transform; aborting.")
+                return None
+            delta = np.linalg.norm(new_transform[:, 2] - transform[:, 2])
+            print(f"DEBUG: Iteration {iter_num+1}: translation delta = {delta:.3f} pixels")
+            transform = new_transform
+            if delta < convergence_thresh:
+                print("DEBUG: Convergence reached.")
+                break
+        if not StarRegistrationThread.is_valid_transform_static(transform):
+            print("DEBUG: Final transform failed validation.")
+            return None
+        print("DEBUG: Final transform computed successfully.")
+        return transform
+
+    @staticmethod
+    def is_valid_transform_static(matrix):
+        a, b, tx = matrix[0]
+        c, d, ty = matrix[1]
+        scale_x = np.sqrt(a**2 + c**2)
+        scale_y = np.sqrt(b**2 + d**2)
+        skew = np.abs((a * b + c * d) / (a**2 + c**2))
+        if not (0.5 <= scale_x <= 2.0 and 0.5 <= scale_y <= 2.0):
+            return False
+        if skew > 0.01:
+            return False
+        return True
+
+    @staticmethod
+    def apply_affine_transform_static(image, transform_matrix):
+        h, w = image.shape[:2]
+        return cv2.warpAffine(image, transform_matrix, (w, h), flags=cv2.INTER_LINEAR)
+    
+class StarRegistrationWindow(QWidget):
+    def __init__(self, image_manager=None):
+        super().__init__()
+        self.image_manager = image_manager  # Reference to the Image Manager
+        self.reference_image_path = None
+        self.files_to_align = []
+        self.output_directory = None
+        self.thread = None  # Store thread reference
+
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Star Registration")
+        self.setGeometry(200, 200, 600, 450)
+        main_layout = QVBoxLayout(self)
+
+        # ─────────────────────────────────────────
+        # Reference Image Selection
+        # ─────────────────────────────────────────
+        ref_layout = QHBoxLayout()
+        self.ref_label = QLabel("Reference Image:")
+        self.ref_path_label = QLabel("No reference selected")
+        self.ref_path_label.setWordWrap(True)
+
+        self.select_ref_slot_button = QPushButton("From Slot")
+        self.select_ref_slot_button.clicked.connect(self.select_reference_from_slot)
+
+        self.select_ref_file_button = QPushButton("From File")
+        self.select_ref_file_button.clicked.connect(self.select_reference_from_file)
+
+        ref_layout.addWidget(self.ref_label)
+        ref_layout.addWidget(self.ref_path_label)
+        ref_layout.addWidget(self.select_ref_slot_button)
+        ref_layout.addWidget(self.select_ref_file_button)
+
+        # ─────────────────────────────────────────
+        # Image Selection Section
+        # ─────────────────────────────────────────
+        file_selection_layout = QHBoxLayout()
+
+        self.add_files_button = QPushButton("Select Files")
+        self.add_files_button.clicked.connect(self.select_files_to_align)
+
+        self.add_directory_button = QPushButton("Select Directory")
+        self.add_directory_button.clicked.connect(self.select_directory_to_align)
+
+        file_selection_layout.addWidget(self.add_files_button)
+        file_selection_layout.addWidget(self.add_directory_button)
+
+        # ─────────────────────────────────────────
+        # TreeBox for Selected Files
+        # ─────────────────────────────────────────
+        self.tree_widget = QTreeWidget()
+        self.tree_widget.setColumnCount(1)
+        self.tree_widget.setHeaderLabels(["Files to Align"])
+        self.tree_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        # Buttons for managing the TreeBox
+        tree_buttons_layout = QHBoxLayout()
+        self.remove_selected_button = QPushButton("Remove Selected")
+        self.remove_selected_button.clicked.connect(self.remove_selected_files)
+
+        self.clear_tree_button = QPushButton("Clear All")
+        self.clear_tree_button.clicked.connect(self.clear_tree)
+
+        tree_buttons_layout.addWidget(self.remove_selected_button)
+        tree_buttons_layout.addWidget(self.clear_tree_button)
+
+        # ─────────────────────────────────────────
+        # Output Directory Selection
+        # ─────────────────────────────────────────
+        output_layout = QHBoxLayout()
+        self.output_label = QLabel("Output Directory:")
+        self.output_path_label = QLabel("No directory selected")
+        self.output_path_label.setWordWrap(True)
+
+        self.select_output_button = QPushButton("Select Output Folder")
+        self.select_output_button.clicked.connect(self.select_output_directory)
+
+        output_layout.addWidget(self.output_label)
+        output_layout.addWidget(self.output_path_label)
+        output_layout.addWidget(self.select_output_button)
+
+        # ─────────────────────────────────────────
+        # Progress Display
+        # ─────────────────────────────────────────
+        self.progress_label = QLabel("Status: Waiting...")
+        self.progress_label.setStyleSheet("color: blue; font-weight: bold;")
+        
+        # ─────────────────────────────────────────
+        # Start Button
+        # ─────────────────────────────────────────
+        self.start_button = QPushButton("Start Registration")
+        self.start_button.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self.start_button.clicked.connect(self.start_registration)
+
+        # ─────────────────────────────────────────
+        # Add widgets to main layout
+        # ─────────────────────────────────────────
+        main_layout.addLayout(ref_layout)
+        main_layout.addLayout(file_selection_layout)
+        main_layout.addWidget(self.tree_widget)
+        main_layout.addLayout(tree_buttons_layout)
+        main_layout.addLayout(output_layout)
+        main_layout.addWidget(self.progress_label)
+        main_layout.addWidget(self.start_button)
+
+    # ─────────────────────────────────────────
+    # Slot/File Selection for Reference Image
+    # ─────────────────────────────────────────
+    def select_reference_from_slot(self):
+        if self.image_manager:
+            available_slots = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+            slot, ok = QInputDialog.getItem(self, "Select Reference Slot", "Choose a reference image slot:", list(available_slots.values()), 0, False)
+            if ok:
+                slot_index = list(available_slots.values()).index(slot)
+                self.reference_image_path = f"Slot {slot_index}"
+                self.ref_path_label.setText(self.reference_image_path)
+
+    def select_reference_from_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Reference Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf);;All Files (*)")
+        if file_path:
+            self.reference_image_path = file_path
+            self.ref_path_label.setText(os.path.basename(file_path))
+
+    # ─────────────────────────────────────────
+    # File Selection for Alignment
+    # ─────────────────────────────────────────
+    def select_files_to_align(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files to Align", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf);;All Files (*)")
+        if files:
+            for file in files:
+                if file not in self.files_to_align:
+                    self.files_to_align.append(file)
+                    self.tree_widget.addTopLevelItem(QTreeWidgetItem([os.path.basename(file)]))
+
+    def select_directory_to_align(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", "")
+        if directory:
+            supported_extensions = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.fits', '.fit', '.xisf')
+            new_files = [os.path.join(directory, f) for f in os.listdir(directory) if f.lower().endswith(supported_extensions)]
+            for file in new_files:
+                if file not in self.files_to_align:
+                    self.files_to_align.append(file)
+                    self.tree_widget.addTopLevelItem(QTreeWidgetItem([os.path.basename(file)]))
+
+    # ─────────────────────────────────────────
+    # Managing Files in TreeBox
+    # ─────────────────────────────────────────
+    def remove_selected_files(self):
+        selected_items = self.tree_widget.selectedItems()
+        for item in selected_items:
+            file_name = item.text(0)
+            for file_path in self.files_to_align:
+                if os.path.basename(file_path) == file_name:
+                    self.files_to_align.remove(file_path)
+                    break
+            index = self.tree_widget.indexOfTopLevelItem(item)
+            self.tree_widget.takeTopLevelItem(index)
+
+    def clear_tree(self):
+        self.tree_widget.clear()
+        self.files_to_align.clear()
+
+    # ─────────────────────────────────────────
+    # Output Directory Selection
+    # ─────────────────────────────────────────
+    def select_output_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Output Directory", "")
+        if directory:
+            self.output_directory = directory
+            self.output_path_label.setText(directory)
+
+    # ─────────────────────────────────────────
+    # Start Registration with Signal Handling
+    # ─────────────────────────────────────────
+    def start_registration(self):
+        if not self.reference_image_path:
+            QMessageBox.warning(self, "Missing Reference", "Please select a reference image before starting.")
+            return
+        if not self.files_to_align:
+            QMessageBox.warning(self, "No Files", "Please add files to align before starting.")
+            return
+        if not self.output_directory:
+            QMessageBox.warning(self, "No Output Directory", "Please select an output directory before starting.")
+            return
+
+        self.progress_label.setText("Status: Running...")
+        self.progress_label.setStyleSheet("color: green; font-weight: bold;")
+
+        self.thread = StarRegistrationThread(self.reference_image_path, self.files_to_align, self.output_directory)
+        self.thread.progress_update.connect(self.update_progress)
+        self.thread.registration_complete.connect(self.registration_finished)
+        self.thread.start()
+
+    def update_progress(self, message):
+        """Update the progress label with the latest status."""
+        self.progress_label.setText(f"Status: {message}")
+        QApplication.processEvents()
+
+    def registration_finished(self, success, message):
+        """Handle the completion of the registration process."""
+        color = "green" if success else "red"
+        self.progress_label.setText(f"Status: {message}")
+        self.progress_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+        if success:
+            QMessageBox.information(self, "Registration Complete", message)
+        else:
+            QMessageBox.warning(self, "Registration Error", message)
+
 
 class PlateSolver(QDialog):
     """
@@ -10999,75 +14938,6 @@ class PSFViewer(QDialog):
                 item = QTableWidgetItem(f"{val:.3f}")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row_index, col_index, item)
-
-@njit(parallel=True, fastmath=True)
-def _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma):
-    """
-    Optimized Numba-compiled local outlier correction.
-    - Computes median and standard deviation from 8 surrounding pixels (excluding center).
-    - If the center pixel is greater than (median + hot_sigma * std_dev), it is replaced with the median.
-    - If the center pixel is less than (median - cold_sigma * std_dev), it is replaced with the median.
-    - Edge pixels are skipped (avoiding padding artifacts).
-    """
-    local_vals = np.empty(9, dtype=np.float32)  # Holds 8 surrounding pixels
-
-    # Process pixels in parallel, skipping edges
-    for y in prange(1, H - 1):  # Skip first and last rows
-        for x in range(1, W - 1):  # Skip first and last columns
-            for c_i in prange(C):  # Parallelize over color channels too
-                k = 0
-                for dy in range(-1, 2):  # -1, 0, +1
-                    for dx in range(-1, 2):  # -1, 0, +1
-                        local_vals[k] = corrected[y + dy, x + dx, c_i]
-                        k += 1
-
-                # Compute median
-                M = np.median(local_vals)
-
-                # Compute MAD manually
-                abs_devs = np.abs(local_vals - M)
-                MAD = np.median(abs_devs)
-
-                # Convert MAD to an approximation of standard deviation
-                sigma_mad = 1.4826 * MAD  
-
-                T = corrected[y, x, c_i]  # **Center pixel**
-                threshold_high = M + (hot_sigma * sigma_mad)
-                threshold_low = M - (cold_sigma * sigma_mad)
-                # **Apply correction ONLY if center pixel is an outlier**
-                if T > threshold_high or T < threshold_low:
-                    corrected[y, x, c_i] = M  # Replace center pixel with median
-
-def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
-    """
-    Optimized local outlier correction using Numba.
-    - Identifies hot and cold outliers based on local neighborhood statistics.
-    - Uses median and standard deviation from surrounding pixels to detect and replace outliers.
-    - Applies separate hot_sigma and cold_sigma thresholds.
-    - Skips edge pixels to avoid padding artifacts.
-    """
-
-    was_gray = False
-
-    if image.ndim == 2:  # Convert grayscale to 3D
-        H, W = image.shape
-        C = 1
-        was_gray = True
-
-    else:
-        H, W, C = image.shape
-
-
-    # Copy the image for modification
-    corrected = image.astype(np.float32).copy()
-
-    # Apply fast correction (no padding, edges skipped)
-    _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma)
-
-    if was_gray:
-        corrected = corrected[:, :, 0]  # Convert back to 2D if grayscale
-
-    return corrected
 
 
 class SupernovaAsteroidHunterTab(QWidget):
@@ -13535,125 +17405,6 @@ class BlemishBlasterDialog(QDialog):
         super().closeEvent(event)
 
 
-def evaluate_polynomial(H: int, W: int, coeffs: np.ndarray, degree: int) -> np.ndarray:
-    """
-    Evaluates the polynomial function over the entire image domain.
-    """
-    xx, yy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing="xy")
-    A_full = build_poly_terms(xx.ravel(), yy.ravel(), degree)
-    return (A_full @ coeffs).reshape(H, W)
-
-
-
-
-
-
-def build_poly_terms(x_array: np.ndarray, y_array: np.ndarray, degree: int) -> np.ndarray:
-    """
-    Precomputes polynomial basis terms efficiently using NumPy, supporting up to degree 6.
-    """
-    ones = np.ones_like(x_array, dtype=np.float32)
-
-    if degree == 1:
-        return np.column_stack((ones, x_array, y_array))
-
-    elif degree == 2:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2))
-
-    elif degree == 3:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3))
-
-    elif degree == 4:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4))
-
-    elif degree == 5:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
-                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5))
-
-    elif degree == 6:
-        return np.column_stack((ones, x_array, y_array, 
-                                x_array**2, x_array * y_array, y_array**2, 
-                                x_array**3, x_array**2 * y_array, x_array * y_array**2, y_array**3,
-                                x_array**4, x_array**3 * y_array, x_array**2 * y_array**2, x_array * y_array**3, y_array**4,
-                                x_array**5, x_array**4 * y_array, x_array**3 * y_array**2, x_array**2 * y_array**3, x_array * y_array**4, y_array**5,
-                                x_array**6, x_array**5 * y_array, x_array**4 * y_array**2, x_array**3 * y_array**3, x_array**2 * y_array**4, x_array * y_array**5, y_array**6))
-
-    else:
-        raise ValueError(f"Unsupported polynomial degree={degree}. Max supported is 6.")
-
-
-
-
-def generate_sample_points(image: np.ndarray, num_points: int = 100) -> np.ndarray:
-    """
-    Generates sample points uniformly across the image.
-
-    - Places points in a uniform grid (no randomization).
-    - Avoids border pixels.
-    - Skips any points with value 0.000 or above 0.85.
-
-    Returns:
-        np.ndarray: Array of shape (N, 2) containing (x, y) coordinates of sample points.
-    """
-    H, W = image.shape[:2]
-    points = []
-
-    # Create a uniform grid (avoiding the border)
-    grid_size = int(np.sqrt(num_points))  # Roughly equal spacing
-    x_vals = np.linspace(10, W - 10, grid_size, dtype=int)  # Avoids border
-    y_vals = np.linspace(10, H - 10, grid_size, dtype=int)
-
-    for y in y_vals:
-        for x in x_vals:
-            # Skip values that are too dark (0.000) or too bright (> 0.85)
-            if np.any(image[int(y), int(x)] == 0.000) or np.any(image[int(y), int(x)] > 0.85):
-                continue  # Skip this pixel
-
-            points.append((int(x), int(y)))
-
-            if len(points) >= num_points:
-                return np.array(points, dtype=np.int32)  # Return only valid points
-
-    return np.array(points, dtype=np.int32)  # Return all collected points
-
-@njit(parallel=True, fastmath=True)
-def _numba_unstretch(image: np.ndarray, stretch_original_medians: np.ndarray, stretch_original_mins: np.ndarray) -> np.ndarray:
-    """
-    Numba-optimized function to undo the unlinked stretch.
-    Restores each channel separately.
-    """
-    H, W, C = image.shape
-    out = np.empty_like(image, dtype=np.float32)
-
-    for c in prange(C):  # Parallelize per channel
-        cmed_stretched = np.median(image[..., c])
-        orig_med = stretch_original_medians[c]
-        orig_min = stretch_original_mins[c]
-
-        if cmed_stretched != 0 and orig_med != 0:
-            for y in prange(H):
-                for x in range(W):
-                    r = image[y, x, c]
-                    numerator = (cmed_stretched - 1) * orig_med * r
-                    denominator = cmed_stretched * (orig_med + r - 1) - orig_med * r
-                    if denominator == 0:
-                        denominator = 1e-6  # Avoid division by zero
-                    out[y, x, c] = numerator / denominator
-
-            # Restore the original black point
-            out[..., c] += orig_min
-
-    return np.clip(out, 0, 1)  # Clip to valid range
-
 
 class PolyGradientRemoval:
     """
@@ -13762,9 +17513,9 @@ class PolyGradientRemoval:
         2) For each channel c: subtract the channel's min => data is >= 0.
         3) Compute the median after min subtraction for that channel.
         4) Call the appropriate Numba function:
-            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            - If single-channel (was originally 1-ch), call numba_mono_final_formula
             on the 1-ch array.
-            - If 3-ch color, call _numba_color_final_formula_unlinked.
+            - If 3-ch color, call numba_color_final_formula_unlinked.
         5) Clip to [0,1].
         6) Store self.stretch_original_mins / medians so we can unstretch later.
         """
@@ -13801,7 +17552,7 @@ class PolyGradientRemoval:
 
         # 4) Apply the final formula with your Numba functions
         if self.was_single_channel:
-            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # If originally single-channel, let's do a single pass with numba_mono_final_formula
             # on the single channel. We can do that by extracting one channel from image_3ch.
             # Then replicate the result to 3 channels, or keep it as 1-ch?
             # Typically we keep it as 1-ch in the end, so let's do that.
@@ -13810,7 +17561,7 @@ class PolyGradientRemoval:
             mono_array = image_3ch[..., 0]  # shape (H,W)
             cmed = medians_after_sub[0]     # The median for that channel
             # We call the numba function
-            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+            stretched_mono = numba_mono_final_formula(mono_array, cmed, target_median)
 
             # Now place it back into image_3ch for consistency
             for c in range(3):
@@ -13819,7 +17570,7 @@ class PolyGradientRemoval:
             # 3-channel unlinked
             medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
             # 'image_3ch' is our 'rescaled'
-            stretched_3ch = _numba_color_final_formula_unlinked(
+            stretched_3ch = numba_color_final_formula_unlinked(
                 image_3ch, medians_rescaled, target_median
             )
             image_3ch = stretched_3ch
@@ -13839,9 +17590,9 @@ class PolyGradientRemoval:
         2) For each channel c: subtract the channel's min => data is >= 0.
         3) Compute the median after min subtraction for that channel.
         4) Call the appropriate Numba function:
-            - If single-channel (was originally 1-ch), call _numba_mono_final_formula
+            - If single-channel (was originally 1-ch), call numba_mono_final_formula
             on the 1-ch array.
-            - If 3-ch color, call _numba_color_final_formula_unlinked.
+            - If 3-ch color, call numba_color_final_formula_unlinked.
         5) Clip to [0,1].
         6) Store self.stretch_original_mins / medians so we can unstretch later.
         """
@@ -13878,7 +17629,7 @@ class PolyGradientRemoval:
 
         # 4) Apply the final formula with your Numba functions
         if self.was_single_channel:
-            # If originally single-channel, let's do a single pass with _numba_mono_final_formula
+            # If originally single-channel, let's do a single pass with numba_mono_final_formula
             # on the single channel. We can do that by extracting one channel from image_3ch.
             # Then replicate the result to 3 channels, or keep it as 1-ch?
             # Typically we keep it as 1-ch in the end, so let's do that.
@@ -13887,7 +17638,7 @@ class PolyGradientRemoval:
             mono_array = image_3ch[..., 0]  # shape (H,W)
             cmed = medians_after_sub[0]     # The median for that channel
             # We call the numba function
-            stretched_mono = _numba_mono_final_formula(mono_array, cmed, target_median)
+            stretched_mono = numba_mono_final_formula(mono_array, cmed, target_median)
 
             # Now place it back into image_3ch for consistency
             for c in range(3):
@@ -13896,7 +17647,7 @@ class PolyGradientRemoval:
             # 3-channel unlinked
             medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
             # 'image_3ch' is our 'rescaled'
-            stretched_3ch = _numba_color_final_formula_unlinked(
+            stretched_3ch = numba_color_final_formula_unlinked(
                 image_3ch, medians_rescaled, target_median
             )
             image_3ch = stretched_3ch
@@ -13918,7 +17669,7 @@ class PolyGradientRemoval:
         stretch_original_mins = np.array(self.stretch_original_mins, dtype=np.float32)
 
         # Call the Numba function
-        unstretched = _numba_unstretch(image, stretch_original_medians, stretch_original_mins)
+        unstretched = numba_unstretch(image, stretch_original_medians, stretch_original_mins)
 
         if self.was_single_channel:
             # Convert back to grayscale
@@ -14178,7 +17929,7 @@ class CustomSpinBox(QWidget):
 
 class GradientRemovalDialog(QDialog):
     # Define signals to communicate with AstroEditingSuite
-    processing_completed = pyqtSignal(np.ndarray, np.ndarray, bool)  # Corrected Image, Gradient Background
+    processing_completed = pyqtSignal(np.ndarray, np.ndarray, bool, str)  # Corrected Image, Gradient Background
 
     def __init__(self, image, parent=None):
         """
@@ -14294,6 +18045,11 @@ class GradientRemovalDialog(QDialog):
         self.show_gradient_checkbox = QCheckBox("Show Gradient Removed")
         self.show_gradient_checkbox.stateChanged.connect(self.update_show_gradient)
         form_layout.addRow(self.show_gradient_checkbox)
+
+        # **New: Slot Selection Dropdown**
+        self.save_slot_dropdown = QComboBox()
+        self.save_slot_dropdown.addItems(["Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7", "Slot 8", "Slot 9"])  # Example slot choices
+        form_layout.addRow("Save Gradient To:", self.save_slot_dropdown)
 
         # Add AutoStretch button
         self.autostretch_button = QPushButton("AutoStretch")
@@ -14652,10 +18408,23 @@ class GradientRemovalDialog(QDialog):
         self.process_button.setEnabled(True)
         QApplication.processEvents()
 
-        # Emit the processed images back to AstroEditingSuite
-        self.processing_completed.emit(corrected_image, gradient_background, self.save_to_slot_1)
+        # Check if the user wants to save the gradient
+        save_gradient = self.show_gradient_checkbox.isChecked()
 
-        # Close the dialog
+        # Get the selected slot from the dropdown
+        selected_slot = self.save_slot_dropdown.currentText()  # Example: "Slot 1"
+
+        if save_gradient:
+            print(f"[INFO] Saving extracted gradient to {selected_slot}")
+        else:
+            print("[INFO] User chose not to save the extracted gradient.")
+
+        # Emit the processed images back to `AstroEditingSuite`
+        self.processing_completed.emit(corrected_image, gradient_background, save_gradient, selected_slot)
+
+        self.status_label.setText("Processing Complete")
+        self.process_button.setEnabled(True)
+        QApplication.processEvents()
         self.accept()
 
     # ------------------ Helper Functions ------------------
@@ -18552,32 +22321,36 @@ class XISFViewer(QWidget):
         self.image_label.clear()
         self.metadata_tree.clear()
 
-        # Ensure the image is a numpy array.
-        if not isinstance(image, np.ndarray):
-            image = np.array(image)
-        
-        # Update internal image data and metadata.
-        self.image_data = image
-        self.original_header = metadata.get('original_header', None)
-        self.is_mono = metadata.get('is_mono', False)
+        if not self.isVisible():
+            return   
+        if image is None:
+            return             
+        if slot == self.image_manager.current_slot:
+            # Ensure the image is a numpy array before proceeding
+            if not isinstance(image, np.ndarray):
+                image = np.array(image)  # Convert to numpy array if necessary
+            
+            self.image = image  # Set the original image
+            self.preview_image = None  # Reset the preview image
+            self.original_header = metadata.get('original_header', None)
+            self.is_mono = metadata.get('is_mono', False)
+            self.filename = metadata.get('file_path', "Unknown File") 
 
-        # Display metadata if available.
-        file_path = metadata.get('file_path', None)
-        if file_path:
-            self.display_metadata(file_path)
+
+        # Display metadata
+        self.display_metadata(self.filename)
 
         # If the image is mono, ensure it's in 3-channel RGB format for display.
         if self.is_mono:
-            # If image has a singleton third dimension, remove it.
             if len(image.shape) == 3 and image.shape[2] == 1:
-                image = np.squeeze(image, axis=2)
-            # Convert a 2D mono image to 3-channel RGB.
+                image = np.squeeze(image, axis=2)  # Remove singleton channel
             if image.ndim == 2:
-                image = np.stack([image] * 3, axis=-1)
+                image = np.stack([image] * 3, axis=-1)  # Convert mono to 3-channel RGB
 
+        # Store the final image to be displayed
         self.image_data = image
 
-        # Update the display using display_image(), which handles scaling and autostretch.
+        # **Ensure the UI updates properly**
         self.display_image()
 
         print(f"XISFViewer: Image updated from ImageManager slot {slot}.")
@@ -19775,6 +23548,11 @@ class BlinkTab(QWidget):
                 print(f"Failed to load image {file_path}: {e}")
                 continue
 
+            # Check if the image is None or empty and skip if so.
+            if image is None or image.size == 0:
+                print(f"Image {file_path} is None or empty. Skipping file.")
+                continue
+
             # Debayer the image if needed (for non-mono images)
             if is_mono:
                 image = self.debayer_image(image, file_path, header)
@@ -20679,7 +24457,6 @@ class BlinkTab(QWidget):
             return QImage(img_data, w, h, 3 * w, QImage.Format.Format_RGB888)
         else:  # Grayscale Image
             return QImage(img_data, w, h, w, QImage.Format.Format_Grayscale8)
-
 
 class CosmicClarityTab(QWidget):
     def __init__(self, image_manager=None):
@@ -23223,6 +27000,8 @@ class StatisticalStretchTab(QWidget):
         self.undoButton.clicked.connect(self.undo_image)
         button_layout.addWidget(self.undoButton)
 
+        self.mouseStatusLabel = QLabel('', self)
+        left_layout.addWidget(self.mouseStatusLabel)
 
         left_layout.addLayout(button_layout)
 
@@ -23299,6 +27078,9 @@ class StatisticalStretchTab(QWidget):
         self.zoom_factor = 0.25
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
+        self.imageLabel.setMouseTracking(True)
+        self.imageLabel.installEventFilter(self)
+
         self.dragging = False
         self.last_pos = QPoint()
 
@@ -23409,6 +27191,26 @@ class StatisticalStretchTab(QWidget):
         self.hideSpinner()
 
     def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.MouseMove:
+            if source in (self.scrollArea.viewport(), self.imageLabel):
+                # Map the event position to imageLabel coordinates
+                pos = self.imageLabel.mapFrom(source, event.pos())
+                if self.imageLabel.pixmap() is not None:
+                    pixmap_size = self.imageLabel.pixmap().size()
+                    if 0 <= pos.x() < pixmap_size.width() and 0 <= pos.y() < pixmap_size.height():
+                        # Convert scaled coordinates back to original image coordinates
+                        img_x = int(pos.x() / self.zoom_factor)
+                        img_y = int(pos.y() / self.zoom_factor)
+                        if self.image is not None:
+                            h, w = self.image.shape[:2]
+                            if 0 <= img_x < w and 0 <= img_y < h:
+                                pixel_value = self.image[img_y, img_x]
+                                if self.image.ndim == 3:
+                                    r, g, b = pixel_value
+                                    self.mouseStatusLabel.setText(f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}")
+                                else:
+                                    self.mouseStatusLabel.setText(f"X:{img_x} Y:{img_y} Val:{pixel_value:.3f}")
+        # Retain your dragging logic below...
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
             self.last_pos = event.pos()
@@ -23421,6 +27223,8 @@ class StatisticalStretchTab(QWidget):
             self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
+
+
 
 
     def openFileDialog(self):
@@ -23645,7 +27449,6 @@ class StatisticalStretchTab(QWidget):
             self.fileLabel.setText('No stretched image to save. Please generate a preview first.')
 
 
-
 # Thread for Stat Stretch background processing
 class StatisticalStretchProcessingThread(QThread):
     preview_generated = pyqtSignal(np.ndarray)  # Signal to send the generated preview image back to the main thread
@@ -23668,101 +27471,6 @@ class StatisticalStretchProcessingThread(QThread):
 
         # Emit the result once done
         self.preview_generated.emit(stretched_image)
-
-@njit(parallel=True, fastmath=True)
-def applyPixelMath_numba(image_array, amount):
-    factor = 3 ** amount
-    denom_factor = 3 ** amount - 1
-    height, width, channels = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(height):
-        for x in prange(width):
-            for c in prange(channels):
-                val = (factor * image_array[y, x, c]) / (denom_factor * image_array[y, x, c] + 1)
-                output[y, x, c] = min(max(val, 0.0), 1.0)  # Equivalent to np.clip()
-    
-    return output
-
-@njit(parallel=True, fastmath=True)
-def adjust_saturation_numba(image_array, saturation_factor):
-    height, width, channels = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(int(height)):  # Ensure y is an integer
-        for x in prange(int(width)):  # Ensure x is an integer
-            r, g, b = image_array[int(y), int(x)]  # Force integer indexing
-
-            # Convert RGB to HSV manually
-            max_val = max(r, g, b)
-            min_val = min(r, g, b)
-            delta = max_val - min_val
-
-            # Compute Hue (H)
-            if delta == 0:
-                h = 0
-            elif max_val == r:
-                h = (60 * ((g - b) / delta) + 360) % 360
-            elif max_val == g:
-                h = (60 * ((b - r) / delta) + 120) % 360
-            else:
-                h = (60 * ((r - g) / delta) + 240) % 360
-
-            # Compute Saturation (S)
-            s = (delta / max_val) if max_val != 0 else 0
-            s *= saturation_factor  # Apply saturation adjustment
-            s = min(max(s, 0.0), 1.0)  # Clip saturation
-
-            # Convert back to RGB
-            if s == 0:
-                r, g, b = max_val, max_val, max_val
-            else:
-                c = s * max_val
-                x_val = c * (1 - abs((h / 60) % 2 - 1))
-                m = max_val - c
-
-                if 0 <= h < 60:
-                    r, g, b = c, x_val, 0
-                elif 60 <= h < 120:
-                    r, g, b = x_val, c, 0
-                elif 120 <= h < 180:
-                    r, g, b = 0, c, x_val
-                elif 180 <= h < 240:
-                    r, g, b = 0, x_val, c
-                elif 240 <= h < 300:
-                    r, g, b = x_val, 0, c
-                else:
-                    r, g, b = c, 0, x_val
-
-                r, g, b = r + m, g + m, b + m  # Add m to shift brightness
-
-            # ✅ Fix: Explicitly cast indices to integers
-            output[int(y), int(x), 0] = r
-            output[int(y), int(x), 1] = g
-            output[int(y), int(x), 2] = b
-
-    return output
-
-
-
-
-@njit(parallel=True, fastmath=True)
-def applySCNR_numba(image_array):
-    height, width, _ = image_array.shape
-    output = np.empty_like(image_array, dtype=np.float32)
-
-    for y in prange(int(height)):
-        for x in prange(int(width)):
-            r, g, b = image_array[y, x]
-            g = min(g, (r + b) / 2)  # Reduce green to the average of red & blue
-            
-            # ✅ Fix: Assign channels individually instead of a tuple
-            output[int(y), int(x), 0] = r
-            output[int(y), int(x), 1] = g
-            output[int(y), int(x), 2] = b
-
-
-    return output
 
 
 # Thread for star stretch background processing
@@ -24910,30 +28618,25 @@ class FullCurvesTab(QWidget):
         if self.image is None:
             return
 
-        # Convert from scaled coordinates to original image coords
-        # scaled_pixmap was created with: pixmap.scaled(orig_size * zoom_factor)
-        # So original coordinate = x/zoom_factor, y/zoom_factor
-        # Make sure to also consider the imageLabel size and whether the image is centered.
-
-        # If you have the pixmap stored, you can find original width/height from self.image shape:
         h, w = self.image.shape[:2]
-
-        # Convert mouse coords to image coords
         img_x = int(x / self.zoom_factor)
         img_y = int(y / self.zoom_factor)
 
-        # Ensure within bounds
         if 0 <= img_x < w and 0 <= img_y < h:
             pixel_value = self.image[img_y, img_x]
             if self.image.ndim == 3:
-                # RGB pixel
+                # RGB pixel: assuming pixel values are in 0-1
                 r, g, b = pixel_value
                 text = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
+                self.curveEditor.updateValueLines(r, g, b, grayscale=False)
             else:
-                # Grayscale pixel
+                # Grayscale pixel: value is in 0-1
                 text = f"X:{img_x} Y:{img_y} Val:{pixel_value:.3f}"
-            # Update a status label or print it
-            self.statusLabel.setText(text)  # For example, reuse fileLabel or add a dedicated status label.
+                # Pass the grayscale value for all channels and set grayscale flag to True
+                self.curveEditor.updateValueLines(pixel_value, pixel_value, pixel_value, grayscale=True)
+            self.statusLabel.setText(text)
+
+
 
     def startProcessing(self):
         if self.original_image is None:
@@ -25076,6 +28779,36 @@ class FullCurvesTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to reset draggable points: {e}")
 
     def eventFilter(self, source, event):
+        # Handle shift+click to add a control point on the curve.
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            # Check if Shift is pressed.
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Map the event position to the imageLabel coordinate system.
+                pos = self.imageLabel.mapFrom(source, event.pos())
+                if self.imageLabel.pixmap() is not None:
+                    pixmap_size = self.imageLabel.pixmap().size()
+                    if 0 <= pos.x() < pixmap_size.width() and 0 <= pos.y() < pixmap_size.height():
+                        # Convert from the scaled image back to original image coordinates.
+                        img_x = int(pos.x() / self.zoom_factor)
+                        img_y = int(pos.y() / self.zoom_factor)
+                        if self.image is not None:
+                            h, w = self.image.shape[:2]
+                            if 0 <= img_x < w and 0 <= img_y < h:
+                                pixel_value = self.image[img_y, img_x]
+                                # Compute the average brightness.
+                                if self.image.ndim == 3:
+                                    avg = (pixel_value[0] + pixel_value[1] + pixel_value[2]) / 3.0
+                                else:
+                                    avg = pixel_value
+                                # Map avg (0–1) to curve coordinates:
+                                new_x = avg * 360.0
+                                new_y = 360.0 - (avg * 360.0)
+                                # Add a new control point to the curve.
+                                self.curveEditor.addControlPoint(new_x, new_y)
+                                # Optionally update a status message:
+                                self.statusLabel.setText(f"Added control point at X:{new_x:.1f} Y:{new_y:.1f}")
+                                return True  # Consume the event.
+        # Existing dragging logic:
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
             self.last_pos = event.pos()
@@ -25088,6 +28821,7 @@ class FullCurvesTab(QWidget):
             self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
+
 
     def refresh(self):
         if self.image_manager:
@@ -25490,7 +29224,7 @@ class ImageLabel(QLabel):
         super().__init__(parent)
         self.setMouseTracking(True)
     def mouseMoveEvent(self, event):
-        self.mouseMoved.emit(event.x(), event.y())
+        self.mouseMoved.emit(event.pos().x(), event.pos().y())
         super().mouseMoveEvent(event)
 
 class CurveEditor(QGraphicsView):
@@ -25664,8 +29398,7 @@ class CurveEditor(QGraphicsView):
 
     def updateCurve(self):
         """Update the curve by redrawing based on endpoints and control points."""
-
-
+        
         all_points = self.end_points + self.control_points
         if not all_points:
             # No points, no curve
@@ -25681,31 +29414,40 @@ class CurveEditor(QGraphicsView):
         xs = [p.scenePos().x() for p in sorted_points]
         ys = [p.scenePos().y() for p in sorted_points]
 
+        # Ensure X values are strictly increasing
+        unique_xs, unique_ys = [], []
+        for i in range(len(xs)):
+            if i == 0 or xs[i] > xs[i - 1]:  # Skip duplicate X values
+                unique_xs.append(xs[i])
+                unique_ys.append(ys[i])
+
         # If there's only one point or none, we can't interpolate
-        if len(xs) < 2:
-            # If there's a single point, just draw a dot or do nothing
+        if len(unique_xs) < 2:
             if self.curve_item:
                 self.scene.removeItem(self.curve_item)
                 self.curve_item = None
 
-            if len(xs) == 1:
+            if len(unique_xs) == 1:
                 # Optionally draw a single point
                 single_path = QPainterPath()
-                single_path.addEllipse(xs[0]-2, ys[0]-2, 4, 4)
+                single_path.addEllipse(unique_xs[0]-2, unique_ys[0]-2, 4, 4)
                 pen = QPen(Qt.GlobalColor.white)
                 pen.setWidth(3)
                 self.curve_item = self.scene.addPath(single_path, pen)
             return
 
-        # Create a PCHIP interpolator
-        interpolator = PchipInterpolator(xs, ys)
-        self.curve_function = interpolator
+        try:
+            # Create a PCHIP interpolator
+            interpolator = PchipInterpolator(unique_xs, unique_ys)
+            self.curve_function = interpolator
 
-        # Sample the curve
-        sample_xs = np.linspace(xs[0], xs[-1], 361)
-        sample_ys = interpolator(sample_xs)
+            # Sample the curve
+            sample_xs = np.linspace(unique_xs[0], unique_xs[-1], 361)
+            sample_ys = interpolator(sample_xs)
 
-
+        except ValueError as e:
+            print(f"Interpolation Error: {e}")  # Log the error instead of crashing
+            return  # Exit gracefully
 
         curve_points = [QPointF(float(x), float(y)) for x, y in zip(sample_xs, sample_ys)]
         self.curve_points = curve_points
@@ -25731,8 +29473,7 @@ class CurveEditor(QGraphicsView):
         if hasattr(self, 'preview_callback') and self.preview_callback:
             # Generate the 8-bit LUT and pass it to the callback
             lut = self.get8bitLUT()
-            self.preview_callback(lut)  # Pass curve_mode      
-
+            self.preview_callback(lut)
 
     def getCurveFunction(self):
         return self.curve_function
@@ -25793,83 +29534,56 @@ class CurveEditor(QGraphicsView):
             self.updateCurve()
         super().keyPressEvent(event)
 
-@njit(parallel=True)
-def apply_lut_gray(image_in, lut):
-    """
-    Numba-accelerated application of 'lut' to a single-channel image_in in [0..1].
-    'lut' is a 1D array of shape (size,) also in [0..1].
-    """
-    out = np.empty_like(image_in)
-    height, width = image_in.shape
-    size_lut = len(lut) - 1
+    def updateValueLines(self, r, g, b, grayscale=False):
+        """
+        Update vertical lines on the curve scene.
+        For color images (grayscale=False), three lines (red, green, blue) are drawn.
+        For grayscale images (grayscale=True), a single gray line is drawn.
+        
+        Values are assumed to be in the range [0, 1] and mapped to 0–360.
+        """
+        if grayscale:
+            # Map the 0–1 grayscale value to the scene's X coordinate (0–360)
+            x = r * 360.0
+            if not hasattr(self, "gray_line") or self.gray_line is None:
+                self.gray_line = self.scene.addLine(x, 0, x, 360, QPen(Qt.GlobalColor.gray))
+            else:
+                self.gray_line.setLine(x, 0, x, 360)
+            # Hide any color lines if present
+            for attr in ("r_line", "g_line", "b_line"):
+                if hasattr(self, attr) and getattr(self, attr) is not None:
+                    getattr(self, attr).setVisible(False)
+        else:
+            # Hide grayscale line if present
+            if hasattr(self, "gray_line") and self.gray_line is not None:
+                self.gray_line.setVisible(False)
+            
+            # Map each 0–1 value to X coordinate on scene (0–360)
+            r_x = r * 360.0
+            g_x = g * 360.0
+            b_x = b * 360.0
 
-    for y in prange(height):
-        for x in range(width):
-            v = image_in[y, x]
-            idx = int(v * size_lut + 0.5)
-            if idx < 0: idx = 0
-            elif idx > size_lut: idx = size_lut
-            out[y, x] = lut[idx]
+            # Create or update the red line
+            if not hasattr(self, "r_line") or self.r_line is None:
+                self.r_line = self.scene.addLine(r_x, 0, r_x, 360, QPen(Qt.GlobalColor.red))
+            else:
+                self.r_line.setLine(r_x, 0, r_x, 360)
+            self.r_line.setVisible(True)
 
-    return out
+            # Create or update the green line
+            if not hasattr(self, "g_line") or self.g_line is None:
+                self.g_line = self.scene.addLine(g_x, 0, g_x, 360, QPen(Qt.GlobalColor.green))
+            else:
+                self.g_line.setLine(g_x, 0, g_x, 360)
+            self.g_line.setVisible(True)
 
-@njit(parallel=True)
-def apply_lut_color(image_in, lut):
-    """
-    Numba-accelerated application of 'lut' to a 3-channel image_in in [0..1].
-    'lut' is a 1D array of shape (size,) also in [0..1].
-    """
-    out = np.empty_like(image_in)
-    height, width, channels = image_in.shape
-    size_lut = len(lut) - 1
+            # Create or update the blue line
+            if not hasattr(self, "b_line") or self.b_line is None:
+                self.b_line = self.scene.addLine(b_x, 0, b_x, 360, QPen(Qt.GlobalColor.blue))
+            else:
+                self.b_line.setLine(b_x, 0, b_x, 360)
+            self.b_line.setVisible(True)
 
-    for y in prange(height):
-        for x in range(width):
-            for c in range(channels):
-                v = image_in[y, x, c]
-                idx = int(v * size_lut + 0.5)
-                if idx < 0: idx = 0
-                elif idx > size_lut: idx = size_lut
-                out[y, x, c] = lut[idx]
-
-    return out
-
-@njit(parallel=True)
-def apply_lut_mono_inplace(array2d, lut):
-    """
-    In-place LUT application on a single-channel 2D array in [0..1].
-    'lut' has shape (size,) also in [0..1].
-    """
-    H, W = array2d.shape
-    size_lut = len(lut) - 1
-    for y in prange(H):
-        for x in prange(W):
-            v = array2d[y, x]
-            idx = int(v * size_lut + 0.5)
-            if idx < 0:
-                idx = 0
-            elif idx > size_lut:
-                idx = size_lut
-            array2d[y, x] = lut[idx]
-
-@njit(parallel=True)
-def apply_lut_color_inplace(array3d, lut):
-    """
-    In-place LUT application on a 3-channel array in [0..1].
-    'lut' has shape (size,) also in [0..1].
-    """
-    H, W, C = array3d.shape
-    size_lut = len(lut) - 1
-    for y in prange(H):
-        for x in prange(W):
-            for c in range(C):
-                v = array3d[y, x, c]
-                idx = int(v * size_lut + 0.5)
-                if idx < 0:
-                    idx = 0
-                elif idx > size_lut:
-                    idx = size_lut
-                array3d[y, x, c] = lut[idx]
 
 def build_curve_lut(curve_func, size=65536):
     """
@@ -25891,214 +29605,6 @@ def build_curve_lut(curve_func, size=65536):
         lut[i] = outv
     return lut
 
-# D65 reference
-_Xn, _Yn, _Zn = 0.95047, 1.00000, 1.08883
-
-# Matrix for RGB -> XYZ (sRGB => D65)
-_M_rgb2xyz = np.array([
-    [0.4124564, 0.3575761, 0.1804375],
-    [0.2126729, 0.7151522, 0.0721750],
-    [0.0193339, 0.1191920, 0.9503041]
-], dtype=np.float32)
-
-# Matrix for XYZ -> RGB (sRGB => D65)
-_M_xyz2rgb = np.array([
-    [ 3.2404542, -1.5371385, -0.4985314],
-    [-0.9692660,  1.8760108,  0.0415560],
-    [ 0.0556434, -0.2040259,  1.0572252]
-], dtype=np.float32)
-
-@njit(parallel=True)
-def rgb_to_xyz_numba(rgb):
-    """
-    Convert an image from sRGB to XYZ (D65).
-    rgb: float32 array in [0..1], shape (H,W,3)
-    returns xyz in [0..maybe >1], shape (H,W,3)
-    """
-    H, W, _ = rgb.shape
-    out = np.empty((H, W, 3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            r = rgb[y, x, 0]
-            g = rgb[y, x, 1]
-            b = rgb[y, x, 2]
-            # Multiply by M_rgb2xyz
-            X = _M_rgb2xyz[0,0]*r + _M_rgb2xyz[0,1]*g + _M_rgb2xyz[0,2]*b
-            Y = _M_rgb2xyz[1,0]*r + _M_rgb2xyz[1,1]*g + _M_rgb2xyz[1,2]*b
-            Z = _M_rgb2xyz[2,0]*r + _M_rgb2xyz[2,1]*g + _M_rgb2xyz[2,2]*b
-            out[y, x, 0] = X
-            out[y, x, 1] = Y
-            out[y, x, 2] = Z
-    return out
-
-@njit(parallel=True)
-def xyz_to_rgb_numba(xyz):
-    """
-    Convert an image from XYZ (D65) to sRGB.
-    xyz: float32 array, shape (H,W,3)
-    returns rgb in [0..1], shape (H,W,3)
-    """
-    H, W, _ = xyz.shape
-    out = np.empty((H, W, 3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            X = xyz[y, x, 0]
-            Y = xyz[y, x, 1]
-            Z = xyz[y, x, 2]
-            # Multiply by M_xyz2rgb
-            r = _M_xyz2rgb[0,0]*X + _M_xyz2rgb[0,1]*Y + _M_xyz2rgb[0,2]*Z
-            g = _M_xyz2rgb[1,0]*X + _M_xyz2rgb[1,1]*Y + _M_xyz2rgb[1,2]*Z
-            b = _M_xyz2rgb[2,0]*X + _M_xyz2rgb[2,1]*Y + _M_xyz2rgb[2,2]*Z
-            # Clip to [0..1]
-            if r < 0: r = 0
-            elif r > 1: r = 1
-            if g < 0: g = 0
-            elif g > 1: g = 1
-            if b < 0: b = 0
-            elif b > 1: b = 1
-            out[y, x, 0] = r
-            out[y, x, 1] = g
-            out[y, x, 2] = b
-    return out
-
-@njit
-def f_lab_numba(t):
-    delta = 6/29
-    out = np.empty_like(t, dtype=np.float32)
-    for i in range(t.size):
-        val = t.flat[i]
-        if val > delta**3:
-            out.flat[i] = val**(1/3)
-        else:
-            out.flat[i] = val/(3*delta*delta) + (4/29)
-    return out
-
-@njit(parallel=True)
-def xyz_to_lab_numba(xyz):
-    """
-    xyz => shape(H,W,3), in D65. 
-    returns lab in shape(H,W,3): L in [0..100], a,b in ~[-128..127].
-    """
-    H, W, _ = xyz.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            X = xyz[y, x, 0] / _Xn
-            Y = xyz[y, x, 1] / _Yn
-            Z = xyz[y, x, 2] / _Zn
-            fx = (X)**(1/3) if X > (6/29)**3 else X/(3*(6/29)**2) + 4/29
-            fy = (Y)**(1/3) if Y > (6/29)**3 else Y/(3*(6/29)**2) + 4/29
-            fz = (Z)**(1/3) if Z > (6/29)**3 else Z/(3*(6/29)**2) + 4/29
-            L = 116*fy - 16
-            a = 500*(fx - fy)
-            b = 200*(fy - fz)
-            out[y, x, 0] = L
-            out[y, x, 1] = a
-            out[y, x, 2] = b
-    return out
-
-@njit(parallel=True)
-def lab_to_xyz_numba(lab):
-    """
-    lab => shape(H,W,3): L in [0..100], a,b in ~[-128..127].
-    returns xyz shape(H,W,3).
-    """
-    H, W, _ = lab.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    delta = 6/29
-    for y in prange(H):
-        for x in prange(W):
-            L = lab[y, x, 0]
-            a = lab[y, x, 1]
-            b = lab[y, x, 2]
-            fy = (L+16)/116
-            fx = fy + a/500
-            fz = fy - b/200
-
-            if fx > delta:
-                xr = fx**3
-            else:
-                xr = 3*delta*delta*(fx - 4/29)
-            if fy > delta:
-                yr = fy**3
-            else:
-                yr = 3*delta*delta*(fy - 4/29)
-            if fz > delta:
-                zr = fz**3
-            else:
-                zr = 3*delta*delta*(fz - 4/29)
-
-            X = _Xn * xr
-            Y = _Yn * yr
-            Z = _Zn * zr
-            out[y, x, 0] = X
-            out[y, x, 1] = Y
-            out[y, x, 2] = Z
-    return out
-
-@njit(parallel=True)
-def rgb_to_hsv_numba(rgb):
-    H, W, _ = rgb.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            r = rgb[y,x,0]
-            g = rgb[y,x,1]
-            b = rgb[y,x,2]
-            cmax = max(r,g,b)
-            cmin = min(r,g,b)
-            delta = cmax - cmin
-            # Hue
-            h = 0.0
-            if delta != 0.0:
-                if cmax == r:
-                    h = 60*(((g-b)/delta) % 6)
-                elif cmax == g:
-                    h = 60*(((b-r)/delta) + 2)
-                else:
-                    h = 60*(((r-g)/delta) + 4)
-            # Saturation
-            s = 0.0
-            if cmax > 0.0:
-                s = delta / cmax
-            v = cmax
-            out[y,x,0] = h
-            out[y,x,1] = s
-            out[y,x,2] = v
-    return out
-
-@njit(parallel=True)
-def hsv_to_rgb_numba(hsv):
-    H, W, _ = hsv.shape
-    out = np.empty((H,W,3), dtype=np.float32)
-    for y in prange(H):
-        for x in prange(W):
-            h = hsv[y,x,0]
-            s = hsv[y,x,1]
-            v = hsv[y,x,2]
-            c = v*s
-            hh = (h/60.0) % 6
-            x_ = c*(1 - abs(hh % 2 - 1))
-            m = v - c
-            r = 0.0
-            g = 0.0
-            b = 0.0
-            if 0 <= hh < 1:
-                r,g,b = c,x_,0
-            elif 1 <= hh < 2:
-                r,g,b = x_,c,0
-            elif 2 <= hh < 3:
-                r,g,b = 0,c,x_
-            elif 3 <= hh < 4:
-                r,g,b = 0,x_,c
-            elif 4 <= hh < 5:
-                r,g,b = x_,0,c
-            else:
-                r,g,b = c,0,x_
-            out[y,x,0] = (r + m)
-            out[y,x,1] = (g + m)
-            out[y,x,2] = (b + m)
-    return out
 
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
@@ -28077,6 +31583,11 @@ class PerfectPalettePickerTab(QWidget):
             
             image, original_header, bit_depth, is_mono, file_path = result
             
+            # 🔹 **NEW: Check if grayscale is stored in 3 channels and extract the first channel**
+            if image.ndim == 3 and np.all(image[:, :, 0] == image[:, :, 1]) and np.all(image[:, :, 0] == image[:, :, 2]):
+                print(f"{image_type} is stored as a 3-channel grayscale image. Extracting the first channel.")
+                image = image[:, :, 0]  # Convert to single-channel grayscale
+
             # Assign the loaded image to the appropriate attribute and update the label
             if image_type == 'Ha':
                 self.ha_image = image
@@ -28245,6 +31756,10 @@ class PerfectPalettePickerTab(QWidget):
         
         return image, original_header, bit_depth, is_mono, file_path
 
+    def get_image_shape(self, image):
+        """Returns the shape of the image or None if not set."""
+        return image.shape if image is not None else None
+
 
     def prepare_preview_palettes(self):
         """
@@ -28260,6 +31775,29 @@ class PerfectPalettePickerTab(QWidget):
         print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC1: {have_osc1} | OSC2: {have_osc2}")
 
 
+        # 🔹 **NEW: Check for image size mismatches**
+        image_shapes = {
+            'Ha': self.get_image_shape(self.ha_image),
+            'OIII': self.get_image_shape(self.oiii_image),
+            'SII': self.get_image_shape(self.sii_image),
+            'OSC1': self.get_image_shape(self.osc1_image),
+            'OSC2': self.get_image_shape(self.osc2_image),
+        }
+
+        # Filter out None values (only check actual loaded images)
+        valid_shapes = {k: v for k, v in image_shapes.items() if v is not None}
+
+        # If different shapes are found, show an error and return
+        if len(set(valid_shapes.values())) > 1:
+            QMessageBox.critical(
+                self,
+                "Image Size Mismatch",
+                f"Error: The selected images have mismatched dimensions!\n\n"
+                f"{valid_shapes}"
+            )
+            self.status_label.setText("Error: Image sizes must match.")
+            print(f"[ERROR] Image size mismatch: {valid_shapes}")
+            return
 
         # Initialize combined channels
         combined_ha = self.ha_image.copy() if self.ha_image is not None else None
@@ -32024,6 +35562,10 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
                     if key.startswith("XISF:"):
                         continue  # Skip XISF metadata
 
+                    if key in ["RANGE_LOW", "RANGE_HIGH"]:
+                        print(f"Removing {key} from header to prevent overflow.")
+                        continue  # Skip adding RANGE_LOW and RANGE_HIGH
+
                     if isinstance(value, dict) and 'value' in value:
                         value = value['value']
 
@@ -32197,76 +35739,6 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
 
 
-@njit(parallel=True)
-def _numba_mono_final_formula(rescaled, median_rescaled, target_median):
-    """
-    Applies the final formula *after* we already have the rescaled values.
-    
-    rescaled[y,x] = (original[y,x] - black_point) / (1 - black_point)
-    median_rescaled = median(rescaled)
-    
-    out_val = ((median_rescaled - 1) * target_median * r) /
-              ( median_rescaled*(target_median + r -1) - target_median*r )
-    """
-    H, W = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            r = rescaled[y, x]
-            numer = (median_rescaled - 1.0) * target_median * r
-            denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-            if abs(denom) < 1e-12:
-                denom = 1e-12
-            out[y, x] = numer / denom
-
-    return out
-
-@njit(parallel=True)
-def _numba_color_final_formula_linked(rescaled, median_rescaled, target_median):
-    """
-    Linked color transform: we use one median_rescaled for all channels.
-    rescaled: (H,W,3), already = (image - black_point)/(1 - black_point)
-    median_rescaled = median of *all* pixels in rescaled
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                numer = (median_rescaled - 1.0) * target_median * r
-                denom = median_rescaled * (target_median + r - 1.0) - target_median * r
-                if abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
-
-@njit(parallel=True)
-def _numba_color_final_formula_unlinked(rescaled, medians_rescaled, target_median):
-    """
-    Unlinked color transform: a separate median_rescaled per channel.
-    rescaled: (H,W,3), where each channel is already (val - black_point[c]) / (1 - black_point[c])
-    medians_rescaled: shape (3,) with median of each channel in the rescaled array.
-    """
-    H, W, C = rescaled.shape
-    out = np.empty_like(rescaled)
-
-    for y in prange(H):
-        for x in range(W):
-            for c in range(C):
-                r = rescaled[y, x, c]
-                med = medians_rescaled[c]
-                numer = (med - 1.0) * target_median * r
-                denom = med * (target_median + r - 1.0) - target_median * r
-                if abs(denom) < 1e-12:
-                    denom = 1e-12
-                out[y, x, c] = numer / denom
-
-    return out
-
 
 def stretch_mono_image(image, target_median, normalize=False, apply_curves=False, curves_boost=0.0):
     """
@@ -32285,7 +35757,7 @@ def stretch_mono_image(image, target_median, normalize=False, apply_curves=False
     median_rescaled = np.median(rescaled_image)
 
     # 4) Final stretch in Numba
-    stretched_image = _numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
+    stretched_image = numba_mono_final_formula(rescaled_image, median_rescaled, target_median)
 
     # 5) Optional curves
     if apply_curves:
@@ -32343,7 +35815,7 @@ def stretch_color_image_linked(image, target_median, normalize=False, apply_curv
     median_rescaled = np.median(rescaled_image)
 
     # 4) Final formula in Numba
-    stretched_image = _numba_color_final_formula_linked(
+    stretched_image = numba_color_final_formula_linked(
         rescaled_image, 
         median_rescaled, 
         target_median
@@ -32389,7 +35861,7 @@ def stretch_color_image_unlinked(image, target_median, normalize=False, apply_cu
         medians_rescaled[c] = np.median(rescaled_image[..., c])
 
     # 3) Final formula in Numba
-    stretched_image = _numba_color_final_formula_unlinked(
+    stretched_image = numba_color_final_formula_unlinked(
         rescaled_image,
         medians_rescaled,
         target_median
@@ -32408,56 +35880,6 @@ def stretch_color_image_unlinked(image, target_median, normalize=False, apply_cu
     return np.clip(stretched_image, 0, 1)
 
 
-@njit
-def piecewise_linear(val, xvals, yvals):
-    """
-    Performs piecewise linear interpolation:
-    Given a scalar 'val', and arrays xvals, yvals (each of length N),
-    finds i s.t. xvals[i] <= val < xvals[i+1],
-    then returns the linear interpolation between yvals[i], yvals[i+1].
-    If val < xvals[0], returns yvals[0].
-    If val > xvals[-1], returns yvals[-1].
-    """
-    if val <= xvals[0]:
-        return yvals[0]
-    for i in range(len(xvals)-1):
-        if val < xvals[i+1]:
-            # Perform a linear interpolation in interval [xvals[i], xvals[i+1]]
-            dx = xvals[i+1] - xvals[i]
-            dy = yvals[i+1] - yvals[i]
-            ratio = (val - xvals[i]) / dx
-            return yvals[i] + ratio * dy
-    return yvals[-1]
-
-@njit(parallel=True)
-def apply_curves_numba(image, xvals, yvals):
-    """
-    Numba-accelerated routine to apply piecewise linear interpolation 
-    to each pixel in 'image'.
-    - image can be (H,W) or (H,W,3).
-    - xvals, yvals are the curve arrays in ascending order.
-    Returns the adjusted image as float32.
-    """
-    if image.ndim == 2:
-        H, W = image.shape
-        out = np.empty((H, W), dtype=np.float32)
-        for y in prange(H):
-            for x in range(W):
-                val = image[y, x]
-                out[y, x] = piecewise_linear(val, xvals, yvals)
-        return out
-    elif image.ndim == 3:
-        H, W, C = image.shape
-        out = np.empty((H, W, C), dtype=np.float32)
-        for y in prange(H):
-            for x in range(W):
-                for c in range(C):
-                    val = image[y, x, c]
-                    out[y, x, c] = piecewise_linear(val, xvals, yvals)
-        return out
-    else:
-        # Unexpected shape
-        return image  # Fallback
 
 def apply_curves_adjustment(image, target_median, curves_boost):
     """
@@ -32512,6 +35934,7 @@ def ensure_native_byte_order(array):
     elif array.dtype.byteorder in ('<', '>'):  # Non-native byte order
         return array.byteswap().view(array.dtype.newbyteorder('='))
     return array
+
 
 
 # Determine if running inside a PyInstaller bundle
@@ -35075,20 +38498,31 @@ class MainWindow(QMainWindow):
                             self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
                             self.print_corner_coordinates()
                             
+                            print(f"Header CROTA2 Value: {self.header.get('CROTA2', 'Not Found')}")
+
                             # Display WCS information
                             # Set orientation based on WCS data if available
                             if 'CROTA2' in self.header:
-                                self.orientation = self.header['CROTA2']
+                                try:
+                                    self.orientation = float(self.header['CROTA2'])  # Convert to float
+                                except (ValueError, TypeError):
+                                    self.orientation = None
+                                    print("CROTA2 found, but could not convert to float.")
                             else:
                                 # Use calculate_orientation if CROTA2 is not present
                                 self.orientation = calculate_orientation(self.header)
                                 if self.orientation is None:
                                     print("Orientation: CD matrix elements not found in WCS header.")
 
-                            # Update orientation label or print for debugging
+                            # --- ✅ Ensure `self.orientation` is a float before using it ---
                             if self.orientation is not None:
-                                print(f"Orientation: {self.orientation:.2f}°")
-                                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                                try:
+                                    self.orientation = float(self.orientation)  # Final conversion check
+                                    print(f"Orientation: {self.orientation:.2f}°")
+                                    self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                                except (ValueError, TypeError):
+                                    print(f"Failed to format orientation: {self.orientation}")
+                                    self.orientation_label.setText("Orientation: N/A")
                             else:
                                 self.orientation_label.setText("Orientation: N/A")
 
@@ -35145,22 +38579,37 @@ class MainWindow(QMainWindow):
             self.center_ra, self.center_dec = self.wcs.wcs.crval
             self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
             self.print_corner_coordinates()
-            
+
+            # --- 🔍 Debugging Output ---
+            print(f"Header CROTA2 Value: {header.get('CROTA2', 'Not Found')}")
+
             # Display WCS information
             if 'CROTA2' in header:
-                self.orientation = header['CROTA2']
+                try:
+                    self.orientation = float(header['CROTA2'])  # Convert to float
+                except (ValueError, TypeError):
+                    self.orientation = None
+                    print("CROTA2 found, but could not convert to float.")
             else:
                 self.orientation = calculate_orientation(header)
                 if self.orientation is None:
                     print("Orientation: CD matrix elements not found in WCS header.")
 
+            # --- ✅ Ensure `self.orientation` is a float before using it ---
             if self.orientation is not None:
-                print(f"Orientation: {self.orientation:.2f}°")
-                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                try:
+                    self.orientation = float(self.orientation)  # Final conversion check
+                    print(f"Orientation: {self.orientation:.2f}°")
+                    self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                except (ValueError, TypeError):
+                    print("Final conversion failed. Orientation is not a float.")
+                    self.orientation_label.setText("Orientation: N/A")
             else:
+                print("Orientation is None.")
                 self.orientation_label.setText("Orientation: N/A")
 
-            print(f"WCS data loaded from header: RA={self.center_ra}, Dec={self.center_dec}, Pixel Scale={self.pixscale} arcsec/px")
+            print(f"WCS data loaded: RA={self.center_ra}, Dec={self.center_dec}, Pixel Scale={self.pixscale} arcsec/px")
+
         except ValueError as e:
             raise ValueError(f"WCS initialization error: {e}")
 
@@ -35283,7 +38732,7 @@ class MainWindow(QMainWindow):
         if self.main_image and self.wcs:
             pos = self.main_preview.mapToScene(event.pos())
             x, y = int(pos.x()), int(pos.y())
-            
+
             if 0 <= x < self.main_image.width() and 0 <= y < self.main_image.height():
                 ra, dec = self.calculate_ra_dec_from_pixel(x, y)
                 ra_hms = self.convert_ra_to_hms(ra)
@@ -35292,16 +38741,25 @@ class MainWindow(QMainWindow):
                 # Update RA/Dec labels
                 self.ra_label.setText(f"RA: {ra_hms}")
                 self.dec_label.setText(f"Dec: {dec_dms}")
-                
-                # Update orientation label if available
+
+                # --- 🔍 Debugging Output ---
+                #print(f"Current Orientation Type: {type(self.orientation)}, Value: {self.orientation}")
+
+                # ✅ Ensure `self.orientation` is a float before formatting
                 if self.orientation is not None:
-                    self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                    try:
+                        self.orientation = float(self.orientation)  # Final safeguard conversion
+                        self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                    except (ValueError, TypeError):
+                        print(f"Failed to format orientation: {self.orientation}")
+                        self.orientation_label.setText("Orientation: N/A")
                 else:
                     self.orientation_label.setText("Orientation: N/A")
         else:
             self.ra_label.setText("RA: N/A")
             self.dec_label.setText("Dec: N/A")
             self.orientation_label.setText("Orientation: N/A")
+
 
 
     def convert_ra_to_hms(self, ra_deg):
