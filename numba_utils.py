@@ -1135,26 +1135,43 @@ def compute_star_count(image):
     return fast_star_count(image)
 
 
-def fast_star_count(image, blur_size=5, threshold_factor=2.5):
-    """ Fast star detection using local contrast and Otsu thresholding. """
-    
-    # ✅ Step 1: Convert to 8-bit (scale intensity to 0-255)
+def fast_star_count(image, blur_size=5, threshold_factor=1.5):
+    """ Fast star detection using local contrast and adaptive thresholding. """
+
+    # ✅ Convert to grayscale if the image has multiple channels (e.g., RGB OSC)
+    if len(image.shape) == 3 and image.shape[-1] == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    # ✅ Normalize image to 0-255 range for 8-bit processing
     norm_img = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255.0
     norm_img = norm_img.astype(np.uint8)
 
-    # ✅ Step 2: Apply Gaussian Blur to create background model
+    # ✅ Apply Gaussian Blur to create background model
     blurred = cv2.GaussianBlur(norm_img, (blur_size, blur_size), 0)
 
-    # ✅ Step 3: Subtract to enhance stars
+    # ✅ Subtract blurred version to enhance stars
     enhanced = cv2.absdiff(norm_img, blurred)
 
-    # ✅ Step 4: Otsu’s thresholding for adaptive star detection
-    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # ✅ Use Otsu's thresholding to get an initial threshold
+    _, otsu_thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # ✅ Step 5: Count connected components (stars)
+    # ✅ Compute the **mean** threshold of all nonzero pixels
+    nonzero_pixels = enhanced[enhanced > 0]  # Extract only nonzero pixel values
+    if len(nonzero_pixels) > 0:
+        adaptive_threshold = np.mean(nonzero_pixels) * threshold_factor  # Scale threshold
+    else:
+        adaptive_threshold = otsu_thresh  # Fallback if no nonzero pixels found
+
+    # ✅ Ensure threshold is in range [0, 255]
+    adaptive_threshold = max(0, min(255, adaptive_threshold))
+
+    # ✅ Apply the adjusted threshold
+    _, binary = cv2.threshold(enhanced, adaptive_threshold, 255, cv2.THRESH_BINARY)
+
+    # ✅ Count connected components (stars)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
 
-    return num_labels - 1  # Subtract 1 because the first label is the background
+    return num_labels - 1  # Subtract 1 because label 0 is the background
 
 @njit(parallel=True, fastmath=True)
 def normalize_images_3d(stack, ref_median):
@@ -1223,101 +1240,233 @@ def normalize_images(stack, ref_median):
         raise ValueError(f"normalize_images: stack must be 3D or 4D, got shape {stack.shape}")
 
 
-@njit(fastmath=True, parallel=True)
-def debayer_RGGB_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # RGGB: top-left red, top-right green, bottom-left green, bottom-right blue.
-            r = image[i2, j2]
-            g1 = image[i2, j2 + 1]
-            g2 = image[i2 + 1, j2]
-            b = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
+@njit(parallel=True, fastmath=True)
+def _edge_aware_interpolate_numba(out):
+    """
+    For each pixel in out (shape: (H,W,3)) where out[y,x,c] == 0,
+    use a simple edge-aware approach:
+      1) Compute horizontal gradient = abs( left - right )
+      2) Compute vertical gradient   = abs( top - bottom )
+      3) Choose the direction with the smaller gradient => average neighbors
+      4) If neighbors are missing or zero, fallback to a small 3x3 average
+
+    This is simpler than AHD but usually better than naive bilinear
+    for high-contrast features like star cores.
+    """
+    H, W, C = out.shape
+
+    for c in range(C):
+        for y in prange(H):
+            for x in range(W):
+                if out[y, x, c] == 0:
+                    # Gather immediate neighbors
+                    left = 0.0
+                    right = 0.0
+                    top = 0.0
+                    bottom = 0.0
+                    have_left = False
+                    have_right = False
+                    have_top = False
+                    have_bottom = False
+
+                    # Left
+                    if x - 1 >= 0:
+                        val = out[y, x - 1, c]
+                        if val != 0:
+                            left = val
+                            have_left = True
+
+                    # Right
+                    if x + 1 < W:
+                        val = out[y, x + 1, c]
+                        if val != 0:
+                            right = val
+                            have_right = True
+
+                    # Top
+                    if y - 1 >= 0:
+                        val = out[y - 1, x, c]
+                        if val != 0:
+                            top = val
+                            have_top = True
+
+                    # Bottom
+                    if y + 1 < H:
+                        val = out[y + 1, x, c]
+                        if val != 0:
+                            bottom = val
+                            have_bottom = True
+
+                    # Compute gradients
+                    # If we don't have valid neighbors for that direction,
+                    # set the gradient to a large number => won't be chosen
+                    gh = 1e6
+                    gv = 1e6
+
+                    if have_left and have_right:
+                        gh = abs(left - right)
+                    if have_top and have_bottom:
+                        gv = abs(top - bottom)
+
+                    # Decide which direction to interpolate
+                    if gh < gv and have_left and have_right:
+                        # Horizontal interpolation
+                        out[y, x, c] = 0.5 * (left + right)
+                    elif gv <= gh and have_top and have_bottom:
+                        # Vertical interpolation
+                        out[y, x, c] = 0.5 * (top + bottom)
+                    else:
+                        # Fallback: average 3×3 region
+                        sumv = 0.0
+                        count = 0
+                        for dy in range(-1, 2):
+                            for dx in range(-1, 2):
+                                yy = y + dy
+                                xx = x + dx
+                                if 0 <= yy < H and 0 <= xx < W:
+                                    val = out[yy, xx, c]
+                                    if val != 0:
+                                        sumv += val
+                                        count += 1
+                        if count > 0:
+                            out[y, x, c] = sumv / count
+
+    return out
+# === Separate Full-Resolution Demosaicing Kernels ===
+# These njit functions assume the raw image is arranged in a Bayer pattern
+# and that we want a full (H,W,3) output.
+
+@njit(parallel=True, fastmath=True)
+def debayer_RGGB_fullres_fast(image):
+    """
+    For an RGGB pattern:
+      - Even rows: even cols = Red, odd cols = Green.
+      - Odd rows: even cols = Green, odd cols = Blue.
+    """
+    H, W = image.shape
+    out = np.zeros((H, W, 3), dtype=image.dtype)
+    for y in prange(H):
+        for x in range(W):
+            if (y & 1) == 0:
+                if (x & 1) == 0:
+                    # Even row, even col: Red
+                    out[y, x, 0] = image[y, x]
+                else:
+                    # Even row, odd col: Green
+                    out[y, x, 1] = image[y, x]
+            else:
+                if (x & 1) == 0:
+                    # Odd row, even col: Green
+                    out[y, x, 1] = image[y, x]
+                else:
+                    # Odd row, odd col: Blue
+                    out[y, x, 2] = image[y, x]
+    _edge_aware_interpolate_numba(out)
     return out
 
-@njit(fastmath=True, parallel=True)
-def debayer_BGGR_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # BGGR: top-left blue, top-right green, bottom-left green, bottom-right red.
-            b = image[i2, j2]
-            g1 = image[i2, j2 + 1]
-            g2 = image[i2 + 1, j2]
-            r = image[i2 + 1, j2 + 1]
-            out[i, j, 2] = b
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 0] = r
+@njit(parallel=True, fastmath=True)
+def debayer_BGGR_fullres_fast(image):
+    """
+    For a BGGR pattern:
+      - Even rows: even cols = Blue, odd cols = Green.
+      - Odd rows: even cols = Green, odd cols = Red.
+    """
+    H, W = image.shape
+    out = np.zeros((H, W, 3), dtype=image.dtype)
+    for y in prange(H):
+        for x in range(W):
+            if (y & 1) == 0:
+                if (x & 1) == 0:
+                    # Even row, even col: Blue
+                    out[y, x, 2] = image[y, x]
+                else:
+                    # Even row, odd col: Green
+                    out[y, x, 1] = image[y, x]
+            else:
+                if (x & 1) == 0:
+                    # Odd row, even col: Green
+                    out[y, x, 1] = image[y, x]
+                else:
+                    # Odd row, odd col: Red
+                    out[y, x, 0] = image[y, x]
+    _edge_aware_interpolate_numba(out)
     return out
 
-@njit(fastmath=True, parallel=True)
-def debayer_GRBG_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # GRBG: top-left green, top-right red, bottom-left blue, bottom-right green.
-            g1 = image[i2, j2]
-            r = image[i2, j2 + 1]
-            b = image[i2 + 1, j2]
-            g2 = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
+@njit(parallel=True, fastmath=True)
+def debayer_GRBG_fullres_fast(image):
+    """
+    For a GRBG pattern:
+      - Even rows: even cols = Green, odd cols = Red.
+      - Odd rows: even cols = Blue, odd cols = Green.
+    """
+    H, W = image.shape
+    out = np.zeros((H, W, 3), dtype=image.dtype)
+    for y in prange(H):
+        for x in range(W):
+            if (y & 1) == 0:
+                if (x & 1) == 0:
+                    # Even row, even col: Green
+                    out[y, x, 1] = image[y, x]
+                else:
+                    # Even row, odd col: Red
+                    out[y, x, 0] = image[y, x]
+            else:
+                if (x & 1) == 0:
+                    # Odd row, even col: Blue
+                    out[y, x, 2] = image[y, x]
+                else:
+                    # Odd row, odd col: Green
+                    out[y, x, 1] = image[y, x]
+    _edge_aware_interpolate_numba(out)
     return out
 
-@njit(fastmath=True, parallel=True)
-def debayer_GBRG_fast(image):
-    h, w = image.shape
-    new_h = h // 2
-    new_w = w // 2
-    out = np.empty((new_h, new_w, 3), dtype=image.dtype)
-    for i in prange(new_h):
-        for j in range(new_w):
-            i2 = i * 2
-            j2 = j * 2
-            # GBRG: top-left green, top-right blue, bottom-left red, bottom-right green.
-            g1 = image[i2, j2]
-            b = image[i2, j2 + 1]
-            r = image[i2 + 1, j2]
-            g2 = image[i2 + 1, j2 + 1]
-            out[i, j, 0] = r
-            out[i, j, 1] = (g1 + g2) / 2.0
-            out[i, j, 2] = b
+@njit(parallel=True, fastmath=True)
+def debayer_GBRG_fullres_fast(image):
+    """
+    For a GBRG pattern:
+      - Even rows: even cols = Green, odd cols = Blue.
+      - Odd rows: even cols = Red, odd cols = Green.
+    """
+    H, W = image.shape
+    out = np.zeros((H, W, 3), dtype=image.dtype)
+    for y in prange(H):
+        for x in range(W):
+            if (y & 1) == 0:
+                if (x & 1) == 0:
+                    # Even row, even col: Green
+                    out[y, x, 1] = image[y, x]
+                else:
+                    # Even row, odd col: Blue
+                    out[y, x, 2] = image[y, x]
+            else:
+                if (x & 1) == 0:
+                    # Odd row, even col: Red
+                    out[y, x, 0] = image[y, x]
+                else:
+                    # Odd row, odd col: Green
+                    out[y, x, 1] = image[y, x]
+    _edge_aware_interpolate_numba(out)
     return out
+
+# === Python-Level Dispatch Function ===
+# Since Numba cannot easily compare strings in nopython mode,
+# we do the if/elif check here in Python and then call the appropriate njit function.
 
 def debayer_fits_fast(image_data, bayer_pattern):
     bp = bayer_pattern.upper()
     if bp == 'RGGB':
-        return debayer_RGGB_fast(image_data)
+        return debayer_RGGB_fullres_fast(image_data)
     elif bp == 'BGGR':
-        return debayer_BGGR_fast(image_data)
+        return debayer_BGGR_fullres_fast(image_data)
     elif bp == 'GRBG':
-        return debayer_GRBG_fast(image_data)
+        return debayer_GRBG_fullres_fast(image_data)
     elif bp == 'GBRG':
-        return debayer_GBRG_fast(image_data)
+        return debayer_GBRG_fullres_fast(image_data)
     else:
         raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
 
 def debayer_raw_fast(raw_image_data, bayer_pattern="RGGB"):
-    # For RAW images, use the same debayering logic.
+    # For RAW images, use the same full-resolution demosaicing logic.
     return debayer_fits_fast(raw_image_data, bayer_pattern)
 
 
