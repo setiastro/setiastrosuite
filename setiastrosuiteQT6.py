@@ -6642,6 +6642,7 @@ class StackingSuiteDialog(QDialog):
 
         # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        
 
         # Load or default these
         self.stacking_directory = self.settings.value("stacking/dir", "", type=str)
@@ -6670,7 +6671,7 @@ class StackingSuiteDialog(QDialog):
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
-
+        self.dir_path_edit = QLineEdit(self.stacking_directory)  # Add this here
         # Create the new Conversion tab.
         self.conversion_tab = self.create_conversion_tab()
         # Existing tabs...
@@ -7151,7 +7152,9 @@ class StackingSuiteDialog(QDialog):
         directory = QFileDialog.getExistingDirectory(self, "Select Stacking Directory")
         if directory:
             self.stacking_directory = directory
-            self.dir_path_edit.setText(directory)
+            self.dir_path_edit.setText(directory)  # No more AttributeError
+            self.settings.setValue("stacking/dir", directory)  # Save the new directory
+
 
     def create_dark_tab(self):
         tab = QWidget()
