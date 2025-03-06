@@ -9317,51 +9317,81 @@ class StackingSuiteDialog(QDialog):
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
 
-        # Get the final transforms (all normalized paths)
-        all_transforms = self.alignment_thread.alignment_matrices
-        self.alignment_thread = None
+        # ✅ Store references before setting self.alignment_thread to None
+        alignment_thread = self.alignment_thread  # Save the reference
 
-        # Filter out any None transforms
-        valid_transforms = {
-            path: mat for (path, mat) in all_transforms.items() if mat is not None
+        if alignment_thread is None:
+            self.update_status("⚠️ Error: No alignment data available.")
+            return
+
+        # ✅ Get the final transforms (all normalized paths)
+        all_transforms = alignment_thread.alignment_matrices.copy()  # Copy before killing the thread
+
+        # ✅ Get final shift values from the last pass
+        if not alignment_thread.transform_deltas:
+            self.update_status("⚠️ No shift data available. Skipping filtering.")
+            final_shifts = [0.0] * len(all_transforms)  # Assume 0 shift if no data
+        else:
+            final_shifts = alignment_thread.transform_deltas[-1]  # Last pass shift values
+
+        # ✅ Pair filenames with shift values
+        file_shift_pairs = list(zip(all_transforms.keys(), final_shifts))
+
+
+        # ✅ Corrected: Map original file paths to their final transformed file paths
+        self.valid_transforms = {
+            orig_path: os.path.join(
+                self.stacking_directory, "Aligned_Images",
+                os.path.basename(orig_path).replace(".fit", "_r.fit")
+            )
+            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
+            if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
-        n_valid = len(valid_transforms)
+        rejected_files = [path for path, shift in file_shift_pairs if shift > 2.0]
+
+        # ✅ Kill the thread after copying the data
+        self.alignment_thread = None  # Now safe to delete
+
+        # ✅ Update status messages
+        n_valid = len(self.valid_transforms)
         n_total = len(all_transforms)
-        self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} failed.")
+        self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} rejected.")
 
         if n_valid == 0:
             self.update_status("⚠️ No frames to stack; aborting.")
             return
 
-        # Optionally save transforms
-        self.save_alignment_matrices_sasd(valid_transforms)
+        # ✅ Inform the user about rejected frames
+        if rejected_files:
+            self.update_status(f"🚨 Rejected {len(rejected_files)} frames due to shift > 2px.")
+            for rf in rejected_files:
+                self.update_status(f"  ❌ {os.path.basename(rf)}")
 
-        # Gather drizzle
+        # ✅ Optionally save only valid transforms
+        self.save_alignment_matrices_sasd(self.valid_transforms)
+
+        # ✅ Gather drizzle settings
         drizzle_dict = self.gather_drizzle_settings_from_tree()
 
-        # Filter your light_files so you only pass files that appear in valid_transforms
-        # Make sure the keys match exactly, i.e. do the same normalization:
+        # ✅ **Filter `light_files` to use only valid transformed images**
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
             filtered_light_files[group] = [
-                f for f in file_list
-                if os.path.normpath(f) in valid_transforms
+                f for f in file_list if os.path.normpath(f) in self.valid_transforms
             ]
             self.update_status(
                 f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
             )
 
-        # Now do the stacking
+        # ✅ Pass `valid_transforms` to stacking so it uses correct images
         self.stack_images_mixed_drizzle(
             grouped_files=filtered_light_files,
             frame_weights=self.frame_weights,
-            transforms_dict=valid_transforms,
+            transforms_dict=self.valid_transforms,  # 🔹 Use stored transforms
             drizzle_dict=drizzle_dict
         )
 
-        # Explicitly delete the thread reference
-        self.alignment_thread = None
 
     def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
         """
@@ -9447,21 +9477,24 @@ class StackingSuiteDialog(QDialog):
     def stack_registered_images(self, grouped_files, frame_weights):
         """
         Stacks registered images by group.
-        
+
         Parameters:
         grouped_files (dict): A dictionary where each key represents a grouping
             (for example, a combination of filter, exposure, dimensions) and the value
-            is a list of original file paths (as selected in the tree view) in that group.
+            is a list of final aligned file paths.
         frame_weights (dict): A dictionary mapping original file paths to computed weights.
-        
-        For each group, the function maps the original file to its corresponding aligned file 
-        (located in the Aligned_Images folder) – if the file isn’t already there, the "_r" suffix
-        is appended (if not already present). Then it stacks the group’s images using weighted
-        Windsorized Sigma Clipping and saves the resulting master stack with a dynamic filename.
+
+        This version ensures that we use the final transformed images instead of appending '_r'.
         """
         # Directory where aligned images are stored.
         aligned_dir = os.path.join(self.stacking_directory, "Aligned_Images")
-        
+
+        # Get valid aligned paths from the latest registration process
+        valid_transforms = self.valid_transforms  # Already filtered for valid shifts
+        self.update_status(f"✅ Using {len(valid_transforms)} final aligned images for stacking.")
+        for orig, aligned in valid_transforms.items():
+            self.update_status(f"  {os.path.basename(orig)} → {os.path.basename(aligned)}")
+
         # Process each group separately.
         for group_key, file_list in grouped_files.items():
             self.update_status(f"📊 Stacking group '{group_key}' with {len(file_list)} files...")
@@ -9475,35 +9508,23 @@ class StackingSuiteDialog(QDialog):
             reference_header = None
 
             # Determine the reference frame for this group:
-            # If self.reference_frame is in this group, use it; otherwise, use the first file.
             group_ref = self.reference_frame if self.reference_frame in file_list else file_list[0]
 
             for orig_file in file_list:
                 try:
-                    # Map the original file to its aligned version.
-                    if os.path.dirname(orig_file) == aligned_dir:
-                        # Already in the aligned directory.
-                        aligned_file_path = orig_file
-                    else:
-                        base = os.path.basename(orig_file)
-                        name, ext = os.path.splitext(base)
-                        # Force extension to ".fits" (even if the tree shows ".fit")
-                        if ext.lower() not in [".fits", ".fit"]:
-                            ext = ".fits"
-                        else:
-                            ext = ".fits"  # Always use .fits for aligned images
+                    # 🔹 **Get the correct final transformed file**
+                    aligned_file_path = self.valid_transforms.get(os.path.normpath(orig_file), None)
 
-                        if os.path.dirname(orig_file) == aligned_dir:
-                            # Already in the aligned directory.
-                            aligned_file_path = orig_file
-                        else:
-                            if not name.endswith("_r"):
-                                name_aligned = f"{name}_r"
-                            else:
-                                name_aligned = name
-                            aligned_file_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
+                    if not aligned_file_path:
+                        self.update_status(f"⚠️ No aligned file found for {orig_file}, skipping.")
+                        continue
 
-                    # Load the aligned image.
+                    # ✅ Ensure the file actually exists before trying to load it
+                    if not os.path.exists(aligned_file_path):
+                        self.update_status(f"🚨 Missing aligned file: {aligned_file_path}. Skipping.")
+                        continue
+
+                    # 🔹 **Load the transformed image**
                     image_data, header, _, _ = load_image(aligned_file_path)
                     if image_data is None:
                         self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
@@ -9525,111 +9546,58 @@ class StackingSuiteDialog(QDialog):
                 self.update_status(f"⚠️ Not enough valid frames in group '{group_key}' to stack.")
                 continue
 
-            # If we did not capture the reference header/median, try loading the reference frame directly.
-            if reference_median is None:
-                try:
-                    self.update_status("ℹ️ Reference frame median not found in loop. Loading reference frame directly...")
-                    if os.path.dirname(group_ref) == aligned_dir:
-                        ref_aligned_path = group_ref
-                    else:
-                        base = os.path.basename(group_ref)
-                        name, ext = os.path.splitext(base)
-                        if not name.endswith("_r"):
-                            name_aligned = f"{name}_r"
-                        else:
-                            name_aligned = name
-                        ref_aligned_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
-                    ref_data, ref_header, _, _ = load_image(ref_aligned_path)
-                    if ref_data is None:
-                        raise ValueError("Reference image data is None")
-                    reference_median = np.median(ref_data)
-                    reference_header = ref_header.copy()
-                except Exception as e:
-                    self.update_status(f"⚠️ Failed to load reference frame for group '{group_key}': {e}. Using first frame as fallback.")
-                    reference_median = np.median(stacked_data[0])
-                    # Try to set reference_header from the first valid frame.
-                    try:
-                        first_file = file_list[0]
-                        if os.path.dirname(first_file) == aligned_dir:
-                            first_aligned = first_file
-                        else:
-                            base = os.path.basename(first_file)
-                            name, ext = os.path.splitext(base)
-                            if not name.endswith("_r"):
-                                name_aligned = f"{name}_r"
-                            else:
-                                name_aligned = name
-                            first_aligned = os.path.join(aligned_dir, f"{name_aligned}{ext}")
-                        _, first_header, _, _ = load_image(first_aligned)
-                        reference_header = first_header.copy()
-                    except Exception:
-                        reference_header = fits.Header()
-
-            # Stack the images.
-            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
-            weights = np.array(weights, dtype=np.float32)
-
+            # ✅ **Normalize images before stacking**
             self.update_status(f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}")
+            if not stacked_data:
+                self.update_status(f"⚠️ No valid frames to stack in group '{group_key}'. Skipping.")
+                return
+
+            stacked_data = np.array(stacked_data, dtype=np.float32)  # ✅ Convert to NumPy array
             stacked_data = normalize_images(stacked_data, reference_median)
 
-            # At the point where you apply the rejection algorithm:
+            # ✅ **Apply rejection algorithm**
             self.update_status(f"📊 Applying {self.rejection_algorithm} on group '{group_key}'...")
             QApplication.processEvents()
 
-            selected_algo = self.rejection_algorithm
+            # ✅ Convert `stacked_data` from list to NumPy array
+            stacked_data = np.array(stacked_data, dtype=np.float32)  # Convert to NumPy array
 
+            # ✅ Convert `weights` to a NumPy array
+            weights = np.array(weights, dtype=np.float32)  # Ensure it's an array for Numba
+
+            # ✅ Ensure `stacked_data` is 4D if needed
+            if stacked_data.ndim == 3:  # If it's color but missing the 4th dimension
+                stacked_data = np.expand_dims(stacked_data, axis=-1)  # Add a new axis for channels
+
+            # Select rejection algorithm
+            selected_algo = self.rejection_algorithm
             if selected_algo == "Weighted Windsorized Sigma Clipping":
-                clipped_mean = windsorized_sigma_clip_weighted(
-                    stacked_data, weights,
-                    lower=self.sigma_low, upper=self.sigma_high
-                )
+                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
             elif selected_algo == "Kappa-Sigma Clipping":
-                clipped_mean = kappa_sigma_clip_weighted(
-                    stacked_data, weights,
-                    kappa=self.kappa, iterations=self.iterations
-                )
+                clipped_mean = kappa_sigma_clip_weighted(stacked_data, weights, kappa=self.kappa, iterations=self.iterations)
             elif selected_algo == "Simple Average (No Rejection)":
                 clipped_mean = np.average(stacked_data, axis=0, weights=weights)
             elif selected_algo == "Simple Median (No Rejection)":
                 clipped_mean = np.median(stacked_data, axis=0)
             elif selected_algo == "Trimmed Mean":
-                clipped_mean = trimmed_mean_weighted(
-                    stacked_data, weights,
-                    trim_fraction=self.trim_fraction
-                )
+                clipped_mean = trimmed_mean_weighted(stacked_data, weights, trim_fraction=self.trim_fraction)
             elif selected_algo == "Extreme Studentized Deviate (ESD)":
-                clipped_mean = esd_clip_weighted(
-                    stacked_data, weights,
-                    threshold=self.esd_threshold
-                )
+                clipped_mean = esd_clip_weighted(stacked_data, weights, threshold=self.esd_threshold)
             elif selected_algo == "Biweight Estimator":
-                clipped_mean = biweight_location_weighted(
-                    stacked_data, weights,
-                    tuning_constant=self.biweight_constant
-                )
+                clipped_mean = biweight_location_weighted(stacked_data, weights, tuning_constant=self.biweight_constant)
             elif selected_algo == "Modified Z-Score Clipping":
-                clipped_mean = modified_zscore_clip_weighted(
-                    stacked_data, weights,
-                    threshold=self.modz_threshold
-                )
+                clipped_mean = modified_zscore_clip_weighted(stacked_data, weights, threshold=self.modz_threshold)
             else:
-                clipped_mean = windsorized_sigma_clip_weighted(
-                    stacked_data, weights,
-                    lower=self.sigma_low, upper=self.sigma_high
-                )
+                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
 
-            # Use the group key as part of the output filename.
-            # Alternatively, you could derive the key from the header.
+            # ✅ **Save the final stacked image**
             output_filename = f"MasterLight_{group_key}.fits"
             output_path = os.path.join(self.stacking_directory, output_filename)
 
-            # Determine if the stacked image is color or mono
-            if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 3:
-                is_mono = False  # Color (H, W, C)
-            else:
-                is_mono = True   # Mono (H, W)
+            # Determine if the stacked image is mono or color
+            is_mono = (clipped_mean.ndim == 2)  # Mono = (H, W), Color = (H, W, C)
 
-            # Update the FITS header
+            # ✅ **Ensure FITS header matches the stacked image dimensions**
             if reference_header is None:
                 reference_header = fits.Header()
                 
@@ -9639,7 +9607,6 @@ class StackingSuiteDialog(QDialog):
             reference_header["CREATOR"] = "SetiAstroSuite"
             reference_header["DATE-OBS"] = datetime.utcnow().isoformat()
 
-            # ✅ Ensure header matches image dimensions
             if is_mono:
                 reference_header["NAXIS"] = 2
                 reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
@@ -9648,20 +9615,21 @@ class StackingSuiteDialog(QDialog):
                 reference_header["NAXIS"] = 3
                 reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
                 reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
-                reference_header["NAXIS3"] = 3  # OSC: 3 color channels
+                reference_header["NAXIS3"] = 3  # 3 Color Channels (RGB)
 
-            # ✅ Save using the global save_image() method.
+            # ✅ **Save the stacked image using `save_image()`**
             save_image(
                 img_array=clipped_mean,
                 filename=output_path,
                 original_format="fits",
                 bit_depth="32-bit floating point",
                 original_header=reference_header,
-                is_mono=is_mono  # Pass corrected flag
+                is_mono=is_mono
             )
 
             self.update_status(f"✅ Group '{group_key}' stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
+
 
     def integrate_registered_images(self):
         """ Integrates previously registered images (already aligned) without re-aligning them. """
@@ -12683,8 +12651,8 @@ class StarRegistrationWorker(QRunnable):
                 QApplication.processEvents()
                 return
 
-            self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
-            QApplication.processEvents()
+            #self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
+            #QApplication.processEvents()
             
             # 2) Detect stars
             img_stars = StarRegistrationThread.detect_grid_stars_static(img)
@@ -12718,16 +12686,22 @@ class StarRegistrationWorker(QRunnable):
                 QApplication.processEvents()
                 return
 
-            # 6) Build output filename (force extension to .fits)
+            # ✅ Build output filename, but prevent multiple "_r" suffixes
             base = os.path.basename(self.file_path)
-            name, _ = os.path.splitext(base)
-            output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
+            name, ext = os.path.splitext(base)
+
+            # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
+            if not name.endswith("_r"):
+                name += "_r"
+
+            output_filename = os.path.join(self.output_directory, f"{name}.fit")  # Always save as .fits
+
             
             # 7) Save the aligned image
             save_image(
                 img_array=aligned_image,
                 filename=output_filename,
-                original_format="fits",
+                original_format="fit",
                 bit_depth=img_bit_depth,
                 original_header=img_header,
                 is_mono=img_is_mono
@@ -12749,7 +12723,7 @@ class StarRegistrationThread(QThread):
     registration_complete = pyqtSignal(bool, str)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
-                 max_refinement_passes=3, shift_tolerance=0.1):
+                 max_refinement_passes=4, shift_tolerance=0.1):
         super().__init__()
         # Always store reference as normalized
         self.reference_image_path = os.path.normpath(reference_image_path)
@@ -12803,6 +12777,20 @@ class StarRegistrationThread(QThread):
                     self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
                     break
 
+            # 🚀 **Reject frames with >2px final shift**
+            final_shifts = self.transform_deltas[-1]  # Last pass shift values
+            self.files_to_align = [
+                f for f, shift in zip(self.files_to_align, final_shifts) if shift <= 2.0
+            ]
+            rejected_files = [
+                f for f, shift in zip(self.files_to_align, final_shifts) if shift > 2.0
+            ]
+
+            if rejected_files:
+                self.progress_update.emit(
+                    f"🚨 Rejected {len(rejected_files)} frame(s) due to high residual shift > 2px."
+                )
+
             # Finished passes
             aligned_count = sum(1 for v in self.alignment_matrices.values() if v is not None)
             total_count = len(self.alignment_matrices)
@@ -12818,38 +12806,92 @@ class StarRegistrationThread(QThread):
         pool.setMaxThreadCount(num_cores)
         self.progress_update.emit(f"Using {num_cores} cores for pass {pass_index+1}.")
 
-        # Launch a worker for each file
-        for file_path in self.files_to_align:
+        transformed_files = []  # Store newly aligned images
+        remaining_files = []  # Already aligned images (skip processing)
+
+        for fpath in self.files_to_align:
+            transform = self.alignment_matrices.get(fpath, None)
+
+            if transform is not None:
+                tx, ty = transform[0,2], transform[1,2]
+                shift_delta = np.sqrt(tx * tx + ty * ty)
+
+                # 🚀 **Skip images already aligned within 0.2 pixels**
+                if shift_delta <= 0.2:
+                    self.progress_update.emit(f"✅ Skipping {os.path.basename(fpath)} (Shift: {shift_delta:.2f}px)")
+                    remaining_files.append(fpath)  # Keep this image unchanged
+                    continue
+
+            # **Only process misaligned images**
             worker = StarRegistrationWorker(
-                file_path, ref_stars, ref_triangles, self.output_directory
+                fpath, ref_stars, ref_triangles, self.output_directory
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
             worker.signals.result_transform.connect(self.on_worker_result_transform)
             pool.start(worker)
+
         pool.waitForDone()
 
         pass_deltas = []
         aligned_count = 0
+
         for fpath in self.files_to_align:
             transform = self.alignment_matrices.get(fpath, None)
             if transform is not None:
                 aligned_count += 1
                 tx, ty = transform[0,2], transform[1,2]
-                pass_deltas.append(np.sqrt(tx*tx + ty*ty))
+                shift_delta = np.sqrt(tx*tx + ty*ty)
+                pass_deltas.append(shift_delta)
+
+                # **Only transform misaligned images**
+                if shift_delta > 0.2:
+                    # Load original image and header
+                    image, original_header, original_format, bit_depth = load_image(fpath)
+                    transformed_image = self.apply_affine_transform_static(image, transform)
+
+                    # ✅ Overwrite previous `_r.fits` file instead of adding multiple `_r`
+                    base_name = os.path.basename(fpath)
+                    name, ext = os.path.splitext(base_name)
+
+                    # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
+                    if not name.endswith("_r"):
+                        name += "_r"
+
+                    transformed_path = os.path.join(self.output_directory, f"{name}.fit")
+
+
+                    # ✅ Corrected save_image call (overwrites _r file)
+                    save_image(
+                        img_array=transformed_image,
+                        filename=transformed_path,
+                        original_format="fit",
+                        bit_depth=bit_depth,
+                        original_header=original_header,
+                        is_mono=(len(image.shape) == 2)
+                    )
+
+                    transformed_files.append(transformed_path)
+                else:
+                    remaining_files.append(fpath)  # Keep already aligned image
 
         self.transform_deltas.append(pass_deltas)
+
+        # ✅ **Update files list for next pass, only processing misaligned images**
+        self.files_to_align = transformed_files + remaining_files
+
         self.progress_update.emit(
             f"Pass {pass_index+1} shift deltas: {[f'{d:.2f}' for d in pass_deltas]}"
         )
 
         if aligned_count == 0:
-            return False, "All frames failed alignment this pass."
+            return False, "All frames already aligned within tolerance."
 
         failed_count = len(self.files_to_align) - aligned_count
         if failed_count > 0:
             return True, f"Pass complete. {failed_count} frame(s) failed."
         return True, "Pass complete (all succeeded)."
+
     
     def on_worker_progress(self, msg):
         self.progress_update.emit(msg)
@@ -12874,7 +12916,7 @@ class StarRegistrationThread(QThread):
         if image.ndim == 3:
             image = np.mean(image, axis=2)
         mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
         sources = daofind(image - median)
         if sources is None or len(sources) == 0:
             return np.array([])
@@ -12897,9 +12939,12 @@ class StarRegistrationThread(QThread):
         d2 = np.linalg.norm(tri_points[1] - tri_points[2])
         d3 = np.linalg.norm(tri_points[2] - tri_points[0])
         sides = sorted([d1, d2, d3])
+        
         if sides[0] == 0:
-            return None
-        return (sides[1] / sides[0], sides[2] / sides[0])
+            return None  # Prevent division by zero
+        
+        # Use higher precision (4 decimal places instead of 2)
+        return (round(sides[1] / sides[0], 4), round(sides[2] / sides[0], 4))
 
     # NEW METHOD: store transforms in self.alignment_matrices
     def on_worker_result_transform(self, file_path, transform):
@@ -12912,7 +12957,7 @@ class StarRegistrationThread(QThread):
         if image.ndim == 3:
             image = np.mean(image, axis=2)
         mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
         sources = daofind(image - median)
         if sources is None or len(sources) == 0:
             return np.array([])
@@ -12943,7 +12988,7 @@ class StarRegistrationThread(QThread):
                         local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
                         local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
                         sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:12])
+                        stars.extend(sorted_stars[:5])
         return np.array(stars) if stars else np.array([])
 
     @staticmethod
@@ -12961,7 +13006,7 @@ class StarRegistrationThread(QThread):
                 if distances[closest_idx] < 20:
                     matches.append((img_star, ref_stars[closest_idx]))
             print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
-            if len(matches) < 3:
+            if len(matches) < 5:
                 print("DEBUG: Not enough matches; continuing to next attempt.")
                 continue
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
@@ -12969,7 +13014,8 @@ class StarRegistrationThread(QThread):
             rough_transform, inliers = cv2.estimateAffinePartial2D(
                 src_pts.reshape(-1, 1, 2),
                 dst_pts.reshape(-1, 1, 2),
-                method=cv2.LMEDS
+                method=cv2.RANSAC,
+                ransacReprojThreshold=3.0
             )
             if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
                 transform = rough_transform
@@ -12989,7 +13035,7 @@ class StarRegistrationThread(QThread):
                 if distances[closest_idx] < 7:
                     matches.append((img_stars[idx], ref_stars[closest_idx]))
             print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
-            if len(matches) < 3:
+            if len(matches) < 5:
                 print("DEBUG: Not enough matches during refinement; aborting transform.")
                 return None
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
@@ -12997,7 +13043,8 @@ class StarRegistrationThread(QThread):
             new_transform, inliers = cv2.estimateAffinePartial2D(
                 src_pts.reshape(-1, 1, 2),
                 dst_pts.reshape(-1, 1, 2),
-                method=cv2.LMEDS
+                method=cv2.RANSAC,
+                ransacReprojThreshold=3.0
             )
             if new_transform is None:
                 print("DEBUG: Refinement failed to compute a new transform; aborting.")
