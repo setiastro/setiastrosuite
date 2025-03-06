@@ -8497,10 +8497,10 @@ class StackingSuiteDialog(QDialog):
             # Extract only the exposure time
             match = re.match(r"([\d.]+)s?", exposure_time_str)
             if not match:
-                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}")
-                continue  # Skip invalid entries
-
-            exposure_time = float(match.group(1))  # Extracted number
+                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}; assigning 0s")
+                exposure_time = -10.0
+            else:
+                exposure_time = float(match.group(1))  # Extracted number
 
             matched_group = None
             for key in flat_files_by_group.keys():
