@@ -213,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.0"
+VERSION = "2.12.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9046,17 +9046,31 @@ class StackingSuiteDialog(QDialog):
                         calibrated_dir, os.path.basename(light_file).replace(".fit", "_c.fit")
                     )
 
-                    # 1) Compute min/max
-                    min_val = light_data.min()
-                    max_val = light_data.max()
-                    range_val = max_val - min_val
+                    # 1) Flatten and find nonzero pixels
+                    flat_data = light_data.ravel()  # or .flatten()
+                    nonzero_indices = np.where(flat_data > 0)[0]
 
-                    # 2) Rescale to [0, 1]
-                    if range_val != 0:
-                        light_data = (light_data - min_val) / range_val
-                    else:
-                        # Edge case: if all pixels have the same value
-                        light_data = np.zeros_like(light_data, dtype=np.float32)
+                    if len(nonzero_indices) > 0:
+                        # Option A: truly the "first" nonzero in raster order
+                        #black_point = flat_data[nonzero_indices[0]]
+
+                        # Option B: the smallest nonzero pixel
+                        black_point = flat_data[nonzero_indices].min()
+
+                        # Subtract that black point
+                        light_data -= black_point
+
+                    # 2) Check if new max is > 1
+                    new_max = light_data.max()
+                    if new_max > 1.0:
+                        new_min = light_data.min()
+                        range_val = new_max - new_min
+                        if range_val != 0:
+                            light_data = (light_data - new_min) / range_val
+                        else:
+                            # Edge case: if everything is constant after black point subtraction
+                            light_data = np.zeros_like(light_data, dtype=np.float32)
+
 
                     save_image(
                         img_array=light_data,
@@ -12823,7 +12837,7 @@ class StarRegistrationThread(QThread):
                 return
 
             # Detect reference stars, etc...
-            ref_stars = self.detect_stars(ref_image)
+            ref_stars = self.detect_stars_static(ref_image)
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
@@ -12989,15 +13003,15 @@ class StarRegistrationThread(QThread):
         self.alignment_matrices[norm_path] = transform
         self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
-    def detect_stars(self, image):
-        if image.ndim == 3:
-            image = np.mean(image, axis=2)
-        mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
-        sources = daofind(image - median)
-        if sources is None or len(sources) == 0:
-            return np.array([])
-        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+    #def detect_stars(self, image):
+    #    if image.ndim == 3:
+    #        image = np.mean(image, axis=2)
+    #    mean, median, std = sigma_clipped_stats(image)
+    #    daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
+    #    sources = daofind(image - median)
+    #    if sources is None or len(sources) == 0:
+    #        return np.array([])
+    #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
 
     def build_triangle_dict(self, coords):
         tri = Delaunay(coords)
@@ -13041,15 +13055,30 @@ class StarRegistrationThread(QThread):
     #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
 
     @staticmethod
-    def detect_stars_static(image):
-        # If the image is color, convert to mono
+    def detect_stars_static(
+        image,
+        blur_size=9,
+        threshold_factor=0.6,
+        min_area=1,
+        max_area=10000
+    ):
+        """
+        Detect more stars by lowering the threshold_factor, reducing the blur_size,
+        and possibly adjusting min_area/max_area.
+        """
         if image.ndim == 3:
             image = np.mean(image, axis=2)
 
-        # Use our contour-based function instead of DAOStarFinder
-        star_coords = fast_star_detect(image)
-
-        return star_coords        
+        # Pass the parameters through to fast_star_detect
+        star_coords = fast_star_detect(
+            image,
+            blur_size=blur_size,
+            threshold_factor=threshold_factor,
+            min_area=min_area,
+            max_area=max_area
+        )
+        return star_coords
+        
 
     #@staticmethod
     #def detect_grid_stars_static(image):
@@ -13080,16 +13109,26 @@ class StarRegistrationThread(QThread):
      #   return np.array(stars) if stars else np.array([])
 
     @staticmethod
-    def detect_grid_stars_static(image):
+    def detect_grid_stars_static(
+        image,
+        blur_size=9,
+        threshold_factor=0.6,
+        min_area=1,
+        max_area=10000
+    ):
         if image.ndim == 3:
             image = np.mean(image, axis=2)
+
         h, w = image.shape
         margin_x = int(w * 0.05)
         margin_y = int(h * 0.05)
         valid_x_min, valid_x_max = margin_x, w - margin_x
         valid_y_min, valid_y_max = margin_y, h - margin_y
+
+        # Divide the image into a 4x4 grid
         grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
         grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+
         stars = []
         for i in range(len(grid_x) - 1):
             for j in range(len(grid_y) - 1):
@@ -13098,17 +13137,41 @@ class StarRegistrationThread(QThread):
                 sub_img = image[y_min:y_max, x_min:x_max]
                 if sub_img.size == 0:
                     continue
+
+                # Basic check for variance (i.e. there's something to detect)
                 if np.std(sub_img) > 0:
-                    local_stars = fast_star_detect(sub_img)  # use new function
-                    # Shift coords back into global space
+                    # Detect stars in this subregion
+                    local_stars = fast_star_detect(sub_img,
+                        blur_size=blur_size,
+                        threshold_factor=threshold_factor,
+                        min_area=min_area,
+                        max_area=max_area
+                    )
+
+                    # Shift local star coords back into global image space
+                    # then store them in a temporary list to sort by brightness
+                    shifted_stars = []
                     for (sx, sy) in local_stars:
                         gx = np.clip(sx + x_min, valid_x_min, valid_x_max - 1)
                         gy = np.clip(sy + y_min, valid_y_min, valid_y_max - 1)
-                        stars.append((gx, gy))
+                        shifted_stars.append((gx, gy))
+
+                    # Sort by brightness in the global image
+                    # (We cast to int for indexing, but you may want a safety check if coords can be fractional)
+                    sorted_stars = sorted(
+                        shifted_stars,
+                        key=lambda s: image[int(s[1]), int(s[0])],
+                        reverse=True
+                    )
+                    # Keep only the 10 brightest
+                    stars.extend(sorted_stars[:50])
+
         if len(stars) == 0:
             return np.empty((0,2), dtype=np.float32)
-        # Optionally sort by brightness if needed, etc.
+
+        # Convert list of (x,y) to Nx2 float32 array
         return np.array(stars, dtype=np.float32)
+
 
 
     @staticmethod
@@ -13123,8 +13186,9 @@ class StarRegistrationThread(QThread):
             for img_star in img_stars:
                 distances = np.linalg.norm(ref_stars - img_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 20:
-                    matches.append((img_star, ref_stars[closest_idx]))
+                #if distances[closest_idx] < 20:
+                #    matches.append((img_star, ref_stars[closest_idx]))
+                matches.append((img_star, ref_stars[closest_idx]))
             print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
             if len(matches) < 5:
                 print("DEBUG: Not enough matches; continuing to next attempt.")
@@ -13152,7 +13216,7 @@ class StarRegistrationThread(QThread):
             for idx, t_star in enumerate(transformed_img_stars):
                 distances = np.linalg.norm(ref_stars - t_star, axis=1)
                 closest_idx = np.argmin(distances)
-                if distances[closest_idx] < 7:
+                if distances[closest_idx] < 20:
                     matches.append((img_stars[idx], ref_stars[closest_idx]))
             print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
             if len(matches) < 5:
