@@ -8278,43 +8278,49 @@ class StackingSuiteDialog(QDialog):
 
 
     def save_master_dark(self, master_dark, output_path, exposure_time, is_mono):
-        """ Saves the master dark as 32-bit floating point FITS while maintaining OSC structure. """
-
-        # ✅ Ensure correct shape for OSC darks
+        """Saves the master dark as 32-bit floating point FITS while maintaining OSC structure."""
         if is_mono:
-            hdu = fits.PrimaryHDU(master_dark.astype(np.float32))  # Mono: (H, W)
-            image_size = f"{master_dark.shape[1]}x{master_dark.shape[0]}"  # (W x H)
+            # Mono => shape (H, W)
+            h, w = master_dark.shape
+            # Wrap in an HDU
+            hdu_data = master_dark.astype(np.float32)
+            hdu = fits.PrimaryHDU(hdu_data)
+            image_size = f"{w}x{h}"  # Width x Height
         else:
-            h, w, c = master_dark.shape  # Get the correct dimensions for OSC
-            hdu = fits.PrimaryHDU(master_dark.transpose(2, 0, 1).astype(np.float32))  # Save as (C, H, W)
-            image_size = f"{w}x{h}"  # ✅ Store (Width x Height), ignore channels
+            # Color => shape (H, W, C)
+            h, w, c = master_dark.shape
+            # Transpose to (C, H, W)
+            hdu_data = master_dark.transpose(2, 0, 1).astype(np.float32)
+            hdu = fits.PrimaryHDU(hdu_data)
+            image_size = f"{w}x{h}"
 
-        # ✅ Proper FITS Header
+        # Now 'hdu' is a fits.PrimaryHDU in both branches
         hdr = hdu.header
-        hdr["SIMPLE"] = True  
-        hdr["BITPIX"] = -32   
-        hdr["NAXIS"] = 3 if not is_mono else 2  # ✅ 3D for OSC, 2D for mono
-        hdr["NAXIS1"] = w  # Width
-        hdr["NAXIS2"] = h  # Height
+        hdr["SIMPLE"]   = True
+        hdr["BITPIX"]   = -32
+        hdr["NAXIS"]    = 3 if not is_mono else 2
+        hdr["NAXIS1"]   = w  # Width
+        hdr["NAXIS2"]   = h  # Height
         if not is_mono:
-            hdr["NAXIS3"] = c  # ✅ RGB channels for OSC
-        hdr["BSCALE"] = 1.0  
-        hdr["BZERO"] = 0.0    
+            hdr["NAXIS3"] = c
+        hdr["BSCALE"]   = 1.0
+        hdr["BZERO"]    = 0.0
         hdr["IMAGETYP"] = "MASTER DARK"
         hdr["EXPOSURE"] = exposure_time
         hdr["DATE-OBS"] = datetime.utcnow().isoformat()
-        hdr["CREATOR"] = "SetiAstroSuite"
+        hdr["CREATOR"]  = "SetiAstroSuite"
 
-        # ✅ Write the FITS file
+        # Write the FITS file
         hdu.writeto(output_path, overwrite=True)
 
-        # ✅ Store Master Dark Path with Correct Key
-        key = f"{exposure_time}s ({image_size})"  # Always store as Width x Height
-        self.master_files[key] = output_path  
-        self.master_sizes[output_path] = image_size  # ✅ Ensure size is stored correctly
+        # Store Master Dark path with correct key
+        key = f"{exposure_time}s ({image_size})"
+        self.master_files[key] = output_path
+        self.master_sizes[output_path] = image_size
 
         print(f"✅ Master Dark FITS saved: {output_path}")
         self.update_status(f"✅ Stored Master Dark -> {key}: {output_path}")
+
 
 
             
@@ -9233,6 +9239,8 @@ class StackingSuiteDialog(QDialog):
             star_count = star_counts[file]["count"]
             ecc = star_counts[file]["eccentricity"]
             mean_value = mean_values[file]
+            star_count = max(star_count,1)
+
 
             # Avoid division by zero
             mean_weight = max(mean_value, 1e-6)
