@@ -213,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.8"
+VERSION = "2.12.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1143,17 +1143,9 @@ class AstroEditingSuite(QMainWindow):
         self.supernova_hunter_tab.show()
 
     def stacking_suite_action(self):
-        """ Opens the Stacking Suite window only if the correct secret code is entered. """
+        self.stackingsuitewindow = StackingSuiteDialog()
+        self.stackingsuitewindow.show()
 
-        # Create input dialog
-        text, ok = QInputDialog.getText(None, "Stacking Suite - beta",
-                                        "If you really want to view it, just say the magic word (please):")
-
-        if ok and text.strip().lower() == "please":
-            self.stackingsuitewindow = StackingSuiteDialog()
-            self.stackingsuitewindow.show()
-        else:
-            QMessageBox.information(None, "Access Denied", "Incorrect code or action canceled.")
 
 
     def open_preview_window(self, slot):
@@ -7527,7 +7519,7 @@ class StackingSuiteDialog(QDialog):
         # ─────────────────────────────────────────
         drizzle_layout = QHBoxLayout()
 
-        self.drizzle_checkbox = QCheckBox("Enable Drizzle")
+        self.drizzle_checkbox = QCheckBox("Enable Drizzle (beta)")
         self.drizzle_checkbox.stateChanged.connect(self.update_drizzle_settings)  # <─ connect signal
         drizzle_layout.addWidget(self.drizzle_checkbox)
 
@@ -8270,7 +8262,7 @@ class StackingSuiteDialog(QDialog):
                 clipped_mean = windsorized_sigma_clip_3d(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
 
             # ✅ Step 5: Save Master Dark
-            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s_{image_size}.fits")
+            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s_{image_size}.fit")
             self.save_master_dark(clipped_mean, master_dark_path, exposure_time, is_mono)
 
             # ✅ Step 6: Add to Master Dark Tree
@@ -8614,7 +8606,7 @@ class StackingSuiteDialog(QDialog):
             clipped_mean = windsorized_sigma_clip(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
 
             # ✅ Save Master Flat
-            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fits")
+            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fit")
             self.save_master_flat(clipped_mean, master_flat_path, exposure_time, filter_name)
 
             # ✅ Store Master Flat properly
@@ -8659,11 +8651,23 @@ class StackingSuiteDialog(QDialog):
         fits_header["BSCALE"] = 1.0  # 🔹 Prevent rescaling
         fits_header["BZERO"] = 0.0   # 🔹 Prevent offset
 
+        # 1) Compute min/max
+        min_val = master_flat.min()
+        max_val = master_flat.max()
+        range_val = max_val - min_val
+
+        # 2) Rescale to [0, 1]
+        if range_val != 0:
+            master_flat = (master_flat - min_val) / range_val
+        else:
+            # Edge case: if all pixels have the same value
+            master_flat = np.zeros_like(master_flat, dtype=np.float32)
+
         # ✅ Save as FITS
         save_image(
             img_array=master_flat,
             filename=output_path,
-            original_format="fits",
+            original_format="fit",
             bit_depth="32-bit floating point",
             original_header=fits_header,
             is_mono=is_mono
@@ -9033,13 +9037,25 @@ class StackingSuiteDialog(QDialog):
 
                     # 🔹 Save using global `save_image()`
                     calibrated_filename = os.path.join(
-                        calibrated_dir, os.path.basename(light_file).replace(".fits", "_c.fits")
+                        calibrated_dir, os.path.basename(light_file).replace(".fit", "_c.fit")
                     )
+
+                    # 1) Compute min/max
+                    min_val = light_data.min()
+                    max_val = light_data.max()
+                    range_val = max_val - min_val
+
+                    # 2) Rescale to [0, 1]
+                    if range_val != 0:
+                        light_data = (light_data - min_val) / range_val
+                    else:
+                        # Edge case: if all pixels have the same value
+                        light_data = np.zeros_like(light_data, dtype=np.float32)
 
                     save_image(
                         img_array=light_data,
                         filename=calibrated_filename,
-                        original_format="fits",
+                        original_format="fit",
                         bit_depth=bit_depth,
                         original_header=hdr,
                         is_mono=is_mono
@@ -9195,7 +9211,11 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
 
             # ✅ Compute Star Count separately
-            star_counts[file] = compute_star_count(images[i])
+            count, ecc = compute_star_count(images[i])
+            star_counts[file] = {
+                "count": count,
+                "eccentricity": ecc
+            }
 
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
@@ -9208,23 +9228,31 @@ class StackingSuiteDialog(QDialog):
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
 
         for file in measured_frames:
-            star_count = star_counts[file]
+            # Unpack your star count and eccentricity from wherever you stored them
+            # e.g. star_counts[file] = (count, ecc)
+            star_count = star_counts[file]["count"]
+            ecc = star_counts[file]["eccentricity"]
             mean_value = mean_values[file]
 
             # Avoid division by zero
-            star_weight = max(star_count, 1e-6)
             mean_weight = max(mean_value, 1e-6)
 
-            # Ratio-based weight
-            raw_weight = star_weight / mean_weight
+            # Weight = star_count * eccentricity / mean
+            raw_weight = (star_count * min(1,max(1.0 - ecc, 0.0))) / mean_weight
+
+            # Store it
             self.frame_weights[file] = raw_weight
 
             debug_weight_log += (
                 f"📂 {os.path.basename(file)} → "
                 f"Star Count: {star_count}, "
+                f"Eccentricity: {ecc:.4f}, "
                 f"Mean: {mean_value:.4f}, "
                 f"Raw Weight: {raw_weight:.4f}\n"
             )
+
+        self.update_status(debug_weight_log)
+
 
         # 6) Normalize Weights so max = 1.0 (optional but recommended)
         max_w = max(self.frame_weights.values())
@@ -9337,8 +9365,14 @@ class StackingSuiteDialog(QDialog):
         # ✅ Pair filenames with shift values
         file_shift_pairs = list(zip(all_transforms.keys(), final_shifts))
 
+        # 1) Build a dictionary of numeric transforms for valid frames
+        valid_matrices = {
+            orig_path: all_transforms[orig_path]
+            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
+            if all_transforms[orig_path] is not None and shift <= 2.0
+        }
 
-        # ✅ Corrected: Map original file paths to their final transformed file paths
+        # 2) Build a dictionary mapping original file → final aligned file path
         self.valid_transforms = {
             orig_path: os.path.join(
                 self.stacking_directory, "Aligned_Images",
@@ -9348,6 +9382,7 @@ class StackingSuiteDialog(QDialog):
             if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
+        # Identify rejected files
         rejected_files = [path for path, shift in file_shift_pairs if shift > 2.0]
 
         # ✅ Kill the thread after copying the data
@@ -9368,13 +9403,13 @@ class StackingSuiteDialog(QDialog):
             for rf in rejected_files:
                 self.update_status(f"  ❌ {os.path.basename(rf)}")
 
-        # ✅ Optionally save only valid transforms
-        self.save_alignment_matrices_sasd(self.valid_transforms)
+        # 3) Save the numeric transforms (2x3 matrices) for valid frames
+        self.save_alignment_matrices_sasd(valid_matrices)
 
         # ✅ Gather drizzle settings
         drizzle_dict = self.gather_drizzle_settings_from_tree()
 
-        # ✅ **Filter `light_files` to use only valid transformed images**
+        # ✅ Filter `light_files` to use only valid transformed images
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
             filtered_light_files[group] = [
@@ -9388,9 +9423,10 @@ class StackingSuiteDialog(QDialog):
         self.stack_images_mixed_drizzle(
             grouped_files=filtered_light_files,
             frame_weights=self.frame_weights,
-            transforms_dict=self.valid_transforms,  # 🔹 Use stored transforms
+            transforms_dict=self.valid_transforms,  # 🔹 Use stored file paths
             drizzle_dict=drizzle_dict
         )
+
 
 
     def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
@@ -9591,7 +9627,7 @@ class StackingSuiteDialog(QDialog):
                 clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
 
             # ✅ **Save the final stacked image**
-            output_filename = f"MasterLight_{group_key}.fits"
+            output_filename = f"MasterLight_{group_key}.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
 
             # After 'clipped_mean' is finalized, do min-max normalization.
@@ -9690,7 +9726,11 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
 
             # ✅ Compute Star Count separately
-            star_counts[file] = compute_star_count(images[i])
+            count, ecc = compute_star_count(images[i])
+            star_counts[file] = {
+                "count": count,
+                "eccentricity": ecc
+            }
 
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
@@ -9852,7 +9892,7 @@ class StackingSuiteDialog(QDialog):
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
         # 8) Save
-        out_filename = f"MasterLight_{group_key}_drizzle.fits"
+        out_filename = f"MasterLight_{group_key}_drizzle.fit"
         out_path = os.path.join(self.stacking_directory, out_filename)
 
         if hdr is None:
@@ -9884,7 +9924,7 @@ class StackingSuiteDialog(QDialog):
         save_image(
             img_array=final_drizzle,
             filename=out_path,
-            original_format="fits",
+            original_format="fit",
             bit_depth="32-bit floating point",
             original_header=hdr,
             is_mono=is_mono  # Pass corrected flag
@@ -13931,7 +13971,7 @@ class PlateSolver(QDialog):
                 save_image(
                     img_array=original_image_data,
                     filename=save_path,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=solved_header,
                     is_mono=is_mono
@@ -14144,7 +14184,7 @@ class PlateSolver(QDialog):
                 save_image(
                     img_array=image_data,
                     filename=save_path,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=wcs_header,
                     is_mono=is_mono
@@ -14658,7 +14698,7 @@ class BatchPlateSolverDialog(QDialog):
                 save_image(
                     img_array=image_data,
                     filename=output_file,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=solved_header,
                     is_mono=is_mono
@@ -35538,28 +35578,48 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                 return image, original_header, bit_depth, is_mono
 
-            elif filename.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            elif filename.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 print(f"Loading RAW file: {filename}")
                 with rawpy.imread(filename) as raw:
-                    # Get the raw Bayer data
+                    # 1) Read the raw Bayer data (no demosaic)
                     bayer_image = raw.raw_image_visible.astype(np.float32)
-                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, min: {bayer_image.min()}, max: {bayer_image.max()}")
+                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, "
+                        f"min: {bayer_image.min():.2f}, max: {bayer_image.max():.2f}")
 
-                    # Ensure Bayer image is normalized
-                    bayer_image /= bayer_image.max()
+                    # 2) Get camera black/white levels
+                    black_levels = raw.black_level_per_channel  # e.g. [512, 512, 512, 512]
+                    white_level  = raw.white_level              # e.g. 16383 for 14-bit
+                    avg_black = float(np.mean(black_levels))    # Simple average
 
+                    # 3) Subtract black level, clip negatives to 0
+                    bayer_image -= avg_black
+                    bayer_image = np.clip(bayer_image, 0, None)
+
+                    # 4) Divide by (white_level - black_level) to normalize to [0..1]
+                    scale = float(white_level - avg_black)
+                    if scale <= 0:
+                        # Safety check if black >= white
+                        scale = 1.0
+                    bayer_image /= scale
+
+                    # Now dark frames should hover near 0.0 instead of ~0.7
+
+                    # 5) Check shape to decide if mono vs. color mosaic
+                    #    Usually it's 2D for a raw Bayer pattern
                     if bayer_image.ndim == 2:
-                        image = bayer_image  # Keep as 2D mono image
+                        image = bayer_image
                         is_mono = True
                     elif bayer_image.ndim == 3 and bayer_image.shape[2] == 3:
-                        image = bayer_image  # Already RGB
+                        # Rare case if raw.raw_image_visible is already color
+                        image = bayer_image
                         is_mono = False
                     else:
                         raise ValueError(f"Unexpected RAW Bayer image shape: {bayer_image.shape}")
-                    bit_depth = "16-bit"  # Assuming 16-bit raw data
-                    is_mono = True
 
-                    # Populate `original_header` with RAW metadata
+                    # 6) Assume 16-bit raw data (typical for DSLRs)
+                    bit_depth = "16-bit"
+
+                    # 7) Build a minimal header from raw metadata
                     original_header_dict = {
                         'CAMERA': raw.camera_whitebalance[0] if raw.camera_whitebalance else 'Unknown',
                         'EXPTIME': raw.shutter if hasattr(raw, 'shutter') else 0.0,
@@ -35568,24 +35628,21 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                         'DATE': raw.timestamp if hasattr(raw, 'timestamp') else 'Unknown',
                     }
 
-                    # Extract CFA pattern
-                    cfa_pattern = raw.raw_colors_visible
-                    cfa_mapping = {
-                        0: 'R',  # Red
-                        1: 'G',  # Green
-                        2: 'B',  # Blue
-                    }
-                    cfa_description = ''.join([cfa_mapping.get(color, '?') for color in cfa_pattern.flatten()[:4]])
-
-                    # Add CFA pattern to header
+                    # 8) Extract the CFA pattern
+                    cfa_pattern = raw.raw_colors_visible  # 2D array of 0/1/2
+                    cfa_mapping = {0: 'R', 1: 'G', 2: 'B'}
+                    cfa_description = ''.join([cfa_mapping.get(color, '?')
+                                            for color in cfa_pattern.flatten()[:4]])
                     original_header_dict['CFA'] = (cfa_description, 'Color Filter Array pattern')
 
-                    # Convert original_header_dict to fits.Header
+                    # 9) Convert dict → FITS Header
                     original_header = fits.Header()
                     for key, value in original_header_dict.items():
                         original_header[key] = value
 
-                    print(f"RAW file loaded with CFA pattern: {cfa_description}")
+                    print(f"RAW file loaded with CFA pattern: {cfa_description}, "
+                        f"dark frames ~0, bright frames ~1 now.")
+                    return image, original_header, bit_depth, is_mono
 
             elif filename.lower().endswith('.png'):
                 print(f"Loading PNG file: {filename}")
