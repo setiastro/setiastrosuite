@@ -103,7 +103,7 @@ def apply_flat_division_numba_2d(image, master_flat, master_bias=None):
         master_flat = master_flat - master_bias
         image = image - master_bias
 
-    median_flat = np.median(master_flat)
+    median_flat = np.mean(master_flat)
     height, width = image.shape
 
     for y in prange(height):
@@ -122,7 +122,7 @@ def apply_flat_division_numba_3d(image, master_flat, master_bias=None):
         master_flat = master_flat - master_bias
         image = image - master_bias
 
-    median_flat = np.median(master_flat)
+    median_flat = np.mean(master_flat)
     height, width, channels = image.shape
 
     for y in prange(height):
@@ -1136,44 +1136,56 @@ def compute_star_count(image):
     return fast_star_count(image)
 
 
-def fast_star_count(    image, 
-    blur_size=31, 
-    threshold_value=20, 
+def fast_star_count(
+    image, 
+    blur_size=15,      # Smaller blur preserves faint/small stars
+    threshold_factor=0.8, 
     min_area=2, 
     max_area=5000
 ):
     """
-    Estimate star count and average eccentricity by:
-      1) Background subtraction via Gaussian blur
-      2) Thresholding
-      3) Contour detection
-      4) Ellipse fitting for each contour => eccentricity
-    Returns (star_count, avg_eccentricity).
+    Estimate star count + average eccentricity by:
+      1) Convert to 8-bit grayscale
+      2) Blur => subtract => enhance stars
+      3) Otsu's threshold * threshold_factor => final threshold
+      4) Contour detection + ellipse fit => eccentricity
+    Returns (star_count, avg_ecc).
     """
 
     # 1) Convert to grayscale if needed
     if image.ndim == 3:
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # 2) Convert to 8-bit [0..255] for contour detection
+    # 2) Normalize to 8-bit
     img_min, img_max = image.min(), image.max()
     if img_max > img_min:
         image_8u = (255.0 * (image - img_min) / (img_max - img_min)).astype(np.uint8)
     else:
-        # All pixels are the same => no stars
-        return 0, 0.0
+        return 0, 0.0  # All pixels identical => no stars
 
-    # 3) Blur heavily to get background, then subtract
+    # 3) Blur + subtract => enhance
     blurred = cv2.GaussianBlur(image_8u, (blur_size, blur_size), 0)
     subtracted = cv2.absdiff(image_8u, blurred)
 
-    # 4) Threshold the subtracted image
-    _, thresh = cv2.threshold(subtracted, threshold_value, 255, cv2.THRESH_BINARY)
+    # 4) Otsu's threshold on 'subtracted'
+    otsu_thresh_val, _ = cv2.threshold(subtracted, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # Scale it down if we want to detect more/fainter stars
+    final_thresh_val = int(otsu_thresh_val * threshold_factor)
+    if final_thresh_val < 2:
+        final_thresh_val = 2  # avoid going below 2
 
-    # 5) Find contours
+    # 5) Apply threshold
+    _, thresh = cv2.threshold(subtracted, final_thresh_val, 255, cv2.THRESH_BINARY)
+
+    # 6) (Optional) Morphological opening to remove single-pixel noise
+    #    Adjust kernel size if you get too many/few stars
+    kernel = np.ones((2, 2), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+    # 7) Find contours
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 6) Filter contours by area, fit ellipse => compute eccentricity
+    # 8) Filter contours by area, fit ellipse => compute eccentricity
     star_count = 0
     ecc_values = []
     for c in contours:
@@ -1181,19 +1193,17 @@ def fast_star_count(    image,
         if area < min_area or area > max_area:
             continue
 
-        # Must have at least 5 points to fit an ellipse
         if len(c) < 5:
-            continue
+            continue  # Need >=5 points to fit an ellipse
 
-        # Fit an ellipse to the contour
+        # Fit ellipse
         ellipse = cv2.fitEllipse(c)
         (cx, cy), (major_axis, minor_axis), angle = ellipse
 
-        # Ensure major_axis >= minor_axis
+        # major_axis >= minor_axis
         if minor_axis > major_axis:
             major_axis, minor_axis = minor_axis, major_axis
 
-        # Eccentricity = sqrt(1 - (b^2 / a^2))
         if major_axis > 0:
             ecc = math.sqrt(1.0 - (minor_axis**2 / major_axis**2))
         else:
@@ -1202,7 +1212,6 @@ def fast_star_count(    image,
         ecc_values.append(ecc)
         star_count += 1
 
-    # 7) Compute average eccentricity
     if star_count > 0:
         avg_ecc = float(np.mean(ecc_values))
     else:
@@ -2488,3 +2497,60 @@ def apply_curves_numba(image, xvals, yvals):
     else:
         # Unexpected shape
         return image  # Fallback
+
+def fast_star_detect(image, 
+                     blur_size=15, 
+                     threshold_factor=0.8, 
+                     min_area=2, 
+                     max_area=5000):
+    """
+    Finds star positions via contour detection + ellipse fitting.
+    Returns Nx2 array of (x, y) star coordinates in the same coordinate system as 'image'.
+    """
+
+    # 1) Convert to grayscale if needed
+    if image.ndim == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+    # 2) Normalize to 8-bit [0..255]
+    img_min, img_max = image.min(), image.max()
+    if img_max <= img_min:
+        return np.empty((0,2), dtype=np.float32)  # All pixels same => no stars
+    image_8u = (255.0 * (image - img_min) / (img_max - img_min)).astype(np.uint8)
+
+    # 3) Blur => subtract => highlight stars
+    blurred = cv2.GaussianBlur(image_8u, (blur_size, blur_size), 0)
+    subtracted = cv2.absdiff(image_8u, blurred)
+
+    # 4) Otsu's threshold => scaled by threshold_factor
+    otsu_thresh, _ = cv2.threshold(subtracted, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    final_thresh_val = max(2, int(otsu_thresh * threshold_factor))
+
+    _, thresh = cv2.threshold(subtracted, final_thresh_val, 255, cv2.THRESH_BINARY)
+
+    # 5) (Optional) morphological opening to remove single-pixel noise
+    kernel = np.ones((2, 2), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+    # 6) Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # 7) Filter by area, fit ellipse => use ellipse center as star position
+    star_positions = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area or area > max_area:
+            continue
+        if len(c) < 5:
+            # Need >=5 points to fit an ellipse
+            continue
+
+        ellipse = cv2.fitEllipse(c)
+        (cx, cy), (major_axis, minor_axis), angle = ellipse
+        # You could check eccentricity, etc. if you want to filter out weird shapes
+        star_positions.append((cx, cy))
+
+    if len(star_positions) == 0:
+        return np.empty((0,2), dtype=np.float32)
+    else:
+        return np.array(star_positions, dtype=np.float32)
