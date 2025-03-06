@@ -9594,8 +9594,24 @@ class StackingSuiteDialog(QDialog):
             output_filename = f"MasterLight_{group_key}.fits"
             output_path = os.path.join(self.stacking_directory, output_filename)
 
-            # Determine if the stacked image is mono or color
-            is_mono = (clipped_mean.ndim == 2)  # Mono = (H, W), Color = (H, W, C)
+            # After 'clipped_mean' is finalized, do min-max normalization.
+            min_val = clipped_mean.min()
+            max_val = clipped_mean.max()
+
+            range_val = max_val - min_val
+            if range_val != 0:
+                # Map the old min to 0, old max to 1
+                clipped_mean = (clipped_mean - min_val) / range_val
+            else:
+                # Edge case: if everything is constant, just set all to 0.0
+                clipped_mean = np.zeros_like(clipped_mean, dtype=np.float32)
+
+            # If the array has a trailing dimension of size 1, squeeze it out
+            if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 1:
+                clipped_mean = np.squeeze(clipped_mean, axis=-1)
+
+            # Now determine if the result is mono or color
+            is_mono = (clipped_mean.ndim == 2)           
 
             # ✅ **Ensure FITS header matches the stacked image dimensions**
             if reference_header is None:
@@ -9621,7 +9637,7 @@ class StackingSuiteDialog(QDialog):
             save_image(
                 img_array=clipped_mean,
                 filename=output_path,
-                original_format="fits",
+                original_format="fit",
                 bit_depth="32-bit floating point",
                 original_header=reference_header,
                 is_mono=is_mono
@@ -12862,14 +12878,14 @@ class StarRegistrationThread(QThread):
 
 
                     # ✅ Corrected save_image call (overwrites _r file)
-                    save_image(
-                        img_array=transformed_image,
-                        filename=transformed_path,
-                        original_format="fit",
-                        bit_depth=bit_depth,
-                        original_header=original_header,
-                        is_mono=(len(image.shape) == 2)
-                    )
+                    #save_image(
+                    #    img_array=transformed_image,
+                    #    filename=transformed_path,
+                    #    original_format="fit",
+                    #    bit_depth=bit_depth,
+                    #    original_header=original_header,
+                    #    is_mono=(len(image.shape) == 2)
+                    #)
 
                     transformed_files.append(transformed_path)
                 else:
@@ -12988,7 +13004,7 @@ class StarRegistrationThread(QThread):
                         local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
                         local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
                         sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:5])
+                        stars.extend(sorted_stars[:6])
         return np.array(stars) if stars else np.array([])
 
     @staticmethod
@@ -35354,75 +35370,74 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     if image_data.dtype.byteorder not in ('=', '|'):
                         image_data = image_data.astype(image_data.dtype.newbyteorder('='))
 
-                    # Determine bit depth
+                    # ---------------------------------------------------------------------
+                    # 1) Detect bit depth and convert to float32
+                    # ---------------------------------------------------------------------
                     if image_data.dtype == np.uint8:
                         bit_depth = "8-bit"
                         print("Identified 8-bit FITS image.")
                         image = image_data.astype(np.float32) / 255.0
+
                     elif image_data.dtype == np.uint16:
                         bit_depth = "16-bit"
                         print("Identified 16-bit FITS image.")
                         image = image_data.astype(np.float32) / 65535.0
-                    elif image_data.dtype == np.float32:
-                        bit_depth = "32-bit floating point"
-                        print("Identified 32-bit floating point FITS image.")
+
                     elif image_data.dtype == np.uint32:
                         bit_depth = "32-bit unsigned"
                         print("Identified 32-bit unsigned FITS image.")
-                    else:
-                        raise ValueError("Unsupported FITS data type!")
 
-                    # Handle 3D FITS data (e.g., RGB or multi-layered)
-                    if image_data.ndim == 3 and image_data.shape[0] == 3:
-                        image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
+                        bzero  = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        image = image_data.astype(np.float32) * bscale + bzero
 
-                        if bit_depth == "8-bit":
-                            image = image.astype(np.float32) / 255.0
-                        elif bit_depth == "16-bit":
-                            image = image.astype(np.float32) / 65535.0
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            image = image.astype(np.float32) * bscale + bzero
-
-                            # Normalize based on range
-                            image_min = image.min()
-                            image_max = image.max()
-                            image = (image - image_min) / (image_max - image_min)
-                        # No normalization needed for 32-bit float
-                        is_mono = False
-
-                    # Handle 2D FITS data (grayscale)
-                    elif image_data.ndim == 2:
-                        if bit_depth == "8-bit":
-                            image = image_data.astype(np.float32) / 255.0
-                        elif bit_depth == "16-bit":
-                            image = image_data.astype(np.float32) / 65535.0
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            image = image_data.astype(np.float32) * bscale + bzero
-
-                            # Normalize based on range
-                            image_min = image.min()
-                            image_max = image.max()
-                            image = (image - image_min) / (image_max - image_min)
-                        elif bit_depth == "32-bit floating point":
-                            image = image_data
+                        # Optionally min-max normalize here
+                        img_min, img_max = image.min(), image.max()
+                        if img_max > img_min:
+                            image = (image - img_min) / (img_max - img_min)
                         else:
-                            raise ValueError("Unsupported FITS data type!")
+                            image = np.zeros_like(image, dtype=np.float32)
 
-                        # Mono or RGB handling
-                        if image_data.ndim == 2:  # Mono
-                            is_mono = True
-                            return image, original_header, bit_depth, is_mono
-                        elif image_data.ndim == 3 and image_data.shape[0] == 3:  # RGB
-                            image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, C)
-                            is_mono = False
-                            return image, original_header, bit_depth, is_mono
+                    elif image_data.dtype == np.float32:
+                        bit_depth = "32-bit floating point"
+                        print("Identified 32-bit floating point FITS image.")
+                        # Already float, so just rename it
+                        image = image_data
 
                     else:
-                        raise ValueError("Unsupported FITS format or dimensions!")
+                        raise ValueError(f"Unsupported FITS data type: {image_data.dtype}")
+
+                    # ---------------------------------------------------------------------
+                    # 2) Squeeze out any singleton dimensions (fix weird NAXIS combos)
+                    # ---------------------------------------------------------------------
+                    image = np.squeeze(image)  # e.g. (H, W, 1) → (H, W)
+
+                    # ---------------------------------------------------------------------
+                    # 3) Interpret final shape to decide if mono or color
+                    # ---------------------------------------------------------------------
+                    if image.ndim == 2:
+                        # (H, W) => mono
+                        is_mono = True
+
+                    elif image.ndim == 3:
+                        # Could be (3, H, W) or (H, W, 3)
+                        if image.shape[0] == 3 and image.shape[1] > 1 and image.shape[2] > 1:
+                            # Transpose to (H, W, 3)
+                            image = np.transpose(image, (1, 2, 0))
+                            is_mono = False
+                        elif image.shape[-1] == 3:
+                            # Already (H, W, 3)
+                            is_mono = False
+                        else:
+                            raise ValueError(f"Unsupported 3D shape after squeeze: {image.shape}")
+                    else:
+                        raise ValueError(f"Unsupported FITS dimensions after squeeze: {image.shape}")
+
+                    # Now you have a robustly loaded image array in 'image'
+                    # with shape either (H, W) for mono or (H, W, 3) for color.
+                    print(f"Loaded FITS image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+                    return image, original_header, bit_depth, is_mono
+
 
             elif filename.lower().endswith(('.tiff', '.tif')):
                 print(f"Loading TIFF file: {filename}")
