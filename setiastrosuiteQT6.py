@@ -9638,17 +9638,30 @@ class StackingSuiteDialog(QDialog):
             output_filename = f"MasterLight_{group_key}.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
 
-            # After 'clipped_mean' is finalized, do min-max normalization.
-            min_val = clipped_mean.min()
-            max_val = clipped_mean.max()
+            # 1) Find the first non-zero pixel value
+            flat_array = clipped_mean.flatten()
+            nonzero_indices = np.where(flat_array > 0)[0]
 
-            range_val = max_val - min_val
-            if range_val != 0:
-                # Map the old min to 0, old max to 1
-                clipped_mean = (clipped_mean - min_val) / range_val
-            else:
-                # Edge case: if everything is constant, just set all to 0.0
-                clipped_mean = np.zeros_like(clipped_mean, dtype=np.float32)
+            if len(nonzero_indices) > 0:
+                # "First" means the earliest in flattened order;
+                # if you prefer the smallest nonzero pixel, use .min() instead.
+                first_nonzero = flat_array[nonzero_indices[0]]
+                
+                # 2) Subtract this black point
+                clipped_mean -= first_nonzero
+
+            # 3) Check if the new max is over 1.0
+            new_max = clipped_mean.max()
+            if new_max > 1.0:
+                # Optional: Do a min-max normalization
+                new_min = clipped_mean.min()
+                range_val = new_max - new_min
+                if range_val != 0:
+                    clipped_mean = (clipped_mean - new_min) / range_val
+                else:
+                    # All pixels are identical after black point subtraction
+                    clipped_mean = np.zeros_like(clipped_mean, dtype=np.float32)
+
 
             # If the array has a trailing dimension of size 1, squeeze it out
             if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 1:
@@ -13016,16 +13029,55 @@ class StarRegistrationThread(QThread):
         self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     # --- Static Methods for use in Workers ---
+    #@staticmethod
+    #def detect_stars_static(image):
+    #    if image.ndim == 3:
+    #        image = np.mean(image, axis=2)
+    #    mean, median, std = sigma_clipped_stats(image)
+    #    daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
+    #    sources = daofind(image - median)
+    #    if sources is None or len(sources) == 0:
+    #        return np.array([])
+    #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
     @staticmethod
     def detect_stars_static(image):
+        # If the image is color, convert to mono
         if image.ndim == 3:
             image = np.mean(image, axis=2)
-        mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
-        sources = daofind(image - median)
-        if sources is None or len(sources) == 0:
-            return np.array([])
-        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+        # Use our contour-based function instead of DAOStarFinder
+        star_coords = fast_star_detect(image)
+
+        return star_coords        
+
+    #@staticmethod
+    #def detect_grid_stars_static(image):
+    #    if image.ndim == 3:
+    #        image = np.mean(image, axis=2)
+    #    h, w = image.shape
+    #    margin_x = int(w * 0.05)
+    #    margin_y = int(h * 0.05)
+    #    valid_x_min, valid_x_max = margin_x, w - margin_x
+    #    valid_y_min, valid_y_max = margin_y, h - margin_y
+    #    grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+    #    grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+    #    stars = []
+    #    for i in range(len(grid_x) - 1):
+    #        for j in range(len(grid_y) - 1):
+    #            x_min, x_max = grid_x[i], grid_x[i+1]
+    #            y_min, y_max = grid_y[j], grid_y[j+1]
+    #            sub_img = image[y_min:y_max, x_min:x_max]
+    ##            if sub_img.size == 0:
+     #               continue
+     #           if np.std(sub_img) > 0:
+     #               local_stars = StarRegistrationThread.detect_stars_static(sub_img)
+     #               if len(local_stars) > 0:
+     #                   local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
+     ##                   local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
+     #                   sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+     #                   stars.extend(sorted_stars[:6])
+     #   return np.array(stars) if stars else np.array([])
 
     @staticmethod
     def detect_grid_stars_static(image):
@@ -13047,13 +13099,17 @@ class StarRegistrationThread(QThread):
                 if sub_img.size == 0:
                     continue
                 if np.std(sub_img) > 0:
-                    local_stars = StarRegistrationThread.detect_stars_static(sub_img)
-                    if len(local_stars) > 0:
-                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
-                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
-                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:6])
-        return np.array(stars) if stars else np.array([])
+                    local_stars = fast_star_detect(sub_img)  # use new function
+                    # Shift coords back into global space
+                    for (sx, sy) in local_stars:
+                        gx = np.clip(sx + x_min, valid_x_min, valid_x_max - 1)
+                        gy = np.clip(sy + y_min, valid_y_min, valid_y_max - 1)
+                        stars.append((gx, gy))
+        if len(stars) == 0:
+            return np.empty((0,2), dtype=np.float32)
+        # Optionally sort by brightness if needed, etc.
+        return np.array(stars, dtype=np.float32)
+
 
     @staticmethod
     def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=10, max_iter=10, convergence_thresh=0.2):
