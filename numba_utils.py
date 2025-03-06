@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit, prange
 import cv2 
+import math
 
 @njit(parallel=True, fastmath=True)
 def rescale_image_numba(image, factor):
@@ -1135,43 +1136,79 @@ def compute_star_count(image):
     return fast_star_count(image)
 
 
-def fast_star_count(image, blur_size=5, threshold_factor=1.5):
-    """ Fast star detection using local contrast and adaptive thresholding. """
+def fast_star_count(    image, 
+    blur_size=31, 
+    threshold_value=20, 
+    min_area=2, 
+    max_area=5000
+):
+    """
+    Estimate star count and average eccentricity by:
+      1) Background subtraction via Gaussian blur
+      2) Thresholding
+      3) Contour detection
+      4) Ellipse fitting for each contour => eccentricity
+    Returns (star_count, avg_eccentricity).
+    """
 
-    # ✅ Convert to grayscale if the image has multiple channels (e.g., RGB OSC)
-    if len(image.shape) == 3 and image.shape[-1] == 3:
+    # 1) Convert to grayscale if needed
+    if image.ndim == 3:
         image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-    # ✅ Normalize image to 0-255 range for 8-bit processing
-    norm_img = (image - np.min(image)) / (np.max(image) - np.min(image)) * 255.0
-    norm_img = norm_img.astype(np.uint8)
-
-    # ✅ Apply Gaussian Blur to create background model
-    blurred = cv2.GaussianBlur(norm_img, (blur_size, blur_size), 0)
-
-    # ✅ Subtract blurred version to enhance stars
-    enhanced = cv2.absdiff(norm_img, blurred)
-
-    # ✅ Use Otsu's thresholding to get an initial threshold
-    _, otsu_thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # ✅ Compute the **mean** threshold of all nonzero pixels
-    nonzero_pixels = enhanced[enhanced > 0]  # Extract only nonzero pixel values
-    if len(nonzero_pixels) > 0:
-        adaptive_threshold = np.mean(nonzero_pixels) * threshold_factor  # Scale threshold
+    # 2) Convert to 8-bit [0..255] for contour detection
+    img_min, img_max = image.min(), image.max()
+    if img_max > img_min:
+        image_8u = (255.0 * (image - img_min) / (img_max - img_min)).astype(np.uint8)
     else:
-        adaptive_threshold = otsu_thresh  # Fallback if no nonzero pixels found
+        # All pixels are the same => no stars
+        return 0, 0.0
 
-    # ✅ Ensure threshold is in range [0, 255]
-    adaptive_threshold = max(0, min(255, adaptive_threshold))
+    # 3) Blur heavily to get background, then subtract
+    blurred = cv2.GaussianBlur(image_8u, (blur_size, blur_size), 0)
+    subtracted = cv2.absdiff(image_8u, blurred)
 
-    # ✅ Apply the adjusted threshold
-    _, binary = cv2.threshold(enhanced, adaptive_threshold, 255, cv2.THRESH_BINARY)
+    # 4) Threshold the subtracted image
+    _, thresh = cv2.threshold(subtracted, threshold_value, 255, cv2.THRESH_BINARY)
 
-    # ✅ Count connected components (stars)
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary)
+    # 5) Find contours
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    return num_labels - 1  # Subtract 1 because label 0 is the background
+    # 6) Filter contours by area, fit ellipse => compute eccentricity
+    star_count = 0
+    ecc_values = []
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area or area > max_area:
+            continue
+
+        # Must have at least 5 points to fit an ellipse
+        if len(c) < 5:
+            continue
+
+        # Fit an ellipse to the contour
+        ellipse = cv2.fitEllipse(c)
+        (cx, cy), (major_axis, minor_axis), angle = ellipse
+
+        # Ensure major_axis >= minor_axis
+        if minor_axis > major_axis:
+            major_axis, minor_axis = minor_axis, major_axis
+
+        # Eccentricity = sqrt(1 - (b^2 / a^2))
+        if major_axis > 0:
+            ecc = math.sqrt(1.0 - (minor_axis**2 / major_axis**2))
+        else:
+            ecc = 0.0
+
+        ecc_values.append(ecc)
+        star_count += 1
+
+    # 7) Compute average eccentricity
+    if star_count > 0:
+        avg_ecc = float(np.mean(ecc_values))
+    else:
+        avg_ecc = 0.0
+
+    return star_count, avg_ecc
 
 @njit(parallel=True, fastmath=True)
 def normalize_images_3d(stack, ref_median):
@@ -2158,11 +2195,13 @@ def drizzle_deposit_numba_naive(img_data, transform, drizzle_buffer, coverage_bu
 
 
 @njit(fastmath=True)
-def drizzle_deposit_numba_footprint(img_data, transform, drizzle_buffer, coverage_buffer,
-                                    drizzle_factor, drop_shrink, frame_weight):
+def drizzle_deposit_numba_footprint(
+    img_data, transform, drizzle_buffer, coverage_buffer,
+    drizzle_factor, drop_shrink, frame_weight
+):
     """
-    Footprint deposit: each input pixel is distributed over a bounding box
-    of width = drop_shrink. 2D single-channel version for brevity.
+    Distributes each input pixel over a bounding box (width=drop_shrink)
+    in the drizzle (out) plane. (Mono 2D version)
     """
     h, w = img_data.shape
     out_h, out_w = drizzle_buffer.shape
@@ -2178,36 +2217,49 @@ def drizzle_deposit_numba_footprint(img_data, transform, drizzle_buffer, coverag
             if val == 0:
                 continue
 
+            # 1) Transform to output coords
             X = a*x + b*y + tx
             Y = c*x + d*y + ty
+
+            # 2) Upsample
             Xo = X * drizzle_factor
             Yo = Y * drizzle_factor
 
+            # 3) Determine bounding box
             min_x = int(np.floor(Xo - footprint_radius))
             max_x = int(np.floor(Xo + footprint_radius))
             min_y = int(np.floor(Yo - footprint_radius))
             max_y = int(np.floor(Yo + footprint_radius))
 
+            # 4) Clip bounding box to output
             if max_x < 0 or min_x >= out_w or max_y < 0 or min_y >= out_h:
                 continue
-            min_x = max(min_x, 0)
-            max_x = min(max_x, out_w - 1)
-            min_y = max(min_y, 0)
-            max_y = min(max_y, out_h - 1)
+            if min_x < 0:
+                min_x = 0
+            if max_x >= out_w:
+                max_x = out_w - 1
+            if min_y < 0:
+                min_y = 0
+            if max_y >= out_h:
+                max_y = out_h - 1
 
-            width_foot = max_x - min_x + 1
-            height_foot = max_y - min_y + 1
+            width_foot = (max_x - min_x + 1)
+            height_foot = (max_y - min_y + 1)
             area_pixels = width_foot * height_foot
             if area_pixels <= 0:
                 continue
 
+            # 5) Distribute flux *and* coverage
             deposit_val = (val * frame_weight) / area_pixels
+            coverage_fraction = frame_weight / area_pixels
+
             for oy in range(min_y, max_y+1):
                 for ox in range(min_x, max_x+1):
                     drizzle_buffer[oy, ox] += deposit_val
-                    coverage_buffer[oy, ox] += frame_weight
+                    coverage_buffer[oy, ox] += coverage_fraction
 
     return drizzle_buffer, coverage_buffer
+
 
 @njit(parallel=True)
 def finalize_drizzle_2d(drizzle_buffer, coverage_buffer, final_out):
@@ -2295,16 +2347,14 @@ def drizzle_deposit_color_footprint(
     img_data,          # shape (H,W,C)
     transform,         # shape (2,3)
     drizzle_buffer,    # shape (outH,outW,C)
-    coverage_buffer,   # shape (outH,outW,C) or (outH,outW) if you prefer
+    coverage_buffer,   # shape (outH,outW,C)
     drizzle_factor, 
     drop_shrink,
     frame_weight
 ):
     """
     Distributes each input pixel (for each channel) over a bounding-box footprint
-    of width=drop_shrink in the output plane. 
-    'img_data' is (H,W,C).
-    'drizzle_buffer' and 'coverage_buffer' are (outH,outW,C).
+    of width=drop_shrink in the output plane. (Color 3D version)
     """
 
     H, W, channels = img_data.shape
@@ -2356,15 +2406,18 @@ def drizzle_deposit_color_footprint(
                 val = img_data[y, x, cidx]
                 if val == 0:
                     continue
+
                 deposit_val = (val * frame_weight) / area_pixels
+                coverage_fraction = frame_weight / area_pixels
 
                 # deposit in bounding box
                 for oy in range(min_y, max_y+1):
                     for ox in range(min_x, max_x+1):
                         drizzle_buffer[oy, ox, cidx] += deposit_val
-                        coverage_buffer[oy, ox, cidx] += frame_weight
+                        coverage_buffer[oy, ox, cidx] += coverage_fraction
 
     return drizzle_buffer, coverage_buffer
+
 
 @njit
 def finalize_drizzle_3d(drizzle_buffer, coverage_buffer, final_out):
