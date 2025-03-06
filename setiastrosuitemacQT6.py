@@ -213,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.11.8"
+VERSION = "2.12.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1143,17 +1143,9 @@ class AstroEditingSuite(QMainWindow):
         self.supernova_hunter_tab.show()
 
     def stacking_suite_action(self):
-        """ Opens the Stacking Suite window only if the correct secret code is entered. """
+        self.stackingsuitewindow = StackingSuiteDialog()
+        self.stackingsuitewindow.show()
 
-        # Create input dialog
-        text, ok = QInputDialog.getText(None, "Stacking Suite - beta",
-                                        "If you really want to view it, just say the magic word (please):")
-
-        if ok and text.strip().lower() == "please":
-            self.stackingsuitewindow = StackingSuiteDialog()
-            self.stackingsuitewindow.show()
-        else:
-            QMessageBox.information(None, "Access Denied", "Incorrect code or action canceled.")
 
 
     def open_preview_window(self, slot):
@@ -7527,7 +7519,7 @@ class StackingSuiteDialog(QDialog):
         # ─────────────────────────────────────────
         drizzle_layout = QHBoxLayout()
 
-        self.drizzle_checkbox = QCheckBox("Enable Drizzle")
+        self.drizzle_checkbox = QCheckBox("Enable Drizzle (beta)")
         self.drizzle_checkbox.stateChanged.connect(self.update_drizzle_settings)  # <─ connect signal
         drizzle_layout.addWidget(self.drizzle_checkbox)
 
@@ -8270,7 +8262,7 @@ class StackingSuiteDialog(QDialog):
                 clipped_mean = windsorized_sigma_clip_3d(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
 
             # ✅ Step 5: Save Master Dark
-            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s_{image_size}.fits")
+            master_dark_path = os.path.join(master_dir, f"MasterDark_{int(exposure_time)}s_{image_size}.fit")
             self.save_master_dark(clipped_mean, master_dark_path, exposure_time, is_mono)
 
             # ✅ Step 6: Add to Master Dark Tree
@@ -8286,43 +8278,49 @@ class StackingSuiteDialog(QDialog):
 
 
     def save_master_dark(self, master_dark, output_path, exposure_time, is_mono):
-        """ Saves the master dark as 32-bit floating point FITS while maintaining OSC structure. """
-
-        # ✅ Ensure correct shape for OSC darks
+        """Saves the master dark as 32-bit floating point FITS while maintaining OSC structure."""
         if is_mono:
-            hdu = fits.PrimaryHDU(master_dark.astype(np.float32))  # Mono: (H, W)
-            image_size = f"{master_dark.shape[1]}x{master_dark.shape[0]}"  # (W x H)
+            # Mono => shape (H, W)
+            h, w = master_dark.shape
+            # Wrap in an HDU
+            hdu_data = master_dark.astype(np.float32)
+            hdu = fits.PrimaryHDU(hdu_data)
+            image_size = f"{w}x{h}"  # Width x Height
         else:
-            h, w, c = master_dark.shape  # Get the correct dimensions for OSC
-            hdu = fits.PrimaryHDU(master_dark.transpose(2, 0, 1).astype(np.float32))  # Save as (C, H, W)
-            image_size = f"{w}x{h}"  # ✅ Store (Width x Height), ignore channels
+            # Color => shape (H, W, C)
+            h, w, c = master_dark.shape
+            # Transpose to (C, H, W)
+            hdu_data = master_dark.transpose(2, 0, 1).astype(np.float32)
+            hdu = fits.PrimaryHDU(hdu_data)
+            image_size = f"{w}x{h}"
 
-        # ✅ Proper FITS Header
+        # Now 'hdu' is a fits.PrimaryHDU in both branches
         hdr = hdu.header
-        hdr["SIMPLE"] = True  
-        hdr["BITPIX"] = -32   
-        hdr["NAXIS"] = 3 if not is_mono else 2  # ✅ 3D for OSC, 2D for mono
-        hdr["NAXIS1"] = w  # Width
-        hdr["NAXIS2"] = h  # Height
+        hdr["SIMPLE"]   = True
+        hdr["BITPIX"]   = -32
+        hdr["NAXIS"]    = 3 if not is_mono else 2
+        hdr["NAXIS1"]   = w  # Width
+        hdr["NAXIS2"]   = h  # Height
         if not is_mono:
-            hdr["NAXIS3"] = c  # ✅ RGB channels for OSC
-        hdr["BSCALE"] = 1.0  
-        hdr["BZERO"] = 0.0    
+            hdr["NAXIS3"] = c
+        hdr["BSCALE"]   = 1.0
+        hdr["BZERO"]    = 0.0
         hdr["IMAGETYP"] = "MASTER DARK"
         hdr["EXPOSURE"] = exposure_time
         hdr["DATE-OBS"] = datetime.utcnow().isoformat()
-        hdr["CREATOR"] = "SetiAstroSuite"
+        hdr["CREATOR"]  = "SetiAstroSuite"
 
-        # ✅ Write the FITS file
+        # Write the FITS file
         hdu.writeto(output_path, overwrite=True)
 
-        # ✅ Store Master Dark Path with Correct Key
-        key = f"{exposure_time}s ({image_size})"  # Always store as Width x Height
-        self.master_files[key] = output_path  
-        self.master_sizes[output_path] = image_size  # ✅ Ensure size is stored correctly
+        # Store Master Dark path with correct key
+        key = f"{exposure_time}s ({image_size})"
+        self.master_files[key] = output_path
+        self.master_sizes[output_path] = image_size
 
         print(f"✅ Master Dark FITS saved: {output_path}")
         self.update_status(f"✅ Stored Master Dark -> {key}: {output_path}")
+
 
 
             
@@ -8497,10 +8495,10 @@ class StackingSuiteDialog(QDialog):
             # Extract only the exposure time
             match = re.match(r"([\d.]+)s?", exposure_time_str)
             if not match:
-                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}")
-                continue  # Skip invalid entries
-
-            exposure_time = float(match.group(1))  # Extracted number
+                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}; assigning 0s")
+                exposure_time = -10.0
+            else:
+                exposure_time = float(match.group(1))  # Extracted number
 
             matched_group = None
             for key in flat_files_by_group.keys():
@@ -8614,7 +8612,7 @@ class StackingSuiteDialog(QDialog):
             clipped_mean = windsorized_sigma_clip(stacked_data, lower=self.sigma_low, upper=self.sigma_high)
 
             # ✅ Save Master Flat
-            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fits")
+            master_flat_path = os.path.join(master_dir, f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fit")
             self.save_master_flat(clipped_mean, master_flat_path, exposure_time, filter_name)
 
             # ✅ Store Master Flat properly
@@ -8659,11 +8657,23 @@ class StackingSuiteDialog(QDialog):
         fits_header["BSCALE"] = 1.0  # 🔹 Prevent rescaling
         fits_header["BZERO"] = 0.0   # 🔹 Prevent offset
 
+        # 1) Compute min/max
+        min_val = master_flat.min()
+        max_val = master_flat.max()
+        range_val = max_val - min_val
+
+        # 2) Rescale to [0, 1]
+        if range_val != 0:
+            master_flat = (master_flat - min_val) / range_val
+        else:
+            # Edge case: if all pixels have the same value
+            master_flat = np.zeros_like(master_flat, dtype=np.float32)
+
         # ✅ Save as FITS
         save_image(
             img_array=master_flat,
             filename=output_path,
-            original_format="fits",
+            original_format="fit",
             bit_depth="32-bit floating point",
             original_header=fits_header,
             is_mono=is_mono
@@ -9033,13 +9043,25 @@ class StackingSuiteDialog(QDialog):
 
                     # 🔹 Save using global `save_image()`
                     calibrated_filename = os.path.join(
-                        calibrated_dir, os.path.basename(light_file).replace(".fits", "_c.fits")
+                        calibrated_dir, os.path.basename(light_file).replace(".fit", "_c.fit")
                     )
+
+                    # 1) Compute min/max
+                    min_val = light_data.min()
+                    max_val = light_data.max()
+                    range_val = max_val - min_val
+
+                    # 2) Rescale to [0, 1]
+                    if range_val != 0:
+                        light_data = (light_data - min_val) / range_val
+                    else:
+                        # Edge case: if all pixels have the same value
+                        light_data = np.zeros_like(light_data, dtype=np.float32)
 
                     save_image(
                         img_array=light_data,
                         filename=calibrated_filename,
-                        original_format="fits",
+                        original_format="fit",
                         bit_depth=bit_depth,
                         original_header=hdr,
                         is_mono=is_mono
@@ -9195,7 +9217,11 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
 
             # ✅ Compute Star Count separately
-            star_counts[file] = compute_star_count(images[i])
+            count, ecc = compute_star_count(images[i])
+            star_counts[file] = {
+                "count": count,
+                "eccentricity": ecc
+            }
 
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
@@ -9208,23 +9234,33 @@ class StackingSuiteDialog(QDialog):
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
 
         for file in measured_frames:
-            star_count = star_counts[file]
+            # Unpack your star count and eccentricity from wherever you stored them
+            # e.g. star_counts[file] = (count, ecc)
+            star_count = star_counts[file]["count"]
+            ecc = star_counts[file]["eccentricity"]
             mean_value = mean_values[file]
+            star_count = max(star_count,1)
+
 
             # Avoid division by zero
-            star_weight = max(star_count, 1e-6)
             mean_weight = max(mean_value, 1e-6)
 
-            # Ratio-based weight
-            raw_weight = star_weight / mean_weight
+            # Weight = star_count * eccentricity / mean
+            raw_weight = (star_count * min(1,max(1.0 - ecc, 0.0))) / mean_weight
+
+            # Store it
             self.frame_weights[file] = raw_weight
 
             debug_weight_log += (
                 f"📂 {os.path.basename(file)} → "
                 f"Star Count: {star_count}, "
+                f"Eccentricity: {ecc:.4f}, "
                 f"Mean: {mean_value:.4f}, "
                 f"Raw Weight: {raw_weight:.4f}\n"
             )
+
+        self.update_status(debug_weight_log)
+
 
         # 6) Normalize Weights so max = 1.0 (optional but recommended)
         max_w = max(self.frame_weights.values())
@@ -9317,51 +9353,89 @@ class StackingSuiteDialog(QDialog):
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
 
-        # Get the final transforms (all normalized paths)
-        all_transforms = self.alignment_thread.alignment_matrices
-        self.alignment_thread = None
+        # ✅ Store references before setting self.alignment_thread to None
+        alignment_thread = self.alignment_thread  # Save the reference
 
-        # Filter out any None transforms
-        valid_transforms = {
-            path: mat for (path, mat) in all_transforms.items() if mat is not None
+        if alignment_thread is None:
+            self.update_status("⚠️ Error: No alignment data available.")
+            return
+
+        # ✅ Get the final transforms (all normalized paths)
+        all_transforms = alignment_thread.alignment_matrices.copy()  # Copy before killing the thread
+
+        # ✅ Get final shift values from the last pass
+        if not alignment_thread.transform_deltas:
+            self.update_status("⚠️ No shift data available. Skipping filtering.")
+            final_shifts = [0.0] * len(all_transforms)  # Assume 0 shift if no data
+        else:
+            final_shifts = alignment_thread.transform_deltas[-1]  # Last pass shift values
+
+        # ✅ Pair filenames with shift values
+        file_shift_pairs = list(zip(all_transforms.keys(), final_shifts))
+
+        # 1) Build a dictionary of numeric transforms for valid frames
+        valid_matrices = {
+            orig_path: all_transforms[orig_path]
+            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
+            if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
-        n_valid = len(valid_transforms)
+        # 2) Build a dictionary mapping original file → final aligned file path
+        self.valid_transforms = {
+            orig_path: os.path.join(
+                self.stacking_directory, "Aligned_Images",
+                os.path.basename(orig_path).replace(".fit", "_r.fit")
+            )
+            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
+            if all_transforms[orig_path] is not None and shift <= 2.0
+        }
+
+        # Identify rejected files
+        rejected_files = [path for path, shift in file_shift_pairs if shift > 2.0]
+
+        # ✅ Kill the thread after copying the data
+        self.alignment_thread = None  # Now safe to delete
+
+        # ✅ Update status messages
+        n_valid = len(self.valid_transforms)
         n_total = len(all_transforms)
-        self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} failed.")
+        self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} rejected.")
 
         if n_valid == 0:
             self.update_status("⚠️ No frames to stack; aborting.")
             return
 
-        # Optionally save transforms
-        self.save_alignment_matrices_sasd(valid_transforms)
+        # ✅ Inform the user about rejected frames
+        if rejected_files:
+            self.update_status(f"🚨 Rejected {len(rejected_files)} frames due to shift > 2px.")
+            for rf in rejected_files:
+                self.update_status(f"  ❌ {os.path.basename(rf)}")
 
-        # Gather drizzle
+        # 3) Save the numeric transforms (2x3 matrices) for valid frames
+        self.save_alignment_matrices_sasd(valid_matrices)
+
+        # ✅ Gather drizzle settings
         drizzle_dict = self.gather_drizzle_settings_from_tree()
 
-        # Filter your light_files so you only pass files that appear in valid_transforms
-        # Make sure the keys match exactly, i.e. do the same normalization:
+        # ✅ Filter `light_files` to use only valid transformed images
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
             filtered_light_files[group] = [
-                f for f in file_list
-                if os.path.normpath(f) in valid_transforms
+                f for f in file_list if os.path.normpath(f) in self.valid_transforms
             ]
             self.update_status(
                 f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
             )
 
-        # Now do the stacking
+        # ✅ Pass `valid_transforms` to stacking so it uses correct images
         self.stack_images_mixed_drizzle(
             grouped_files=filtered_light_files,
             frame_weights=self.frame_weights,
-            transforms_dict=valid_transforms,
+            transforms_dict=self.valid_transforms,  # 🔹 Use stored file paths
             drizzle_dict=drizzle_dict
         )
 
-        # Explicitly delete the thread reference
-        self.alignment_thread = None
+
 
     def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
         """
@@ -9447,21 +9521,24 @@ class StackingSuiteDialog(QDialog):
     def stack_registered_images(self, grouped_files, frame_weights):
         """
         Stacks registered images by group.
-        
+
         Parameters:
         grouped_files (dict): A dictionary where each key represents a grouping
             (for example, a combination of filter, exposure, dimensions) and the value
-            is a list of original file paths (as selected in the tree view) in that group.
+            is a list of final aligned file paths.
         frame_weights (dict): A dictionary mapping original file paths to computed weights.
-        
-        For each group, the function maps the original file to its corresponding aligned file 
-        (located in the Aligned_Images folder) – if the file isn’t already there, the "_r" suffix
-        is appended (if not already present). Then it stacks the group’s images using weighted
-        Windsorized Sigma Clipping and saves the resulting master stack with a dynamic filename.
+
+        This version ensures that we use the final transformed images instead of appending '_r'.
         """
         # Directory where aligned images are stored.
         aligned_dir = os.path.join(self.stacking_directory, "Aligned_Images")
-        
+
+        # Get valid aligned paths from the latest registration process
+        valid_transforms = self.valid_transforms  # Already filtered for valid shifts
+        self.update_status(f"✅ Using {len(valid_transforms)} final aligned images for stacking.")
+        for orig, aligned in valid_transforms.items():
+            self.update_status(f"  {os.path.basename(orig)} → {os.path.basename(aligned)}")
+
         # Process each group separately.
         for group_key, file_list in grouped_files.items():
             self.update_status(f"📊 Stacking group '{group_key}' with {len(file_list)} files...")
@@ -9475,35 +9552,23 @@ class StackingSuiteDialog(QDialog):
             reference_header = None
 
             # Determine the reference frame for this group:
-            # If self.reference_frame is in this group, use it; otherwise, use the first file.
             group_ref = self.reference_frame if self.reference_frame in file_list else file_list[0]
 
             for orig_file in file_list:
                 try:
-                    # Map the original file to its aligned version.
-                    if os.path.dirname(orig_file) == aligned_dir:
-                        # Already in the aligned directory.
-                        aligned_file_path = orig_file
-                    else:
-                        base = os.path.basename(orig_file)
-                        name, ext = os.path.splitext(base)
-                        # Force extension to ".fits" (even if the tree shows ".fit")
-                        if ext.lower() not in [".fits", ".fit"]:
-                            ext = ".fits"
-                        else:
-                            ext = ".fits"  # Always use .fits for aligned images
+                    # 🔹 **Get the correct final transformed file**
+                    aligned_file_path = self.valid_transforms.get(os.path.normpath(orig_file), None)
 
-                        if os.path.dirname(orig_file) == aligned_dir:
-                            # Already in the aligned directory.
-                            aligned_file_path = orig_file
-                        else:
-                            if not name.endswith("_r"):
-                                name_aligned = f"{name}_r"
-                            else:
-                                name_aligned = name
-                            aligned_file_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
+                    if not aligned_file_path:
+                        self.update_status(f"⚠️ No aligned file found for {orig_file}, skipping.")
+                        continue
 
-                    # Load the aligned image.
+                    # ✅ Ensure the file actually exists before trying to load it
+                    if not os.path.exists(aligned_file_path):
+                        self.update_status(f"🚨 Missing aligned file: {aligned_file_path}. Skipping.")
+                        continue
+
+                    # 🔹 **Load the transformed image**
                     image_data, header, _, _ = load_image(aligned_file_path)
                     if image_data is None:
                         self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
@@ -9525,111 +9590,87 @@ class StackingSuiteDialog(QDialog):
                 self.update_status(f"⚠️ Not enough valid frames in group '{group_key}' to stack.")
                 continue
 
-            # If we did not capture the reference header/median, try loading the reference frame directly.
-            if reference_median is None:
-                try:
-                    self.update_status("ℹ️ Reference frame median not found in loop. Loading reference frame directly...")
-                    if os.path.dirname(group_ref) == aligned_dir:
-                        ref_aligned_path = group_ref
-                    else:
-                        base = os.path.basename(group_ref)
-                        name, ext = os.path.splitext(base)
-                        if not name.endswith("_r"):
-                            name_aligned = f"{name}_r"
-                        else:
-                            name_aligned = name
-                        ref_aligned_path = os.path.join(aligned_dir, f"{name_aligned}{ext}")
-                    ref_data, ref_header, _, _ = load_image(ref_aligned_path)
-                    if ref_data is None:
-                        raise ValueError("Reference image data is None")
-                    reference_median = np.median(ref_data)
-                    reference_header = ref_header.copy()
-                except Exception as e:
-                    self.update_status(f"⚠️ Failed to load reference frame for group '{group_key}': {e}. Using first frame as fallback.")
-                    reference_median = np.median(stacked_data[0])
-                    # Try to set reference_header from the first valid frame.
-                    try:
-                        first_file = file_list[0]
-                        if os.path.dirname(first_file) == aligned_dir:
-                            first_aligned = first_file
-                        else:
-                            base = os.path.basename(first_file)
-                            name, ext = os.path.splitext(base)
-                            if not name.endswith("_r"):
-                                name_aligned = f"{name}_r"
-                            else:
-                                name_aligned = name
-                            first_aligned = os.path.join(aligned_dir, f"{name_aligned}{ext}")
-                        _, first_header, _, _ = load_image(first_aligned)
-                        reference_header = first_header.copy()
-                    except Exception:
-                        reference_header = fits.Header()
-
-            # Stack the images.
-            stacked_data = np.stack(stacked_data, axis=0)  # Shape: (num_frames, height, width)
-            weights = np.array(weights, dtype=np.float32)
-
+            # ✅ **Normalize images before stacking**
             self.update_status(f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}")
+            if not stacked_data:
+                self.update_status(f"⚠️ No valid frames to stack in group '{group_key}'. Skipping.")
+                return
+
+            stacked_data = np.array(stacked_data, dtype=np.float32)  # ✅ Convert to NumPy array
             stacked_data = normalize_images(stacked_data, reference_median)
 
-            # At the point where you apply the rejection algorithm:
+            # ✅ **Apply rejection algorithm**
             self.update_status(f"📊 Applying {self.rejection_algorithm} on group '{group_key}'...")
             QApplication.processEvents()
 
-            selected_algo = self.rejection_algorithm
+            # ✅ Convert `stacked_data` from list to NumPy array
+            stacked_data = np.array(stacked_data, dtype=np.float32)  # Convert to NumPy array
 
+            # ✅ Convert `weights` to a NumPy array
+            weights = np.array(weights, dtype=np.float32)  # Ensure it's an array for Numba
+
+            # ✅ Ensure `stacked_data` is 4D if needed
+            if stacked_data.ndim == 3:  # If it's color but missing the 4th dimension
+                stacked_data = np.expand_dims(stacked_data, axis=-1)  # Add a new axis for channels
+
+            # Select rejection algorithm
+            selected_algo = self.rejection_algorithm
             if selected_algo == "Weighted Windsorized Sigma Clipping":
-                clipped_mean = windsorized_sigma_clip_weighted(
-                    stacked_data, weights,
-                    lower=self.sigma_low, upper=self.sigma_high
-                )
+                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
             elif selected_algo == "Kappa-Sigma Clipping":
-                clipped_mean = kappa_sigma_clip_weighted(
-                    stacked_data, weights,
-                    kappa=self.kappa, iterations=self.iterations
-                )
+                clipped_mean = kappa_sigma_clip_weighted(stacked_data, weights, kappa=self.kappa, iterations=self.iterations)
             elif selected_algo == "Simple Average (No Rejection)":
                 clipped_mean = np.average(stacked_data, axis=0, weights=weights)
             elif selected_algo == "Simple Median (No Rejection)":
                 clipped_mean = np.median(stacked_data, axis=0)
             elif selected_algo == "Trimmed Mean":
-                clipped_mean = trimmed_mean_weighted(
-                    stacked_data, weights,
-                    trim_fraction=self.trim_fraction
-                )
+                clipped_mean = trimmed_mean_weighted(stacked_data, weights, trim_fraction=self.trim_fraction)
             elif selected_algo == "Extreme Studentized Deviate (ESD)":
-                clipped_mean = esd_clip_weighted(
-                    stacked_data, weights,
-                    threshold=self.esd_threshold
-                )
+                clipped_mean = esd_clip_weighted(stacked_data, weights, threshold=self.esd_threshold)
             elif selected_algo == "Biweight Estimator":
-                clipped_mean = biweight_location_weighted(
-                    stacked_data, weights,
-                    tuning_constant=self.biweight_constant
-                )
+                clipped_mean = biweight_location_weighted(stacked_data, weights, tuning_constant=self.biweight_constant)
             elif selected_algo == "Modified Z-Score Clipping":
-                clipped_mean = modified_zscore_clip_weighted(
-                    stacked_data, weights,
-                    threshold=self.modz_threshold
-                )
+                clipped_mean = modified_zscore_clip_weighted(stacked_data, weights, threshold=self.modz_threshold)
             else:
-                clipped_mean = windsorized_sigma_clip_weighted(
-                    stacked_data, weights,
-                    lower=self.sigma_low, upper=self.sigma_high
-                )
+                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
 
-            # Use the group key as part of the output filename.
-            # Alternatively, you could derive the key from the header.
-            output_filename = f"MasterLight_{group_key}.fits"
+            # ✅ **Save the final stacked image**
+            output_filename = f"MasterLight_{group_key}.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
 
-            # Determine if the stacked image is color or mono
-            if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 3:
-                is_mono = False  # Color (H, W, C)
-            else:
-                is_mono = True   # Mono (H, W)
+            # 1) Find the first non-zero pixel value
+            flat_array = clipped_mean.flatten()
+            nonzero_indices = np.where(flat_array > 0)[0]
 
-            # Update the FITS header
+            if len(nonzero_indices) > 0:
+                # "First" means the earliest in flattened order;
+                # if you prefer the smallest nonzero pixel, use .min() instead.
+                first_nonzero = flat_array[nonzero_indices[0]]
+                
+                # 2) Subtract this black point
+                clipped_mean -= first_nonzero
+
+            # 3) Check if the new max is over 1.0
+            new_max = clipped_mean.max()
+            if new_max > 1.0:
+                # Optional: Do a min-max normalization
+                new_min = clipped_mean.min()
+                range_val = new_max - new_min
+                if range_val != 0:
+                    clipped_mean = (clipped_mean - new_min) / range_val
+                else:
+                    # All pixels are identical after black point subtraction
+                    clipped_mean = np.zeros_like(clipped_mean, dtype=np.float32)
+
+
+            # If the array has a trailing dimension of size 1, squeeze it out
+            if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 1:
+                clipped_mean = np.squeeze(clipped_mean, axis=-1)
+
+            # Now determine if the result is mono or color
+            is_mono = (clipped_mean.ndim == 2)           
+
+            # ✅ **Ensure FITS header matches the stacked image dimensions**
             if reference_header is None:
                 reference_header = fits.Header()
                 
@@ -9639,7 +9680,6 @@ class StackingSuiteDialog(QDialog):
             reference_header["CREATOR"] = "SetiAstroSuite"
             reference_header["DATE-OBS"] = datetime.utcnow().isoformat()
 
-            # ✅ Ensure header matches image dimensions
             if is_mono:
                 reference_header["NAXIS"] = 2
                 reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
@@ -9648,20 +9688,21 @@ class StackingSuiteDialog(QDialog):
                 reference_header["NAXIS"] = 3
                 reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
                 reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
-                reference_header["NAXIS3"] = 3  # OSC: 3 color channels
+                reference_header["NAXIS3"] = 3  # 3 Color Channels (RGB)
 
-            # ✅ Save using the global save_image() method.
+            # ✅ **Save the stacked image using `save_image()`**
             save_image(
                 img_array=clipped_mean,
                 filename=output_path,
-                original_format="fits",
+                original_format="fit",
                 bit_depth="32-bit floating point",
                 original_header=reference_header,
-                is_mono=is_mono  # Pass corrected flag
+                is_mono=is_mono
             )
 
             self.update_status(f"✅ Group '{group_key}' stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
+
 
     def integrate_registered_images(self):
         """ Integrates previously registered images (already aligned) without re-aligning them. """
@@ -9706,7 +9747,11 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
 
             # ✅ Compute Star Count separately
-            star_counts[file] = compute_star_count(images[i])
+            count, ecc = compute_star_count(images[i])
+            star_counts[file] = {
+                "count": count,
+                "eccentricity": ecc
+            }
 
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
@@ -9868,7 +9913,7 @@ class StackingSuiteDialog(QDialog):
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
         # 8) Save
-        out_filename = f"MasterLight_{group_key}_drizzle.fits"
+        out_filename = f"MasterLight_{group_key}_drizzle.fit"
         out_path = os.path.join(self.stacking_directory, out_filename)
 
         if hdr is None:
@@ -9900,7 +9945,7 @@ class StackingSuiteDialog(QDialog):
         save_image(
             img_array=final_drizzle,
             filename=out_path,
-            original_format="fits",
+            original_format="fit",
             bit_depth="32-bit floating point",
             original_header=hdr,
             is_mono=is_mono  # Pass corrected flag
@@ -12683,8 +12728,8 @@ class StarRegistrationWorker(QRunnable):
                 QApplication.processEvents()
                 return
 
-            self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
-            QApplication.processEvents()
+            #self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
+            #QApplication.processEvents()
             
             # 2) Detect stars
             img_stars = StarRegistrationThread.detect_grid_stars_static(img)
@@ -12718,16 +12763,22 @@ class StarRegistrationWorker(QRunnable):
                 QApplication.processEvents()
                 return
 
-            # 6) Build output filename (force extension to .fits)
+            # ✅ Build output filename, but prevent multiple "_r" suffixes
             base = os.path.basename(self.file_path)
-            name, _ = os.path.splitext(base)
-            output_filename = os.path.join(self.output_directory, f"{name}_r.fits")
+            name, ext = os.path.splitext(base)
+
+            # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
+            if not name.endswith("_r"):
+                name += "_r"
+
+            output_filename = os.path.join(self.output_directory, f"{name}.fit")  # Always save as .fits
+
             
             # 7) Save the aligned image
             save_image(
                 img_array=aligned_image,
                 filename=output_filename,
-                original_format="fits",
+                original_format="fit",
                 bit_depth=img_bit_depth,
                 original_header=img_header,
                 is_mono=img_is_mono
@@ -12749,7 +12800,7 @@ class StarRegistrationThread(QThread):
     registration_complete = pyqtSignal(bool, str)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
-                 max_refinement_passes=3, shift_tolerance=0.1):
+                 max_refinement_passes=4, shift_tolerance=0.1):
         super().__init__()
         # Always store reference as normalized
         self.reference_image_path = os.path.normpath(reference_image_path)
@@ -12803,6 +12854,20 @@ class StarRegistrationThread(QThread):
                     self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
                     break
 
+            # 🚀 **Reject frames with >2px final shift**
+            final_shifts = self.transform_deltas[-1]  # Last pass shift values
+            self.files_to_align = [
+                f for f, shift in zip(self.files_to_align, final_shifts) if shift <= 2.0
+            ]
+            rejected_files = [
+                f for f, shift in zip(self.files_to_align, final_shifts) if shift > 2.0
+            ]
+
+            if rejected_files:
+                self.progress_update.emit(
+                    f"🚨 Rejected {len(rejected_files)} frame(s) due to high residual shift > 2px."
+                )
+
             # Finished passes
             aligned_count = sum(1 for v in self.alignment_matrices.values() if v is not None)
             total_count = len(self.alignment_matrices)
@@ -12818,38 +12883,92 @@ class StarRegistrationThread(QThread):
         pool.setMaxThreadCount(num_cores)
         self.progress_update.emit(f"Using {num_cores} cores for pass {pass_index+1}.")
 
-        # Launch a worker for each file
-        for file_path in self.files_to_align:
+        transformed_files = []  # Store newly aligned images
+        remaining_files = []  # Already aligned images (skip processing)
+
+        for fpath in self.files_to_align:
+            transform = self.alignment_matrices.get(fpath, None)
+
+            if transform is not None:
+                tx, ty = transform[0,2], transform[1,2]
+                shift_delta = np.sqrt(tx * tx + ty * ty)
+
+                # 🚀 **Skip images already aligned within 0.2 pixels**
+                if shift_delta <= 0.2:
+                    self.progress_update.emit(f"✅ Skipping {os.path.basename(fpath)} (Shift: {shift_delta:.2f}px)")
+                    remaining_files.append(fpath)  # Keep this image unchanged
+                    continue
+
+            # **Only process misaligned images**
             worker = StarRegistrationWorker(
-                file_path, ref_stars, ref_triangles, self.output_directory
+                fpath, ref_stars, ref_triangles, self.output_directory
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
             worker.signals.result_transform.connect(self.on_worker_result_transform)
             pool.start(worker)
+
         pool.waitForDone()
 
         pass_deltas = []
         aligned_count = 0
+
         for fpath in self.files_to_align:
             transform = self.alignment_matrices.get(fpath, None)
             if transform is not None:
                 aligned_count += 1
                 tx, ty = transform[0,2], transform[1,2]
-                pass_deltas.append(np.sqrt(tx*tx + ty*ty))
+                shift_delta = np.sqrt(tx*tx + ty*ty)
+                pass_deltas.append(shift_delta)
+
+                # **Only transform misaligned images**
+                if shift_delta > 0.2:
+                    # Load original image and header
+                    image, original_header, original_format, bit_depth = load_image(fpath)
+                    transformed_image = self.apply_affine_transform_static(image, transform)
+
+                    # ✅ Overwrite previous `_r.fits` file instead of adding multiple `_r`
+                    base_name = os.path.basename(fpath)
+                    name, ext = os.path.splitext(base_name)
+
+                    # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
+                    if not name.endswith("_r"):
+                        name += "_r"
+
+                    transformed_path = os.path.join(self.output_directory, f"{name}.fit")
+
+
+                    # ✅ Corrected save_image call (overwrites _r file)
+                    #save_image(
+                    #    img_array=transformed_image,
+                    #    filename=transformed_path,
+                    #    original_format="fit",
+                    #    bit_depth=bit_depth,
+                    #    original_header=original_header,
+                    #    is_mono=(len(image.shape) == 2)
+                    #)
+
+                    transformed_files.append(transformed_path)
+                else:
+                    remaining_files.append(fpath)  # Keep already aligned image
 
         self.transform_deltas.append(pass_deltas)
+
+        # ✅ **Update files list for next pass, only processing misaligned images**
+        self.files_to_align = transformed_files + remaining_files
+
         self.progress_update.emit(
             f"Pass {pass_index+1} shift deltas: {[f'{d:.2f}' for d in pass_deltas]}"
         )
 
         if aligned_count == 0:
-            return False, "All frames failed alignment this pass."
+            return False, "All frames already aligned within tolerance."
 
         failed_count = len(self.files_to_align) - aligned_count
         if failed_count > 0:
             return True, f"Pass complete. {failed_count} frame(s) failed."
         return True, "Pass complete (all succeeded)."
+
     
     def on_worker_progress(self, msg):
         self.progress_update.emit(msg)
@@ -12874,7 +12993,7 @@ class StarRegistrationThread(QThread):
         if image.ndim == 3:
             image = np.mean(image, axis=2)
         mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
+        daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
         sources = daofind(image - median)
         if sources is None or len(sources) == 0:
             return np.array([])
@@ -12897,9 +13016,12 @@ class StarRegistrationThread(QThread):
         d2 = np.linalg.norm(tri_points[1] - tri_points[2])
         d3 = np.linalg.norm(tri_points[2] - tri_points[0])
         sides = sorted([d1, d2, d3])
+        
         if sides[0] == 0:
-            return None
-        return (sides[1] / sides[0], sides[2] / sides[0])
+            return None  # Prevent division by zero
+        
+        # Use higher precision (4 decimal places instead of 2)
+        return (round(sides[1] / sides[0], 4), round(sides[2] / sides[0], 4))
 
     # NEW METHOD: store transforms in self.alignment_matrices
     def on_worker_result_transform(self, file_path, transform):
@@ -12907,16 +13029,55 @@ class StarRegistrationThread(QThread):
         self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     # --- Static Methods for use in Workers ---
+    #@staticmethod
+    #def detect_stars_static(image):
+    #    if image.ndim == 3:
+    #        image = np.mean(image, axis=2)
+    #    mean, median, std = sigma_clipped_stats(image)
+    #    daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
+    #    sources = daofind(image - median)
+    #    if sources is None or len(sources) == 0:
+    #        return np.array([])
+    #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
     @staticmethod
     def detect_stars_static(image):
+        # If the image is color, convert to mono
         if image.ndim == 3:
             image = np.mean(image, axis=2)
-        mean, median, std = sigma_clipped_stats(image)
-        daofind = DAOStarFinder(fwhm=3.5, threshold=3.4 * std)
-        sources = daofind(image - median)
-        if sources is None or len(sources) == 0:
-            return np.array([])
-        return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+
+        # Use our contour-based function instead of DAOStarFinder
+        star_coords = fast_star_detect(image)
+
+        return star_coords        
+
+    #@staticmethod
+    #def detect_grid_stars_static(image):
+    #    if image.ndim == 3:
+    #        image = np.mean(image, axis=2)
+    #    h, w = image.shape
+    #    margin_x = int(w * 0.05)
+    #    margin_y = int(h * 0.05)
+    #    valid_x_min, valid_x_max = margin_x, w - margin_x
+    #    valid_y_min, valid_y_max = margin_y, h - margin_y
+    #    grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+    #    grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+    #    stars = []
+    #    for i in range(len(grid_x) - 1):
+    #        for j in range(len(grid_y) - 1):
+    #            x_min, x_max = grid_x[i], grid_x[i+1]
+    #            y_min, y_max = grid_y[j], grid_y[j+1]
+    #            sub_img = image[y_min:y_max, x_min:x_max]
+    ##            if sub_img.size == 0:
+     #               continue
+     #           if np.std(sub_img) > 0:
+     #               local_stars = StarRegistrationThread.detect_stars_static(sub_img)
+     #               if len(local_stars) > 0:
+     #                   local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
+     ##                   local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
+     #                   sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
+     #                   stars.extend(sorted_stars[:6])
+     #   return np.array(stars) if stars else np.array([])
 
     @staticmethod
     def detect_grid_stars_static(image):
@@ -12938,13 +13099,17 @@ class StarRegistrationThread(QThread):
                 if sub_img.size == 0:
                     continue
                 if np.std(sub_img) > 0:
-                    local_stars = StarRegistrationThread.detect_stars_static(sub_img)
-                    if len(local_stars) > 0:
-                        local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
-                        local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
-                        sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-                        stars.extend(sorted_stars[:12])
-        return np.array(stars) if stars else np.array([])
+                    local_stars = fast_star_detect(sub_img)  # use new function
+                    # Shift coords back into global space
+                    for (sx, sy) in local_stars:
+                        gx = np.clip(sx + x_min, valid_x_min, valid_x_max - 1)
+                        gy = np.clip(sy + y_min, valid_y_min, valid_y_max - 1)
+                        stars.append((gx, gy))
+        if len(stars) == 0:
+            return np.empty((0,2), dtype=np.float32)
+        # Optionally sort by brightness if needed, etc.
+        return np.array(stars, dtype=np.float32)
+
 
     @staticmethod
     def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=10, max_iter=10, convergence_thresh=0.2):
@@ -12961,7 +13126,7 @@ class StarRegistrationThread(QThread):
                 if distances[closest_idx] < 20:
                     matches.append((img_star, ref_stars[closest_idx]))
             print(f"DEBUG: Found {len(matches)} matches on attempt {attempt}")
-            if len(matches) < 3:
+            if len(matches) < 5:
                 print("DEBUG: Not enough matches; continuing to next attempt.")
                 continue
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
@@ -12969,7 +13134,8 @@ class StarRegistrationThread(QThread):
             rough_transform, inliers = cv2.estimateAffinePartial2D(
                 src_pts.reshape(-1, 1, 2),
                 dst_pts.reshape(-1, 1, 2),
-                method=cv2.LMEDS
+                method=cv2.RANSAC,
+                ransacReprojThreshold=3.0
             )
             if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
                 transform = rough_transform
@@ -12989,7 +13155,7 @@ class StarRegistrationThread(QThread):
                 if distances[closest_idx] < 7:
                     matches.append((img_stars[idx], ref_stars[closest_idx]))
             print(f"DEBUG: Refinement iteration {iter_num+1}: found {len(matches)} matches.")
-            if len(matches) < 3:
+            if len(matches) < 5:
                 print("DEBUG: Not enough matches during refinement; aborting transform.")
                 return None
             src_pts = np.array([m[0] for m in matches], dtype=np.float32)
@@ -12997,7 +13163,8 @@ class StarRegistrationThread(QThread):
             new_transform, inliers = cv2.estimateAffinePartial2D(
                 src_pts.reshape(-1, 1, 2),
                 dst_pts.reshape(-1, 1, 2),
-                method=cv2.LMEDS
+                method=cv2.RANSAC,
+                ransacReprojThreshold=3.0
             )
             if new_transform is None:
                 print("DEBUG: Refinement failed to compute a new transform; aborting.")
@@ -13868,7 +14035,7 @@ class PlateSolver(QDialog):
                 save_image(
                     img_array=original_image_data,
                     filename=save_path,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=solved_header,
                     is_mono=is_mono
@@ -14081,7 +14248,7 @@ class PlateSolver(QDialog):
                 save_image(
                     img_array=image_data,
                     filename=save_path,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=wcs_header,
                     is_mono=is_mono
@@ -14595,7 +14762,7 @@ class BatchPlateSolverDialog(QDialog):
                 save_image(
                     img_array=image_data,
                     filename=output_file,
-                    original_format="fits",
+                    original_format="fit",
                     bit_depth="32-bit floating point",
                     original_header=solved_header,
                     is_mono=is_mono
@@ -35307,75 +35474,74 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     if image_data.dtype.byteorder not in ('=', '|'):
                         image_data = image_data.astype(image_data.dtype.newbyteorder('='))
 
-                    # Determine bit depth
+                    # ---------------------------------------------------------------------
+                    # 1) Detect bit depth and convert to float32
+                    # ---------------------------------------------------------------------
                     if image_data.dtype == np.uint8:
                         bit_depth = "8-bit"
                         print("Identified 8-bit FITS image.")
                         image = image_data.astype(np.float32) / 255.0
+
                     elif image_data.dtype == np.uint16:
                         bit_depth = "16-bit"
                         print("Identified 16-bit FITS image.")
                         image = image_data.astype(np.float32) / 65535.0
-                    elif image_data.dtype == np.float32:
-                        bit_depth = "32-bit floating point"
-                        print("Identified 32-bit floating point FITS image.")
+
                     elif image_data.dtype == np.uint32:
                         bit_depth = "32-bit unsigned"
                         print("Identified 32-bit unsigned FITS image.")
-                    else:
-                        raise ValueError("Unsupported FITS data type!")
 
-                    # Handle 3D FITS data (e.g., RGB or multi-layered)
-                    if image_data.ndim == 3 and image_data.shape[0] == 3:
-                        image = np.transpose(image_data, (1, 2, 0))  # Reorder to (height, width, channels)
+                        bzero  = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        image = image_data.astype(np.float32) * bscale + bzero
 
-                        if bit_depth == "8-bit":
-                            image = image.astype(np.float32) / 255.0
-                        elif bit_depth == "16-bit":
-                            image = image.astype(np.float32) / 65535.0
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            image = image.astype(np.float32) * bscale + bzero
-
-                            # Normalize based on range
-                            image_min = image.min()
-                            image_max = image.max()
-                            image = (image - image_min) / (image_max - image_min)
-                        # No normalization needed for 32-bit float
-                        is_mono = False
-
-                    # Handle 2D FITS data (grayscale)
-                    elif image_data.ndim == 2:
-                        if bit_depth == "8-bit":
-                            image = image_data.astype(np.float32) / 255.0
-                        elif bit_depth == "16-bit":
-                            image = image_data.astype(np.float32) / 65535.0
-                        elif bit_depth == "32-bit unsigned":
-                            bzero = original_header.get('BZERO', 0)
-                            bscale = original_header.get('BSCALE', 1)
-                            image = image_data.astype(np.float32) * bscale + bzero
-
-                            # Normalize based on range
-                            image_min = image.min()
-                            image_max = image.max()
-                            image = (image - image_min) / (image_max - image_min)
-                        elif bit_depth == "32-bit floating point":
-                            image = image_data
+                        # Optionally min-max normalize here
+                        img_min, img_max = image.min(), image.max()
+                        if img_max > img_min:
+                            image = (image - img_min) / (img_max - img_min)
                         else:
-                            raise ValueError("Unsupported FITS data type!")
+                            image = np.zeros_like(image, dtype=np.float32)
 
-                        # Mono or RGB handling
-                        if image_data.ndim == 2:  # Mono
-                            is_mono = True
-                            return image, original_header, bit_depth, is_mono
-                        elif image_data.ndim == 3 and image_data.shape[0] == 3:  # RGB
-                            image = np.transpose(image_data, (1, 2, 0))  # Convert to (H, W, C)
-                            is_mono = False
-                            return image, original_header, bit_depth, is_mono
+                    elif image_data.dtype == np.float32:
+                        bit_depth = "32-bit floating point"
+                        print("Identified 32-bit floating point FITS image.")
+                        # Already float, so just rename it
+                        image = image_data
 
                     else:
-                        raise ValueError("Unsupported FITS format or dimensions!")
+                        raise ValueError(f"Unsupported FITS data type: {image_data.dtype}")
+
+                    # ---------------------------------------------------------------------
+                    # 2) Squeeze out any singleton dimensions (fix weird NAXIS combos)
+                    # ---------------------------------------------------------------------
+                    image = np.squeeze(image)  # e.g. (H, W, 1) → (H, W)
+
+                    # ---------------------------------------------------------------------
+                    # 3) Interpret final shape to decide if mono or color
+                    # ---------------------------------------------------------------------
+                    if image.ndim == 2:
+                        # (H, W) => mono
+                        is_mono = True
+
+                    elif image.ndim == 3:
+                        # Could be (3, H, W) or (H, W, 3)
+                        if image.shape[0] == 3 and image.shape[1] > 1 and image.shape[2] > 1:
+                            # Transpose to (H, W, 3)
+                            image = np.transpose(image, (1, 2, 0))
+                            is_mono = False
+                        elif image.shape[-1] == 3:
+                            # Already (H, W, 3)
+                            is_mono = False
+                        else:
+                            raise ValueError(f"Unsupported 3D shape after squeeze: {image.shape}")
+                    else:
+                        raise ValueError(f"Unsupported FITS dimensions after squeeze: {image.shape}")
+
+                    # Now you have a robustly loaded image array in 'image'
+                    # with shape either (H, W) for mono or (H, W, 3) for color.
+                    print(f"Loaded FITS image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+                    return image, original_header, bit_depth, is_mono
+
 
             elif filename.lower().endswith(('.tiff', '.tif')):
                 print(f"Loading TIFF file: {filename}")
@@ -35476,28 +35642,48 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                 return image, original_header, bit_depth, is_mono
 
-            elif filename.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            elif filename.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 print(f"Loading RAW file: {filename}")
                 with rawpy.imread(filename) as raw:
-                    # Get the raw Bayer data
+                    # 1) Read the raw Bayer data (no demosaic)
                     bayer_image = raw.raw_image_visible.astype(np.float32)
-                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, min: {bayer_image.min()}, max: {bayer_image.max()}")
+                    print(f"Raw Bayer image dtype: {bayer_image.dtype}, "
+                        f"min: {bayer_image.min():.2f}, max: {bayer_image.max():.2f}")
 
-                    # Ensure Bayer image is normalized
-                    bayer_image /= bayer_image.max()
+                    # 2) Get camera black/white levels
+                    black_levels = raw.black_level_per_channel  # e.g. [512, 512, 512, 512]
+                    white_level  = raw.white_level              # e.g. 16383 for 14-bit
+                    avg_black = float(np.mean(black_levels))    # Simple average
 
+                    # 3) Subtract black level, clip negatives to 0
+                    bayer_image -= avg_black
+                    bayer_image = np.clip(bayer_image, 0, None)
+
+                    # 4) Divide by (white_level - black_level) to normalize to [0..1]
+                    scale = float(white_level - avg_black)
+                    if scale <= 0:
+                        # Safety check if black >= white
+                        scale = 1.0
+                    bayer_image /= scale
+
+                    # Now dark frames should hover near 0.0 instead of ~0.7
+
+                    # 5) Check shape to decide if mono vs. color mosaic
+                    #    Usually it's 2D for a raw Bayer pattern
                     if bayer_image.ndim == 2:
-                        image = bayer_image  # Keep as 2D mono image
+                        image = bayer_image
                         is_mono = True
                     elif bayer_image.ndim == 3 and bayer_image.shape[2] == 3:
-                        image = bayer_image  # Already RGB
+                        # Rare case if raw.raw_image_visible is already color
+                        image = bayer_image
                         is_mono = False
                     else:
                         raise ValueError(f"Unexpected RAW Bayer image shape: {bayer_image.shape}")
-                    bit_depth = "16-bit"  # Assuming 16-bit raw data
-                    is_mono = True
 
-                    # Populate `original_header` with RAW metadata
+                    # 6) Assume 16-bit raw data (typical for DSLRs)
+                    bit_depth = "16-bit"
+
+                    # 7) Build a minimal header from raw metadata
                     original_header_dict = {
                         'CAMERA': raw.camera_whitebalance[0] if raw.camera_whitebalance else 'Unknown',
                         'EXPTIME': raw.shutter if hasattr(raw, 'shutter') else 0.0,
@@ -35506,24 +35692,21 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                         'DATE': raw.timestamp if hasattr(raw, 'timestamp') else 'Unknown',
                     }
 
-                    # Extract CFA pattern
-                    cfa_pattern = raw.raw_colors_visible
-                    cfa_mapping = {
-                        0: 'R',  # Red
-                        1: 'G',  # Green
-                        2: 'B',  # Blue
-                    }
-                    cfa_description = ''.join([cfa_mapping.get(color, '?') for color in cfa_pattern.flatten()[:4]])
-
-                    # Add CFA pattern to header
+                    # 8) Extract the CFA pattern
+                    cfa_pattern = raw.raw_colors_visible  # 2D array of 0/1/2
+                    cfa_mapping = {0: 'R', 1: 'G', 2: 'B'}
+                    cfa_description = ''.join([cfa_mapping.get(color, '?')
+                                            for color in cfa_pattern.flatten()[:4]])
                     original_header_dict['CFA'] = (cfa_description, 'Color Filter Array pattern')
 
-                    # Convert original_header_dict to fits.Header
+                    # 9) Convert dict → FITS Header
                     original_header = fits.Header()
                     for key, value in original_header_dict.items():
                         original_header[key] = value
 
-                    print(f"RAW file loaded with CFA pattern: {cfa_description}")
+                    print(f"RAW file loaded with CFA pattern: {cfa_description}, "
+                        f"dark frames ~0, bright frames ~1 now.")
+                    return image, original_header, bit_depth, is_mono
 
             elif filename.lower().endswith('.png'):
                 print(f"Loading PNG file: {filename}")
