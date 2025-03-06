@@ -12837,7 +12837,7 @@ class StarRegistrationThread(QThread):
                 return
 
             # Detect reference stars, etc...
-            ref_stars = self.detect_stars_static(ref_image)
+            ref_stars = self.detect_stars(ref_image)
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
@@ -13003,15 +13003,54 @@ class StarRegistrationThread(QThread):
         self.alignment_matrices[norm_path] = transform
         self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
-    #def detect_stars(self, image):
-    #    if image.ndim == 3:
-    #        image = np.mean(image, axis=2)
-    #    mean, median, std = sigma_clipped_stats(image)
-    #    daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
-    #    sources = daofind(image - median)
-    #    if sources is None or len(sources) == 0:
-    #        return np.array([])
-    #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
+    def detect_stars(self, image):
+        """
+        Run DAOStarFinder multiple times with different FWHMs,
+        then combine (deduplicate) the results.
+        """
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+
+        mean, median, std = sigma_clipped_stats(image)
+        
+        # A range of FWHMs you want to try
+        fwhm_list = [3, 4, 5, 6, 7]
+        
+        all_sources = []
+        for fwhm in fwhm_list:
+            daofind = DAOStarFinder(fwhm=fwhm, threshold=4 * std)
+            sources = daofind(image - median)
+            if sources is not None and len(sources) > 0:
+                all_sources.append(sources)
+
+        # If we never found any stars, return empty
+        if not all_sources:
+            return np.empty((0, 2), dtype=np.float32)
+
+        # 1) Combine them all into a single table
+        combined_sources = vstack(all_sources)  # Astropy Table vertical stack
+
+        # 2) Optionally remove duplicates
+        #    E.g. we can round the (x,y) to 1 decimal place and do a unique operation.
+        #    This helps if the same star is found at slightly different coords in different FWHM passes.
+        x_rounded = np.round(combined_sources['xcentroid'], 1)
+        y_rounded = np.round(combined_sources['ycentroid'], 1)
+        xy_rounded = np.array([x_rounded, y_rounded]).T
+        
+        # We'll build a dictionary to track unique (x_rounded, y_rounded)
+        seen = {}
+        unique_rows = []
+        for i, (rx, ry) in enumerate(xy_rounded):
+            key = (rx, ry)
+            if key not in seen:
+                seen[key] = True
+                unique_rows.append(i)
+
+        final_sources = combined_sources[unique_rows]
+        
+        # Convert to Nx2 NumPy array
+        star_coords = np.vstack([final_sources['xcentroid'], final_sources['ycentroid']]).T
+        return star_coords.astype(np.float32)
 
     def build_triangle_dict(self, coords):
         tri = Delaunay(coords)
