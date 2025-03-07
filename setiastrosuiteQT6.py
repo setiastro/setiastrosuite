@@ -9592,75 +9592,62 @@ class StackingSuiteDialog(QDialog):
 
 
     def stack_registered_images_chunked(
-        self, 
-        grouped_files,          # dict of {group_key: [list_of_original_file_paths]}
-        frame_weights,          # dict of {orig_file_path: weight}
-        chunk_height=512,       # adjust chunk size as needed
+        self,
+        grouped_files,           # dict of { group_key: [list_of_aligned_file_paths] }
+        frame_weights,           # dict of { aligned_file_path: weight }
+        chunk_height=512,
         chunk_width=512
     ):
         """
-        A chunked version of stack_registered_images() that never loads entire
-        images into RAM at once. We read small tiles from each file, do outlier
-        rejection, and write the result into a memmap array tile by tile.
-
-        This method supports all your existing rejection algorithms:
-            - Weighted Windsorized Sigma Clipping
-            - Kappa-Sigma Clipping
-            - Simple Average/Median
-            - Trimmed Mean
-            - Extreme Studentized Deviate (ESD)
-            - Biweight Estimator
-            - Modified Z-Score Clipping
+        Chunked stacking of already-aligned FITS images (no transforms needed).
+        Reads small tiles from each image, applies outlier rejection, writes
+        the result into a memory-mapped array, and saves a final stacked FITS.
 
         Requirements:
-            - A partial-read function (load_fits_tile) that can load a subregion
-            of a FITS file from disk.
-            - self.valid_transforms: dict of { orig_path -> aligned_fits_path }
-            - self.reference_frame: if set, used as reference in each group
-            - self.rejection_algorithm: a string selecting the method
-            - self.sigma_low, self.sigma_high, self.kappa, etc. as needed
-            - outlier rejection functions (windsorized_sigma_clip_weighted, etc.)
+        - A partial-read function load_fits_tile(path, y1, y2, x1, x2)
+            that returns a subregion of a FITS image from disk.
+        - self.reference_frame, if set, used to pick a reference image in each group;
+            otherwise we use the first file in the group.
+        - self.rejection_algorithm, plus the relevant sigma/kappa/trim_fraction
+            etc. for outlier rejection.
+        - The aligned files in each group are final “_r.fit” paths.
         """
 
-        aligned_dir = os.path.join(self.stacking_directory, "Aligned_Images")
-        valid_transforms = self.valid_transforms  # e.g. {orig_file: aligned_file}
+        self.update_status(f"✅ Chunked stacking {len(grouped_files)} group(s)...")
 
-        self.update_status(f"✅ Using {len(valid_transforms)} final aligned images for stacking.")
-        for orig, aligned in valid_transforms.items():
-            self.update_status(f"  {os.path.basename(orig)} → {os.path.basename(aligned)}")
-
-        # -------------------------------------------------
-        # Process each group in grouped_files
-        # -------------------------------------------------
+        # For each group (e.g. "Ha 900s", "OIII 300s", etc.)
         for group_key, file_list in grouped_files.items():
-            self.update_status(f"📊 Chunked stacking group '{group_key}' with {len(file_list)} files...")
-            if len(file_list) < 2:
+            num_files = len(file_list)
+            self.update_status(f"📊 Group '{group_key}' has {num_files} aligned file(s).")
+            QApplication.processEvents()
+            if num_files < 2:
                 self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
                 continue
 
-            # 1) Identify reference frame
-            group_ref = self.reference_frame if (self.reference_frame in file_list) else file_list[0]
-            ref_aligned_path = valid_transforms.get(os.path.normpath(group_ref), None)
-            if not ref_aligned_path or not os.path.exists(ref_aligned_path):
-                self.update_status(f"⚠️ Missing aligned file for reference '{group_ref}', skipping group.")
+            # 1) Identify the reference file
+            if hasattr(self, "reference_frame") and self.reference_frame in file_list:
+                ref_file = self.reference_frame
+            else:
+                ref_file = file_list[0]
+
+            if not os.path.exists(ref_file):
+                self.update_status(f"⚠️ Reference file '{ref_file}' not found, skipping group.")
                 continue
 
-            # 2) Load the reference fully just once to get shape + reference median
-            ref_data, ref_header, _, _ = load_image(ref_aligned_path)
+            # 2) Load the reference image fully once to get shape + median
+            ref_data, ref_header, _, _ = load_image(ref_file)
             if ref_data is None:
-                self.update_status(f"⚠️ Could not load reference '{ref_aligned_path}', skipping group.")
+                self.update_status(f"⚠️ Could not load reference '{ref_file}', skipping group.")
                 continue
 
             reference_median = np.median(ref_data)
             reference_header = ref_header.copy() if ref_header else fits.Header()
 
-            # Determine shape (mono vs. color)
             is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
             height, width = ref_data.shape[:2]
             channels = 3 if is_color else 1
 
-            # 3) Prepare a final memmap array for the stacked result
-            # shape = (height, width, channels)
+            # 3) Prepare a memmap for the final stacked image
             memmap_path = os.path.join(self.stacking_directory, f"chunked_{group_key}.dat")
             final_stacked = np.memmap(
                 memmap_path,
@@ -9669,29 +9656,29 @@ class StackingSuiteDialog(QDialog):
                 shape=(height, width, channels)
             )
 
-            # Build a list of aligned file paths & weights for this group
+            # Build a list of file paths and weights for this group
+            # We assume each file in file_list is an aligned FITS path
             aligned_paths = []
             weights_list = []
-            for orig_file in file_list:
-                aligned_file = valid_transforms.get(os.path.normpath(orig_file), None)
-                if aligned_file and os.path.exists(aligned_file):
-                    aligned_paths.append(aligned_file)
-                    w = frame_weights.get(orig_file, 1.0)
+            for fpath in file_list:
+                if os.path.exists(fpath):
+                    aligned_paths.append(fpath)
+                    w = frame_weights.get(fpath, 1.0)
                     weights_list.append(w)
                 else:
-                    self.update_status(f"⚠️ No aligned file found for {orig_file}, skipping.")
+                    self.update_status(f"⚠️ File not found: {fpath}, skipping.")
+
             if len(aligned_paths) < 2:
                 self.update_status(f"⚠️ Not enough valid frames in group '{group_key}' to stack.")
                 continue
 
             weights_list = np.array(weights_list, dtype=np.float32)
-            num_frames = len(aligned_paths)
-
-            # 4) Iterate over tiles in (height, width)
             self.update_status(
                 f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}"
             )
+            QApplication.processEvents()
 
+            # 4) Loop over tiles in the final image
             for y_start in range(0, height, chunk_height):
                 y_end = min(y_start + chunk_height, height)
                 tile_h = y_end - y_start
@@ -9700,10 +9687,10 @@ class StackingSuiteDialog(QDialog):
                     x_end = min(x_start + chunk_width, width)
                     tile_w = x_end - x_start
 
-                    # Create a small stack: (num_frames, tile_h, tile_w, channels)
-                    tile_stack = np.zeros((num_frames, tile_h, tile_w, channels), dtype=np.float32)
+                    # Create a stack for this tile: (num_frames, tile_h, tile_w, channels)
+                    tile_stack = np.zeros((len(aligned_paths), tile_h, tile_w, channels), dtype=np.float32)
 
-                    # 4A) Load each frame's tile from disk
+                    # 4A) Read each frame's tile from disk
                     for i, path in enumerate(aligned_paths):
                         sub_img = load_fits_tile(path, y_start, y_end, x_start, x_end)
                         if sub_img is None:
@@ -9712,97 +9699,83 @@ class StackingSuiteDialog(QDialog):
 
                         # shape handling
                         if sub_img.ndim == 2 and channels == 3:
-                            # expand mono tile to 3-channel
                             sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
                         elif sub_img.ndim == 2 and channels == 1:
-                            # expand last dim
                             sub_img = sub_img[:, :, np.newaxis]
 
                         sub_img = sub_img.astype(np.float32, copy=False)
 
-                        # Normalization:
-                        # If you want EXACT logic from your existing `normalize_images`, 
-                        # you might store each frame's full-image median in a dict and do:
-                        # factor = reference_median / per_frame_median[path]
-                        # sub_img *= factor
-                        # For demonstration, we do local tile median (less accurate):
+                        # Normalization
+                        # If you prefer EXACT logic from 'normalize_images', 
+                        # you'd do: factor = (reference_median / per_frame_median[path])
+                        # For now, we do a local tile median approach
                         tile_median = np.median(sub_img)
                         if tile_median > 1e-9:
                             norm_factor = reference_median / tile_median
                             sub_img *= norm_factor
 
                         tile_stack[i] = sub_img
-
-                    # 4B) Apply your chosen rejection algorithm
-                    selected_algo = self.rejection_algorithm
-                    if selected_algo == "Simple Median (No Rejection)":
+                    self.update_status(f"📊  Stacking with {self.rejection_algorithm}")
+                    QApplication.processEvents()                  
+                    # 4B) Outlier rejection
+                    algo = self.rejection_algorithm
+                    if algo == "Simple Median (No Rejection)":
                         tile_result = np.median(tile_stack, axis=0)
-                    elif selected_algo == "Simple Average (No Rejection)":
+                    elif algo == "Simple Average (No Rejection)":
                         tile_result = np.average(tile_stack, axis=0, weights=weights_list)
-                    elif selected_algo == "Weighted Windsorized Sigma Clipping":
+                    elif algo == "Weighted Windsorized Sigma Clipping":
                         tile_result = windsorized_sigma_clip_weighted(
-                            tile_stack, 
-                            weights_list,
-                            lower=self.sigma_low,
+                            tile_stack, weights_list, 
+                            lower=self.sigma_low, 
                             upper=self.sigma_high
                         )
-                    elif selected_algo == "Kappa-Sigma Clipping":
+                    elif algo == "Kappa-Sigma Clipping":
                         tile_result = kappa_sigma_clip_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             kappa=self.kappa,
                             iterations=self.iterations
                         )
-                    elif selected_algo == "Trimmed Mean":
+                    elif algo == "Trimmed Mean":
                         tile_result = trimmed_mean_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             trim_fraction=self.trim_fraction
                         )
-                    elif selected_algo == "Extreme Studentized Deviate (ESD)":
+                    elif algo == "Extreme Studentized Deviate (ESD)":
                         tile_result = esd_clip_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             threshold=self.esd_threshold
                         )
-                    elif selected_algo == "Biweight Estimator":
+                    elif algo == "Biweight Estimator":
                         tile_result = biweight_location_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             tuning_constant=self.biweight_constant
                         )
-                    elif selected_algo == "Modified Z-Score Clipping":
+                    elif algo == "Modified Z-Score Clipping":
                         tile_result = modified_zscore_clip_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             threshold=self.modz_threshold
                         )
                     else:
                         # default
                         tile_result = windsorized_sigma_clip_weighted(
-                            tile_stack,
-                            weights_list,
+                            tile_stack, weights_list,
                             lower=self.sigma_low,
                             upper=self.sigma_high
                         )
 
-                    # 4C) Write the tile_result back into final_stacked
+                    # 4C) Write the tile result back into final_stacked
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
 
-            # 5) final_stacked on disk now has the entire stacked image in a memmap. 
-            #    We can do a final pass for black-point or min-max normalization.
+            # 5) Now final_stacked on disk is complete. Do a final pass for black-point etc.
+            final_array = np.array(final_stacked)  # loads from memmap
+            del final_stacked  # close the memmap
 
-            final_array = np.array(final_stacked)  # read the memmap into memory
-            del final_stacked  # close the memmap file
-
-            # Black point shift
             flat_array = final_array.flatten()
             nonzero_indices = np.where(flat_array > 0)[0]
             if len(nonzero_indices) > 0:
                 first_nonzero = flat_array[nonzero_indices[0]]
                 final_array -= first_nonzero
 
-            # Optional min-max
             new_max = final_array.max()
             if new_max > 1.0:
                 new_min = final_array.min()
@@ -9814,11 +9787,11 @@ class StackingSuiteDialog(QDialog):
 
             # Squeeze if mono
             if final_array.ndim == 3 and final_array.shape[-1] == 1:
-                final_array = np.squeeze(final_array, axis=-1)
+                final_array = final_array[..., 0]
 
             is_mono = (final_array.ndim == 2)
 
-            # 6) Save final stacked result
+            # 6) Save final stacked image
             if reference_header is None:
                 reference_header = fits.Header()
 
@@ -9853,7 +9826,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"✅ Group '{group_key}' chunked stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
 
-            # Optionally remove the memmap file
+            # Remove memmap file
             try:
                 os.remove(memmap_path)
             except OSError:
@@ -9946,11 +9919,13 @@ class StackingSuiteDialog(QDialog):
             return
 
         self.update_status(f"✅ All chunks complete! Measured {len(measured_frames)} frames total.")
+        QApplication.processEvents()
 
         # 4) Compute Weights
         self.update_status("⚖️ Computing frame weights...")
 
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
+        QApplication.processEvents()
         for file in measured_frames:
             c = star_counts[file]["count"]
             ecc = star_counts[file]["eccentricity"]
@@ -9967,16 +9942,20 @@ class StackingSuiteDialog(QDialog):
                 f"📂 {os.path.basename(file)} → "
                 f"Star Count: {c}, Mean: {mean_val:.4f}, Final Weight: {raw_weight:.4f}\n"
             )
+            QApplication.processEvents()
 
         self.update_status(debug_weight_log)
         self.update_status("✅ Frame weights computed!")
+        QApplication.processEvents()
 
         # 5) Pick the best reference frame if not user-specified
         if hasattr(self, "reference_frame") and self.reference_frame:
             self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
+            QApplication.processEvents()
         else:
             self.reference_frame = max(self.frame_weights, key=self.frame_weights.get)
             self.update_status(f"📌 Auto-selected reference frame: {self.reference_frame} (Best Weight)")
+            
 
         # 6) Finally, call the chunked stacking method using the already registered images
         self.stack_registered_images_chunked(self.light_files, self.frame_weights)
