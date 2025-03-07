@@ -1,9 +1,9 @@
 {
-  "version": "2.12.1",
+  "version": "2.12.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.1/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Seti Astro Stacking Suite (SASS)-Supports Debayering Fits/Camera Raw-Dark, Flat, and Image Calibration-Image Measurement, Registration, and Integration-Available Rejection algorithms: Weighted Windsorized Sigma Clipping, Kappa Sigma Clipping, Simple Average, Simple Median, Trimmed Mean, Extreme Studentized Deviate, Biweight Estimate, and Modified Z-Score Clipping-Drizzle and dropshink algorithms-Automated grouping based on filter, exposure, etc-Automated folder creation for aligned images, master images, and calibrated images"
+  "notes": "Major Bug Fix: Flats were overcorrecting due to normalization of master flat prior to saving it.  This has been corrected."
 }
