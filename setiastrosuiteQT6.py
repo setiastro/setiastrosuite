@@ -213,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.2"
+VERSION = "2.12.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -6631,6 +6631,7 @@ class StackingSuiteDialog(QDialog):
         self.per_group_drizzle = {}
         self.manual_dark_overrides = {}  
         self.manual_flat_overrides = {}
+        self.conversion_output_directory = None
 
         # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
@@ -6781,9 +6782,24 @@ class StackingSuiteDialog(QDialog):
         self.update_status("Conversion list cleared.")
 
     def convert_all_files(self):
+        # If no output directory is set, ask the user if they want to set it now.
         if not self.conversion_output_directory:
-            QMessageBox.warning(self, "No Output Directory", "Please select a conversion output directory first.")
-            return
+            reply = QMessageBox.question(
+                self,
+                "No Output Directory",
+                "No output directory is set. Do you want to select one now?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.select_conversion_output_dir()  # Let them pick a folder
+            else:
+                # They chose 'No' → just stop
+                return
+
+            # If it's still empty after that, bail out
+            if not self.conversion_output_directory:
+                QMessageBox.warning(self, "No Output Directory", "Please select a conversion output directory first.")
+                return
 
         count = self.conversion_tree.topLevelItemCount()
         if count == 0:
@@ -6960,10 +6976,13 @@ class StackingSuiteDialog(QDialog):
         layout.addWidget(self.status_scroll)
 
     def update_status(self, message):
-        """ Updates the status log with a scrolling history. """
-        self.status_text.append(message)  # Adds new message at the bottom
-        self.status_text.verticalScrollBar().setValue(self.status_text.verticalScrollBar().maximum())  # Auto-scroll to bottom
-        QApplication.processEvents() 
+        old_state = self.status_text.blockSignals(True)
+        self.status_text.append(message)
+        self.status_text.verticalScrollBar().setValue(
+            self.status_text.verticalScrollBar().maximum()
+        )
+        self.status_text.blockSignals(old_state)
+
 
     def open_stacking_settings(self):
         """ Opens a dialog to set the stacking directory, sigma values, rejection algorithm, and algorithm parameters. """
@@ -7624,7 +7643,6 @@ class StackingSuiteDialog(QDialog):
 
     def clear_tree_selection(self, tree):
         """ Clears the selection in the given tree widget and removes items from dictionaries. """
-        
         selected_items = tree.selectedItems()
         if not selected_items:
             return  # Nothing to remove
@@ -7646,7 +7664,6 @@ class StackingSuiteDialog(QDialog):
                         removed_keys.append(group_key)
 
                 parent.removeChild(item)
-
             else:
                 # ✅ Handle parent groups (remove entire category)
                 group_key = item.text(0)
@@ -7660,8 +7677,13 @@ class StackingSuiteDialog(QDialog):
         for key in removed_keys:
             self.light_files.pop(key, None)
 
-        print(f"✅ Cleared selection. Remaining files: {sum(len(v) for v in self.light_files.values())} total")
+        # 🔹 If no files remain, clear the reference frame
+        remaining_files = sum(len(v) for v in self.light_files.values())
+        if remaining_files == 0:
+            self.reference_frame = None
+            self.update_status("All items cleared. Reference frame reset.")
 
+        print(f"✅ Cleared selection. Remaining files: {remaining_files} total")
 
 
     def populate_calibrated_lights(self, manual_addition=False):
@@ -7878,22 +7900,28 @@ class StackingSuiteDialog(QDialog):
 
             # ✅ Extract metadata (filter, exposure, size)
             try:
-                with fits.open(file) as hdul:
-                    header = hdul[0].header
-                    filter_name = header.get("FILTER", "Unknown")
-                    exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                header = fits.getheader(file, ext=0)  # Read only the primary header
+                filter_name = header.get("FILTER", "Unknown")
+                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
 
-                    # Extract image size
-                    data = hdul[0].data
-                    if data is not None:
-                        height, width = data.shape[-2:]
-                        image_size = f"{width}x{height}"
-                    else:
-                        image_size = "Unknown"
+                # Retrieve image size from NAXIS keywords
+                naxis = header.get("NAXIS", 0)
+                if naxis >= 2:
+                    width = header.get("NAXIS1", 0)
+                    height = header.get("NAXIS2", 0)
+                else:
+                    width, height = 0, 0
 
-                    group_key = f"{filter_name} - {exposure}s ({image_size})"
+                if width > 0 and height > 0:
+                    image_size = f"{width}x{height}"
+                else:
+                    image_size = "Unknown"
+
+                group_key = f"{filter_name} - {exposure}s ({image_size})"
+
             except Exception:
                 group_key = "Unknown - Unknown"
+
 
             # ✅ Ensure group exists in tree
             existing_groups = {self.reg_tree.topLevelItem(i).text(0) for i in range(self.reg_tree.topLevelItemCount())}
@@ -7908,6 +7936,9 @@ class StackingSuiteDialog(QDialog):
 
             # ✅ Add file to tree
             file_item = QTreeWidgetItem([file, "Loaded"])
+            print(f"✅ Added {file} light frame.")
+            self.update_status(f"✅ Added {file} light frame.")
+            QApplication.processEvents()
             group_item.addChild(file_item)
 
             # ✅ Ensure it's stored for processing
@@ -7916,6 +7947,8 @@ class StackingSuiteDialog(QDialog):
             self.light_files[group_key].append(file)
 
         print(f"✅ Added {len(files)} light frames.")
+        self.update_status(f"✅ Added {len(files)} light frames.")
+        QApplication.processEvents()
 
 
 
@@ -9185,87 +9218,111 @@ class StackingSuiteDialog(QDialog):
 
 
     def register_images(self):
-        """ Measures all frames, aligns them, and performs weighted stacking with Windsorized Sigma Clipping. """
+        """ 
+        Measures all frames in batches (up to the number of CPU cores),
+        then aligns them, and computes weighted stacking parameters.
+        """
         self.update_status("🔄 Image Registration Started...")
 
-        # ✅ Extract files from tree before processing
+        # 1) Extract files from tree before processing
         self.extract_light_files_from_tree()
         if not self.light_files:
             self.update_status("⚠️ No light frames found!")
             return
 
-        self.update_status("📊 Loading in frame image arrays for weight calculation...")
+        # Flatten all groups into one list of files
+        all_files = [file for file_list in self.light_files.values() for file in file_list]
+        self.update_status(f"📊 Found {len(all_files)} total frames. Now measuring in parallel batches...")
 
-        self.frame_weights = {}  # ✅ Store as an instance variable
+        self.frame_weights = {}  # Will hold final weights
         mean_values = {}
         star_counts = {}
         measured_frames = []
 
-        all_files = [file for file_list in self.light_files.values() for file in file_list]
+        # Decide how many images to load per batch (e.g. # of CPU cores)
+        import os
+        max_workers = os.cpu_count() or 4
+        chunk_size = max_workers  # You can tweak this if needed
 
-        images = []  # ✅ List to store successfully loaded images
-        valid_files = []  # ✅ List to track corresponding file names
+        # Simple helper to chunk the file list
+        def chunk_list(lst, size):
+            for i in range(0, len(lst), size):
+                yield lst[i : i + size]
 
-        # ✅ Load images using global `load_image()` function
-        for file in all_files:
-            image_data, _, _, _ = load_image(file)
-            self.update_status(f"Loaded {file}")
-            QApplication.processEvents
+        chunked_files = list(chunk_list(all_files, chunk_size))
+        total_chunks = len(chunked_files)
 
-            if image_data is not None:
-                images.append(image_data)
-                valid_files.append(file)  # Only keep valid files
+        # 2) Load & measure each chunk
+        chunk_index = 0
+        for chunk in chunked_files:
+            chunk_index += 1
+            self.update_status(
+                f"📦 Loading and measuring chunk {chunk_index}/{total_chunks} with up to {len(chunk)} images..."
+            )
 
-        if not images:
-            self.update_status("⚠️ No valid images loaded!")
-            return
+            # Temporary storage for images in this chunk
+            chunk_images = []
+            chunk_valid_files = []
 
-        self.update_status(f"✅ Loaded {len(images)} valid frames for registration.")
+            # Load images in this chunk
+            for file in chunk:
+                image_data, _, _, _ = load_image(file)
+                self.update_status(f"  Loaded {file}")
+                QApplication.processEvents()  # keep UI responsive
 
-        # ✅ Step 1: Parallel Processing for Mean Pixel Value
-        means = parallel_measure_frames(images)
+                if image_data is not None:
+                    chunk_images.append(image_data)
+                    chunk_valid_files.append(file)
 
-        for i, file in enumerate(valid_files):
-            self.update_status(f"🌍 Measuring frames... {i+1}/{len(valid_files)} global statistics.")
-            mean_signal = means[i]
-            mean_values[file] = mean_signal
-            measured_frames.append(file)
+            if not chunk_images:
+                self.update_status("⚠️ No valid images in this chunk.")
+                continue
 
-            self.update_status(f"⭐ Measuring frames... {i+1}/{len(valid_files)} stellar statistics.")
+            # Parallel measure the mean pixel value for this chunk
+            self.update_status("🌍 Measuring global statistics (mean) in parallel...")
+            means = parallel_measure_frames(chunk_images)  # same function you already have
 
-            # ✅ Compute Star Count separately
-            count, ecc = compute_star_count(images[i])
-            star_counts[file] = {
-                "count": count,
-                "eccentricity": ecc
-            }
+            # For each valid image in the chunk, measure star count & store results
+            for i, file in enumerate(chunk_valid_files):
+                self.update_status(f"⭐ Measuring star stats for {file}...")
+                mean_signal = means[i]
+                mean_values[file] = mean_signal
 
+                # Star count
+                count, ecc = compute_star_count(chunk_images[i])
+                star_counts[file] = {
+                    "count": count,
+                    "eccentricity": ecc
+                }
+
+                measured_frames.append(file)
+
+            # Clear out this chunk’s data to free memory before next chunk
+            del chunk_images
+
+        # 3) If no frames measured at all, bail out
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
             return
 
-        self.update_status("✅ Frame measurements complete!")
+        self.update_status(f"✅ All chunks complete! Measured {len(measured_frames)} frames total.")
 
-        # 5) Compute Weights for Stacking
+        # 4) Compute Weights
         self.update_status("⚖️ Computing frame weights...")
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
 
         for file in measured_frames:
-            # Unpack your star count and eccentricity from wherever you stored them
-            # e.g. star_counts[file] = (count, ecc)
             star_count = star_counts[file]["count"]
             ecc = star_counts[file]["eccentricity"]
             mean_value = mean_values[file]
-            star_count = max(star_count,1)
 
-
-            # Avoid division by zero
+            # Avoid zero
+            star_count = max(star_count, 1)
             mean_weight = max(mean_value, 1e-6)
 
-            # Weight = star_count * eccentricity / mean
-            raw_weight = (star_count * min(1,max(1.0 - ecc, 0.0))) / mean_weight
+            # Weight = star_count * (1 - ecc) / mean
+            raw_weight = (star_count * min(1, max(1.0 - ecc, 0.0))) / mean_weight
 
-            # Store it
             self.frame_weights[file] = raw_weight
 
             debug_weight_log += (
@@ -9278,9 +9335,8 @@ class StackingSuiteDialog(QDialog):
 
         self.update_status(debug_weight_log)
 
-
-        # 6) Normalize Weights so max = 1.0 (optional but recommended)
-        max_w = max(self.frame_weights.values())
+        # 5) Normalize Weights so max = 1.0 (recommended)
+        max_w = max(self.frame_weights.values()) if self.frame_weights else 0
         if max_w > 0:
             for k in self.frame_weights:
                 self.frame_weights[k] /= max_w
@@ -9294,27 +9350,26 @@ class StackingSuiteDialog(QDialog):
         self.update_status(debug_weight_log)
         self.update_status("✅ Frame weights computed and normalized!")
 
-        # ✅ Step 2: Determine the Best Reference Frame
+        # 6) Pick Reference Frame
         if hasattr(self, "reference_frame") and self.reference_frame:
             self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
         else:
-            # new robust approach
-            self.reference_frame = self.select_reference_frame_robust(self.frame_weights, sigma_threshold=2.0)
+            self.reference_frame = self.select_reference_frame_robust(
+                self.frame_weights, sigma_threshold=2.0
+            )
             self.update_status(f"📌 Auto-selected robust reference frame: {self.reference_frame}")
 
-
-        # ✅ Step 3: Align All Frames to the Reference
+        # 7) Start Alignment Thread
         output_directory = os.path.join(self.stacking_directory, "Aligned_Images")
         os.makedirs(output_directory, exist_ok=True)
 
-        # ✅ Fix: Store thread in instance variable to prevent early destruction
-        self.alignment_thread = StarRegistrationThread(self.reference_frame, measured_frames, output_directory)
+        self.alignment_thread = StarRegistrationThread(
+            self.reference_frame, measured_frames, output_directory
+        )
         self.alignment_thread.progress_update.connect(self.update_status)
-
-        # ✅ Ensure proper cleanup after completion
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
-
         self.alignment_thread.start()
+
 
     def save_alignment_matrices_sasd(self, transforms_dict):
         out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
@@ -9537,15 +9592,15 @@ class StackingSuiteDialog(QDialog):
 
     def stack_registered_images(self, grouped_files, frame_weights):
         """
-        Stacks registered images by group.
+        Stacks registered images by group using memory mapping to reduce RAM usage.
 
         Parameters:
-        grouped_files (dict): A dictionary where each key represents a grouping
-            (for example, a combination of filter, exposure, dimensions) and the value
-            is a list of final aligned file paths.
-        frame_weights (dict): A dictionary mapping original file paths to computed weights.
-
-        This version ensures that we use the final transformed images instead of appending '_r'.
+        -----------
+        grouped_files : dict
+            A dictionary where each key is a group (e.g. filter/exposure/dimensions)
+            and each value is a list of final aligned file paths.
+        frame_weights : dict
+            A dictionary mapping original file paths to computed weights.
         """
         # Directory where aligned images are stored.
         aligned_dir = os.path.join(self.stacking_directory, "Aligned_Images")
@@ -9563,151 +9618,221 @@ class StackingSuiteDialog(QDialog):
                 self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
                 continue
 
-            stacked_data = []
-            weights = []
+            # -------------------------------------------------
+            # 1) Identify Reference Frame and Dimensions
+            # -------------------------------------------------
+            group_ref = self.reference_frame if self.reference_frame in file_list else file_list[0]
             reference_median = None
             reference_header = None
 
-            # Determine the reference frame for this group:
-            group_ref = self.reference_frame if self.reference_frame in file_list else file_list[0]
+            # First, load the reference image fully so we know shape & reference median
+            ref_aligned_file = valid_transforms.get(os.path.normpath(group_ref), None)
+            if (not ref_aligned_file) or (not os.path.exists(ref_aligned_file)):
+                self.update_status(f"⚠️ Missing aligned file for reference '{group_ref}', skipping group.")
+                continue
 
-            for orig_file in file_list:
+            ref_data, ref_header, _, _ = load_image(ref_aligned_file)
+            if ref_data is None:
+                self.update_status(f"⚠️ Could not load reference '{ref_aligned_file}', skipping group.")
+                continue
+
+            reference_median = np.median(ref_data)
+            reference_header = ref_header.copy() if ref_header else fits.Header()
+
+            # Figure out shape (2D or 3D color).  
+            # For consistent handling, treat color as shape=(height, width, channels).
+            is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
+            height, width = ref_data.shape[:2]
+            channels = 3 if is_color else 1
+
+            # -------------------------------------------------
+            # 2) Create a Memmap Array for the Entire Stack
+            # -------------------------------------------------
+            # shape: (num_frames, height, width, channels)
+            num_frames = len(file_list)
+            memmap_path = os.path.join(self.stacking_directory, f"memmap_{group_key}.dat")
+            stacked_data = np.memmap(
+                memmap_path,
+                dtype=np.float32,
+                mode='w+',
+                shape=(num_frames, height, width, channels)
+            )
+
+            # Also track weights in a normal NumPy array
+            weights = np.zeros(num_frames, dtype=np.float32)
+
+            # -------------------------------------------------
+            # 3) Load & Normalize Each Frame Into Memmap
+            # -------------------------------------------------
+            self.update_status(
+                f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}"
+            )
+            valid_count = 0
+
+            for i, orig_file in enumerate(file_list):
                 try:
-                    # 🔹 **Get the correct final transformed file**
-                    aligned_file_path = self.valid_transforms.get(os.path.normpath(orig_file), None)
-
-                    if not aligned_file_path:
+                    aligned_file_path = valid_transforms.get(os.path.normpath(orig_file), None)
+                    if (not aligned_file_path) or (not os.path.exists(aligned_file_path)):
                         self.update_status(f"⚠️ No aligned file found for {orig_file}, skipping.")
                         continue
 
-                    # ✅ Ensure the file actually exists before trying to load it
-                    if not os.path.exists(aligned_file_path):
-                        self.update_status(f"🚨 Missing aligned file: {aligned_file_path}. Skipping.")
-                        continue
-
-                    # 🔹 **Load the transformed image**
                     image_data, header, _, _ = load_image(aligned_file_path)
                     if image_data is None:
                         self.update_status(f"⚠️ Registration Failed: {aligned_file_path}")
                         continue
 
-                    stacked_data.append(image_data)
-                    weight = frame_weights.get(orig_file, 1.0)
-                    weights.append(weight)
+                    # Convert to float32 and ensure shape is (H, W, C)
+                    if image_data.ndim == 2:
+                        image_data = image_data[..., np.newaxis]  # (H,W) -> (H,W,1)
+                    image_data = image_data.astype(np.float32, copy=False)
 
-                    # If this file is the designated reference, capture its median and header.
-                    if orig_file == group_ref:
-                        reference_median = np.median(image_data)
-                        reference_header = header.copy()
+                    # Insert a singleton “stack” dimension so normalize_images sees shape=(N,H,W,C)
+                    # Then remove it again. This is the easiest way to reuse your existing function.
+                    image_data_4d = image_data[np.newaxis, ...]  # shape = (1,H,W,C)
+                    image_data_4d = normalize_images(image_data_4d, reference_median)
+                    # Now shape is still (1,H,W,C); remove the first dimension
+                    image_data = image_data_4d[0]
+
+                    # Store in memmap
+                    stacked_data[valid_count] = image_data
+
+                    # Weight
+                    weights[valid_count] = frame_weights.get(orig_file, 1.0)
+                    valid_count += 1
 
                 except Exception as e:
-                    self.update_status(f"⚠️ Error processing '{orig_file}' (mapped to '{aligned_file_path}'): {e}")
+                    self.update_status(f"⚠️ Error processing '{orig_file}': {e}")
 
-            if len(stacked_data) < 2:
+            # If fewer than 2 valid frames were loaded, skip
+            if valid_count < 2:
                 self.update_status(f"⚠️ Not enough valid frames in group '{group_key}' to stack.")
+                # Clean up memmap file
+                try:
+                    os.remove(memmap_path)
+                except OSError:
+                    pass
                 continue
 
-            # ✅ **Normalize images before stacking**
-            self.update_status(f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}")
-            if not stacked_data:
-                self.update_status(f"⚠️ No valid frames to stack in group '{group_key}'. Skipping.")
-                return
+            # Truncate memmap if some frames were invalid
+            # (If valid_count < num_frames, you have leftover empty slots.)
+            # We'll just treat the leftover as empty. The next step will only look at
+            # the first valid_count frames.
 
-            stacked_data = np.array(stacked_data, dtype=np.float32)  # ✅ Convert to NumPy array
-            stacked_data = normalize_images(stacked_data, reference_median)
-
-            # ✅ **Apply rejection algorithm**
+            # -------------------------------------------------
+            # 4) Perform Rejection & Combine
+            # -------------------------------------------------
             self.update_status(f"📊 Applying {self.rejection_algorithm} on group '{group_key}'...")
             QApplication.processEvents()
 
-            # ✅ Convert `stacked_data` from list to NumPy array
-            stacked_data = np.array(stacked_data, dtype=np.float32)  # Convert to NumPy array
+            # Because your rejection functions expect shape=(N,H,W,C), we keep it that way.
+            # But we must pass only the “valid_count” portion. We do stacked_data[:valid_count].
+            # Convert weights to the same length:
+            final_weights = weights[:valid_count]
 
-            # ✅ Convert `weights` to a NumPy array
-            weights = np.array(weights, dtype=np.float32)  # Ensure it's an array for Numba
-
-            # ✅ Ensure `stacked_data` is 4D if needed
-            if stacked_data.ndim == 3:  # If it's color but missing the 4th dimension
-                stacked_data = np.expand_dims(stacked_data, axis=-1)  # Add a new axis for channels
-
-            # Select rejection algorithm
-            selected_algo = self.rejection_algorithm
-            if selected_algo == "Weighted Windsorized Sigma Clipping":
-                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
-            elif selected_algo == "Kappa-Sigma Clipping":
-                clipped_mean = kappa_sigma_clip_weighted(stacked_data, weights, kappa=self.kappa, iterations=self.iterations)
-            elif selected_algo == "Simple Average (No Rejection)":
-                clipped_mean = np.average(stacked_data, axis=0, weights=weights)
-            elif selected_algo == "Simple Median (No Rejection)":
-                clipped_mean = np.median(stacked_data, axis=0)
-            elif selected_algo == "Trimmed Mean":
-                clipped_mean = trimmed_mean_weighted(stacked_data, weights, trim_fraction=self.trim_fraction)
-            elif selected_algo == "Extreme Studentized Deviate (ESD)":
-                clipped_mean = esd_clip_weighted(stacked_data, weights, threshold=self.esd_threshold)
-            elif selected_algo == "Biweight Estimator":
-                clipped_mean = biweight_location_weighted(stacked_data, weights, tuning_constant=self.biweight_constant)
-            elif selected_algo == "Modified Z-Score Clipping":
-                clipped_mean = modified_zscore_clip_weighted(stacked_data, weights, threshold=self.modz_threshold)
+            # The next line calls your chosen rejection function. 
+            # e.g. for Weighted Windsorized Sigma Clipping:
+            if self.rejection_algorithm == "Weighted Windsorized Sigma Clipping":
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    lower=self.sigma_low, 
+                    upper=self.sigma_high
+                )
+            elif self.rejection_algorithm == "Kappa-Sigma Clipping":
+                clipped_mean = kappa_sigma_clip_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    kappa=self.kappa, 
+                    iterations=self.iterations
+                )
+            elif self.rejection_algorithm == "Simple Average (No Rejection)":
+                # np.average over axis=0 with weights
+                clipped_mean = np.average(stacked_data[:valid_count], axis=0, weights=final_weights)
+            elif self.rejection_algorithm == "Simple Median (No Rejection)":
+                clipped_mean = np.median(stacked_data[:valid_count], axis=0)
+            elif self.rejection_algorithm == "Trimmed Mean":
+                clipped_mean = trimmed_mean_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    trim_fraction=self.trim_fraction
+                )
+            elif self.rejection_algorithm == "Extreme Studentized Deviate (ESD)":
+                clipped_mean = esd_clip_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    threshold=self.esd_threshold
+                )
+            elif self.rejection_algorithm == "Biweight Estimator":
+                clipped_mean = biweight_location_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    tuning_constant=self.biweight_constant
+                )
+            elif self.rejection_algorithm == "Modified Z-Score Clipping":
+                clipped_mean = modified_zscore_clip_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    threshold=self.modz_threshold
+                )
             else:
-                clipped_mean = windsorized_sigma_clip_weighted(stacked_data, weights, lower=self.sigma_low, upper=self.sigma_high)
+                # default
+                clipped_mean = windsorized_sigma_clip_weighted(
+                    stacked_data[:valid_count], 
+                    final_weights, 
+                    lower=self.sigma_low, 
+                    upper=self.sigma_high
+                )
 
-            # ✅ **Save the final stacked image**
-            output_filename = f"MasterLight_{group_key}.fit"
-            output_path = os.path.join(self.stacking_directory, output_filename)
-
-            # 1) Find the first non-zero pixel value
+            # -------------------------------------------------
+            # 5) Black Point & Optional Min‐Max Normalization
+            # -------------------------------------------------
+            # clipped_mean now has shape (H, W, C).
             flat_array = clipped_mean.flatten()
             nonzero_indices = np.where(flat_array > 0)[0]
-
             if len(nonzero_indices) > 0:
-                # "First" means the earliest in flattened order;
-                # if you prefer the smallest nonzero pixel, use .min() instead.
                 first_nonzero = flat_array[nonzero_indices[0]]
-                
-                # 2) Subtract this black point
                 clipped_mean -= first_nonzero
 
-            # 3) Check if the new max is over 1.0
             new_max = clipped_mean.max()
             if new_max > 1.0:
-                # Optional: Do a min-max normalization
                 new_min = clipped_mean.min()
                 range_val = new_max - new_min
                 if range_val != 0:
                     clipped_mean = (clipped_mean - new_min) / range_val
                 else:
-                    # All pixels are identical after black point subtraction
                     clipped_mean = np.zeros_like(clipped_mean, dtype=np.float32)
 
-
-            # If the array has a trailing dimension of size 1, squeeze it out
+            # If the result is effectively mono, shape might be (H,W,1). Squeeze it.
             if clipped_mean.ndim == 3 and clipped_mean.shape[-1] == 1:
                 clipped_mean = np.squeeze(clipped_mean, axis=-1)
 
-            # Now determine if the result is mono or color
-            is_mono = (clipped_mean.ndim == 2)           
+            is_mono = (clipped_mean.ndim == 2)
 
-            # ✅ **Ensure FITS header matches the stacked image dimensions**
+            # -------------------------------------------------
+            # 6) Prepare FITS Header & Save
+            # -------------------------------------------------
             if reference_header is None:
                 reference_header = fits.Header()
-                
+
             reference_header["IMAGETYP"] = "MASTER STACK"
-            reference_header["BITPIX"] = -32  # 32-bit floating point
+            reference_header["BITPIX"] = -32
             reference_header["STACKED"] = (True, "Stacked using rejection algorithm")
             reference_header["CREATOR"] = "SetiAstroSuite"
             reference_header["DATE-OBS"] = datetime.utcnow().isoformat()
 
             if is_mono:
                 reference_header["NAXIS"] = 2
-                reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
-                reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
+                reference_header["NAXIS1"] = clipped_mean.shape[1]  # width
+                reference_header["NAXIS2"] = clipped_mean.shape[0]  # height
             else:
                 reference_header["NAXIS"] = 3
-                reference_header["NAXIS1"] = clipped_mean.shape[1]  # Width
-                reference_header["NAXIS2"] = clipped_mean.shape[0]  # Height
-                reference_header["NAXIS3"] = 3  # 3 Color Channels (RGB)
+                reference_header["NAXIS1"] = clipped_mean.shape[1]  # width
+                reference_header["NAXIS2"] = clipped_mean.shape[0]  # height
+                reference_header["NAXIS3"] = 3
 
-            # ✅ **Save the stacked image using `save_image()`**
+            output_filename = f"MasterLight_{group_key}.fit"
+            output_path = os.path.join(self.stacking_directory, output_filename)
+
             save_image(
                 img_array=clipped_mean,
                 filename=output_path,
@@ -9719,6 +9844,13 @@ class StackingSuiteDialog(QDialog):
 
             self.update_status(f"✅ Group '{group_key}' stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
+
+            # Clean up the memmap file
+            try:
+                os.remove(memmap_path)
+            except OSError:
+                pass
+
 
 
     def integrate_registered_images(self):
@@ -9782,18 +9914,20 @@ class StackingSuiteDialog(QDialog):
         debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
 
         for file in measured_frames:
-            star_count = star_counts[file]
+            star_data = star_counts[file]          # star_data is a dict: {"count": ..., "eccentricity": ...}
+            count = star_data["count"]            # numeric
+            ecc = star_data["eccentricity"]       # numeric
             mean_value = mean_values[file]
 
-            # ✅ Ensure no division by zero
-            star_weight = max(star_count, 1e-6)
+            # Ensure no division by zero
+            star_weight = max(count, 1e-6)
             mean_weight = max(mean_value, 1e-6)
 
-            # ✅ Ratio-based weight calculation
-            self.frame_weights[file] = star_weight / mean_weight  # ✅ Always positive
+            # Ratio-based weight calculation
+            self.frame_weights[file] = star_weight / mean_weight  # Always positive
 
             # ✅ Add to debug log
-            debug_weight_log += f"📂 {os.path.basename(file)} → Star Count: {star_count}, Mean: {mean_value:.4f}, Final Weight: {self.frame_weights[file]:.4f}\n"
+            debug_weight_log += f"📂 {os.path.basename(file)} → Star Count: {count}, Mean: {mean_value:.4f}, Final Weight: {self.frame_weights[file]:.4f}\n"
 
         self.update_status(debug_weight_log)  # ✅ Print weights to the status window
         self.update_status("✅ Frame weights computed!")
@@ -12871,14 +13005,21 @@ class StarRegistrationThread(QThread):
                     self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
                     break
 
-            # 🚀 **Reject frames with >2px final shift**
+            # 🚀 Reject frames with >2px final shift
             final_shifts = self.transform_deltas[-1]  # Last pass shift values
-            self.files_to_align = [
-                f for f, shift in zip(self.files_to_align, final_shifts) if shift <= 2.0
-            ]
-            rejected_files = [
-                f for f, shift in zip(self.files_to_align, final_shifts) if shift > 2.0
-            ]
+
+            old_files = self.files_to_align
+            new_files = []
+            rejected_files = []
+
+            # Single pass over old_files and final_shifts
+            for f, shift in zip(old_files, final_shifts):
+                if shift <= 2.0:
+                    new_files.append(f)
+                else:
+                    rejected_files.append(f)
+
+            self.files_to_align = new_files
 
             if rejected_files:
                 self.progress_update.emit(
@@ -12974,9 +13115,15 @@ class StarRegistrationThread(QThread):
         # ✅ **Update files list for next pass, only processing misaligned images**
         self.files_to_align = transformed_files + remaining_files
 
+        pass_deltas_preview = [f"{d:.2f}" for d in pass_deltas[:10]]
+        preview_str = ", ".join(pass_deltas_preview)
+        if len(pass_deltas) > 10:
+            preview_str += f" ... ({len(pass_deltas)} total)"
+
         self.progress_update.emit(
-            f"Pass {pass_index+1} shift deltas: {[f'{d:.2f}' for d in pass_deltas]}"
+            f"Pass {pass_index+1} shift deltas: [{preview_str}]"
         )
+
 
         if aligned_count == 0:
             return False, "All frames already aligned within tolerance."
@@ -12996,15 +13143,15 @@ class StarRegistrationThread(QThread):
     def on_worker_result(self, out):
         self.progress_update.emit("Saved: " + out)
 
-    def on_worker_result_transform(self, file_path, transform):
-        """
-        Called whenever the worker emits `result_transform`.
-        We store the transform in `self.alignment_matrices`.
-        """
-
-        norm_path = os.path.normpath(file_path)
-        self.alignment_matrices[norm_path] = transform
-        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
+    #def on_worker_result_transform(self, file_path, transform):
+    #    """
+    #    Called whenever the worker emits `result_transform`.
+    #    We store the transform in `self.alignment_matrices`.
+    #    """
+    #
+    #    norm_path = os.path.normpath(file_path)
+    #    self.alignment_matrices[norm_path] = transform
+    #    self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     def detect_stars(self, image):
         """
@@ -13294,9 +13441,7 @@ class StarRegistrationThread(QThread):
         scale_x = np.sqrt(a**2 + c**2)
         scale_y = np.sqrt(b**2 + d**2)
         skew = np.abs((a * b + c * d) / (a**2 + c**2))
-        if not (0.5 <= scale_x <= 2.0 and 0.5 <= scale_y <= 2.0):
-            return False
-        if skew > 0.01:
+        if not (0.4 <= scale_x <= 2.1 and 0.4 <= scale_y <= 2.1):
             return False
         return True
 
