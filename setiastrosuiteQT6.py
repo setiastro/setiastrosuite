@@ -9981,15 +9981,11 @@ class StackingSuiteDialog(QDialog):
             self.reference_frame = max(self.frame_weights, key=self.frame_weights.get)
             self.update_status(f"📌 Auto-selected reference frame: {self.reference_frame} (Best Weight)")
             
-        chunk_h = self.chunk_height 
-        chunk_w = self.chunk_width 
+        chunk_h = self.chunk_height  # or self.settings.value("stacking/chunk_height", 1024, type=int)
+        chunk_w = self.chunk_width   # or self.settings.value("stacking/chunk_width", 1024, type=int)
+
         # 6) Finally, call the chunked stacking method using the already registered images
-        self.stack_registered_images_chunked(
-            grouped_files=single_group_dict,
-            frame_weights=frame_weights,
-            chunk_height=chunk_h,
-            chunk_width=chunk_w
-        )
+        self.stack_registered_images_chunked(self.light_files, self.frame_weights, chunk_height=chunk_h, chunk_width=chunk_w)
 
     def drizzle_stack_one_group(
         self,
