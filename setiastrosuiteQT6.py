@@ -6652,6 +6652,8 @@ class StackingSuiteDialog(QDialog):
         self.biweight_constant = self.settings.value("stacking/biweight_constant", 6.0, type=float)
         self.trim_fraction = self.settings.value("stacking/trim_fraction", 0.1, type=float)
         self.modz_threshold = self.settings.value("stacking/modz_threshold", 3.5, type=float)
+        self.chunk_height = self.settings.value("stacking/chunk_height", 1024, type=int)
+        self.chunk_width = self.settings.value("stacking/chunk_width", 1024, type=int)        
 
         # Dictionaries to store file paths
         self.conversion_files = {}
@@ -7017,6 +7019,21 @@ class StackingSuiteDialog(QDialog):
         sigma_layout.addWidget(self.sigma_low_spinbox)
         layout.addLayout(sigma_layout)
 
+        chunk_layout = QHBoxLayout()
+        chunk_layout.addWidget(QLabel("Chunk Height:"))
+        self.chunkHeightSpinBox = QSpinBox()
+        self.chunkHeightSpinBox.setRange(128, 8192)  # or whatever range you want
+        self.chunkHeightSpinBox.setValue(self.settings.value("stacking/chunk_height", 1024, type=int))
+        chunk_layout.addWidget(self.chunkHeightSpinBox)
+
+        chunk_layout.addWidget(QLabel("Chunk Width:"))
+        self.chunkWidthSpinBox = QSpinBox()
+        self.chunkWidthSpinBox.setRange(128, 8192)
+        self.chunkWidthSpinBox.setValue(self.settings.value("stacking/chunk_width", 1024, type=int))
+        chunk_layout.addWidget(self.chunkWidthSpinBox)
+
+        layout.addLayout(chunk_layout)
+
         # Rejection algorithm selection
         algo_layout = QHBoxLayout()
         algo_label = QLabel("Rejection Algorithm:")
@@ -7155,6 +7172,8 @@ class StackingSuiteDialog(QDialog):
         self.biweight_constant = self.biweight_spinbox.value()
         self.trim_fraction = self.trim_spinbox.value()
         self.modz_threshold = self.modz_spinbox.value()
+        self.chunk_height = self.chunkHeightSpinBox.value()
+        self.chunk_width = self.chunkWidthSpinBox.value()
 
         # Store in QSettings
         self.settings.setValue("stacking/dir", self.stacking_directory)
@@ -7167,6 +7186,8 @@ class StackingSuiteDialog(QDialog):
         self.settings.setValue("stacking/biweight_constant", self.biweight_constant)
         self.settings.setValue("stacking/trim_fraction", self.trim_fraction)
         self.settings.setValue("stacking/modz_threshold", self.modz_threshold)
+        self.settings.setValue("stacking/chunk_height", self.chunk_height)
+        self.settings.setValue("stacking/chunk_width", self.chunk_width)
 
         print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
         print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
@@ -9564,12 +9585,15 @@ class StackingSuiteDialog(QDialog):
         """
         Uses the chunked stacking method for normal stacking.
         """
+        chunk_h = self.chunk_height  # or self.settings.value("stacking/chunk_height", 1024, type=int)
+        chunk_w = self.chunk_width   # or self.settings.value("stacking/chunk_width", 1024, type=int)
+
         single_group_dict = { group_key: file_list }
         self.stack_registered_images_chunked(
             grouped_files=single_group_dict,
             frame_weights=frame_weights,
-            chunk_height=512,
-            chunk_width=512
+            chunk_height=chunk_h,
+            chunk_width=chunk_w
         )
 
 
@@ -9595,8 +9619,8 @@ class StackingSuiteDialog(QDialog):
         self,
         grouped_files,           # dict of { group_key: [list_of_aligned_file_paths] }
         frame_weights,           # dict of { aligned_file_path: weight }
-        chunk_height=512,
-        chunk_width=512
+        chunk_height=1024,
+        chunk_width=1024
     ):
         """
         Chunked stacking of already-aligned FITS images (no transforms needed).
@@ -9676,6 +9700,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status(
                 f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}"
             )
+            self.update_status(f"📊  Stacking with {self.rejection_algorithm}")
             QApplication.processEvents()
 
             # 4) Loop over tiles in the final image
@@ -9715,8 +9740,8 @@ class StackingSuiteDialog(QDialog):
                             sub_img *= norm_factor
 
                         tile_stack[i] = sub_img
-                    self.update_status(f"📊  Stacking with {self.rejection_algorithm}")
-                    QApplication.processEvents()                  
+    
+           
                     # 4B) Outlier rejection
                     algo = self.rejection_algorithm
                     if algo == "Simple Median (No Rejection)":
@@ -9956,9 +9981,15 @@ class StackingSuiteDialog(QDialog):
             self.reference_frame = max(self.frame_weights, key=self.frame_weights.get)
             self.update_status(f"📌 Auto-selected reference frame: {self.reference_frame} (Best Weight)")
             
-
+        chunk_h = self.chunk_height 
+        chunk_w = self.chunk_width 
         # 6) Finally, call the chunked stacking method using the already registered images
-        self.stack_registered_images_chunked(self.light_files, self.frame_weights)
+        self.stack_registered_images_chunked(
+            grouped_files=single_group_dict,
+            frame_weights=frame_weights,
+            chunk_height=chunk_h,
+            chunk_width=chunk_w
+        )
 
     def drizzle_stack_one_group(
         self,
