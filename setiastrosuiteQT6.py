@@ -213,7 +213,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.1"
+VERSION = "2.12.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -8656,18 +8656,6 @@ class StackingSuiteDialog(QDialog):
         fits_header = original_header if original_header else fits.Header()
         fits_header["BSCALE"] = 1.0  # 🔹 Prevent rescaling
         fits_header["BZERO"] = 0.0   # 🔹 Prevent offset
-
-        # 1) Compute min/max
-        min_val = master_flat.min()
-        max_val = master_flat.max()
-        range_val = max_val - min_val
-
-        # 2) Rescale to [0, 1]
-        if range_val != 0:
-            master_flat = (master_flat - min_val) / range_val
-        else:
-            # Edge case: if all pixels have the same value
-            master_flat = np.zeros_like(master_flat, dtype=np.float32)
 
         # ✅ Save as FITS
         save_image(
