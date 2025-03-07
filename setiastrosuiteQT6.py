@@ -6801,6 +6801,21 @@ class StackingSuiteDialog(QDialog):
 
             image, header, bit_depth, is_mono = result
 
+            if image is None:
+                item.setText(1, "Failed to load")
+                self.update_status(f"Failed to load {os.path.basename(file_path)}")
+                continue
+
+            # 🔹 If the file has no header (TIFF, PNG, JPG, etc.), create a minimal one
+            if header is None:
+                header = fits.Header()
+                header["SIMPLE"]   = True
+                header["BITPIX"]   = -32  # Or 16, depending on your preference
+                header["CREATOR"]  = "SetiAstroSuite"
+                header["IMAGETYP"] = "UNKNOWN"  # We'll set it properly below
+                header["EXPTIME"]  = "Unknown"  # Just a placeholder
+                # You can add more default keywords as needed
+
             # Debayer if needed:
             image = self.debayer_image(image, file_path, header)
             if image.ndim == 3:
