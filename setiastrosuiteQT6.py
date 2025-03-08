@@ -42,7 +42,7 @@ from scipy.optimize import curve_fit
 import exifread
 from numba_utils import *
 
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from astropy.wcs.utils import skycoord_to_pixel
 from astropy.coordinates import SkyCoord
@@ -6652,8 +6652,8 @@ class StackingSuiteDialog(QDialog):
         self.biweight_constant = self.settings.value("stacking/biweight_constant", 6.0, type=float)
         self.trim_fraction = self.settings.value("stacking/trim_fraction", 0.1, type=float)
         self.modz_threshold = self.settings.value("stacking/modz_threshold", 3.5, type=float)
-        self.chunk_height = self.settings.value("stacking/chunk_height", 1024, type=int)
-        self.chunk_width = self.settings.value("stacking/chunk_width", 1024, type=int)        
+        self.chunk_height = self.settings.value("stacking/chunk_height", 2048, type=int)
+        self.chunk_width = self.settings.value("stacking/chunk_width", 2048, type=int)        
 
         # Dictionaries to store file paths
         self.conversion_files = {}
@@ -7023,13 +7023,13 @@ class StackingSuiteDialog(QDialog):
         chunk_layout.addWidget(QLabel("Chunk Height:"))
         self.chunkHeightSpinBox = QSpinBox()
         self.chunkHeightSpinBox.setRange(128, 8192)  # or whatever range you want
-        self.chunkHeightSpinBox.setValue(self.settings.value("stacking/chunk_height", 1024, type=int))
+        self.chunkHeightSpinBox.setValue(self.settings.value("stacking/chunk_height", 2048, type=int))
         chunk_layout.addWidget(self.chunkHeightSpinBox)
 
         chunk_layout.addWidget(QLabel("Chunk Width:"))
         self.chunkWidthSpinBox = QSpinBox()
         self.chunkWidthSpinBox.setRange(128, 8192)
-        self.chunkWidthSpinBox.setValue(self.settings.value("stacking/chunk_width", 1024, type=int))
+        self.chunkWidthSpinBox.setValue(self.settings.value("stacking/chunk_width", 2048, type=int))
         chunk_layout.addWidget(self.chunkWidthSpinBox)
 
         layout.addLayout(chunk_layout)
@@ -9262,7 +9262,6 @@ class StackingSuiteDialog(QDialog):
         star_counts = {}
         measured_frames = []
 
-        import os
         max_workers = os.cpu_count() or 4
         chunk_size = max_workers  # or bigger if you prefer
 
@@ -9273,7 +9272,9 @@ class StackingSuiteDialog(QDialog):
         chunked_files = list(chunk_list(all_files, chunk_size))
         total_chunks = len(chunked_files)
 
-        # 2) PHASE 1: Load & Measure Each Chunk
+        # ---------------------------------------------------------------------
+        # PHASE 1: Load & Measure Each Chunk (to pick reference frame & weights)
+        # ---------------------------------------------------------------------
         chunk_index = 0
         for chunk in chunked_files:
             chunk_index += 1
@@ -9282,15 +9283,32 @@ class StackingSuiteDialog(QDialog):
             chunk_images = []
             chunk_valid_files = []
 
-            # Load images in this chunk
-            for file in chunk:
-                image_data, _, _, _ = load_image(file)
-                self.update_status(f"  Loaded {file}")
-                QApplication.processEvents()
+            # -------------------------------
+            # Multi-threaded loading of chunk
+            # -------------------------------
+            self.update_status(f"🌍 Loading {len(chunk)} images in parallel (up to {max_workers} threads)...")
 
-                if image_data is not None:
-                    chunk_images.append(image_data)
-                    chunk_valid_files.append(file)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_file = {}
+                for file in chunk:
+                    future = executor.submit(load_image, file)
+                    future_to_file[future] = file
+
+                for future in as_completed(future_to_file):
+                    file = future_to_file[future]
+                    try:
+                        image_data, _, _, _ = future.result()
+                        # Announce we loaded this file
+                        self.update_status(f"  Loaded {file}")
+                        QApplication.processEvents()
+
+                        if image_data is not None:
+                            chunk_images.append(image_data)
+                            chunk_valid_files.append(file)
+
+                    except Exception as e:
+                        self.update_status(f"⚠️ Error loading {file}: {e}")
+                        QApplication.processEvents()
 
             if not chunk_images:
                 self.update_status("⚠️ No valid images in this chunk.")
@@ -9318,7 +9336,9 @@ class StackingSuiteDialog(QDialog):
 
         self.update_status(f"✅ All chunks complete! Measured {len(measured_frames)} frames total.")
 
-        # 3) Compute Weights
+        # ------------------------------------------------
+        # 2) Compute Weights & Pick Reference
+        # ------------------------------------------------
         self.update_status("⚖️ Computing frame weights...")
         debug_log = "\n📊 **Frame Weights Debug Log:**\n"
         for file in measured_frames:
@@ -9331,25 +9351,28 @@ class StackingSuiteDialog(QDialog):
             raw_w = (c * min(1, max(1.0 - ecc, 0.0))) / m
             self.frame_weights[file] = raw_w
 
-            debug_log += (f"📂 {os.path.basename(file)} → "
-                        f"StarCount={c}, Ecc={ecc:.4f}, Mean={m:.4f}, Weight={raw_w:.4f}\n")
+            debug_log += (
+                f"📂 {os.path.basename(file)} → "
+                f"StarCount={c}, Ecc={ecc:.4f}, Mean={m:.4f}, Weight={raw_w:.4f}\n"
+            )
 
         self.update_status(debug_log)
 
-        # 4) Normalize Weights
         max_w = max(self.frame_weights.values()) if self.frame_weights else 0
         if max_w > 0:
             for k in self.frame_weights:
                 self.frame_weights[k] /= max_w
 
-        # 5) Pick Reference Frame
+        # Choose reference
         if hasattr(self, "reference_frame") and self.reference_frame:
             self.update_status(f"📌 Using user-specified reference: {self.reference_frame}")
         else:
             self.reference_frame = self.select_reference_frame_robust(self.frame_weights, sigma_threshold=2.0)
             self.update_status(f"📌 Auto-selected robust reference frame: {self.reference_frame}")
 
-        # 6) Load the reference fully, get its median
+        # ------------------------------------------------
+        # 3) Load the reference, get ref_median
+        # ------------------------------------------------
         ref_data, _, _, _ = load_image(self.reference_frame)
         if ref_data is None:
             self.update_status(f"🚨 Could not load reference {self.reference_frame}. Aborting.")
@@ -9357,8 +9380,9 @@ class StackingSuiteDialog(QDialog):
         ref_median = np.median(ref_data)
         self.update_status(f"📊 Reference median: {ref_median:.4f}")
 
-        # 7) PHASE 2: Normalize Each Frame to ref_median
-        #    We'll do it again in chunks to avoid loading all frames at once.
+        # ------------------------------------------------
+        # 4) Normalize Each Frame to ref_median in Batches
+        # ------------------------------------------------
         norm_dir = os.path.join(self.stacking_directory, "Normalized_Images")
         os.makedirs(norm_dir, exist_ok=True)
 
@@ -9372,65 +9396,96 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"🌀 Normalizing chunk {chunk_index}/{total_chunks} ({len(chunk)} frames)...")
             QApplication.processEvents()
 
-            # Load them all into a stack so we can call `normalize_images(...)`
-            # (We rely on your existing code that expects shape=(F,H,W) or (F,H,W,C).)
+            # --------------
+            # Multi-threaded loading again
+            # --------------
             loaded_images = []
             valid_paths = []
-            for file in chunk:
-                img, hdr, _, _ = load_image(file)
-                if img is not None:
-                    loaded_images.append(img)
-                    valid_paths.append(file)
+
+            self.update_status(f"🌍 Loading {len(chunk)} images in parallel for normalization (up to {max_workers} threads)...")
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_file = {}
+                for file in chunk:
+                    future = executor.submit(load_image, file)
+                    future_to_file[future] = file
+
+                for future in as_completed(future_to_file):
+                    file = future_to_file[future]
+                    try:
+                        img, hdr, _, _ = future.result()
+                        if img is not None:
+                            loaded_images.append(img)
+                            valid_paths.append(file)
+                        else:
+                            self.update_status(f"⚠️ No data for {file}")
+                    except Exception as e:
+                        self.update_status(f"⚠️ Error loading {file} for normalization: {e}")
+                    QApplication.processEvents()
 
             if not loaded_images:
                 continue
 
-            # Build a single NumPy array: shape=(F,H,W) or (F,H,W,C)
-            # We assume all frames are the same shape
+            # shape=(F,H,W) or (F,H,W,C)
             stack = np.array(loaded_images, dtype=np.float32)
-
-            # Use your Numba function
             normalized_stack = normalize_images(stack, ref_median)
 
-            # Now save each frame with suffix "_n.fit"
+            # Save each with "_n.fit"
             for i, orig_file in enumerate(valid_paths):
                 base = os.path.basename(orig_file)
-                # remove existing "_n.fit" if any
                 if base.endswith("_n.fit"):
                     base = base.replace("_n.fit", ".fit")
                 out_name = base.replace(".fit", "_n.fit")
                 out_path = os.path.join(norm_dir, out_name)
 
-                # Save the single frame
                 frame_data = normalized_stack[i]
+                is_mono = (frame_data.ndim == 2)
 
-                # If it's 2D or 3D color
-                if frame_data.ndim == 2:
-                    is_mono = True
-                else:
-                    is_mono = False  # shape=(H,W,C)
+                # Reuse original header but don't load image data again
+                try:
+                    orig_header = fits.getheader(orig_file, ext=0)
+                except:
+                    orig_header = fits.Header()
 
-                # We can reuse the original header or just do a blank one
-                hdu = fits.PrimaryHDU(data=frame_data.astype(np.float32), header=hdr)
+                hdu = fits.PrimaryHDU(data=frame_data.astype(np.float32), header=orig_header)
                 hdu.writeto(out_path, overwrite=True)
                 normalized_files.append(out_path)
 
-            del loaded_images
-            del stack
-            del normalized_stack
+            del loaded_images, stack, normalized_stack
 
-        # 8) Start Alignment on the normalized files
+        # ---------------------------------------------------------
+        # 5) ***Update self.light_files to reference *_n.fit***
+        # ---------------------------------------------------------
+        for group, file_list in self.light_files.items():
+            new_list = []
+            for old_path in file_list:
+                base = os.path.basename(old_path)
+                if base.endswith("_n.fit"):
+                    # It's already _n
+                    new_list.append(os.path.join(norm_dir, base))
+                else:
+                    n_name = base.replace(".fit", "_n.fit")
+                    new_path = os.path.join(norm_dir, n_name)
+                    new_list.append(new_path)
+
+            self.light_files[group] = new_list
+
+        self.update_status("✅ Updated self.light_files to use _n.fit paths for all frames.")
+
+        # ------------------------------------------------
+        # 6) Start Alignment on the normalized files
+        # ------------------------------------------------
         align_dir = os.path.join(self.stacking_directory, "Aligned_Images")
         os.makedirs(align_dir, exist_ok=True)
 
         self.alignment_thread = StarRegistrationThread(
-            self.reference_frame, normalized_files, align_dir
+            self.reference_frame,
+            normalized_files,  # the entire list of _n.fit files
+            align_dir
         )
         self.alignment_thread.progress_update.connect(self.update_status)
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
         self.alignment_thread.start()
-
-
 
     def save_alignment_matrices_sasd(self, transforms_dict):
         out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
@@ -9486,50 +9541,54 @@ class StackingSuiteDialog(QDialog):
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
 
-        # ✅ Store references before setting self.alignment_thread to None
-        alignment_thread = self.alignment_thread  # Save the reference
-
+        alignment_thread = self.alignment_thread
         if alignment_thread is None:
             self.update_status("⚠️ Error: No alignment data available.")
             return
 
-        # ✅ Get the final transforms (all normalized paths)
-        all_transforms = alignment_thread.alignment_matrices.copy()  # Copy before killing the thread
+        # Copy the final transforms
+        all_transforms = alignment_thread.alignment_matrices.copy()
 
-        # ✅ Get final shift values from the last pass
+        # Get final shift values
         if not alignment_thread.transform_deltas:
             self.update_status("⚠️ No shift data available. Skipping filtering.")
-            final_shifts = [0.0] * len(all_transforms)  # Assume 0 shift if no data
+            final_shifts = [0.0] * len(all_transforms)
         else:
-            final_shifts = alignment_thread.transform_deltas[-1]  # Last pass shift values
+            final_shifts = alignment_thread.transform_deltas[-1]
 
-        # ✅ Pair filenames with shift values
+        # Pair filenames with shift values
         file_shift_pairs = list(zip(all_transforms.keys(), final_shifts))
 
-        # 1) Build a dictionary of numeric transforms for valid frames
+        # 1) Build numeric transforms for valid frames
         valid_matrices = {
             orig_path: all_transforms[orig_path]
             for orig_path, shift in zip(all_transforms.keys(), final_shifts)
             if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
-        # 2) Build a dictionary mapping original file → final aligned file path
-        self.valid_transforms = {
-            orig_path: os.path.join(
-                self.stacking_directory, "Aligned_Images",
-                os.path.basename(orig_path).replace(".fit", "_r.fit")
-            )
-            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
-            if all_transforms[orig_path] is not None and shift <= 2.0
-        }
+        # 2) Build dictionary from the normalized `_n.fit` → final aligned `_n_r.fit`
+        self.valid_transforms = {}
+        for norm_path, shift in file_shift_pairs:
+            transform = all_transforms[norm_path]
+            if transform is not None and shift <= 2.0:
+                base = os.path.basename(norm_path)
+                # If it ends with `_n.fit`, produce `_n_r.fit`. Otherwise `_r.fit`.
+                if base.endswith("_n.fit"):
+                    aligned_name = base.replace("_n.fit", "_n_r.fit")
+                else:
+                    aligned_name = base.replace(".fit", "_r.fit")
 
-        # Identify rejected files
+                aligned_path = os.path.join(
+                    self.stacking_directory, "Aligned_Images", aligned_name
+                )
+                # Key the dictionary by the *same* `_n.fit` path used by the alignment
+                self.valid_transforms[os.path.normpath(norm_path)] = aligned_path
+
+        # Identify rejected
         rejected_files = [path for path, shift in file_shift_pairs if shift > 2.0]
+        self.alignment_thread = None  # done with the thread
 
-        # ✅ Kill the thread after copying the data
-        self.alignment_thread = None  # Now safe to delete
-
-        # ✅ Update status messages
+        # Status
         n_valid = len(self.valid_transforms)
         n_total = len(all_transforms)
         self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} rejected.")
@@ -9538,21 +9597,31 @@ class StackingSuiteDialog(QDialog):
             self.update_status("⚠️ No frames to stack; aborting.")
             return
 
-        # ✅ Inform the user about rejected frames
         if rejected_files:
             self.update_status(f"🚨 Rejected {len(rejected_files)} frames due to shift > 2px.")
             for rf in rejected_files:
                 self.update_status(f"  ❌ {os.path.basename(rf)}")
 
-        # 3) Save the numeric transforms (2x3 matrices) for valid frames
+        # 3) Save numeric transforms
         self.save_alignment_matrices_sasd(valid_matrices)
 
-        # ✅ Gather drizzle settings
+        # Gather drizzle
         drizzle_dict = self.gather_drizzle_settings_from_tree()
 
-        # ✅ Filter `light_files` to use only valid transformed images
+        # ===========================
+        # DEBUG PRINTS BEFORE FILTER
+        # ===========================
+
+
+        # 4) Filter `light_files`
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
+            print(f"  Group '{group}':")
+            for f in file_list:
+                normed_f = os.path.normpath(f)
+                in_dict = (normed_f in self.valid_transforms)
+                print(f"    {f} => '{normed_f}' => in valid_transforms? {in_dict}")
+
             filtered_light_files[group] = [
                 f for f in file_list if os.path.normpath(f) in self.valid_transforms
             ]
@@ -9560,11 +9629,28 @@ class StackingSuiteDialog(QDialog):
                 f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
             )
 
-        # ✅ Pass `valid_transforms` to stacking so it uses correct images
+        # 5) **Build a second dict** that replaces each `_n.fit` with its `_n_r.fit` path
+        #    so the stacking method sees only the aligned files.
+        aligned_light_files = {}
+        for group, file_list in filtered_light_files.items():
+            new_list = []
+            for f in file_list:
+                normed_f = os.path.normpath(f)
+                aligned_f = self.valid_transforms.get(normed_f, None)
+                if aligned_f and os.path.exists(aligned_f):
+                    new_list.append(aligned_f)
+            aligned_light_files[group] = new_list
+
+            # Optional debug
+            print(f"\nDEBUG: For group '{group}', passing {len(new_list)} aligned files:")
+            for a in new_list:
+                print(f"   {a}")
+
+        # Finally, pass the aligned_light_files to stacking
         self.stack_images_mixed_drizzle(
-            grouped_files=filtered_light_files,
+            grouped_files=aligned_light_files,  # <--- Now we pass the _n_r.fit paths
             frame_weights=self.frame_weights,
-            transforms_dict=self.valid_transforms,  # 🔹 Use stored file paths
+            transforms_dict=self.valid_transforms,
             drizzle_dict=drizzle_dict
         )
 
@@ -9657,56 +9743,49 @@ class StackingSuiteDialog(QDialog):
 
     def stack_registered_images_chunked(
         self,
-        grouped_files,           # dict of { group_key: [list_of_aligned_file_paths] }
-        frame_weights,           # dict of { aligned_file_path: weight }
-        chunk_height=1024,
-        chunk_width=1024
+        grouped_files,           # dict of { group_key: [list_of_aligned_and_already_normalized_file_paths] }
+        frame_weights,           # dict of { file_path: weight }
+        chunk_height=2048,
+        chunk_width=2048
     ):
         """
-        Chunked stacking of already-aligned FITS images (no transforms needed).
+        Chunked stacking of already-aligned and pre-normalized FITS images.
         Reads small tiles from each image, applies outlier rejection, writes
         the result into a memory-mapped array, and saves a final stacked FITS.
 
-        Requirements:
-        - A partial-read function load_fits_tile(path, y1, y2, x1, x2)
-            that returns a subregion of a FITS image from disk.
-        - self.reference_frame, if set, used to pick a reference image in each group;
-            otherwise we use the first file in the group.
-        - self.rejection_algorithm, plus the relevant sigma/kappa/trim_fraction
-            etc. for outlier rejection.
-        - The aligned files in each group are final “_r.fit” paths.
+        No local tile normalization is performed here, because each image
+        was already scaled to the reference median beforehand.
         """
 
         self.update_status(f"✅ Chunked stacking {len(grouped_files)} group(s)...")
 
-        # For each group (e.g. "Ha 900s", "OIII 300s", etc.)
         for group_key, file_list in grouped_files.items():
             num_files = len(file_list)
             self.update_status(f"📊 Group '{group_key}' has {num_files} aligned file(s).")
             QApplication.processEvents()
+
+            # Debug: show the exact files we are about to stack
+            print(f"\nDEBUG: About to stack group '{group_key}' with {num_files} files:")
+            for idx, f in enumerate(file_list, start=1):
+                print(f"  {idx}) {f}")
+
             if num_files < 2:
                 self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
                 continue
 
-            # 1) Identify the reference file
-            if hasattr(self, "reference_frame") and self.reference_frame in file_list:
-                ref_file = self.reference_frame
-            else:
-                ref_file = file_list[0]
-
+            # 1) Identify the reference file just for shape/header
+            ref_file = file_list[0]  # or use self.reference_frame if it's definitely in file_list
             if not os.path.exists(ref_file):
                 self.update_status(f"⚠️ Reference file '{ref_file}' not found, skipping group.")
                 continue
 
-            # 2) Load the reference image fully once to get shape + median
+            # 2) Load the reference image fully once to get shape
             ref_data, ref_header, _, _ = load_image(ref_file)
             if ref_data is None:
                 self.update_status(f"⚠️ Could not load reference '{ref_file}', skipping group.")
                 continue
 
-            reference_median = np.median(ref_data)
-            reference_header = ref_header.copy() if ref_header else fits.Header()
-
+            # No local "reference_median" needed now
             is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
             height, width = ref_data.shape[:2]
             channels = 3 if is_color else 1
@@ -9721,7 +9800,6 @@ class StackingSuiteDialog(QDialog):
             )
 
             # Build a list of file paths and weights for this group
-            # We assume each file in file_list is an aligned FITS path
             aligned_paths = []
             weights_list = []
             for fpath in file_list:
@@ -9737,10 +9815,7 @@ class StackingSuiteDialog(QDialog):
                 continue
 
             weights_list = np.array(weights_list, dtype=np.float32)
-            self.update_status(
-                f"📊 Normalizing group '{group_key}' images to reference median: {reference_median:.4f}"
-            )
-            self.update_status(f"📊  Stacking with {self.rejection_algorithm}")
+            self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
             QApplication.processEvents()
 
             # 4) Loop over tiles in the final image
@@ -9755,33 +9830,28 @@ class StackingSuiteDialog(QDialog):
                     # Create a stack for this tile: (num_frames, tile_h, tile_w, channels)
                     tile_stack = np.zeros((len(aligned_paths), tile_h, tile_w, channels), dtype=np.float32)
 
-                    # 4A) Read each frame's tile from disk
-                    for i, path in enumerate(aligned_paths):
-                        sub_img = load_fits_tile(path, y_start, y_end, x_start, x_end)
-                        if sub_img is None:
-                            # If partial read fails, fill with zeros
-                            continue
+                    num_cores = os.cpu_count() or 4  # or set a different concurrency limit
+                    with ThreadPoolExecutor(max_workers=num_cores) as executor:
+                        future_to_index = {}
+                        for i, path in enumerate(aligned_paths):
+                            future = executor.submit(load_fits_tile, path, y_start, y_end, x_start, x_end)
+                            future_to_index[future] = i
 
-                        # shape handling
-                        if sub_img.ndim == 2 and channels == 3:
-                            sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
-                        elif sub_img.ndim == 2 and channels == 1:
-                            sub_img = sub_img[:, :, np.newaxis]
+                        for future in as_completed(future_to_index):
+                            i = future_to_index[future]
+                            sub_img = future.result()
+                            if sub_img is None:
+                                continue
 
-                        sub_img = sub_img.astype(np.float32, copy=False)
+                            # shape handling
+                            if sub_img.ndim == 2 and channels == 3:
+                                sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
+                            elif sub_img.ndim == 2 and channels == 1:
+                                sub_img = sub_img[:, :, np.newaxis]
 
-                        # Normalization
-                        # If you prefer EXACT logic from 'normalize_images', 
-                        # you'd do: factor = (reference_median / per_frame_median[path])
-                        # For now, we do a local tile median approach
-                        tile_median = np.median(sub_img)
-                        if tile_median > 1e-9:
-                            norm_factor = reference_median / tile_median
-                            sub_img *= norm_factor
+                            sub_img = sub_img.astype(np.float32, copy=False)
+                            tile_stack[i] = sub_img
 
-                        tile_stack[i] = sub_img
-    
-           
                     # 4B) Outlier rejection
                     algo = self.rejection_algorithm
                     if algo == "Simple Median (No Rejection)":
@@ -9790,8 +9860,8 @@ class StackingSuiteDialog(QDialog):
                         tile_result = np.average(tile_stack, axis=0, weights=weights_list)
                     elif algo == "Weighted Windsorized Sigma Clipping":
                         tile_result = windsorized_sigma_clip_weighted(
-                            tile_stack, weights_list, 
-                            lower=self.sigma_low, 
+                            tile_stack, weights_list,
+                            lower=self.sigma_low,
                             upper=self.sigma_high
                         )
                     elif algo == "Kappa-Sigma Clipping":
@@ -9821,21 +9891,19 @@ class StackingSuiteDialog(QDialog):
                             threshold=self.modz_threshold
                         )
                     else:
-                        # default
                         tile_result = windsorized_sigma_clip_weighted(
                             tile_stack, weights_list,
                             lower=self.sigma_low,
                             upper=self.sigma_high
                         )
 
-                    # 4C) Write the tile result back into final_stacked
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
 
-            # 5) Now final_stacked on disk is complete. Do a final pass for black-point etc.
-            final_array = np.array(final_stacked)  # loads from memmap
-            del final_stacked  # close the memmap
+            # 5) Now final_stacked is complete. Do final black-point / min-max
+            final_array = np.array(final_stacked)
+            del final_stacked
 
-            flat_array = final_array.flatten()
+            flat_array = final_array.ravel()
             nonzero_indices = np.where(flat_array > 0)[0]
             if len(nonzero_indices) > 0:
                 first_nonzero = flat_array[nonzero_indices[0]]
@@ -9853,28 +9921,27 @@ class StackingSuiteDialog(QDialog):
             # Squeeze if mono
             if final_array.ndim == 3 and final_array.shape[-1] == 1:
                 final_array = final_array[..., 0]
-
             is_mono = (final_array.ndim == 2)
 
             # 6) Save final stacked image
-            if reference_header is None:
-                reference_header = fits.Header()
+            if ref_header is None:
+                ref_header = fits.Header()
 
-            reference_header["IMAGETYP"] = "MASTER STACK"
-            reference_header["BITPIX"] = -32
-            reference_header["STACKED"] = (True, "Stacked using chunked approach")
-            reference_header["CREATOR"] = "SetiAstroSuite"
-            reference_header["DATE-OBS"] = datetime.utcnow().isoformat()
+            ref_header["IMAGETYP"] = "MASTER STACK"
+            ref_header["BITPIX"] = -32
+            ref_header["STACKED"] = (True, "Stacked using chunked approach")
+            ref_header["CREATOR"] = "SetiAstroSuite"
+            ref_header["DATE-OBS"] = datetime.utcnow().isoformat()
 
             if is_mono:
-                reference_header["NAXIS"] = 2
-                reference_header["NAXIS1"] = final_array.shape[1]
-                reference_header["NAXIS2"] = final_array.shape[0]
+                ref_header["NAXIS"] = 2
+                ref_header["NAXIS1"] = final_array.shape[1]
+                ref_header["NAXIS2"] = final_array.shape[0]
             else:
-                reference_header["NAXIS"] = 3
-                reference_header["NAXIS1"] = final_array.shape[1]
-                reference_header["NAXIS2"] = final_array.shape[0]
-                reference_header["NAXIS3"] = 3
+                ref_header["NAXIS"] = 3
+                ref_header["NAXIS1"] = final_array.shape[1]
+                ref_header["NAXIS2"] = final_array.shape[0]
+                ref_header["NAXIS3"] = 3
 
             output_filename = f"MasterLight_{group_key}.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
@@ -9884,18 +9951,19 @@ class StackingSuiteDialog(QDialog):
                 filename=output_path,
                 original_format="fit",
                 bit_depth="32-bit floating point",
-                original_header=reference_header,
+                original_header=ref_header,
                 is_mono=is_mono
             )
 
             self.update_status(f"✅ Group '{group_key}' chunked stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
 
-            # Remove memmap file
+            # Clean up memmap file
             try:
                 os.remove(memmap_path)
             except OSError:
                 pass
+
 
 
     def integrate_registered_images(self):
@@ -10191,7 +10259,7 @@ class StackingSuiteDialog(QDialog):
         self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
 
 def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
-    from astropy.io import fits
+
     with fits.open(filepath, memmap=True) as hdul:
         # Only read the sub-region of the primary HDU
         tile_data = hdul[0].section[y_start:y_end, x_start:x_end]
