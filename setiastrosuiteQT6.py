@@ -13158,25 +13158,48 @@ class StarRegistrationThread(QThread):
                     self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
                     break
 
-            # 🚀 Reject frames with >2px final shift
+            # 🚀 Reject frames with >2px final shift *OR* >2° rotation
             final_shifts = self.transform_deltas[-1]  # Last pass shift values
 
             old_files = self.files_to_align
             new_files = []
             rejected_files = []
 
-            # Single pass over old_files and final_shifts
             for f, shift in zip(old_files, final_shifts):
-                if shift <= 2.0:
-                    new_files.append(f)
-                else:
+                transform = self.alignment_matrices.get(f, None)
+                if transform is None:
+                    # No transform => definitely reject
                     rejected_files.append(f)
+                    continue
+
+                # Extract elements from the 2×3 matrix
+                # transform = [[a, b, tx],
+                #              [c, d, ty]]
+                a, b, tx = transform[0]
+                c, d, ty = transform[1]
+
+                # 1) SHIFT check
+                if shift > 2.0:
+                    rejected_files.append(f)
+                    continue
+
+                # 2) ROTATION check
+                # For a typical 2D rigid transform, rotation angle (in radians) is arctan2(b, a).
+                # Then convert to degrees and compare to 2°.
+                rotation_radians = np.arctan2(b, a)
+                rotation_degrees = abs(np.degrees(rotation_radians))
+                if rotation_degrees > 2.0:
+                    rejected_files.append(f)
+                    continue
+
+                # If both shift and rotation are within limits, keep the file
+                new_files.append(f)
 
             self.files_to_align = new_files
 
             if rejected_files:
                 self.progress_update.emit(
-                    f"🚨 Rejected {len(rejected_files)} frame(s) due to high residual shift > 2px."
+                    f"🚨 Rejected {len(rejected_files)} frame(s) due to shift >2px or rotation >2°."
                 )
 
             # Finished passes
