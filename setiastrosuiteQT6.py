@@ -9240,32 +9240,32 @@ class StackingSuiteDialog(QDialog):
 
     def register_images(self):
         """ 
-        Measures all frames in batches (up to the number of CPU cores),
-        then aligns them, and computes weighted stacking parameters.
+        Measures all frames in small batches (to find a reference frame and weights),
+        then normalizes each entire frame (again in small batches) using the Numba
+        `normalize_images` function, saves them with a '_n.fit' suffix, and finally
+        starts the alignment thread on those normalized files.
         """
         self.update_status("🔄 Image Registration Started...")
 
-        # 1) Extract files from tree before processing
+        # 1) Extract files from tree
         self.extract_light_files_from_tree()
         if not self.light_files:
             self.update_status("⚠️ No light frames found!")
             return
 
-        # Flatten all groups into one list of files
-        all_files = [file for file_list in self.light_files.values() for file in file_list]
+        # Flatten to get all files
+        all_files = [f for file_list in self.light_files.values() for f in file_list]
         self.update_status(f"📊 Found {len(all_files)} total frames. Now measuring in parallel batches...")
 
-        self.frame_weights = {}  # Will hold final weights
+        self.frame_weights = {}
         mean_values = {}
         star_counts = {}
         measured_frames = []
 
-        # Decide how many images to load per batch (e.g. # of CPU cores)
         import os
         max_workers = os.cpu_count() or 4
-        chunk_size = max_workers  # You can tweak this if needed
+        chunk_size = max_workers  # or bigger if you prefer
 
-        # Simple helper to chunk the file list
         def chunk_list(lst, size):
             for i in range(0, len(lst), size):
                 yield lst[i : i + size]
@@ -9273,15 +9273,12 @@ class StackingSuiteDialog(QDialog):
         chunked_files = list(chunk_list(all_files, chunk_size))
         total_chunks = len(chunked_files)
 
-        # 2) Load & measure each chunk
+        # 2) PHASE 1: Load & Measure Each Chunk
         chunk_index = 0
         for chunk in chunked_files:
             chunk_index += 1
-            self.update_status(
-                f"📦 Loading and measuring chunk {chunk_index}/{total_chunks} with up to {len(chunk)} images..."
-            )
+            self.update_status(f"📦 Measuring chunk {chunk_index}/{total_chunks} ({len(chunk)} frames)")
 
-            # Temporary storage for images in this chunk
             chunk_images = []
             chunk_valid_files = []
 
@@ -9289,7 +9286,7 @@ class StackingSuiteDialog(QDialog):
             for file in chunk:
                 image_data, _, _, _ = load_image(file)
                 self.update_status(f"  Loaded {file}")
-                QApplication.processEvents()  # keep UI responsive
+                QApplication.processEvents()
 
                 if image_data is not None:
                     chunk_images.append(image_data)
@@ -9299,97 +9296,140 @@ class StackingSuiteDialog(QDialog):
                 self.update_status("⚠️ No valid images in this chunk.")
                 continue
 
-            # Parallel measure the mean pixel value for this chunk
-            self.update_status("🌍 Measuring global statistics (mean) in parallel...")
-            means = parallel_measure_frames(chunk_images)  # same function you already have
+            # measure means in parallel
+            self.update_status("🌍 Measuring global means in parallel...")
+            means = parallel_measure_frames(chunk_images)
 
-            # For each valid image in the chunk, measure star count & store results
+            # star counts
             for i, file in enumerate(chunk_valid_files):
-                self.update_status(f"⭐ Measuring star stats for {file}...")
-                mean_signal = means[i]
-                mean_values[file] = mean_signal
+                mean_val = means[i]
+                mean_values[file] = mean_val
 
-                # Star count
-                count, ecc = compute_star_count(chunk_images[i])
-                star_counts[file] = {
-                    "count": count,
-                    "eccentricity": ecc
-                }
+                c, ecc = compute_star_count(chunk_images[i])
+                star_counts[file] = {"count": c, "eccentricity": ecc}
 
                 measured_frames.append(file)
 
-            # Clear out this chunk’s data to free memory before next chunk
             del chunk_images
 
-        # 3) If no frames measured at all, bail out
         if not measured_frames:
             self.update_status("⚠️ No frames could be measured!")
             return
 
         self.update_status(f"✅ All chunks complete! Measured {len(measured_frames)} frames total.")
 
-        # 4) Compute Weights
+        # 3) Compute Weights
         self.update_status("⚖️ Computing frame weights...")
-        debug_weight_log = "\n📊 **Frame Weights Debug Log:**\n"
-
+        debug_log = "\n📊 **Frame Weights Debug Log:**\n"
         for file in measured_frames:
-            star_count = star_counts[file]["count"]
+            c = star_counts[file]["count"]
             ecc = star_counts[file]["eccentricity"]
-            mean_value = mean_values[file]
+            m = mean_values[file]
 
-            # Avoid zero
-            star_count = max(star_count, 1)
-            mean_weight = max(mean_value, 1e-6)
+            c = max(c, 1)
+            m = max(m, 1e-6)
+            raw_w = (c * min(1, max(1.0 - ecc, 0.0))) / m
+            self.frame_weights[file] = raw_w
 
-            # Weight = star_count * (1 - ecc) / mean
-            raw_weight = (star_count * min(1, max(1.0 - ecc, 0.0))) / mean_weight
+            debug_log += (f"📂 {os.path.basename(file)} → "
+                        f"StarCount={c}, Ecc={ecc:.4f}, Mean={m:.4f}, Weight={raw_w:.4f}\n")
 
-            self.frame_weights[file] = raw_weight
+        self.update_status(debug_log)
 
-            debug_weight_log += (
-                f"📂 {os.path.basename(file)} → "
-                f"Star Count: {star_count}, "
-                f"Eccentricity: {ecc:.4f}, "
-                f"Mean: {mean_value:.4f}, "
-                f"Raw Weight: {raw_weight:.4f}\n"
-            )
-
-        self.update_status(debug_weight_log)
-
-        # 5) Normalize Weights so max = 1.0 (recommended)
+        # 4) Normalize Weights
         max_w = max(self.frame_weights.values()) if self.frame_weights else 0
         if max_w > 0:
             for k in self.frame_weights:
                 self.frame_weights[k] /= max_w
 
-        debug_weight_log += "\n🔧 Normalizing Weights so maximum is 1.0:\n"
-        for file in measured_frames:
-            debug_weight_log += (
-                f"{os.path.basename(file)} => Normalized Weight: {self.frame_weights[file]:.4f}\n"
-            )
-
-        self.update_status(debug_weight_log)
-        self.update_status("✅ Frame weights computed and normalized!")
-
-        # 6) Pick Reference Frame
+        # 5) Pick Reference Frame
         if hasattr(self, "reference_frame") and self.reference_frame:
-            self.update_status(f"📌 Using user-specified reference frame: {self.reference_frame}")
+            self.update_status(f"📌 Using user-specified reference: {self.reference_frame}")
         else:
-            self.reference_frame = self.select_reference_frame_robust(
-                self.frame_weights, sigma_threshold=2.0
-            )
+            self.reference_frame = self.select_reference_frame_robust(self.frame_weights, sigma_threshold=2.0)
             self.update_status(f"📌 Auto-selected robust reference frame: {self.reference_frame}")
 
-        # 7) Start Alignment Thread
-        output_directory = os.path.join(self.stacking_directory, "Aligned_Images")
-        os.makedirs(output_directory, exist_ok=True)
+        # 6) Load the reference fully, get its median
+        ref_data, _, _, _ = load_image(self.reference_frame)
+        if ref_data is None:
+            self.update_status(f"🚨 Could not load reference {self.reference_frame}. Aborting.")
+            return
+        ref_median = np.median(ref_data)
+        self.update_status(f"📊 Reference median: {ref_median:.4f}")
+
+        # 7) PHASE 2: Normalize Each Frame to ref_median
+        #    We'll do it again in chunks to avoid loading all frames at once.
+        norm_dir = os.path.join(self.stacking_directory, "Normalized_Images")
+        os.makedirs(norm_dir, exist_ok=True)
+
+        chunked_files = list(chunk_list(measured_frames, chunk_size))
+        total_chunks = len(chunked_files)
+        normalized_files = []
+
+        chunk_index = 0
+        for chunk in chunked_files:
+            chunk_index += 1
+            self.update_status(f"🌀 Normalizing chunk {chunk_index}/{total_chunks} ({len(chunk)} frames)...")
+            QApplication.processEvents()
+
+            # Load them all into a stack so we can call `normalize_images(...)`
+            # (We rely on your existing code that expects shape=(F,H,W) or (F,H,W,C).)
+            loaded_images = []
+            valid_paths = []
+            for file in chunk:
+                img, hdr, _, _ = load_image(file)
+                if img is not None:
+                    loaded_images.append(img)
+                    valid_paths.append(file)
+
+            if not loaded_images:
+                continue
+
+            # Build a single NumPy array: shape=(F,H,W) or (F,H,W,C)
+            # We assume all frames are the same shape
+            stack = np.array(loaded_images, dtype=np.float32)
+
+            # Use your Numba function
+            normalized_stack = normalize_images(stack, ref_median)
+
+            # Now save each frame with suffix "_n.fit"
+            for i, orig_file in enumerate(valid_paths):
+                base = os.path.basename(orig_file)
+                # remove existing "_n.fit" if any
+                if base.endswith("_n.fit"):
+                    base = base.replace("_n.fit", ".fit")
+                out_name = base.replace(".fit", "_n.fit")
+                out_path = os.path.join(norm_dir, out_name)
+
+                # Save the single frame
+                frame_data = normalized_stack[i]
+
+                # If it's 2D or 3D color
+                if frame_data.ndim == 2:
+                    is_mono = True
+                else:
+                    is_mono = False  # shape=(H,W,C)
+
+                # We can reuse the original header or just do a blank one
+                hdu = fits.PrimaryHDU(data=frame_data.astype(np.float32), header=hdr)
+                hdu.writeto(out_path, overwrite=True)
+                normalized_files.append(out_path)
+
+            del loaded_images
+            del stack
+            del normalized_stack
+
+        # 8) Start Alignment on the normalized files
+        align_dir = os.path.join(self.stacking_directory, "Aligned_Images")
+        os.makedirs(align_dir, exist_ok=True)
 
         self.alignment_thread = StarRegistrationThread(
-            self.reference_frame, measured_frames, output_directory
+            self.reference_frame, normalized_files, align_dir
         )
         self.alignment_thread.progress_update.connect(self.update_status)
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
         self.alignment_thread.start()
+
 
 
     def save_alignment_matrices_sasd(self, transforms_dict):
