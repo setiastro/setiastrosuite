@@ -9616,11 +9616,11 @@ class StackingSuiteDialog(QDialog):
         # 4) Filter `light_files`
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
-            print(f"  Group '{group}':")
+            
             for f in file_list:
                 normed_f = os.path.normpath(f)
                 in_dict = (normed_f in self.valid_transforms)
-                print(f"    {f} => '{normed_f}' => in valid_transforms? {in_dict}")
+                
 
             filtered_light_files[group] = [
                 f for f in file_list if os.path.normpath(f) in self.valid_transforms
@@ -9641,10 +9641,6 @@ class StackingSuiteDialog(QDialog):
                     new_list.append(aligned_f)
             aligned_light_files[group] = new_list
 
-            # Optional debug
-            print(f"\nDEBUG: For group '{group}', passing {len(new_list)} aligned files:")
-            for a in new_list:
-                print(f"   {a}")
 
         # Finally, pass the aligned_light_files to stacking
         self.stack_images_mixed_drizzle(
@@ -9765,9 +9761,6 @@ class StackingSuiteDialog(QDialog):
             QApplication.processEvents()
 
             # Debug: show the exact files we are about to stack
-            print(f"\nDEBUG: About to stack group '{group_key}' with {num_files} files:")
-            for idx, f in enumerate(file_list, start=1):
-                print(f"  {idx}) {f}")
 
             if num_files < 2:
                 self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
