@@ -9811,7 +9811,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
             QApplication.processEvents()
 
-            # 4) Loop over tiles in the final image
+            # 4) Loop over tiles in the final image, using actual leftover sizes
             for y_start in range(0, height, chunk_height):
                 y_end = min(y_start + chunk_height, height)
                 tile_h = y_end - y_start
@@ -9820,10 +9820,12 @@ class StackingSuiteDialog(QDialog):
                     x_end = min(x_start + chunk_width, width)
                     tile_w = x_end - x_start
 
-                    # Create a stack for this tile: (num_frames, tile_h, tile_w, channels)
+                    # Note: tile_w might be < 2048 if x_end is near the image's right edge.
+                    # So we allocate tile_stack accordingly:
                     tile_stack = np.zeros((len(aligned_paths), tile_h, tile_w, channels), dtype=np.float32)
 
-                    num_cores = os.cpu_count() or 4  # or set a different concurrency limit
+                    # Load each tile in parallel
+                    num_cores = os.cpu_count() or 4
                     with ThreadPoolExecutor(max_workers=num_cores) as executor:
                         future_to_index = {}
                         for i, path in enumerate(aligned_paths):
@@ -9836,14 +9838,19 @@ class StackingSuiteDialog(QDialog):
                             if sub_img is None:
                                 continue
 
-                            # shape handling
+                            # If sub_img is (H, W) & channels=3, expand => (H, W, 3)
                             if sub_img.ndim == 2 and channels == 3:
                                 sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
                             elif sub_img.ndim == 2 and channels == 1:
                                 sub_img = sub_img[:, :, np.newaxis]
 
+                            # If sub_img is (3, H, W) but we want (H, W, 3), transpose
+                            if sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
+                                sub_img = sub_img.transpose(1, 2, 0)
+
                             sub_img = sub_img.astype(np.float32, copy=False)
-                            tile_stack[i] = sub_img
+                            tile_stack[i] = sub_img  # shape=(tile_h, tile_w, channels)
+
 
                     # 4B) Outlier rejection
                     algo = self.rejection_algorithm
@@ -10252,11 +10259,146 @@ class StackingSuiteDialog(QDialog):
         self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
 
 def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
-
+    """
+    Loads a sub-region from a FITS file, detecting which axes are spatial vs. color.
+    
+    * If the data is 2D, it might be (height, width) or (width, height).
+    * If the data is 3D, it might be:
+        - (height, width, 3)
+        - (3, height, width)
+        - (width, height, 3)
+        - (3, width, height)
+      We only slice the two spatial dimensions; the color axis remains intact.
+    
+    The returned tile will always have the shape:
+      - (tile_height, tile_width) for mono
+      - (tile_height, tile_width, 3) for color
+    (though the color dimension may still be first if it was first in the file).
+    It's up to the caller to reorder if needed.
+    """
     with fits.open(filepath, memmap=True) as hdul:
-        # Only read the sub-region of the primary HDU
-        tile_data = hdul[0].section[y_start:y_end, x_start:x_end]
+        data = hdul[0].data
+        if data is None:
+            return None
+
+        shape = data.shape
+        ndim = data.ndim
+
+        # We'll handle up to 3D. If 2D => shape is (dim0, dim1).
+        # If 3D => shape is (dim0, dim1, dim2).
+        # We need to find which two dims are "spatial X & Y", and slice them.
+        
+        # 1) Identify the "spatial" dimensions
+        #    We'll assume:
+        #    - If 2D => shape might be (height, width) or (width, height).
+        #    - If 3D => one dimension is color=3, the other two are spatial.
+        
+        if ndim == 2:
+            # shape could be (height, width) or (width, height)
+            dim0, dim1 = shape
+            # We'll guess dim0=height, dim1=width if dim0 ~ 4000, dim1 ~ 6000 (just an example).
+            # But better to see which is bigger if we know the user expects (height=~4000, width=~6000).
+            # Or just do y-slice on the smaller dimension if the user passes y up to 4000, x up to 6000.
+            
+            # We'll define:
+            # y-slice => dimension that matches "height"
+            # x-slice => dimension that matches "width"
+            # If y_end > dim0, that implies dim0 is "width" => we need to swap slicing
+            # But it's simpler to check which dimension is bigger.
+            
+            # A robust approach: compare (y_end, x_end) to shape
+            # if y_end <= dim0 and x_end <= dim1 => we do data[y1:y2, x1:x2]
+            # else => data[x1:x2, y1:y2]
+            
+            # But the simplest fix: if dim0 >= y_end and dim1 >= x_end => normal slice
+            # else => swapped slice
+            if (y_end <= dim0) and (x_end <= dim1):
+                tile_data = data[y_start:y_end, x_start:x_end]
+            else:
+                tile_data = data[x_start:x_end, y_start:y_end]
+
+        elif ndim == 3:
+            # shape could be (height, width, 3) or (3, height, width) or (width, height, 3), etc.
+            # We want to slice the two spatial dims, leaving the color dimension alone.
+            
+            dim0, dim1, dim2 = shape
+            # If one dimension == 3, that's color. The other two are spatial.
+            # We'll find which dims are ~4000 or ~6000, etc.
+            # For instance, if dim0==3 => shape is (3, height, width).
+            
+            # We'll define a small helper:
+            def do_slice_spatial(data3d, spat0, spat1, color_axis):
+                """
+                Slices the 3D array along spat0, spat1 as y,x, ignoring the color axis.
+                spat0, spat1, color_axis are indices in [0,1,2].
+                y1:y2 => spat0-slice, x1:x2 => spat1-slice.
+                We'll reorder if needed afterwards in the caller.
+                """
+                # We'll build slices of shape [ :, :, : ] with the color axis untouched.
+                # We can do something like:
+                #   if spat0 < spat1 < color_axis => ...
+                # but it's simpler to permute the axes so that data is (spat0, spat1, color).
+                # However, that might be too complex. Let's do direct indexing.
+                
+                # We'll create a slice object for each dimension
+                slicer = [slice(None)]*3
+                # spat0 => y-slice
+                slicer[spat0] = slice(y_start, y_end)
+                # spat1 => x-slice
+                slicer[spat1] = slice(x_start, x_end)
+                # color_axis => remains slice(None)
+                
+                tile = data3d[tuple(slicer)]
+                return tile
+            
+            # We'll find which axis is color=3 (if any)
+            color_axis = None
+            spat_axes = []
+            for idx, d in enumerate((dim0, dim1, dim2)):
+                if d == 3:
+                    color_axis = idx
+                else:
+                    spat_axes.append(idx)
+            
+            if color_axis is None:
+                # means all dims are spatial? e.g. (width, height, depth??)
+                # We'll assume the last dimension is color=1 => a weird case.
+                # Or we can treat it as 2D with an extra dimension => just slice first 2 dims.
+                # Let's just assume no color axis => slice the first two dims as y/x.
+                # We'll do the same logic as 2D, but we have an extra dimension?
+                # We'll do a simpler approach: treat dim2 as 1 channel. 
+                # Or if user truly has (height, width, 3) but 3 != color => confusion.
+                # For now, let's assume color_axis=2 if dim2 < something. It's a fallback.
+                color_axis = 2
+            
+            # spat_axes are the other two indices
+            if len(spat_axes) != 2:
+                # Something weird => fallback
+                # We'll just assume spat_axes=[0,1], color_axis=2
+                spat_axes = [0,1]
+
+            # Now we have spat_axes e.g. [0,1], color_axis e.g. 2
+            # We must see if slicing y_end fits spat_axes[0], x_end fits spat_axes[1].
+            
+            # We'll do a dimension check:
+            spat0, spat1 = spat_axes
+            d0 = shape[spat0]
+            d1 = shape[spat1]
+            # If y_end <= d0 and x_end <= d1 => we do normal
+            # else we swap.
+            if (y_end <= d0) and (x_end <= d1):
+                tile_data = do_slice_spatial(data, spat0, spat1, color_axis)
+            else:
+                # If that fails, we try to swap spat0/spat1
+                tile_data = do_slice_spatial(data, spat1, spat0, color_axis)
+
+        else:
+            # We don't handle 4D or more
+            return None
+
     return tile_data
+
+
 
 
 # --------------------------------------------------
