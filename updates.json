@@ -1,9 +1,9 @@
 {
-  "version": "2.12.2",
+  "version": "2.12.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.2/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.4/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.4/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Major Bug Fix: Flats were overcorrecting due to normalization of master flat prior to saving it.  This has been corrected."
+  "notes": "Updated Stacking to utilize more parallel paths drastically reducing RAM especially helpful on computers with 16GB of RAM."
 }
