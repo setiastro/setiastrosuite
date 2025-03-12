@@ -200,106 +200,125 @@ def subtract_dark(frames, dark_frame):
 
 
 @njit(parallel=True, fastmath=True)
-def windsorized_sigma_clip_weighted_3d(stack, weights, lower=2.5, upper=2.5):
+def windsorized_sigma_clip_weighted_3d_iter(stack, weights, lower=2.5, upper=2.5, iterations=2):
     """
-    Weighted Windsorized Sigma Clipping for a 3D mono stack:
+    Iterative Weighted Windsorized Sigma Clipping for a 3D mono stack:
       stack.shape == (F,H,W)
       weights.shape can be (F,) or (F,H,W).
     Returns a 2D clipped image (H,W).
     """
     num_frames, height, width = stack.shape
     clipped = np.zeros((height, width), dtype=np.float32)
-
+    
     # Check shape of weights
     if weights.ndim == 1 and weights.shape[0] == num_frames:
         pass
     elif weights.ndim == 3 and weights.shape == stack.shape:
         pass
     else:
-        raise ValueError("windsorized_sigma_clip_weighted_3d: mismatch in shapes for 3D stack & weights")
-
+        raise ValueError("windsorized_sigma_clip_weighted_3d_iter: mismatch in shapes for 3D stack & weights")
+    
     for i in prange(height):
         for j in range(width):
             pixel_values = stack[:, i, j]  # shape=(F,)
-
-            # Figure out corresponding weights
+            
+            # Determine corresponding weights
             if weights.ndim == 1:
-                pixel_weights = weights[:]
+                pixel_weights = weights[:]  # shape (F,)
             else:
                 pixel_weights = weights[:, i, j]
-
-            median_val = np.median(pixel_values)
-            std_dev = np.std(pixel_values)
-            lower_bound = median_val - lower * std_dev
-            upper_bound = median_val + upper * std_dev
-
-            valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+            
+            # Start with nonzero pixels as valid
+            valid_mask = pixel_values != 0
+            
+            # Iterative sigma clipping loop
+            for _ in range(iterations):
+                if np.sum(valid_mask) == 0:
+                    break
+                valid_vals = pixel_values[valid_mask]
+                median_val = np.median(valid_vals)
+                std_dev = np.std(valid_vals)
+                lower_bound = median_val - lower * std_dev
+                upper_bound = median_val + upper * std_dev
+                valid_mask = valid_mask & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+            
             valid_vals = pixel_values[valid_mask]
             valid_w = pixel_weights[valid_mask]
-
             wsum = np.sum(valid_w)
             if wsum > 0:
                 clipped[i, j] = np.sum(valid_vals * valid_w) / wsum
             else:
-                clipped[i, j] = median_val
-
+                # Fallback: use median of nonzero values if available, else 0.
+                nonzero = pixel_values[pixel_values != 0]
+                if nonzero.size > 0:
+                    clipped[i, j] = np.median(nonzero)
+                else:
+                    clipped[i, j] = 0.0
     return clipped
 
 @njit(parallel=True, fastmath=True)
-def windsorized_sigma_clip_weighted_4d(stack, weights, lower=2.5, upper=2.5):
+def windsorized_sigma_clip_weighted_4d_iter(stack, weights, lower=2.5, upper=2.5, iterations=2):
     """
-    Weighted Windsorized Sigma Clipping for a 4D color stack:
+    Iterative Weighted Windsorized Sigma Clipping for a 4D color stack:
       stack.shape == (F,H,W,C)
       weights.shape can be (F,) or (F,H,W,C).
     Returns a 3D clipped image (H,W,C).
     """
     num_frames, height, width, channels = stack.shape
     clipped = np.zeros((height, width, channels), dtype=np.float32)
-
+    
     # Check shape of weights
     if weights.ndim == 1 and weights.shape[0] == num_frames:
         pass
     elif weights.ndim == 4 and weights.shape == stack.shape:
         pass
     else:
-        raise ValueError("windsorized_sigma_clip_weighted_4d: mismatch in shapes for 4D stack & weights")
-
+        raise ValueError("windsorized_sigma_clip_weighted_4d_iter: mismatch in shapes for 4D stack & weights")
+    
     for i in prange(height):
         for j in range(width):
             for c in range(channels):
                 pixel_values = stack[:, i, j, c]  # shape=(F,)
-
+                
                 if weights.ndim == 1:
                     pixel_weights = weights[:]
                 else:
                     pixel_weights = weights[:, i, j, c]
-
-                median_val = np.median(pixel_values)
-                std_dev = np.std(pixel_values)
-                lower_bound = median_val - lower * std_dev
-                upper_bound = median_val + upper * std_dev
-
-                valid_mask = (pixel_values != 0) & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+                
+                valid_mask = pixel_values != 0
+                
+                for _ in range(iterations):
+                    if np.sum(valid_mask) == 0:
+                        break
+                    valid_vals = pixel_values[valid_mask]
+                    median_val = np.median(valid_vals)
+                    std_dev = np.std(valid_vals)
+                    lower_bound = median_val - lower * std_dev
+                    upper_bound = median_val + upper * std_dev
+                    valid_mask = valid_mask & (pixel_values >= lower_bound) & (pixel_values <= upper_bound)
+                
                 valid_vals = pixel_values[valid_mask]
                 valid_w = pixel_weights[valid_mask]
-
                 wsum = np.sum(valid_w)
                 if wsum > 0:
                     clipped[i, j, c] = np.sum(valid_vals * valid_w) / wsum
                 else:
-                    clipped[i, j, c] = median_val
-
+                    nonzero = pixel_values[pixel_values != 0]
+                    if nonzero.size > 0:
+                        clipped[i, j, c] = np.median(nonzero)
+                    else:
+                        clipped[i, j, c] = 0.0
     return clipped
 
-def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5):
+def windsorized_sigma_clip_weighted(stack, weights, lower=2.5, upper=2.5, iterations=2):
     """
-    Dispatcher that calls either the 3D or 4D Numba function
+    Dispatcher that calls either the iterative 3D or 4D Numba function
     depending on 'stack.ndim'.
     """
     if stack.ndim == 3:
-        return windsorized_sigma_clip_weighted_3d(stack, weights, lower, upper)
+        return windsorized_sigma_clip_weighted_3d_iter(stack, weights, lower, upper, iterations)
     elif stack.ndim == 4:
-        return windsorized_sigma_clip_weighted_4d(stack, weights, lower, upper)
+        return windsorized_sigma_clip_weighted_4d_iter(stack, weights, lower, upper, iterations)
     else:
         raise ValueError(f"windsorized_sigma_clip_weighted: stack must be 3D or 4D, got {stack.shape}")
 
@@ -2499,9 +2518,9 @@ def apply_curves_numba(image, xvals, yvals):
         return image  # Fallback
 
 def fast_star_detect(image, 
-                     blur_size=15, 
-                     threshold_factor=0.8, 
-                     min_area=2, 
+                     blur_size=9, 
+                     threshold_factor=0.7, 
+                     min_area=1, 
                      max_area=5000):
     """
     Finds star positions via contour detection + ellipse fitting.
