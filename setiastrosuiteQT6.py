@@ -41,6 +41,7 @@ from numba import njit, prange
 from scipy.optimize import curve_fit
 import exifread
 from numba_utils import *
+import astroalign
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -213,7 +214,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.4"
+VERSION = "2.12.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3994,7 +3995,7 @@ class AstroEditingSuite(QMainWindow):
         file_path = event.mimeData().urls()[0].toLocalFile()
         
         # Check if the file is an image (you can customize this check as needed)
-        if file_path.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.xisf', '.fit', '.jpg', '.jpeg', '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+        if file_path.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.xisf', '.fit', '.jpg', '.jpeg', '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             try:
                 # Load the image into ImageManager
                 image, header, bit_depth, is_mono = load_image(file_path)
@@ -4214,7 +4215,7 @@ class AstroEditingSuite(QMainWindow):
         default_dir = self.settings.value("working_directory", "")
         """Open an image and load it into the ImageManager."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", default_dir, 
-                                            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+                                            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
         if file_path:
             try:
@@ -6732,7 +6733,7 @@ class StackingSuiteDialog(QDialog):
         self.image_integration_tab = self.create_image_registration_tab()
 
         # Add the tabs in desired order. (Conversion first)
-        self.tabs.addTab(self.conversion_tab, "Debayer && Convert Formats")
+        self.tabs.addTab(self.conversion_tab, "Convert Non-FITS Formats")
         self.tabs.addTab(self.dark_tab, "Darks")
         self.tabs.addTab(self.flat_tab, "Flats")
         self.tabs.addTab(self.light_tab, "Lights")
@@ -6846,9 +6847,9 @@ class StackingSuiteDialog(QDialog):
                 self,
                 "No Output Directory",
                 "No output directory is set. Do you want to select one now?",
-                QMessageBox.Yes | QMessageBox.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 self.select_conversion_output_dir()  # Let them pick a folder
             else:
                 # They chose 'No' → just stop
@@ -6893,7 +6894,7 @@ class StackingSuiteDialog(QDialog):
             if header is None:
                 header = fits.Header()
                 header["SIMPLE"]   = True
-                header["BITPIX"]   = -32  # Or 16, depending on your preference
+                header["BITPIX"]   = 16  # Or 16, depending on your preference
                 header["CREATOR"]  = "SetiAstroSuite"
                 header["IMAGETYP"] = "UNKNOWN"  # We'll set it properly below
                 header["EXPTIME"]  = "Unknown"  # Just a placeholder
@@ -6905,7 +6906,7 @@ class StackingSuiteDialog(QDialog):
                 is_mono = False
 
             # If it's a RAW format, definitely treat as color
-            if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            if file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
                 is_mono = False
 
                 # Try extracting EXIF metadata
@@ -6996,13 +6997,14 @@ class StackingSuiteDialog(QDialog):
             base = os.path.basename(file_path)
             name, _ = os.path.splitext(base)
             output_filename = os.path.join(self.conversion_output_directory, f"{name}.fit")
+            image=image/np.max(image)
 
             try:
                 save_image(
                     img_array=image,
                     filename=output_filename,
                     original_format="fit",
-                    bit_depth=bit_depth,
+                    bit_depth="16-bit",
                     original_header=header,
                     is_mono=is_mono
                 )
@@ -7022,7 +7024,7 @@ class StackingSuiteDialog(QDialog):
 
 
     def debayer_image(self, image, file_path, header):
-        if file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+        if file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             print(f"Debayering RAW image: {file_path}")
             return debayer_raw_fast(image)
         elif file_path.lower().endswith(('.fits', '.fit')):
@@ -11182,9 +11184,15 @@ class MosaicMasterDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-        # Checkbox for forcing blind solve
+        # Horizontal sizer for checkboxes.
+        checkbox_layout = QHBoxLayout()
         self.forceBlindCheckBox = QCheckBox("Force Blind Solve (ignore existing WCS)")
-        layout.addWidget(self.forceBlindCheckBox)
+        checkbox_layout.addWidget(self.forceBlindCheckBox)
+        # New Seestar Mode checkbox:
+        self.seestarCheckBox = QCheckBox("Seestar Mode")
+        self.seestarCheckBox.setToolTip("When enabled, images are aligned iteratively using astroalign without plate solving.")
+        checkbox_layout.addWidget(self.seestarCheckBox)
+        layout.addLayout(checkbox_layout)
 
         self.transform_combo = QComboBox()
         self.transform_combo.addItems([
@@ -11347,267 +11355,459 @@ class MosaicMasterDialog(QDialog):
 
     # ---------- Align (Entry Point) ----------
     def align_images(self):
+        if self.seestarCheckBox.isChecked():
+            self.align_images_seestar_mode()
+        else:
+            if len(self.loaded_images) == 0:
+                QMessageBox.warning(self, "Align", "No images to align.")
+                return
+
+            # Show spinner and start animation.
+            self.spinnerLabel.show()
+            self.spinnerMovie.start()
+            QApplication.processEvents()
+
+            # Step 1: Force blind solve if requested.
+            force_blind = self.forceBlindCheckBox.isChecked()
+            images_to_process = (self.loaded_images if force_blind 
+                                else [item for item in self.loaded_images if item.get("wcs") is None])
+
+            # Process each image for plate solving.
+            for item in images_to_process:
+                # Check if ASTAP is set.
+                if not self.astap_exe or not os.path.exists(self.astap_exe):
+                    executable_filter = "Executables (*.exe);;All Files (*)" if sys.platform.startswith("win") else "Executables (astap);;All Files (*)"
+                    new_path, _ = QFileDialog.getOpenFileName(self, "Select ASTAP Executable", "", executable_filter)
+                    if new_path:
+                        self.astap_exe = new_path
+                        self.settings.setValue("astap/exe_path", self.astap_exe)
+                        QMessageBox.information(self, "Mosaic Master", "ASTAP path updated successfully.")
+                    else:
+                        QMessageBox.warning(self, "Mosaic Master", "ASTAP path not provided. Falling back to blind solve.")
+                        solved_header = self.perform_blind_solve(item)
+                        if solved_header:
+                            item["wcs"] = WCS(solved_header)
+                        continue  # Move to next image
+
+                # Attempt ASTAP solve.
+                self.status_label.setText(f"Attempting ASTAP solve for {item['path']}...")
+                QApplication.processEvents()
+                solved_header = self.attempt_astap_solve(item)
+
+                if solved_header is None:
+                    self.status_label.setText(f"ASTAP failed for {item['path']}. Falling back to blind solve...")
+                    QApplication.processEvents()
+                    solved_header = self.perform_blind_solve(item)
+                else:
+                    self.status_label.setText(f"Plate solve successful using ASTAP for {item['path']}.")
+
+                if solved_header:
+                    # Remove unnecessary 3D-related keywords.
+                    for k in list(solved_header.keys()):
+                        if (k.startswith("NAXIS3") or k.startswith("CTYPE3") or k.startswith("CUNIT3") or
+                            k.startswith("CRVAL3") or k.startswith("CRPIX3") or k.startswith("CDELT3") or
+                            k.startswith("CD3_") or k.startswith("PC3_") or k.startswith("PC_3")):
+                            del solved_header[k]
+                    # Ensure mandatory WCS keys are present.
+                    solved_header.setdefault("CTYPE1", "RA---TAN")
+                    solved_header.setdefault("CTYPE2", "DEC--TAN")
+                    solved_header.setdefault("RADECSYS", "ICRS")
+                    solved_header.setdefault("WCSAXES", 2)
+                    item["wcs"] = WCS(solved_header)
+                else:
+                    print(f"Plate solving failed for {item['path']}.")
+
+            # After processing, get all images with valid WCS.
+            wcs_items = [x for x in self.loaded_images if x.get("wcs") is not None]
+            if not wcs_items:
+                print("No images have WCS, skipping WCS alignment.")
+                self.spinnerMovie.stop()
+                self.spinnerLabel.hide()
+                return
+
+            # Use the first image's WCS as reference and compute the mosaic bounding box.
+            reference_wcs = wcs_items[0]["wcs"].deepcopy()
+            min_x, min_y, max_x, max_y = self.compute_mosaic_bounding_box(wcs_items, reference_wcs)
+            mosaic_width = int(max_x - min_x)
+            mosaic_height = int(max_y - min_y)
+
+            if mosaic_width < 1 or mosaic_height < 1:
+                print("ERROR: Computed mosaic size is invalid. Check WCS or inputs.")
+                return
+
+            # Adjust the reference WCS so that (min_x, min_y) becomes (0,0).
+            mosaic_wcs = reference_wcs.deepcopy()
+            mosaic_wcs.wcs.crpix[0] -= min_x
+            mosaic_wcs.wcs.crpix[1] -= min_y
+            self.wcs_metadata = mosaic_wcs.to_header()
+
+            # Set up accumulators.
+            is_color = any(not item["is_mono"] for item in wcs_items)
+            if is_color:
+                self.final_mosaic = np.zeros((mosaic_height, mosaic_width, 3), dtype=np.float32)
+            else:
+                self.final_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
+            self.weight_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
+
+            first_image = True
+            for idx, itm in enumerate(wcs_items):
+                arr = itm["image"]
+                self.status_label.setText(f"Projecting {itm['path']} onto the celestial sphere...")
+                QApplication.processEvents()
+
+                # Pre-stretch the image.
+                stretched_arr = self.stretch_image(arr)
+                # Use the first channel for alignment.
+                if not itm["is_mono"]:
+                    red_stretched = stretched_arr[..., 0]
+                else:
+                    red_stretched = stretched_arr[..., 0] if stretched_arr.ndim == 3 else stretched_arr
+
+                # Reproject the image.
+                if not itm["is_mono"]:
+                    channels = []
+                    for c in range(3):
+                        channel = stretched_arr[..., c]
+                        reproj, _ = reproject_interp((channel, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
+                        reproj = np.nan_to_num(reproj, nan=0.0).astype(np.float32)
+                        channels.append(reproj)
+                    reprojected = np.stack(channels, axis=-1)
+                    reproj_red = reprojected[..., 0]
+                else:
+                    reproj_red, _ = reproject_interp((red_stretched, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
+                    reproj_red = np.nan_to_num(reproj_red, nan=0.0).astype(np.float32)
+                    reprojected = np.stack([reproj_red, reproj_red, reproj_red], axis=-1)
+
+                self.status_label.setText(f"WCS Reproject: {itm['path']} processed.")
+                QApplication.processEvents()
+
+                # --- Stellar Alignment ---
+                num_stars = self.settings.value("mosaic/num_stars", 150, type=int)
+                if not first_image:
+                    transform_method = self.transform_combo.currentText()
+                    # Use the current mosaic as reference.
+                    mosaic_gray = (self.final_mosaic if self.final_mosaic.ndim == 2 
+                                else np.mean(self.final_mosaic, axis=-1))
+                    print("Mosaic gray shape:", mosaic_gray.shape)
+                        
+                    self.status_label.setText("Detecting stars in overlap region...")
+                    QApplication.processEvents()
+                        
+                    overlap_mask = (mosaic_gray > 0) & (reproj_red > 0)
+                        
+                    # (Optional: You can still detect stars if needed, but here we opt to use astroalign directly.)
+                    try:
+                        import astroalign
+                        # reproj_red is already a grayscale version from the reprojected image.
+                        reproj_gray = reproj_red  
+                        self.status_label.setText("Computing affine transform with astroalign...")
+                        QApplication.processEvents()
+                            
+                        # Use astroalign to find a transform that maps reproj_gray (target) to mosaic_gray (reference).
+                        transform_obj, (src_pts, dst_pts) = astroalign.find_transform(reproj_gray, mosaic_gray)
+                        # Extract a 2x3 affine matrix and ensure its type.
+                        transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
+                        self.status_label.setText("Astroalign computed transform successfully.")
+                    except Exception as e:
+                        self.status_label.setText(f"Astroalign failed: {e}. Using identity transform.")
+                        transform_matrix = np.eye(2, 3, dtype=np.float32)
+                        
+                    print("Computed affine transform matrix:\n", transform_matrix)
+                    # Compute the effective scales.
+                    A = transform_matrix[:, :2]
+                    scale1 = np.linalg.norm(A[:, 0])
+                    scale2 = np.linalg.norm(A[:, 1])
+                    print("Computed scales: {:.6f}, {:.6f}".format(scale1, scale2))
+                                            
+                    self.status_label.setText("Affine alignment computed. Warping image...")
+                    QApplication.processEvents()
+                    # Warp the reprojected image with the computed 2x3 transform.
+                    affine_aligned = cv2.warpAffine(reprojected, transform_matrix, (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
+                    print("Affine aligned image shape:", affine_aligned.shape)
+                    print("Affine aligned image mean:", np.mean(affine_aligned))
+                    aligned = affine_aligned
+
+                    # If a refined method is selected, further refine the alignment.
+                    if transform_method in ["Homography Transform", "Polynomial Warp Based Transform"]:
+                        self.status_label.setText(f"Starting refined alignment using {transform_method}...")
+                        print("Refined alignment using method:", transform_method)
+                        QApplication.processEvents()                    
+                        refined_result = self.refined_alignment(affine_aligned, mosaic_gray, method=transform_method)
+                        if refined_result is not None:
+                            aligned, best_inliers2 = refined_result
+                            self.status_label.setText(f"Refined alignment succeeded with {best_inliers2} inliers.")
+                            print("Refined alignment inliers:", best_inliers2)
+                        else:
+                            self.status_label.setText("Refined alignment failed; falling back to affine alignment.")
+                            print("Refined alignment failed; using affine alignment.")
+                            aligned = affine_aligned
+                    else:
+                        aligned = affine_aligned
+
+                    gray_aligned = aligned[..., 0] if aligned.ndim == 3 else aligned
+                    print("Final aligned image shape:", aligned.shape)
+                else:
+                    # For the first image, use the reprojected image as is.
+                    aligned = reprojected
+                    gray_aligned = (np.mean(aligned, axis=-1) if not itm["is_mono"] else aligned[..., 0])
+                    first_image = False
+
+                # Compute weight mask from the grayscale aligned image.
+                binary_mask = (gray_aligned > 0).astype(np.uint8)
+                smooth_mask = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 5)
+                if np.max(smooth_mask) > 0:
+                    smooth_mask = smooth_mask / np.max(smooth_mask)
+                else:
+                    smooth_mask = binary_mask.astype(np.float32)
+                smooth_mask = cv2.GaussianBlur(smooth_mask, (15, 15), 0)
+
+                # Accumulate the aligned image.
+                if is_color:
+                    self.final_mosaic += aligned * smooth_mask[..., np.newaxis]
+                else:
+                    self.final_mosaic += aligned[..., 0] * smooth_mask
+                self.weight_mosaic += smooth_mask
+
+                self.status_label.setText(f"Processed: {itm['path']}")
+                QApplication.processEvents()
+
+            # Final blending.
+            nonzero_mask = (self.weight_mosaic > 0)
+            if is_color:
+                self.final_mosaic = np.where(self.weight_mosaic[..., None] > 0,
+                                            self.final_mosaic / self.weight_mosaic[..., None],
+                                            self.final_mosaic)
+            else:
+                self.final_mosaic[nonzero_mask] = self.final_mosaic[nonzero_mask] / self.weight_mosaic[nonzero_mask]
+
+            print("WCS + Star Alignment Complete.")
+            self.status_label.setText("WCS + Star Alignment Complete. De-Normalizing Mosaic...")
+            self.final_mosaic = self.unstretch_image(self.final_mosaic)
+            self.status_label.setText("Final Mosaic Ready.")
+            QApplication.processEvents()
+
+            if self.final_mosaic.ndim == 2:
+                display_image = np.stack([self.final_mosaic] * 3, axis=-1)
+            else:
+                display_image = self.stretch_for_display(self.final_mosaic)
+            mosaic_win = MosaicPreviewWindow(display_image, title="Incremental Mosaic", parent=self)
+            mosaic_win.show()
+
+            self.spinnerMovie.stop()
+            self.spinnerLabel.hide()
+            QApplication.processEvents()
+            pass        
+
+    def align_images_seestar_mode(self):
         if len(self.loaded_images) == 0:
             QMessageBox.warning(self, "Align", "No images to align.")
             return
 
-        # Show spinner and start animation.
+        self.status_label.setText("Running Seestar Mode alignment...")
         self.spinnerLabel.show()
         self.spinnerMovie.start()
         QApplication.processEvents()
 
-        # Step 1: Force blind solve if requested.
-        force_blind = self.forceBlindCheckBox.isChecked()
-        images_to_process = self.loaded_images if force_blind else [item for item in self.loaded_images if item.get("wcs") is None]
-
-        for item in images_to_process:
-            # Check if ASTAP is set.
-            if not self.astap_exe or not os.path.exists(self.astap_exe):
-                executable_filter = "Executables (*.exe);;All Files (*)" if sys.platform.startswith("win") else "Executables (astap);;All Files (*)"
-                new_path, _ = QFileDialog.getOpenFileName(self, "Select ASTAP Executable", "", executable_filter)
-                if new_path:
-                    self.astap_exe = new_path
-                    self.settings.setValue("astap/exe_path", self.astap_exe)
-                    QMessageBox.information(self, "Mosaic Master", "ASTAP path updated successfully.")
-                else:
-                    QMessageBox.warning(self, "Mosaic Master", "ASTAP path not provided. Falling back to blind solve.")
-                    solved_header = self.perform_blind_solve(item)
-                    if solved_header:
-                        item["wcs"] = WCS(solved_header)
-                    continue  # Move to next image
-
-            # Attempt ASTAP solve.
-            self.status_label.setText(f"Attempting ASTAP solve for {item['path']}...")
-            QApplication.processEvents()
-            solved_header = self.attempt_astap_solve(item)
-
-            if solved_header is None:
-                self.status_label.setText(f"ASTAP failed for {item['path']}. Falling back to blind solve...")
-                QApplication.processEvents()
-                solved_header = self.perform_blind_solve(item)
+        def crop_5px_border(img):
+            """
+            Crops 5 pixels from each edge of img if possible.
+            Returns the cropped image. If the image is too small,
+            returns an empty array.
+            """
+            if img.ndim == 3:
+                h, w, c = img.shape
+                if h <= 10 or w <= 10:
+                    return np.empty((0, 0, c), dtype=img.dtype)
+                return img[5:-5, 5:-5, :]
             else:
-                self.status_label.setText(f"Plate solve successful using ASTAP for {item['path']}.")
+                h, w = img.shape
+                if h <= 10 or w <= 10:
+                    return np.empty((0, 0), dtype=img.dtype)
+                return img[5:-5, 5:-5]
 
-            if solved_header:
-                # Remove any unnecessary 3D-related keywords
-                for k in list(solved_header.keys()):
-                    if (k.startswith("NAXIS3") or k.startswith("CTYPE3") or k.startswith("CUNIT3") or
-                        k.startswith("CRVAL3") or k.startswith("CRPIX3") or k.startswith("CDELT3") or
-                        k.startswith("CD3_") or k.startswith("PC3_") or k.startswith("PC_3")):
-                        del solved_header[k]
-
-                # Ensure mandatory WCS keys are present
-                solved_header.setdefault("CTYPE1", "RA---TAN")
-                solved_header.setdefault("CTYPE2", "DEC--TAN")
-                solved_header.setdefault("RADECSYS", "ICRS")
-                solved_header.setdefault("WCSAXES", 2)
-
-                item["wcs"] = WCS(solved_header)
+        def ensure_float32_in_01(img):
+            """
+            Converts 'img' to float32 in [0,1] range by checking its max value.
+            """
+            img = img.astype(np.float32, copy=False)
+            mx = np.max(img)
+            if mx <= 1.0:
+                # Already [0,1]
+                pass
+            elif mx <= 255.0:
+                # Likely 8-bit range
+                img /= 255.0
+            elif mx <= 65535.0:
+                # Likely 16-bit range
+                img /= 65535.0
             else:
-                print(f"Plate solving failed for {item['path']}.")
+                # Fallback => scale by max
+                if mx > 0:
+                    img /= mx
+            return img
 
-        # After processing, get all images with valid WCS.
-        wcs_items = [x for x in self.loaded_images if x.get("wcs") is not None]
-        if not wcs_items:
-            print("No images have WCS, skipping WCS alignment.")
-            self.spinnerMovie.stop()
-            self.spinnerLabel.hide()
+        # -----------------------------------------------------
+        # 1) Prepare the initial mosaic from the first image
+        # -----------------------------------------------------
+        base_item = self.loaded_images[0]
+        base_img = ensure_float32_in_01(base_item["image"])
+        mosaic = crop_5px_border(base_img)
+        if mosaic.size == 0:
+            QMessageBox.warning(self, "Crop Error", "Initial image is too small after cropping.")
             return
 
-        # Use the first image's WCS as reference and compute the mosaic bounding box.
-        reference_wcs = wcs_items[0]["wcs"].deepcopy()
-        min_x, min_y, max_x, max_y = self.compute_mosaic_bounding_box(wcs_items, reference_wcs)
-        mosaic_width = int(max_x - min_x)
-        mosaic_height = int(max_y - min_y)
-
-        if mosaic_width < 1 or mosaic_height < 1:
-            print("ERROR: Computed mosaic size is invalid. Check WCS or inputs.")
-            return
-
-        # Adjust the reference WCS so that (min_x, min_y) becomes (0,0).
-        mosaic_wcs = reference_wcs.deepcopy()
-        mosaic_wcs.wcs.crpix[0] -= min_x
-        mosaic_wcs.wcs.crpix[1] -= min_y
-        self.wcs_metadata = mosaic_wcs.to_header()
-
-        # Set up accumulators.
-        is_color = any(not item["is_mono"] for item in wcs_items)
-        if is_color:
-            self.final_mosaic = np.zeros((mosaic_height, mosaic_width, 3), dtype=np.float32)
+        # Create the initial weight mask
+        if mosaic.ndim == 3:
+            mosaic_weight = np.any(mosaic > 0, axis=2).astype(np.float32)
         else:
-            self.final_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
-        self.weight_mosaic = np.zeros((mosaic_height, mosaic_width), dtype=np.float32)
+            mosaic_weight = (mosaic > 0).astype(np.float32)
 
-        first_image = True
-        for idx, itm in enumerate(wcs_items):
-            arr = itm["image"]
-            self.status_label.setText(f"Projecting {itm['path']} onto the celestial sphere...")
+        # 2) Process each subsequent image
+        for item in self.loaded_images[1:]:
+            new_img = item["image"].astype(np.float32)
+            new_img = crop_5px_border(new_img)
+            if new_img.size == 0:
+                print(f"Skipping {item['path']} (too small after crop).")
+                continue
+
+            # Create grayscale copies for astroalign
+            new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
+            mosaic_gray = np.mean(mosaic, axis=2) if mosaic.ndim == 3 else mosaic
+
+            try:
+                import astroalign
+                # Compute the affine transform
+                transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray)
+                transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
+            except Exception as e:
+                print("Astroalign failed for image", item["path"], ":", e)
+                continue
+
+            # Current mosaic dims
+            if mosaic.ndim == 3:
+                h_m, w_m, _ = mosaic.shape
+            else:
+                h_m, w_m = mosaic.shape
+            mosaic_corners = np.array([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]], dtype=np.float32)
+
+            # New image dims
+            h_new, w_new = new_gray.shape
+            new_img_corners = np.array([[0, 0], [w_new, 0], [0, h_new], [w_new, h_new]], dtype=np.float32)
+
+            # Warp corners
+            ones = np.ones((4, 1), dtype=np.float32)
+            new_img_corners_hom = np.hstack([new_img_corners, ones])
+            warped_corners = (transform_matrix @ new_img_corners_hom.T).T
+
+            # Determine new canvas size
+            all_corners = np.vstack([mosaic_corners, warped_corners])
+            min_xy = np.min(all_corners, axis=0)
+            max_xy = np.max(all_corners, axis=0)
+            new_canvas_width = int(np.ceil(max_xy[0] - min_xy[0]))
+            new_canvas_height = int(np.ceil(max_xy[1] - min_xy[1]))
+            shift = -min_xy
+            shift_int = np.round(shift).astype(int)
+            y0, x0 = shift_int[1], shift_int[0]
+
+            # Create new canvas
+            if mosaic.ndim == 3:
+                channels = mosaic.shape[2]
+                new_canvas = np.zeros((new_canvas_height, new_canvas_width, channels), dtype=np.float32)
+            else:
+                new_canvas = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+            new_weight = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+
+            # Copy mosaic into new canvas
+            new_canvas[y0:y0+h_m, x0:x0+w_m, ...] = mosaic
+            new_weight[y0:y0+h_m, x0:x0+w_m] = mosaic_weight
+
+            # Adjust transform for shift
+            new_transform = transform_matrix.copy()
+            new_transform[0, 2] += shift[0]
+            new_transform[1, 2] += shift[1]
+
+            # Warp the new image
+            warped_new = cv2.warpAffine(new_img, new_transform,
+                                        (new_canvas_width, new_canvas_height),
+                                        flags=cv2.INTER_LINEAR)
+
+            # Binary weight mask for the new image
+            if warped_new.ndim == 3:
+                weight_new = np.any(warped_new > 0, axis=2).astype(np.float32)
+            else:
+                weight_new = (warped_new > 0).astype(np.float32)
+
+            # ---------------------------
+            # Overlap logic with 3/4 rule
+            # ---------------------------
+            if warped_new.ndim == 3:
+                mask_m = np.any(new_canvas > 0, axis=2)
+                mask_n = np.any(warped_new > 0, axis=2)
+                both = mask_m & mask_n
+                only_m = mask_m & (~mask_n)
+                only_n = mask_n & (~mask_m)
+
+                combined = np.zeros_like(new_canvas)
+
+                # For "both" pixels, do the 3/4 check channel-by-channel
+                val_m = new_canvas[both]     # shape (N, channels)
+                val_n = warped_new[both]
+                # We'll define a function to handle the logic per pixel
+                # "If one is less than 3/4 the other => pick the higher; else average"
+                # We can do this vectorized:
+                # sum across channels? or do it channel by channel?
+                # We'll do it channel by channel in a vectorized manner:
+                # condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
+                # pickHigher => use np.maximum
+                # else => average
+                condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
+                # condition is shape (N, channels)
+                # pick higher or average
+                picked_vals = np.where(condition, np.maximum(val_m, val_n), (val_m + val_n) / 2.0)
+
+                combined[both] = picked_vals
+                combined[only_m] = new_canvas[only_m]
+                combined[only_n] = warped_new[only_n]
+            else:
+                # Grayscale
+                mask_m = (new_canvas > 0)
+                mask_n = (warped_new > 0)
+                both = mask_m & mask_n
+                only_m = mask_m & (~mask_n)
+                only_n = mask_n & (~mask_m)
+
+                combined = np.zeros_like(new_canvas)
+                val_m = new_canvas[both]
+                val_n = warped_new[both]
+                condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
+                picked_vals = np.where(condition, np.maximum(val_m, val_n), (val_m + val_n) / 2.0)
+                combined[both] = picked_vals
+                combined[only_m] = new_canvas[only_m]
+                combined[only_n] = warped_new[only_n]
+
+            mosaic = combined
+            mosaic_weight = np.where((new_weight + weight_new) > 0, 1.0, 0.0)
+
+            self.status_label.setText(f"Integrated image: {item['path']}")
             QApplication.processEvents()
 
-            # Pre-stretch the image.
-            stretched_arr = self.stretch_image(arr)
-            # Use the first channel for alignment.
-            if not itm["is_mono"]:
-                red_stretched = stretched_arr[..., 0]
-            else:
-                red_stretched = stretched_arr[..., 0] if stretched_arr.ndim == 3 else stretched_arr
+        # (Optional) Final normalization
+        max_val = np.max(mosaic)
+        if max_val > 0:
+            mosaic /= max_val
 
-            # Reproject the image.
-            if not itm["is_mono"]:
-                channels = []
-                for c in range(3):
-                    channel = stretched_arr[..., c]
-                    reproj, _ = reproject_interp((channel, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
-                    reproj = np.nan_to_num(reproj, nan=0.0).astype(np.float32)
-                    channels.append(reproj)
-                reprojected = np.stack(channels, axis=-1)
-                reproj_red = reprojected[..., 0]
-            else:
-                reproj_red, _ = reproject_interp((red_stretched, itm["wcs"]), mosaic_wcs, shape_out=(mosaic_height, mosaic_width))
-                reproj_red = np.nan_to_num(reproj_red, nan=0.0).astype(np.float32)
-                reprojected = np.stack([reproj_red, reproj_red, reproj_red], axis=-1)
-
-            self.status_label.setText(f"WCS Reproject: {itm['path']} processed.")
-            QApplication.processEvents()
-
-            # --- Stellar Alignment ---
-            # --- Stellar Alignment ---
-            num_stars = self.settings.value("mosaic/num_stars", 150, type=int)
-            if not first_image:
-                transform_method = self.transform_combo.currentText()
-                # Use the current mosaic as reference.
-                mosaic_gray = self.final_mosaic if self.final_mosaic.ndim == 2 else np.mean(self.final_mosaic, axis=-1)
-                print("Mosaic gray shape:", mosaic_gray.shape)
-                
-                self.status_label.setText("Detecting stars in overlap region...")
-                QApplication.processEvents()
-                
-                overlap_mask = (mosaic_gray > 0) & (reproj_red > 0)
-
-
-                # Detect stars (with flux) in the masked regions.
-                mosaic_star_list = self.detect_stars(np.where(overlap_mask, mosaic_gray, 0), max_stars=num_stars)
-                new_star_list = self.detect_stars(np.where(overlap_mask, reproj_red, 0), max_stars=num_stars)
-                
-                print("New star list count:", len(new_star_list))
-                print("Mosaic star list count:", len(mosaic_star_list))
-                
-                self.status_label.setText(f"Overlap stars: new image: {len(new_star_list)}; mosaic: {len(mosaic_star_list)} detected.")
-                QApplication.processEvents()
-                
-                print("New star list count:", len(new_star_list))
-                print("Mosaic star list count:", len(mosaic_star_list))
-                if new_star_list:
-                    new_xs = [s[0] for s in new_star_list]
-                    new_ys = [s[1] for s in new_star_list]
-                    print("New stars X range: {:.2f} to {:.2f}".format(min(new_xs), max(new_xs)))
-                    print("New stars Y range: {:.2f} to {:.2f}".format(min(new_ys), max(new_ys)))
-                if mosaic_star_list:
-                    mosaic_xs = [s[0] for s in mosaic_star_list]
-                    mosaic_ys = [s[1] for s in mosaic_star_list]
-                    print("Mosaic stars X range: {:.2f} to {:.2f}".format(min(mosaic_xs), max(mosaic_xs)))
-                    print("Mosaic stars Y range: {:.2f} to {:.2f}".format(min(mosaic_ys), max(mosaic_ys)))
-                
-                self.status_label.setText(f"Overlap stars: new image: {len(new_star_list)}; mosaic: {len(mosaic_star_list)} detected.")
-                QApplication.processEvents()
-                
-                self.status_label.setText("Running RANSAC for initial affine alignment...")
-                QApplication.processEvents()
-                transform_matrix, inliers = self.estimate_transform_ransac(new_star_list, mosaic_star_list, mosaic_width)
-                
-                if transform_matrix is not None:
-                    print("Computed affine transform matrix:\n", transform_matrix)
-                    print("Number of inliers:", inliers)
-                    # Compute the effective scale from the transform.
-                    A = transform_matrix[:2, :2]
-                    scale1 = np.linalg.norm(A[:, 0])
-                    scale2 = np.linalg.norm(A[:, 1])
-                    print("Computed scales: {:.6f}, {:.6f}".format(scale1, scale2))
-                    
-                    self.status_label.setText(f"Affine alignment: {inliers} inliers found. Warping image...")
-                    QApplication.processEvents()
-                    # Try warping with the computed transform (no inversion)
-                    affine_aligned = cv2.warpAffine(reprojected, transform_matrix[:2], (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
-                    print("Affine aligned image shape:", affine_aligned.shape)
-                    print("Affine aligned image mean:", np.mean(affine_aligned))
-                    aligned = affine_aligned
-                else:
-                    self.status_label.setText("Affine transform not found; using reprojected image.")
-                    print("No affine transform found; falling back to reprojected image.")
-                    QApplication.processEvents()
-                    transform_matrix = np.eye(3, dtype=np.float32)
-                    affine_aligned = reprojected
-                    aligned = affine_aligned
-
-                # If the user selected a refined method, further refine the alignment.
-                if transform_method in ["Homography Transform", "Polynomial Warp Based Transform"]:
-                    self.status_label.setText(f"Starting refined alignment using {transform_method}...")
-                    print("Refined alignment using method:", transform_method)
-                    QApplication.processEvents()                    
-                    refined_result = self.refined_alignment(affine_aligned, mosaic_gray, method=transform_method)
-                    if refined_result is not None:
-                        aligned, best_inliers2 = refined_result
-                        self.status_label.setText(f"Refined alignment succeeded with {best_inliers2} inliers.")
-                        print("Refined alignment inliers:", best_inliers2)
-                    else:
-                        self.status_label.setText("Refined alignment failed; falling back to affine alignment.")
-                        print("Refined alignment failed; using affine alignment.")
-                        aligned = affine_aligned
-                else:
-                    aligned = affine_aligned
-
-                gray_aligned = aligned[..., 0] if aligned.ndim == 3 else aligned
-                print("Final aligned image shape:", aligned.shape)
-            else:
-                aligned = reprojected
-                gray_aligned = np.mean(aligned, axis=-1) if not itm["is_mono"] else aligned[..., 0]
-                first_image = False
-
-
-
-
-            # Compute weight mask from the grayscale aligned image.
-            binary_mask = (gray_aligned > 0).astype(np.uint8)
-            smooth_mask = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 5)
-            if np.max(smooth_mask) > 0:
-                smooth_mask = smooth_mask / np.max(smooth_mask)
-            else:
-                smooth_mask = binary_mask.astype(np.float32)
-            smooth_mask = cv2.GaussianBlur(smooth_mask, (15, 15), 0)
-
-            # Accumulate the aligned image.
-            if is_color:
-                self.final_mosaic += aligned * smooth_mask[..., np.newaxis]
-            else:
-                self.final_mosaic += aligned[..., 0] * smooth_mask
-            self.weight_mosaic += smooth_mask
-
-            self.status_label.setText(f"Processed: {itm['path']}")
-            QApplication.processEvents()
-
-        # Final blending.
-        nonzero_mask = (self.weight_mosaic > 0)
-        if is_color:
-            self.final_mosaic = np.where(self.weight_mosaic[..., None] > 0, self.final_mosaic / self.weight_mosaic[..., None], self.final_mosaic)
-        else:
-            self.final_mosaic[nonzero_mask] = self.final_mosaic[nonzero_mask] / self.weight_mosaic[nonzero_mask]
-
-        print("WCS + Star Alignment Complete.")
-        self.status_label.setText("WCS + Star Alignment Complete. De-Normalizing Mosaic...")
-        self.final_mosaic = self.unstretch_image(self.final_mosaic)
-        self.status_label.setText("Final Mosaic Ready.")
-        QApplication.processEvents()
-
-        if self.final_mosaic.ndim == 2:
-            display_image = np.stack([self.final_mosaic] * 3, axis=-1)
-        else:
-            display_image = self.stretch_for_display(self.final_mosaic)
-        mosaic_win = MosaicPreviewWindow(display_image, title="Incremental Mosaic", parent=self)
-        mosaic_win.show()
-
+        self.final_mosaic = mosaic
         self.spinnerMovie.stop()
         self.spinnerLabel.hide()
+        self.status_label.setText("Seestar Mode alignment complete.")
         QApplication.processEvents()
+
+        display_image = self.stretch_for_display(self.final_mosaic)
+        mosaic_win = MosaicPreviewWindow(display_image, title="Robot Telescope Mosaic", parent=self)
+        mosaic_win.show()
+
+
+
 
         
     # ---------- Star alignment using triangle matching ----------
@@ -11995,13 +12195,37 @@ class MosaicMasterDialog(QDialog):
 
 
     def stretch_for_display(self, arr):
+        """
+        Uses your global stretch_mono_image or stretch_color_image to produce
+        a display-ready 8-bit image. For color images, uses unlinked stretching.
+        """
         arr = arr.astype(np.float32)
-        mn, mx = np.percentile(arr, (0.5, 99.5))
-        if mx > mn:
-            arr = (arr - mn) / (mx - mn)
+
+        # Decide if it's mono or color based on shape
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            # Color image => use stretch_color_image with unlinked stretching
+            stretched = stretch_color_image(
+                image=arr,
+                target_median=0.25,   # Adjust if you prefer a different default
+                linked=False,         # "unlinked" mode
+                normalize=True,       # Ensures final values are in [0,1]
+                apply_curves=False,   # Adjust if needed
+                curves_boost=0.0
+            )
         else:
-            arr = np.zeros_like(arr)
-        return (arr * 255).clip(0, 255).astype(np.uint8)
+            # Mono image => use stretch_mono_image
+            stretched = stretch_mono_image(
+                image=arr,
+                target_median=0.25,
+                normalize=True,
+                apply_curves=False,
+                curves_boost=0.0
+            )
+
+        # Convert [0,1] => [0,255]
+        disp = (stretched * 255.0).clip(0, 255).astype(np.uint8)
+        return disp
+
 
     def detect_stars(self, image2d, max_stars=50):
         # Retrieve user-defined values for sigma and fwhm.
@@ -12134,7 +12358,6 @@ class MosaicMasterDialog(QDialog):
 
         return int(np.floor(min_x)), int(np.floor(min_y)), int(np.ceil(max_x)), int(np.ceil(max_y))
 
-    # ---------- Finalize / Save Mosaic ----------
     def create_mosaic(self):
         """Finalize the mosaic (including blending/normalization) and push it to the image manager."""
         if self.final_mosaic is None:
@@ -12146,16 +12369,23 @@ class MosaicMasterDialog(QDialog):
         mosaic_win.show()
 
     def finalize_mosaic(self):
-        """ Push the final mosaic (and its WCS metadata) to the image manager """
+        """Push the final mosaic (and its WCS metadata) to the image manager."""
         if self.final_mosaic is None:
             print("No mosaic to finalize.")
             return
         print("🔹 Pushing mosaic to image manager...")
 
-        # Convert the Header to a dict before passing it
-        meta = dict(self.wcs_metadata)
+        # Check if self.wcs_metadata exists and is nonempty.
+        if not self.wcs_metadata or not any(self.wcs_metadata.values()):
+            print("WCS metadata not available; creating minimal header.")
+            # Determine if the final mosaic is mono.
+            is_mono = (self.final_mosaic.ndim == 2 or (self.final_mosaic.ndim == 3 and self.final_mosaic.shape[2] == 1))
+            minimal_header = self.create_minimal_fits_header(self.final_mosaic, is_mono)
+            meta = dict(minimal_header)
+        else:
+            meta = dict(self.wcs_metadata)
 
-        # If the final mosaic is 2D (grayscale), replicate it across three channels
+        # If the final mosaic is 2D (grayscale), replicate it across three channels.
         final_img = self.final_mosaic
         if final_img.ndim == 2:
             final_img = np.stack([final_img, final_img, final_img], axis=-1)
@@ -13239,10 +13469,8 @@ class StellarAlignmentDialog(QDialog):
         return selected
 
 
-    # -----------------------------
-    # Run Alignment – Uses RANSAC/Delaunay Approach with Progress Updates
-    # -----------------------------
     def run_alignment(self):
+        # Ensure both source and target images are loaded.
         if self.source_from_slot_radio.isChecked() and self.stellar_source is None:
             self.load_source_from_slot()
         if self.target_from_slot_radio.isChecked() and self.stellar_target is None:
@@ -13254,75 +13482,64 @@ class StellarAlignmentDialog(QDialog):
             QMessageBox.warning(self, "Error", "Please select a target image.")
             return
 
-        source_img = self.stellar_source
-        target_img = self.stellar_target
-        H, W = source_img.shape[:2]
-        self.status_label.setText("Detecting stars...")
-        QApplication.processEvents()
-        source_stars = self.detect_stars_by_grid(source_img, stars_per_region=20)
-        target_stars = self.detect_stars_by_grid(target_img, stars_per_region=20)
-        if len(source_stars) < 3 or len(target_stars) < 3:
-            QMessageBox.warning(self, "Alignment Error", "Not enough stars detected for alignment.")
-            return
-
-        self.status_label.setText("Running RANSAC for alignment...")
-        QApplication.processEvents()
-        best_matrix, best_inliers = self.estimate_transform_ransac(source_stars, target_stars)
-        if best_matrix is None:
-            QMessageBox.warning(self, "Alignment Error", "Failed to compute alignment transform.")
-            return
-
-        self.status_label.setText("Warping target image with affine transform...")
-        QApplication.processEvents()
-        inv_transform = cv2.invertAffineTransform(best_matrix[:2])
-        warped_target = cv2.warpAffine(target_img, inv_transform, (W, H), flags=cv2.INTER_LINEAR)
-        canvas = np.zeros((H, W, 3), dtype=warped_target.dtype)
-        canvas[:] = warped_target
-        self.aligned_image = canvas
-        self.update_preview(self.result_preview_label, canvas)
-
-        # --- Begin Homography Refinement (TPS block is commented out) ---
-        self.status_label.setText("Refining alignment with Homography Transform...")
-        QApplication.processEvents()
-        # Redetect stars in the overlap region from both the mosaic (affine result) and source.
-        mosaic_gray = np.mean(canvas, axis=-1) if canvas.ndim == 3 else canvas
-        # Use the current mosaic as the target for refinement.
-        # (Note: self.final_mosaic may not have been updated; using canvas as the affine result.)
-        overlap_mask = (mosaic_gray > 0)  # simple mask; you can refine this as needed.
-        mosaic_stars_refined = self.detect_stars_by_grid(np.where(overlap_mask, mosaic_gray, 0), stars_per_region=50)
-        new_stars_refined = self.detect_stars_by_grid(np.where(overlap_mask, mosaic_gray, 0), stars_per_region=50)
-        
-        self.status_label.setText(f"Refinement: Detected {len(mosaic_stars_refined)} mosaic stars and {len(new_stars_refined)} new stars.")
-        QApplication.processEvents()
-        
-        src_ctrl_pts = self.select_corner_stars(new_stars_refined, (H, W), margin=0.15)
-        tgt_ctrl_pts = self.select_corner_stars(mosaic_stars_refined, (H, W), margin=0.15)
-        num_ctrl = min(len(src_ctrl_pts), len(tgt_ctrl_pts))
-        if num_ctrl < 3:
-            self.status_label.setText("Not enough corner control points for homography refinement; skipping refinement.")
-            refined_image = canvas
+        # Convert images to grayscale for astroalign computations.
+        src = self.stellar_source
+        tgt = self.stellar_target
+        if src.ndim == 3:
+            src_gray = np.mean(src, axis=2)
         else:
-            src_ctrl_pts = src_ctrl_pts[:num_ctrl]
-            tgt_ctrl_pts = tgt_ctrl_pts[:num_ctrl]
-            self.status_label.setText("Computing homography from refined stars...")
-            QApplication.processEvents()
-            H_refined, mask = cv2.findHomography(np.float32(src_ctrl_pts).reshape(-1,1,2),
-                                                 np.float32(tgt_ctrl_pts).reshape(-1,1,2),
-                                                 cv2.RANSAC, 5.0)
-            if H_refined is None:
-                self.status_label.setText("Homography estimation failed; using affine result.")
-                refined_image = canvas
-            else:
-                inliers = int(np.count_nonzero(mask)) if mask is not None else 0
-                self.status_label.setText(f"Homography computed with {inliers} inliers. Warping image...")
-                QApplication.processEvents()
-                refined_image = cv2.warpPerspective(canvas, H_refined, (W, H), flags=cv2.INTER_LINEAR)
-        # --- End Homography Refinement ---
+            src_gray = src
+        if tgt.ndim == 3:
+            tgt_gray = np.mean(tgt, axis=2)
+        else:
+            tgt_gray = tgt
 
-        self.aligned_image = refined_image
-        self.update_preview(self.result_preview_label, refined_image)
-        QMessageBox.information(self, "Alignment Complete", f"Alignment completed with {best_inliers} affine inliers.")
-        self.show_transform_info(best_matrix)
+        self.status_label.setText("Computing alignment with astroalign...")
+        QApplication.processEvents()
+
+        try:
+            import astroalign
+            # Compute the transform to align the target image to the source.
+            # Note: The order of arguments matters: here we find a transform that maps tgt_gray to src_gray.
+            transform_obj, (src_pts, tgt_pts) = astroalign.find_transform(tgt_gray, src_gray)
+            # Extract the 3x3 matrix and convert it to a 2x3 affine matrix.
+            mat_3x3 = transform_obj.params
+            affine_transform = mat_3x3[0:2, :]
+        except Exception as e:
+            QMessageBox.warning(self, "Alignment Error", f"Astroalign failed: {e}")
+            return
+
+        self.status_label.setText("Warping target image with astroalign transform...")
+        QApplication.processEvents()
+
+        import cv2
+        H, W = src.shape[:2]
+        # Apply the computed transform to the target image.
+        if tgt.ndim == 2:
+            warped_target = cv2.warpAffine(tgt, affine_transform, (W, H), flags=cv2.INTER_LINEAR)
+        else:
+            channels = []
+            for i in range(tgt.shape[2]):
+                warped_channel = cv2.warpAffine(
+                    tgt[:, :, i],
+                    affine_transform,
+                    (W, H),
+                    flags=cv2.INTER_LINEAR
+                )
+                channels.append(warped_channel)
+            warped_target = np.stack(channels, axis=2)
+
+        self.aligned_image = warped_target
+        self.status_label.setText("Alignment complete with astroalign.")
+        self.update_preview(self.result_preview_label, warped_target)
+
+        # Optionally, display the transformation matrix details.
+        transform_3x3 = np.eye(3, dtype=np.float32)
+        transform_3x3[:2] = affine_transform
+        self.show_transform_info(transform_3x3)
+
+        QMessageBox.information(self, "Alignment Complete", "Alignment completed using astroalign.")
+
 
 
     def show_transform_info(self, matrix):
@@ -13411,84 +13628,152 @@ class RegistrationWorkerSignals(QObject):
 # Worker to Process One Image Registration
 #############################################
 class StarRegistrationWorker(QRunnable):
-    def __init__(self, file_path, ref_stars, ref_triangles, output_directory):
+    def __init__(self, file_path, 
+                 ref_stars, ref_triangles, output_directory, 
+                 use_triangle=False, 
+                 use_astroalign=False, 
+                 reference_image=None):
+        """
+        :param file_path: Path to the source image.
+        :param ref_stars: Star coordinates of the reference image (for RANSAC/triangle).
+        :param ref_triangles: Triangle dictionary built from reference stars.
+        :param output_directory: Where aligned images go.
+        :param use_triangle: If True, do triangle->RANSAC approach.
+        :param use_astroalign: If True, we attempt astroalign first for a rough alignment.
+        :param reference_image: The actual reference image array, needed for astroalign.
+                               Must be 2D grayscale if you want to feed it directly to astroalign.
+        """
         super().__init__()
         self.file_path = file_path
         self.ref_stars = ref_stars
         self.ref_triangles = ref_triangles
         self.output_directory = output_directory
+        self.use_triangle = use_triangle
+        self.use_astroalign = use_astroalign
+        self.reference_image = reference_image  # 2D reference image for astroalign
+
         self.signals = RegistrationWorkerSignals()
 
     def run(self):
         try:
-            # 1) Load image
+            # 1) Load image (color or grayscale)
             img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
             if img is None:
                 self.signals.error.emit(f"Could not load {self.file_path}")
-                QApplication.processEvents()
                 return
 
-            #self.signals.progress.emit(f"Loaded {os.path.basename(self.file_path)}")
-            #QApplication.processEvents()
-            
-            # 2) Detect stars
-            img_stars = StarRegistrationThread.detect_grid_stars_static(img)
-            if len(img_stars) < 9:
-                self.signals.error.emit(f"Not enough stars in {self.file_path}")
-                QApplication.processEvents()
-                return
+            # Keep a copy of the original image (color, if applicable)
+            original_img = img.copy()
 
-            self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
-            QApplication.processEvents()
+            # Create a grayscale copy for alignment calculations.
+            # Astroalign and star detection work best on 2D data.
+            if img.ndim == 3:
+                img_for_alignment = np.mean(img, axis=2)
+            else:
+                img_for_alignment = img
 
-            # 3) Compute affine transform
-            transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
-                img_stars, self.ref_stars, self.ref_triangles
-            )
+            # Optionally sanitize NaNs on the grayscale version.
+            if np.isnan(img_for_alignment).any() or np.isinf(img_for_alignment).any():
+                img_for_alignment = np.nan_to_num(img_for_alignment, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # 2) Attempt astroalign first (if requested)
+            transform = None
+            if self.use_astroalign:
+                # Make sure we have a valid 2D reference image.
+                if (self.reference_image is not None) and (self.reference_image.ndim == 2):
+                    transform = self.compute_affine_transform_astroalign(img_for_alignment, self.reference_image)
+                    if transform is not None:
+                        self.signals.progress.emit(
+                            f"Astroalign computed initial transform for {os.path.basename(self.file_path)}"
+                        )
+                    else:
+                        self.signals.progress.emit(
+                            f"Astroalign failed or was not applicable for {os.path.basename(self.file_path)}"
+                        )
+                else:
+                    self.signals.progress.emit(
+                        "Warning: reference_image is not a valid 2D array; skipping astroalign."
+                    )
+
+            # 3) If astroalign transform is None, do your normal star-based method
             if transform is None:
-                self.signals.error.emit(f"Alignment failed for {self.file_path}")
-                QApplication.processEvents()
-                return
+                # Detect stars in the source image (use the grayscale version)
+                self.signals.progress.emit(f"✨ Detecting stars in {os.path.basename(self.file_path)}")
+                
+                img_stars = StarRegistrationThread.detect_grid_stars_static(img_for_alignment)
+                if len(img_stars) < 9:
+                    self.signals.error.emit(f"Not enough stars in {self.file_path}")
+                    return
+                self.signals.progress.emit(
+                    f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}"
+                )
 
-            self.signals.progress.emit(f"Computed transform for {os.path.basename(self.file_path)}")
-            QApplication.processEvents()
+                # Compute affine transform using triangle or RANSAC methods.
+                if self.use_triangle:
+                    transform = StarRegistrationThread.compute_affine_transform_triangle_then_ransac(
+                        img_stars, self.ref_stars, self.ref_triangles
+                    )
+                else:
+                    transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
+                        img_stars, self.ref_stars, self.ref_triangles
+                    )
 
-            # 4) Emit the transform so the main thread can store it
-            self.signals.result_transform.emit(self.file_path, transform)
+                if transform is None:
+                    self.signals.error.emit(f"Alignment failed for {self.file_path}")
+                    return
 
-            # 5) Apply the transform
-            aligned_image = StarRegistrationThread.apply_affine_transform_static(img, transform)
+                self.signals.progress.emit(
+                    f"Computed transform for {os.path.basename(self.file_path)}"
+                )
+
+            # 4) Apply the transform to the original (color) image.
+            aligned_image = StarRegistrationThread.apply_affine_transform_static(original_img, transform)
             if aligned_image is None:
                 self.signals.error.emit(f"Transform application failed for {self.file_path}")
-                QApplication.processEvents()
                 return
 
-            # ✅ Build output filename, but prevent multiple "_r" suffixes
+            # Check for NaNs in the warped image.
+            if np.isnan(aligned_image).any() or np.isinf(aligned_image).any():
+                self.signals.error.emit(f"Aligned image for {self.file_path} contains NaNs/Infs")
+                return
+
+            # 5) Emit the transform for storage.
+            self.signals.result_transform.emit(self.file_path, transform)
+
+            # 6) Build output filename (ensuring "_r" is appended, overwriting the same file).
             base = os.path.basename(self.file_path)
             name, ext = os.path.splitext(base)
-
-            # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
             if not name.endswith("_r"):
                 name += "_r"
+            output_filename = os.path.join(self.output_directory, f"{name}.fit")
 
-            output_filename = os.path.join(self.output_directory, f"{name}.fit")  # Always save as .fits
-
-            
-            # 7) Save the aligned image
+            # 7) Save the aligned (color) image.
             save_image(
                 img_array=aligned_image,
                 filename=output_filename,
                 original_format="fit",
                 bit_depth=img_bit_depth,
                 original_header=img_header,
-                is_mono=img_is_mono
+                is_mono=img_is_mono  # remains False for color images
             )
             self.signals.result.emit(output_filename)
             self.signals.progress.emit(f"Registered {os.path.basename(self.file_path)}")
-            QApplication.processEvents()
+
         except Exception as e:
             self.signals.error.emit(f"Error processing {self.file_path}: {e}")
-            QApplication.processEvents()
+
+    @staticmethod
+    def compute_affine_transform_astroalign(source_img, reference_img):
+        import astroalign
+        from skimage.transform import AffineTransform
+        try:
+            transform_obj, (src_list, dst_list) = astroalign.find_transform(source_img, reference_img)
+            mat_3x3 = transform_obj.params
+            affine_2x3 = mat_3x3[0:2, :]
+            return affine_2x3
+        except Exception as e:
+            print(f"DEBUG: astroalign failed: {e}")
+            return None
 
 
 #############################################
@@ -13500,7 +13785,7 @@ class StarRegistrationThread(QThread):
     registration_complete = pyqtSignal(bool, str)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
-                 max_refinement_passes=4, shift_tolerance=0.1):
+                 max_refinement_passes=5, shift_tolerance=0.2):
         super().__init__()
         # Always store reference as normalized
         self.reference_image_path = os.path.normpath(reference_image_path)
@@ -13521,6 +13806,19 @@ class StarRegistrationThread(QThread):
             if ref_image is None:
                 self.registration_complete.emit(False, "Reference image failed to load!")
                 return
+
+            # Convert to 2D if needed
+            if ref_image.ndim == 3:
+                ref_image = np.mean(ref_image, axis=2)
+            # Replace any NaNs
+            ref_image = np.nan_to_num(ref_image, nan=0.0, posinf=0.0, neginf=0.0)
+            if ref_image is None:
+                self.registration_complete.emit(False, "Reference image failed to load!")
+                return
+            if np.isnan(ref_image).any() or np.isinf(ref_image).any():
+                print("DEBUG: Found NaNs/Infs in reference image. Replacing with zeros.")
+                ref_image = np.nan_to_num(ref_image, nan=0.0, posinf=0.0, neginf=0.0)
+            self.reference_image_2d = ref_image    
 
             # Detect reference stars, etc...
             ref_stars = self.detect_stars(ref_image)
@@ -13613,33 +13911,43 @@ class StarRegistrationThread(QThread):
         pool.setMaxThreadCount(num_cores)
         self.progress_update.emit(f"Using {num_cores} cores for pass {pass_index+1}.")
 
-        transformed_files = []  # Store newly aligned images
-        remaining_files = []  # Already aligned images (skip processing)
-
+        transformed_files = []
+        remaining_files = []
+        
+        # Use astroalign for the first 2 passes; for passes 3+ use RANSAC (with triangle matching if pass_index >= 2)
+        use_astroalign = (pass_index < 2)
+        
         for fpath in self.files_to_align:
             transform = self.alignment_matrices.get(fpath, None)
-
             if transform is not None:
-                tx, ty = transform[0,2], transform[1,2]
-                shift_delta = np.sqrt(tx * tx + ty * ty)
-
-                # 🚀 **Skip images already aligned within 0.2 pixels**
-                if shift_delta <= 0.2:
-                    self.progress_update.emit(f"✅ Skipping {os.path.basename(fpath)} (Shift: {shift_delta:.2f}px)")
-                    remaining_files.append(fpath)  # Keep this image unchanged
+                tx, ty = transform[0, 2], transform[1, 2]
+                shift_delta = np.sqrt(tx**2 + ty**2)
+                if shift_delta <= 0.1:
+                    self.progress_update.emit(
+                        f"✅ Skipping {os.path.basename(fpath)} (Shift: {shift_delta:.2f}px)"
+                    )
+                    remaining_files.append(fpath)
                     continue
 
-            # **Only process misaligned images**
+            # For pass >= 2, use the triangle approach with RANSAC refinement.
+            do_triangle = (pass_index >= 3)
+            
             worker = StarRegistrationWorker(
-                fpath, ref_stars, ref_triangles, self.output_directory
+                file_path=fpath,
+                ref_stars=ref_stars,
+                ref_triangles=ref_triangles,
+                output_directory=self.output_directory,
+                use_triangle=do_triangle,
+                use_astroalign=use_astroalign,
+                reference_image=self.reference_image_2d  # 2D reference image for astroalign
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
             worker.signals.result_transform.connect(self.on_worker_result_transform)
             pool.start(worker)
-
+        
         pool.waitForDone()
-
+        
         pass_deltas = []
         aligned_count = 0
 
@@ -13647,63 +13955,51 @@ class StarRegistrationThread(QThread):
             transform = self.alignment_matrices.get(fpath, None)
             if transform is not None:
                 aligned_count += 1
-                tx, ty = transform[0,2], transform[1,2]
-                shift_delta = np.sqrt(tx*tx + ty*ty)
+                tx, ty = transform[0, 2], transform[1, 2]
+                shift_delta = np.sqrt(tx**2 + ty**2)
                 pass_deltas.append(shift_delta)
-
-                # **Only transform misaligned images**
+                # Only refine if the shift is larger than our tolerance.
                 if shift_delta > 0.2:
-                    # Load original image and header
+                    # Load the current (possibly already refined) image.
                     image, original_header, original_format, bit_depth = load_image(fpath)
                     transformed_image = self.apply_affine_transform_static(image, transform)
-
-                    # ✅ Overwrite previous `_r.fits` file instead of adding multiple `_r`
-                    base_name = os.path.basename(fpath)
-                    name, ext = os.path.splitext(base_name)
-
-                    # ✅ Ensure the filename is always in "_r.fits" format without duplicating "_r"
+                    if transformed_image is not None and (
+                        np.isnan(transformed_image).any() or np.isinf(transformed_image).any()
+                    ):
+                        transformed_image = np.nan_to_num(transformed_image, nan=0.0)
+                    # Build the output filename.
+                    base = os.path.basename(fpath)
+                    name, ext = os.path.splitext(base)
                     if not name.endswith("_r"):
                         name += "_r"
-
                     transformed_path = os.path.join(self.output_directory, f"{name}.fit")
-
-
-                    # ✅ Corrected save_image call (overwrites _r file)
-                    #save_image(
-                    #    img_array=transformed_image,
-                    #    filename=transformed_path,
-                    #    original_format="fit",
-                    #    bit_depth=bit_depth,
-                    #    original_header=original_header,
-                    #    is_mono=(len(image.shape) == 2)
-                    #)
-
+                    # Overwrite the existing file.
+                    save_image(
+                        img_array=transformed_image,
+                        filename=transformed_path,
+                        original_format="fit",
+                        bit_depth=bit_depth,
+                        original_header=original_header,
+                        is_mono=False
+                    )
                     transformed_files.append(transformed_path)
                 else:
-                    remaining_files.append(fpath)  # Keep already aligned image
-
+                    remaining_files.append(fpath)
         self.transform_deltas.append(pass_deltas)
-
-        # ✅ **Update files list for next pass, only processing misaligned images**
+        # Update files_to_align so that subsequent passes operate on the same (overwritten) _r files.
         self.files_to_align = transformed_files + remaining_files
-
-        pass_deltas_preview = [f"{d:.2f}" for d in pass_deltas[:10]]
-        preview_str = ", ".join(pass_deltas_preview)
+        preview = ", ".join([f"{d:.2f}" for d in pass_deltas[:10]])
         if len(pass_deltas) > 10:
-            preview_str += f" ... ({len(pass_deltas)} total)"
-
-        self.progress_update.emit(
-            f"Pass {pass_index+1} shift deltas: [{preview_str}]"
-        )
-
+            preview += f" ... ({len(pass_deltas)} total)"
+        self.progress_update.emit(f"Pass {pass_index+1} shift deltas: [{preview}]")
 
         if aligned_count == 0:
             return False, "All frames already aligned within tolerance."
-
         failed_count = len(self.files_to_align) - aligned_count
         if failed_count > 0:
             return True, f"Pass complete. {failed_count} frame(s) failed."
         return True, "Pass complete (all succeeded)."
+
 
     
     def on_worker_progress(self, msg):
@@ -13713,30 +14009,22 @@ class StarRegistrationThread(QThread):
         self.progress_update.emit("Error: " + msg)
 
     def on_worker_result(self, out):
-        self.progress_update.emit("Saved: " + out)
+        print("Saved: " + out)
 
-    #def on_worker_result_transform(self, file_path, transform):
-    #    """
-    #    Called whenever the worker emits `result_transform`.
-    #    We store the transform in `self.alignment_matrices`.
-    #    """
-    #
-    #    norm_path = os.path.normpath(file_path)
-    #    self.alignment_matrices[norm_path] = transform
-    #    self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
 
     def detect_stars(self, image):
         """
         Run DAOStarFinder multiple times with different FWHMs,
         then combine (deduplicate) the results.
         """
+        self.progress_update.emit(f"✨ Detecting all stars in reference frame")
         if image.ndim == 3:
             image = np.mean(image, axis=2)
 
         mean, median, std = sigma_clipped_stats(image)
         
         # A range of FWHMs you want to try
-        fwhm_list = [3, 4, 5, 6, 7]
+        fwhm_list = [2.5, 3, 3.5, 4, 5, 6, 7]
         
         all_sources = []
         for fwhm in fwhm_list:
@@ -13798,79 +14086,29 @@ class StarRegistrationThread(QThread):
         # Use higher precision (4 decimal places instead of 2)
         return (round(sides[1] / sides[0], 4), round(sides[2] / sides[0], 4))
 
+    @staticmethod
+    def compute_triangle_invariant_static(tri_points):
+        """
+        Compute the invariant for a triangle defined by three points.
+        Returns a tuple (side2/side1, side3/side1) if valid, otherwise None.
+        This invariant is independent of scale and rotation.
+        """
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1] / sides[0], sides[2] / sides[0])
+
     # NEW METHOD: store transforms in self.alignment_matrices
     def on_worker_result_transform(self, file_path, transform):
         self.alignment_matrices[file_path] = transform
-        self.progress_update.emit(f"Stored transform for {os.path.basename(file_path)}")
-
-    # --- Static Methods for use in Workers ---
-    #@staticmethod
-    #def detect_stars_static(image):
-    #    if image.ndim == 3:
-    #        image = np.mean(image, axis=2)
-    #    mean, median, std = sigma_clipped_stats(image)
-    #    daofind = DAOStarFinder(fwhm=5, threshold=4 * std)
-    #    sources = daofind(image - median)
-    #    if sources is None or len(sources) == 0:
-    #        return np.array([])
-    #    return np.vstack([sources['xcentroid'], sources['ycentroid']]).T
-
-    @staticmethod
-    def detect_stars_static(
-        image,
-        blur_size=9,
-        threshold_factor=0.6,
-        min_area=1,
-        max_area=10000
-    ):
-        """
-        Detect more stars by lowering the threshold_factor, reducing the blur_size,
-        and possibly adjusting min_area/max_area.
-        """
-        if image.ndim == 3:
-            image = np.mean(image, axis=2)
-
-        # Pass the parameters through to fast_star_detect
-        star_coords = fast_star_detect(
-            image,
-            blur_size=blur_size,
-            threshold_factor=threshold_factor,
-            min_area=min_area,
-            max_area=max_area
-        )
-        return star_coords
         
 
-    #@staticmethod
-    #def detect_grid_stars_static(image):
-    #    if image.ndim == 3:
-    #        image = np.mean(image, axis=2)
-    #    h, w = image.shape
-    #    margin_x = int(w * 0.05)
-    #    margin_y = int(h * 0.05)
-    #    valid_x_min, valid_x_max = margin_x, w - margin_x
-    #    valid_y_min, valid_y_max = margin_y, h - margin_y
-    #    grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
-    #    grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
-    #    stars = []
-    #    for i in range(len(grid_x) - 1):
-    #        for j in range(len(grid_y) - 1):
-    #            x_min, x_max = grid_x[i], grid_x[i+1]
-    #            y_min, y_max = grid_y[j], grid_y[j+1]
-    #            sub_img = image[y_min:y_max, x_min:x_max]
-    ##            if sub_img.size == 0:
-     #               continue
-     #           if np.std(sub_img) > 0:
-     #               local_stars = StarRegistrationThread.detect_stars_static(sub_img)
-     #               if len(local_stars) > 0:
-     #                   local_stars[:, 0] = np.clip(local_stars[:, 0] + x_min, valid_x_min, valid_x_max-1)
-     ##                   local_stars[:, 1] = np.clip(local_stars[:, 1] + y_min, valid_y_min, valid_y_max-1)
-     #                   sorted_stars = sorted(local_stars, key=lambda s: image[int(s[1]), int(s[0])], reverse=True)
-     #                   stars.extend(sorted_stars[:6])
-     #   return np.array(stars) if stars else np.array([])
 
     @staticmethod
-    def detect_grid_stars_static(
+    def detect_grid_stars_static_fast(
         image,
         blur_size=9,
         threshold_factor=0.6,
@@ -13899,44 +14137,113 @@ class StarRegistrationThread(QThread):
                 if sub_img.size == 0:
                     continue
 
-                # Basic check for variance (i.e. there's something to detect)
+                # Check if there's enough variance to detect stars
                 if np.std(sub_img) > 0:
                     # Detect stars in this subregion
-                    local_stars = fast_star_detect(sub_img,
+                    local_stars = fast_star_detect(
+                        sub_img,
                         blur_size=blur_size,
                         threshold_factor=threshold_factor,
                         min_area=min_area,
                         max_area=max_area
                     )
 
-                    # Shift local star coords back into global image space
-                    # then store them in a temporary list to sort by brightness
                     shifted_stars = []
                     for (sx, sy) in local_stars:
+                        # Skip any star coordinates that are NaN
+                        if np.isnan(sx) or np.isnan(sy):
+                            continue
                         gx = np.clip(sx + x_min, valid_x_min, valid_x_max - 1)
                         gy = np.clip(sy + y_min, valid_y_min, valid_y_max - 1)
                         shifted_stars.append((gx, gy))
 
-                    # Sort by brightness in the global image
-                    # (We cast to int for indexing, but you may want a safety check if coords can be fractional)
+                    # Optionally filter again (just in case)
+                    filtered_stars = [s for s in shifted_stars if not (np.isnan(s[0]) or np.isnan(s[1]))]
+
+                    # Sort by brightness in the global image (casting to int for indexing)
                     sorted_stars = sorted(
-                        shifted_stars,
+                        filtered_stars,
                         key=lambda s: image[int(s[1]), int(s[0])],
                         reverse=True
                     )
-                    # Keep only the 10 brightest
-                    stars.extend(sorted_stars[:50])
+                    # Keep only the top 50 stars from this subregion
+                    stars.extend(sorted_stars[:20])
 
         if len(stars) == 0:
             return np.empty((0,2), dtype=np.float32)
 
-        # Convert list of (x,y) to Nx2 float32 array
+        return np.array(stars, dtype=np.float32)
+
+    @staticmethod
+    def detect_grid_stars_static(
+        image,
+        fwhm_list=[2.5, 3, 3.5, 4, 5],
+        threshold_factor=4,  # multiplied by std
+        min_area=1,
+        max_area=10000
+    ):
+
+        # If the image is color, average it to produce a single channel.
+        print("detecting grid stars dao")
+        if image.ndim == 3:
+            image = np.mean(image, axis=2)
+
+        h, w = image.shape
+        margin_x = int(w * 0.05)
+        margin_y = int(h * 0.05)
+        valid_x_min, valid_x_max = margin_x, w - margin_x
+        valid_y_min, valid_y_max = margin_y, h - margin_y
+
+        # Divide the image into a 4x4 grid.
+        grid_x = np.linspace(valid_x_min, valid_x_max, 4, dtype=int)
+        grid_y = np.linspace(valid_y_min, valid_y_max, 4, dtype=int)
+
+        stars = []
+        for i in range(len(grid_x) - 1):
+            for j in range(len(grid_y) - 1):
+                x_min, x_max = grid_x[i], grid_x[i+1]
+                y_min, y_max = grid_y[j], grid_y[j+1]
+                sub_img = image[y_min:y_max, x_min:x_max]
+                if sub_img.size == 0:
+                    continue
+
+                # Only process subregions with sufficient variance.
+                if np.std(sub_img) > 0:
+                    # Compute sigma-clipped stats for thresholding.
+                    mean, median, std = sigma_clipped_stats(sub_img)
+                    # Try each FWHM value.
+                    for fwhm in fwhm_list:
+                        daofind = DAOStarFinder(fwhm=fwhm, threshold=threshold_factor * std)
+                        sources = daofind(sub_img - median)
+                        if sources is not None and len(sources) > 0:
+                            # Convert the astropy Table to a NumPy array of (x, y) coordinates.
+                            local_stars = np.column_stack((sources['xcentroid'], sources['ycentroid']))
+                            shifted_stars = []
+                            for (sx, sy) in local_stars:
+                                # Skip any NaN values.
+                                if np.isnan(sx) or np.isnan(sy):
+                                    continue
+                                # Shift to global image coordinates.
+                                gx = np.clip(sx + x_min, valid_x_min, valid_x_max - 1)
+                                gy = np.clip(sy + y_min, valid_y_min, valid_y_max - 1)
+                                shifted_stars.append((gx, gy))
+                            # Optionally, filter out any remaining NaNs.
+                            filtered_stars = [s for s in shifted_stars if not (np.isnan(s[0]) or np.isnan(s[1]))]
+                            # Sort by brightness using the pixel value in the global image.
+                            sorted_stars = sorted(
+                                filtered_stars,
+                                key=lambda s: image[int(s[1]), int(s[0])],
+                                reverse=True
+                            )
+                            # Keep the top 20 stars from this subregion for this FWHM.
+                            stars.extend(sorted_stars[:20])
+        if len(stars) == 0:
+            return np.empty((0, 2), dtype=np.float32)
         return np.array(stars, dtype=np.float32)
 
 
-
     @staticmethod
-    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=10, max_iter=10, convergence_thresh=0.2):
+    def compute_affine_transform_with_ransac_static(img_stars, ref_stars, ref_triangles, max_attempts=20, max_iter=20, convergence_thresh=0.2):
         print("DEBUG: Starting compute_affine_transform_with_ransac_static")
         attempt = 0
         transform = None
@@ -13962,12 +14269,29 @@ class StarRegistrationThread(QThread):
                 method=cv2.RANSAC,
                 ransacReprojThreshold=3.0
             )
-            if rough_transform is not None and StarRegistrationThread.is_valid_transform_static(rough_transform):
-                transform = rough_transform
-                print("DEBUG: Rough transform computed successfully.")
-                break
-            else:
-                print("DEBUG: Rough transform invalid; retrying.")
+            # -----------------------------
+            # CHECK for NaN => fallback
+            # -----------------------------
+            if rough_transform is not None:
+                if np.isnan(rough_transform).any() or np.isinf(rough_transform).any():
+                    print("DEBUG: Rough transform has NaN => trying triangles fallback.")
+                    fallback = StarRegistrationThread.compute_affine_transform_from_triangles(
+                        img_stars, ref_stars, ref_triangles
+                    )
+                    if fallback is not None:
+                        print("DEBUG: Fallback worked; using triangle-based transform.")
+                        transform = fallback
+                        break
+                    else:
+                        rough_transform = None  # Force next attempt
+                else:
+                    # No NaN => check validity
+                    if StarRegistrationThread.is_valid_transform_static(rough_transform):
+                        transform = rough_transform
+                        print("DEBUG: Rough transform computed successfully.")
+                        break
+                    else:
+                        print("DEBUG: Rough transform invalid; retrying.")
         if transform is None:
             print("DEBUG: Failed to compute initial rough transform.")
             return None
@@ -14020,7 +14344,203 @@ class StarRegistrationThread(QThread):
     @staticmethod
     def apply_affine_transform_static(image, transform_matrix):
         h, w = image.shape[:2]
-        return cv2.warpAffine(image, transform_matrix, (w, h), flags=cv2.INTER_LINEAR)
+        # If grayscale, use warpAffine directly.
+        if image.ndim == 2:
+            aligned = cv2.warpAffine(
+                image,
+                transform_matrix,
+                (w, h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
+            )
+        else:
+            # For color images, apply warpAffine on each channel.
+            channels = []
+            for i in range(image.shape[2]):
+                warped_channel = cv2.warpAffine(
+                    image[:, :, i],
+                    transform_matrix,
+                    (w, h),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0
+                )
+                channels.append(warped_channel)
+            aligned = np.stack(channels, axis=2)
+
+        return aligned
+
+    @staticmethod
+    def compute_affine_transform_from_triangles(img_stars, ref_stars, ref_triangles, method='auto', max_stars=100):
+        """
+        Compute an affine transform by matching triangles using side–side–side invariants.
+        
+        If the target image has few stars (e.g. fewer than 30), this function computes invariants for 
+        all combinations of three stars; otherwise, it uses Delaunay triangulation to generate triangles.
+        
+        The 'ref_triangles' is assumed to be built from the reference stars using your build_triangle_dict() method.
+        
+        The 'method' parameter can be:
+        - 'all'    : always compute all combinations (useful if you have very few stars)
+        - 'delaunay': always use Delaunay triangulation
+        - 'auto'   : use 'all' if len(img_stars) < 30, otherwise 'delaunay'
+        
+        Returns an affine transform (2x3 matrix) or None if matching fails.
+        """
+        import numpy as np
+        from itertools import combinations
+        from scipy.spatial import Delaunay
+
+        if len(img_stars) < 3:
+            print("DEBUG: Too few stars in target for triangle matching.")
+            return None
+
+        # Decide on method automatically if 'auto'
+        if method == 'auto':
+            method = 'all' if len(img_stars) < 30 else 'delaunay'
+        
+        # Option 1: Compute all combinations if method=='all'
+        if method == 'all':
+            img_triangle_invariants = {}
+            # Compute invariants for every combination of 3 stars.
+            for comb in combinations(range(len(img_stars)), 3):
+                pts = img_stars[list(comb)]
+                inv = StarRegistrationThread.compute_triangle_invariant_static(pts)
+                if inv is None:
+                    continue
+                inv_key = (round(inv[0], 2), round(inv[1], 2))
+                img_triangle_invariants.setdefault(inv_key, []).append(comb)
+            target_tri_dict = img_triangle_invariants
+        else:
+            # Option 2: Use Delaunay triangulation
+            # Optionally limit the star set if it's huge:
+            if len(img_stars) > max_stars:
+                img_stars = img_stars[:max_stars]
+            try:
+                tri = Delaunay(img_stars)
+            except Exception as e:
+                print("DEBUG: Delaunay triangulation failed:", e)
+                return None
+            target_tri_dict = {}
+            for simplex in tri.simplices:
+                pts = img_stars[simplex]
+                inv = StarRegistrationThread.compute_triangle_invariant_static(pts)
+                if inv is None:
+                    continue
+                inv_key = (round(inv[0], 2), round(inv[1], 2))
+                target_tri_dict.setdefault(inv_key, []).append(simplex)
+
+        # Cross-match: For each triangle invariant in the target dictionary,
+        # if a matching invariant exists in the reference triangles, add the point pairs.
+        matches = []
+        for inv_key, sim_list in target_tri_dict.items():
+            if inv_key in ref_triangles:
+                ref_simplices = ref_triangles[inv_key]
+                for s in sim_list:
+                    # 's' is either a tuple (if computed from all combinations) or an array (from Delaunay)
+                    pts_img = img_stars[list(s)] if isinstance(s, tuple) else img_stars[s]
+                    for rs in ref_simplices:
+                        pts_ref = ref_stars[rs]
+                        # Each triangle yields three matches.
+                        for i in range(3):
+                            matches.append((pts_img[i], pts_ref[i]))
+        if len(matches) < 6:
+            print("DEBUG: Not enough triangle matches to run RANSAC.")
+            return None
+
+        src_pts = np.array([m[0] for m in matches], dtype=np.float32).reshape(-1, 1, 2)
+        dst_pts = np.array([m[1] for m in matches], dtype=np.float32).reshape(-1, 1, 2)
+
+        transform, inliers = cv2.estimateAffinePartial2D(
+            src_pts,
+            dst_pts,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=3.0
+        )
+
+        if transform is not None:
+            if np.isnan(transform).any() or np.isinf(transform).any():
+                print("DEBUG: Triangle fallback transform has NaN/Inf.")
+                return None
+            if not StarRegistrationThread.is_valid_transform_static(transform):
+                print("DEBUG: Triangle fallback transform not valid by scale check.")
+                return None
+            print("DEBUG: Triangle-based transform succeeded.")
+            return transform
+
+        return None
+
+
+    @staticmethod
+    def compute_affine_transform_triangle_then_ransac(img_stars, ref_stars, ref_triangles, max_iter=100, convergence_thresh=0.2, ransac_thresh=3.0, max_stars=300):
+        """
+        First, compute an initial transform using triangle matching.
+        Then, refine the transform using nearest-star RANSAC.
+        To avoid freezing, only use the top 'max_stars' (if available) from img_stars.
+        """
+        if len(img_stars) < 3:
+            print("DEBUG: Too few stars in target for triangle matching.")
+            return None
+
+        # Limit the number of stars to process.
+        if len(img_stars) > max_stars:
+            img_stars = img_stars[:max_stars]
+        
+        # Compute the initial transform from triangles.
+        initial_transform = StarRegistrationThread.compute_affine_transform_from_triangles(img_stars, ref_stars, ref_triangles)
+        if initial_transform is None:
+            print("DEBUG: Triangle matching did not yield an initial transform.")
+            return None
+        print("DEBUG: Initial triangle-based transform computed.")
+
+        # Refine using nearest-star RANSAC starting from the triangle transform.
+        transform = initial_transform
+        for iter_num in range(max_iter):
+            transformed_img_stars = cv2.transform(img_stars.reshape(-1, 1, 2), transform).reshape(-1, 2)
+            matches = []
+            for idx, t_star in enumerate(transformed_img_stars):
+                distances = np.linalg.norm(ref_stars - t_star, axis=1)
+                closest_idx = np.argmin(distances)
+                if distances[closest_idx] < 20:
+                    matches.append((img_stars[idx], ref_stars[closest_idx]))
+            print(f"DEBUG (triangle→ransac): Refinement iteration {iter_num+1}: found {len(matches)} matches.")
+            if len(matches) < 5:
+                print("DEBUG: Not enough matches during refinement; aborting transform.")
+                return None
+            src_pts = np.array([m[0] for m in matches], dtype=np.float32)
+            dst_pts = np.array([m[1] for m in matches], dtype=np.float32)
+            new_transform, inliers = cv2.estimateAffinePartial2D(
+                src_pts.reshape(-1, 1, 2),
+                dst_pts.reshape(-1, 1, 2),
+                method=cv2.RANSAC,
+                ransacReprojThreshold=ransac_thresh
+            )
+            if new_transform is None:
+                print("DEBUG: Refinement failed to compute a new transform; aborting.")
+                return None
+            delta = np.linalg.norm(new_transform[:, 2] - transform[:, 2])
+            print(f"DEBUG (triangle→ransac): Iteration {iter_num+1}: translation delta = {delta:.3f} pixels.")
+            transform = new_transform
+            if delta < convergence_thresh:
+                print("DEBUG (triangle→ransac): Convergence reached.")
+                break
+        if not StarRegistrationThread.is_valid_transform_static(transform):
+            print("DEBUG: Final transform (triangle→ransac) failed validation.")
+            return None
+        print("DEBUG: Final transform (triangle→ransac) computed successfully.")
+        return transform
+
+    @staticmethod
+    def compute_triangle_invariant_static(tri_points):
+        # same logic as compute_triangle_invariant
+        d1 = np.linalg.norm(tri_points[0] - tri_points[1])
+        d2 = np.linalg.norm(tri_points[1] - tri_points[2])
+        d3 = np.linalg.norm(tri_points[2] - tri_points[0])
+        sides = sorted([d1, d2, d3])
+        if sides[0] == 0:
+            return None
+        return (sides[1]/sides[0], sides[2]/sides[0])        
     
 class StarRegistrationWindow(QWidget):
     def __init__(self, image_manager=None):
@@ -36597,6 +37117,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
 
 
 def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False, image_meta=None, file_meta=None):
+ 
     """
     Save an image array to a file in the specified format and bit depth.
     """
@@ -41283,9 +41804,14 @@ class CalculationThread(QThread):
             df['Altitude'] = np.round(altaz.alt.deg, 1)
             df['Azimuth'] = np.round(altaz.az.deg, 1)
 
-            # **Vectorized Moon Separation Calculation**
-            moon = get_body("moon", astropy_time, location).transform_to(altaz_frame)
-            df['Degrees from Moon'] = np.round(sky_coords.separation(moon).deg, 2)
+            # 1) Transform all catalog objects to AltAz:
+            altaz_coords = sky_coords.transform_to(altaz_frame)
+
+            # 2) Transform the Moon to AltAz, too:
+            moon_altaz = get_body("moon", astropy_time, location).transform_to(altaz_frame)
+
+            # 3) Now calculate separation in AltAz space:
+            df['Degrees from Moon'] = np.round(altaz_coords.separation(moon_altaz).deg, 2)
 
             # **Apply altitude filter after calculations**
             df = df[df['Altitude'] >= self.min_altitude]
