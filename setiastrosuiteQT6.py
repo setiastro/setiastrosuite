@@ -214,7 +214,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.6"
+VERSION = "2.12.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9540,8 +9540,8 @@ class StackingSuiteDialog(QDialog):
                             # First check for Bayer pattern in the header
                             if header and header.get('BAYERPAT'):
                                 image_data = self.debayer_image(image_data, file, header)
-                                self.update_status(f"📦 Bayer pattern detected, Debayering")
-                                QApplication.processEvents
+                                self.update_status("📦 Bayer pattern detected, Debayering")
+                                QApplication.processEvents()
                             else:
                                 # If the image is 3D but has only one channel (e.g. HxWx1), squeeze it to 2D
                                 if image_data.ndim == 3 and image_data.shape[-1] == 1:
@@ -11556,21 +11556,22 @@ class MosaicMasterDialog(QDialog):
         return image
 
     def align_images_seestar_mode(self):
+        """ 
+        Measures and aligns images in Seestar Mode. Instead of using a fixed reference,
+        the mosaic is updated after each image is added, so that new stars in the mosaic
+        are included for subsequent alignments.
+        """
         if len(self.loaded_images) == 0:
             QMessageBox.warning(self, "Align", "No images to align.")
             return
 
-        self.status_label.setText("Running Seestar Mode alignment...")
+        self.status_label.setText("🔄 Image Registration Started...")
         self.spinnerLabel.show()
         self.spinnerMovie.start()
         QApplication.processEvents()
 
         def crop_5px_border(img):
-            """
-            Crops 5 pixels from each edge of img if possible.
-            Returns the cropped image. If the image is too small,
-            returns an empty array.
-            """
+            """Crops 5 pixels from each edge, if possible."""
             if img.ndim == 3:
                 h, w, c = img.shape
                 if h <= 10 or w <= 10:
@@ -11583,28 +11584,27 @@ class MosaicMasterDialog(QDialog):
                 return img[5:-5, 5:-5]
 
         def ensure_float32_in_01(img):
-            """
-            Converts 'img' to float32 in [0,1] range by checking its max value.
-            """
+            """Converts 'img' to float32 in [0,1] range (if needed)."""
             img = img.astype(np.float32, copy=False)
             mx = np.max(img)
             if mx <= 1.0:
-                pass  # Already in [0,1]
+                return img  # Already in [0,1]
             elif mx <= 255.0:
-                img /= 255.0
+                return img / 255.0
             elif mx <= 65535.0:
-                img /= 65535.0
+                return img / 65535.0
             else:
                 if mx > 0:
-                    img /= mx
-            return img
+                    return img / mx
+                else:
+                    return img
 
         # -----------------------------------------------------
         # 1) Prepare the initial mosaic from the first image
         # -----------------------------------------------------
         base_item = self.loaded_images[0]
         base_img = ensure_float32_in_01(base_item["image"])
-        # Only debayer if FITS, single channel, and header has a Bayer pattern.
+        # Debayer if needed: check FITS, mono, header has Bayer pattern.
         if base_item["path"].lower().endswith(('.fits', '.fit')):
             if (base_img.ndim == 2 and "header" in base_item and 
                 base_item["header"] is not None and 
@@ -11623,12 +11623,15 @@ class MosaicMasterDialog(QDialog):
         else:
             mosaic_weight = (mosaic > 0).astype(np.float32)
 
-        # -----------------------------------------------------
-        # 2) Process each subsequent image for alignment
-        # -----------------------------------------------------
+        # (Optional) Use the initial mosaic as the initial reference for alignment.
+        # In the following loop, after each new image is integrated, the mosaic is updated.
+        # Thus, new stars in the mosaic will be included as the reference for the next image.
+        self.status_label.setText("Starting alignment of subsequent images...")
+        QApplication.processEvents()
+
         for item in self.loaded_images[1:]:
             new_img = item["image"].astype(np.float32)
-            # Only debayer FITS if the image is single channel and header has a Bayer pattern.
+            # Debayer if needed
             if item["path"].lower().endswith(('.fits', '.fit')):
                 if (new_img.ndim == 2 and "header" in item and 
                     item["header"] is not None and 
@@ -11638,47 +11641,46 @@ class MosaicMasterDialog(QDialog):
                     new_img = self.debayer_image(new_img, item["path"], item["header"])
             new_img = crop_5px_border(new_img)
             if new_img.size == 0:
-                print(f"Skipping {item['path']} (too small after crop).")
+                self.status_label.setText(f"Skipping {item['path']} (too small after crop).")
                 continue
 
             # --- Ensure channel consistency ---
-            # If the base mosaic is color (3-channel) but new_img is grayscale, convert new_img to 3-channel.
             if mosaic.ndim == 3 and new_img.ndim == 2:
                 new_img = np.repeat(new_img[:, :, np.newaxis], mosaic.shape[2], axis=2)
-            # Alternatively, if the mosaic is grayscale but new_img is color, convert new_img to grayscale.
             elif mosaic.ndim == 2 and new_img.ndim == 3:
                 new_img = np.mean(new_img, axis=2)
 
-            # Create grayscale copies for astroalign
-            new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
+            # --- Update reference for alignment using current mosaic ---
+            # Compute grayscale versions from the current mosaic and the new image.
             mosaic_gray = np.mean(mosaic, axis=2) if mosaic.ndim == 3 else mosaic
+            new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
 
             try:
-                
-                # Compute the affine transform between new_gray and mosaic_gray
+                # Compute affine transform between new image and current mosaic
                 transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray)
                 transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
+                self.status_label.setText(f"Astroalign success for {item['path']}: {e}")
             except Exception as e:
-                print("Astroalign failed for image", item["path"], ":", e)
+                self.status_label.setText(f"Astroalign failed for {item['path']}: {e}")
                 continue
 
-            # Current mosaic dimensions
+            # Get current mosaic dimensions and set up corners
             if mosaic.ndim == 3:
                 h_m, w_m, _ = mosaic.shape
             else:
                 h_m, w_m = mosaic.shape
             mosaic_corners = np.array([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]], dtype=np.float32)
 
-            # New image dimensions (from grayscale new_gray)
+            # New image dimensions from new_gray
             h_new, w_new = new_gray.shape
             new_img_corners = np.array([[0, 0], [w_new, 0], [0, h_new], [w_new, h_new]], dtype=np.float32)
 
-            # Warp corners of the new image
+            # Warp corners of new image
             ones = np.ones((4, 1), dtype=np.float32)
             new_img_corners_hom = np.hstack([new_img_corners, ones])
             warped_corners = (transform_matrix @ new_img_corners_hom.T).T
 
-            # Determine new canvas size that holds both images
+            # Determine new canvas size that fits both mosaic and warped new image
             all_corners = np.vstack([mosaic_corners, warped_corners])
             min_xy = np.min(all_corners, axis=0)
             max_xy = np.max(all_corners, axis=0)
@@ -11688,7 +11690,7 @@ class MosaicMasterDialog(QDialog):
             shift_int = np.round(shift).astype(int)
             y0, x0 = shift_int[1], shift_int[0]
 
-            # Create new canvas for the mosaic
+            # Create new canvas for the updated mosaic
             if mosaic.ndim == 3:
                 channels = mosaic.shape[2]
                 new_canvas = np.zeros((new_canvas_height, new_canvas_width, channels), dtype=np.float32)
@@ -11696,50 +11698,45 @@ class MosaicMasterDialog(QDialog):
                 new_canvas = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
             new_weight = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
 
-            # Copy current mosaic into new canvas
+            # Copy current mosaic into the new canvas
             new_canvas[y0:y0+h_m, x0:x0+w_m, ...] = mosaic
             new_weight[y0:y0+h_m, x0:x0+w_m] = mosaic_weight
 
-            # Adjust the transform matrix for canvas shift
+            # Adjust transform for the canvas shift
             new_transform = transform_matrix.copy()
             new_transform[0, 2] += shift[0]
             new_transform[1, 2] += shift[1]
 
-            # Warp the new image onto the new canvas
+            # Warp new image onto the new canvas
             warped_new = cv2.warpAffine(new_img, new_transform,
                                         (new_canvas_width, new_canvas_height),
                                         flags=cv2.INTER_LINEAR)
 
-            # Create a binary weight mask for the warped new image
+            # Create binary weight mask for the warped new image
             if warped_new.ndim == 3:
                 weight_new = np.any(warped_new > 0, axis=2).astype(np.float32)
             else:
                 weight_new = (warped_new > 0).astype(np.float32)
 
             # ---------------------------
-            # Overlap logic with 3/4 rule
+            # Overlap logic (3/4 rule)
             # ---------------------------
             if warped_new.ndim == 3:
-                # For color images: extract per-pixel masks from the 3-channel data.
-                mask_m = np.any(new_canvas > 0, axis=2)  # shape: (H, W)
-                mask_n = np.any(warped_new > 0, axis=2)    # shape: (H, W)
+                mask_m = np.any(new_canvas > 0, axis=2)
+                mask_n = np.any(warped_new > 0, axis=2)
                 both = mask_m & mask_n
                 only_m = mask_m & (~mask_n)
                 only_n = mask_n & (~mask_m)
 
                 combined = np.zeros_like(new_canvas)
-
-                # For pixels where both images contribute, process channel-by-channel.
-                val_m = new_canvas[both]     # shape: (N, channels)
-                val_n = warped_new[both]     # shape: (N, channels)
+                val_m = new_canvas[both]
+                val_n = warped_new[both]
                 condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
                 picked_vals = np.where(condition, np.maximum(val_m, val_n), (val_m + val_n) / 2.0)
-
                 combined[both] = picked_vals
                 combined[only_m] = new_canvas[only_m]
                 combined[only_n] = warped_new[only_n]
             else:
-                # Grayscale case
                 mask_m = (new_canvas > 0)
                 mask_n = (warped_new > 0)
                 both = mask_m & mask_n
@@ -11755,14 +11752,22 @@ class MosaicMasterDialog(QDialog):
                 combined[only_m] = new_canvas[only_m]
                 combined[only_n] = warped_new[only_n]
 
-            # Update mosaic and weight mask
+            # Update mosaic and weight mask with the new integration.
             mosaic = combined
             mosaic_weight = np.where((new_weight + weight_new) > 0, 1.0, 0.0)
-
             self.status_label.setText(f"Integrated image: {item['path']}")
             QApplication.processEvents()
 
-        # (Optional) Final normalization
+            # --- NEW STEP: Update the reference mosaic_gray ---
+            # Recompute mosaic_gray from the updated mosaic to pick up new stars.
+            # (Optionally, you could call a star-detection function here.)
+            # For now, we simply re-calc the grayscale version:
+            if mosaic.ndim == 3:
+                mosaic_gray = np.mean(mosaic, axis=2)
+            else:
+                mosaic_gray = mosaic
+
+        # (Optional) Final normalization (if desired)
         max_val = np.max(mosaic)
         if max_val > 0:
             mosaic /= max_val
@@ -11776,7 +11781,6 @@ class MosaicMasterDialog(QDialog):
         display_image = self.stretch_for_display(self.final_mosaic)
         mosaic_win = MosaicPreviewWindow(display_image, title="Robot Telescope Mosaic", parent=self)
         mosaic_win.show()
-
 
         
     # ---------- Star alignment using triangle matching ----------
