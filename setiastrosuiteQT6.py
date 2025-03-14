@@ -9479,7 +9479,7 @@ class StackingSuiteDialog(QDialog):
         """ 
         Measures all frames in small batches (to find a reference frame and weights),
         then normalizes each entire frame (again in small batches) using the Numba
-        `normalize_images` function, saves them with a '_n.fit' suffix, and finally
+        normalize_images function, saves them with a '_n.fit' suffix, and finally
         starts the alignment thread on those normalized files.
         """
         self.update_status("🔄 Image Registration Started...")
@@ -9526,6 +9526,7 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"🌍 Loading {len(chunk)} images in parallel (up to {max_workers} threads)...")
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Build the dictionary mapping futures to file names
                 future_to_file = {}
                 for file in chunk:
                     future = executor.submit(load_image, file)
@@ -9534,18 +9535,26 @@ class StackingSuiteDialog(QDialog):
                 for future in as_completed(future_to_file):
                     file = future_to_file[future]
                     try:
-                        image_data, _, _, _ = future.result()
-                        # Announce we loaded this file
-                        self.update_status(f"  Loaded {file}")
-                        QApplication.processEvents()
-
+                        image_data, header, _, _ = future.result()
                         if image_data is not None:
+                            # First check for Bayer pattern in the header
+                            if header and header.get('BAYERPAT'):
+                                image_data = self.debayer_image(image_data, file, header)
+                                self.update_status(f"📦 Bayer pattern detected, Debayering")
+                                QApplication.processEvents
+                            else:
+                                # If the image is 3D but has only one channel (e.g. HxWx1), squeeze it to 2D
+                                if image_data.ndim == 3 and image_data.shape[-1] == 1:
+                                    image_data = np.squeeze(image_data, axis=-1)
                             chunk_images.append(image_data)
                             chunk_valid_files.append(file)
-
+                            self.update_status(f"  Loaded {file}")
+                            QApplication.processEvents()
                     except Exception as e:
                         self.update_status(f"⚠️ Error loading {file}: {e}")
                         QApplication.processEvents()
+
+
 
             if not chunk_images:
                 self.update_status("⚠️ No valid images in this chunk.")
@@ -9652,6 +9661,13 @@ class StackingSuiteDialog(QDialog):
                     try:
                         img, hdr, _, _ = future.result()
                         if img is not None:
+                            # Check for Bayer pattern first – debayer if needed
+                            if hdr and hdr.get('BAYERPAT'):
+                                img = self.debayer_image(img, file, hdr)
+                            else:
+                                # Only squeeze if the image has an extra singleton dimension
+                                if img.ndim == 3 and img.shape[-1] == 1:
+                                    img = np.squeeze(img, axis=-1)
                             loaded_images.append(img)
                             valid_paths.append(file)
                         else:
@@ -9659,6 +9675,7 @@ class StackingSuiteDialog(QDialog):
                     except Exception as e:
                         self.update_status(f"⚠️ Error loading {file} for normalization: {e}")
                     QApplication.processEvents()
+
 
             if not loaded_images:
                 continue
