@@ -214,7 +214,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.5"
+VERSION = "2.12.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9354,37 +9354,18 @@ class StackingSuiteDialog(QDialog):
                     if not is_mono and light_data.shape[0] == 3:
                         light_data = light_data.transpose(1, 2, 0)  # Convert back (C, H, W) → (H, W, C)
 
+                    # --- Debug: Report min and max of light_data ---
+                    min_val = light_data.min()
+                    max_val = light_data.max()
+                    self.update_status(f"Before saving: min = {min_val:.4f}, max = {max_val:.4f}")
+                    print(f"Before saving: min = {min_val:.4f}, max = {max_val:.4f}")
+                    QApplication.processEvents()
+
                     # 🔹 Save using global `save_image()`
                     calibrated_filename = os.path.join(
                         calibrated_dir, os.path.basename(light_file).replace(".fit", "_c.fit")
                     )
-
-                    # 1) Flatten and find nonzero pixels
-                    flat_data = light_data.ravel()  # or .flatten()
-                    nonzero_indices = np.where(flat_data > 0)[0]
-
-                    if len(nonzero_indices) > 0:
-                        # Option A: truly the "first" nonzero in raster order
-                        #black_point = flat_data[nonzero_indices[0]]
-
-                        # Option B: the smallest nonzero pixel
-                        black_point = flat_data[nonzero_indices].min()
-
-                        # Subtract that black point
-                        light_data -= black_point
-
-                    # 2) Check if new max is > 1
-                    new_max = light_data.max()
-                    if new_max > 1.0:
-                        new_min = light_data.min()
-                        range_val = new_max - new_min
-                        if range_val != 0:
-                            light_data = (light_data - new_min) / range_val
-                        else:
-                            # Edge case: if everything is constant after black point subtraction
-                            light_data = np.zeros_like(light_data, dtype=np.float32)
-
-
+        
                     save_image(
                         img_array=light_data,
                         filename=calibrated_filename,
@@ -10537,77 +10518,31 @@ def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
         if data is None:
             return None
 
+        # Save the original data type for normalization later.
+        orig_dtype = data.dtype
+
         shape = data.shape
         ndim = data.ndim
 
-        # We'll handle up to 3D. If 2D => shape is (dim0, dim1).
-        # If 3D => shape is (dim0, dim1, dim2).
-        # We need to find which two dims are "spatial X & Y", and slice them.
-        
-        # 1) Identify the "spatial" dimensions
-        #    We'll assume:
-        #    - If 2D => shape might be (height, width) or (width, height).
-        #    - If 3D => one dimension is color=3, the other two are spatial.
-        
         if ndim == 2:
-            # shape could be (height, width) or (width, height)
+            # Data is 2D; shape could be (height, width) or (width, height)
             dim0, dim1 = shape
-            # We'll guess dim0=height, dim1=width if dim0 ~ 4000, dim1 ~ 6000 (just an example).
-            # But better to see which is bigger if we know the user expects (height=~4000, width=~6000).
-            # Or just do y-slice on the smaller dimension if the user passes y up to 4000, x up to 6000.
-            
-            # We'll define:
-            # y-slice => dimension that matches "height"
-            # x-slice => dimension that matches "width"
-            # If y_end > dim0, that implies dim0 is "width" => we need to swap slicing
-            # But it's simpler to check which dimension is bigger.
-            
-            # A robust approach: compare (y_end, x_end) to shape
-            # if y_end <= dim0 and x_end <= dim1 => we do data[y1:y2, x1:x2]
-            # else => data[x1:x2, y1:y2]
-            
-            # But the simplest fix: if dim0 >= y_end and dim1 >= x_end => normal slice
-            # else => swapped slice
             if (y_end <= dim0) and (x_end <= dim1):
                 tile_data = data[y_start:y_end, x_start:x_end]
             else:
                 tile_data = data[x_start:x_end, y_start:y_end]
-
         elif ndim == 3:
-            # shape could be (height, width, 3) or (3, height, width) or (width, height, 3), etc.
-            # We want to slice the two spatial dims, leaving the color dimension alone.
-            
+            # Data is 3D; could be (height, width, 3) or (3, height, width), etc.
             dim0, dim1, dim2 = shape
-            # If one dimension == 3, that's color. The other two are spatial.
-            # We'll find which dims are ~4000 or ~6000, etc.
-            # For instance, if dim0==3 => shape is (3, height, width).
-            
-            # We'll define a small helper:
+
             def do_slice_spatial(data3d, spat0, spat1, color_axis):
-                """
-                Slices the 3D array along spat0, spat1 as y,x, ignoring the color axis.
-                spat0, spat1, color_axis are indices in [0,1,2].
-                y1:y2 => spat0-slice, x1:x2 => spat1-slice.
-                We'll reorder if needed afterwards in the caller.
-                """
-                # We'll build slices of shape [ :, :, : ] with the color axis untouched.
-                # We can do something like:
-                #   if spat0 < spat1 < color_axis => ...
-                # but it's simpler to permute the axes so that data is (spat0, spat1, color).
-                # However, that might be too complex. Let's do direct indexing.
-                
-                # We'll create a slice object for each dimension
-                slicer = [slice(None)]*3
-                # spat0 => y-slice
+                slicer = [slice(None)] * 3
                 slicer[spat0] = slice(y_start, y_end)
-                # spat1 => x-slice
                 slicer[spat1] = slice(x_start, x_end)
-                # color_axis => remains slice(None)
-                
                 tile = data3d[tuple(slicer)]
                 return tile
-            
-            # We'll find which axis is color=3 (if any)
+
+            # Identify the color axis (assumed to have size 3)
             color_axis = None
             spat_axes = []
             for idx, d in enumerate((dim0, dim1, dim2)):
@@ -10615,45 +10550,39 @@ def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
                     color_axis = idx
                 else:
                     spat_axes.append(idx)
-            
+
             if color_axis is None:
-                # means all dims are spatial? e.g. (width, height, depth??)
-                # We'll assume the last dimension is color=1 => a weird case.
-                # Or we can treat it as 2D with an extra dimension => just slice first 2 dims.
-                # Let's just assume no color axis => slice the first two dims as y/x.
-                # We'll do the same logic as 2D, but we have an extra dimension?
-                # We'll do a simpler approach: treat dim2 as 1 channel. 
-                # Or if user truly has (height, width, 3) but 3 != color => confusion.
-                # For now, let's assume color_axis=2 if dim2 < something. It's a fallback.
-                color_axis = 2
-            
-            # spat_axes are the other two indices
-            if len(spat_axes) != 2:
-                # Something weird => fallback
-                # We'll just assume spat_axes=[0,1], color_axis=2
-                spat_axes = [0,1]
-
-            # Now we have spat_axes e.g. [0,1], color_axis e.g. 2
-            # We must see if slicing y_end fits spat_axes[0], x_end fits spat_axes[1].
-            
-            # We'll do a dimension check:
-            spat0, spat1 = spat_axes
-            d0 = shape[spat0]
-            d1 = shape[spat1]
-            # If y_end <= d0 and x_end <= d1 => we do normal
-            # else we swap.
-            if (y_end <= d0) and (x_end <= d1):
-                tile_data = do_slice_spatial(data, spat0, spat1, color_axis)
+                # No axis with size 3; assume the image is mono and use the first two dims.
+                tile_data = data[y_start:y_end, x_start:x_end]
             else:
-                # If that fails, we try to swap spat0/spat1
-                tile_data = do_slice_spatial(data, spat1, spat0, color_axis)
-
+                # Ensure we have two spatial axes.
+                if len(spat_axes) != 2:
+                    spat_axes = [0, 1]
+                spat0, spat1 = spat_axes
+                d0 = shape[spat0]
+                d1 = shape[spat1]
+                if (y_end <= d0) and (x_end <= d1):
+                    tile_data = do_slice_spatial(data, spat0, spat1, color_axis)
+                else:
+                    tile_data = do_slice_spatial(data, spat1, spat0, color_axis)
         else:
-            # We don't handle 4D or more
             return None
 
-    return tile_data
+        # Normalize based on the original data type.
+        if orig_dtype == np.uint8:
+            tile_data = tile_data.astype(np.float32) / 255.0
+        elif orig_dtype == np.uint16:
+            tile_data = tile_data.astype(np.float32) / 65535.0
+        elif orig_dtype == np.uint32:
+            # 32-bit data: convert to float32 but leave values as is.
+            tile_data = tile_data.astype(np.float32)
+        elif orig_dtype == np.float32:
+            # Already 32-bit float; assume it's in the desired range.
+            tile_data = tile_data
+        else:
+            tile_data = tile_data.astype(np.float32)
 
+    return tile_data
 
 
 
@@ -36861,12 +36790,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                         bscale = original_header.get('BSCALE', 1)
                         image = image_data.astype(np.float32) * bscale + bzero
 
-                        # Optionally min-max normalize here
-                        img_min, img_max = image.min(), image.max()
-                        if img_max > img_min:
-                            image = (image - img_min) / (img_max - img_min)
-                        else:
-                            image = np.zeros_like(image, dtype=np.float32)
+
 
                     elif image_data.dtype == np.float32:
                         bit_depth = "32-bit floating point"
