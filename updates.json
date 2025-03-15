@@ -1,9 +1,9 @@
 {
-  "version": "2.12.6",
+  "version": "2.12.7",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.6/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.6/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.6/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Major Bug Fix: Stacking Suite (during master creation original 16bit integers were not scaled into 32bit leading to huge over subtractions and over corrections rendering the calibrated frames either all white or all black)"
+  "notes": "Seestar Mode in Mosaic Master now fully expands for the full mosaic along with automatic debayering and normalization"
 }
