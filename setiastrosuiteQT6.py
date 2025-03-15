@@ -11600,24 +11600,48 @@ class MosaicMasterDialog(QDialog):
                     return img
 
         def compute_rough_transform(new_header, ref_header):
-            """If both headers have valid WCS, compute a rough translation to pre-align images."""
+            """Compute a rough transformation (rotation and translation) using WCS.
+            
+            This function estimates the rotation angle by comparing an offset point in the reference image,
+            then computes a translation so that the rotated new image center aligns with the reference center.
+            """
             try:
                 new_wcs = WCS(new_header)
                 ref_wcs = WCS(ref_header)
-                # Use image centers as reference.
-                # Get reference image dimensions from ref_header keys or WCS.
+                # Compute the reference image center in pixel coordinates.
                 ref_naxis1 = int(ref_header.get('NAXIS1', 0))
                 ref_naxis2 = int(ref_header.get('NAXIS2', 0))
-                ref_center = np.array([[ref_naxis1 / 2.0, ref_naxis2 / 2.0]])
-                world_center = ref_wcs.all_pix2world(ref_center, 1)
-                new_center = new_wcs.all_world2pix(world_center, 1)
-                translation = new_center[0] - ref_center[0]
-                # Build a 2x3 matrix for translation (note: negative translation to align new image to ref).
-                rough = np.array([[1, 0, -translation[0]], [0, 1, -translation[1]]], dtype=np.float32)
+                ref_center = np.array([ref_naxis1 / 2.0, ref_naxis2 / 2.0])
+                
+                # Convert the reference center to world coordinates.
+                world_center = ref_wcs.all_pix2world(ref_center[None, :], 1)
+                # Map the world center to new image pixel coordinates.
+                new_center = new_wcs.all_world2pix(world_center, 1)[0]
+                
+                # Compute an offset in the reference image along the x-axis.
+                ref_offset = ref_center + np.array([1, 0])
+                world_offset = ref_wcs.all_pix2world(ref_offset[None, :], 1)[0]
+                new_offset = new_wcs.all_world2pix(world_offset[None, :], 1)[0]
+                
+                # The vector from the new center to the new offset gives an angle.
+                vector = new_offset - new_center
+                angle = np.arctan2(vector[1], vector[0])
+                cos_a = np.cos(angle)
+                sin_a = np.sin(angle)
+                
+                # Build a 2x2 rotation matrix.
+                R = np.array([[cos_a, -sin_a],
+                            [sin_a,  cos_a]])
+                # Compute the translation such that the rotated new center maps to the ref center.
+                # That is, we want: ref_center = R @ new_center + t  =>  t = ref_center - R @ new_center
+                t = ref_center - R @ new_center
+                # Build the full 2x3 affine transform.
+                rough = np.hstack([R, t.reshape(2, 1)]).astype(np.float32)
                 return rough
             except Exception as e:
                 print(f"Rough transform skipped: {e}")
                 return None
+
 
         # -----------------------------------------------------
         # 1) Prepare the initial mosaic from the first image
@@ -11691,12 +11715,33 @@ class MosaicMasterDialog(QDialog):
                         new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
                         new_gray = stretch_mono_image(new_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
 
-                import astroalign
+
                 # Now compute refined transform using astroalign.
-                transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray)
-                transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
-                self.status_label.setText(f"Astroalign success for {item['path']} ({len(src_pts)} stars)")
+                mosaic_gray = mosaic_gray.astype(np.float32)
+                new_gray = new_gray.astype(np.float32)
+                self.status_label.setText(f"Astroaligning for {item['path']})")
                 QApplication.processEvents()
+                try:
+                    transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray)
+                except Exception as e:
+                    print(f"[DEBUG] Primary alignment failed: {e}. Retrying with fallback parameters...")
+                    self.status_label.setText(f"Primary alignment failed: {e}. Retrying with fallback parameters...")
+                    QApplication.processEvents()
+                    try:
+                        transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray,
+                                                                                    detection_sigma=2,
+                                                                                    max_control_points=3)
+                    except Exception as e2:
+                        print(f"[DEBUG] Fallback alignment also failed: {e2}")
+                        transform_obj = None  # or handle the failure appropriately
+
+                if transform_obj is None:
+                    self.status_label.setText("Alignment failed for " + item['path'])
+                    return False
+                else:
+                    transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
+                    self.status_label.setText(f"Astroalign success for {item['path']} ({len(src_pts)} stars)")
+                    QApplication.processEvents()
 
                 # Get current mosaic dimensions.
                 if mosaic.ndim == 3:
