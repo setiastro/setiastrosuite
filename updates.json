@@ -1,9 +1,9 @@
 {
-  "version": "2.12.7",
+  "version": "2.12.8",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.7/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Seestar Mode in Mosaic Master now fully expands for the full mosaic along with automatic debayering and normalization"
+  "notes": "Seestar mode now does rough alignments with WCS first, then to astroalign, then a fall back to strictly look in the overlap region for star"
 }
