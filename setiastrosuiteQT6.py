@@ -42,6 +42,8 @@ from scipy.optimize import curve_fit
 import exifread
 from numba_utils import *
 import astroalign
+print("[DEBUG] astroalign version:", astroalign.__version__)
+import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -159,6 +161,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QListWidget,
     QListWidgetItem,
+    QSplashScreen,
     QProgressDialog
 )
 
@@ -216,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.8"
+VERSION = "2.12.9"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -11610,7 +11613,7 @@ class MosaicMasterDialog(QDialog):
         try:
             refine_obj, (src_pts, dst_pts) = astroalign.find_transform(
                 warped_new_ma, mosaic_ma,
-                detection_sigma=3.5
+                detection_sigma=2
             )
             print(f"[DEBUG] Overlap-limited astroalign success with {len(src_pts)} stars.")
         except Exception as e:
@@ -11844,101 +11847,127 @@ class MosaicMasterDialog(QDialog):
             print(f"[DEBUG] Aligning image: {item['path']}")
             try:
                 new_img = item["image"].astype(np.float32)
+                print(f"[DEBUG] new_img initial shape={new_img.shape}, dtype={new_img.dtype}, "
+                    f"min={np.min(new_img):.3f}, max={np.max(new_img):.3f}")
+
                 if item["path"].lower().endswith(('.fits', '.fit')):
-                    if new_img.ndim == 2 and "header" in item and item["header"] is not None and item["header"].get('BAYERPAT'):
+                    if (new_img.ndim == 2 
+                        and "header" in item 
+                        and item["header"] is not None 
+                        and item["header"].get('BAYERPAT')):
+                        print(f"[DEBUG] Debayering image: {item['path']}")
                         new_img = self.debayer_image(new_img, item["path"], item["header"])
+                        print(f"[DEBUG] debayered new_img shape={new_img.shape}, dtype={new_img.dtype}, "
+                            f"min={np.min(new_img):.3f}, max={np.max(new_img):.3f}")
+
                 new_img = crop_5px_border(new_img)
+                print(f"[DEBUG] After crop_5px_border, new_img shape={new_img.shape}, dtype={new_img.dtype}")
+
                 if new_img.size == 0:
+                    print(f"[DEBUG] new_img is empty after cropping => skip.")
                     self.status_label.setText(f"Skipping {item['path']} (too small after crop).")
                     QApplication.processEvents()
                     return False
 
-                # Ensure channel consistency.
+                # Ensure channel consistency
+                print(f"[DEBUG] mosaic shape={mosaic.shape}, dtype={mosaic.dtype}, "
+                    f"mosaic range=({np.min(mosaic):.3f}, {np.max(mosaic):.3f})")
                 if mosaic.ndim == 3 and new_img.ndim == 2:
+                    print("[DEBUG] Expanding new_img from 2D => 3D to match mosaic channels.")
                     new_img = np.repeat(new_img[:, :, np.newaxis], mosaic.shape[2], axis=2)
                 elif mosaic.ndim == 2 and new_img.ndim == 3:
+                    print("[DEBUG] Converting new_img 3D => 2D by averaging channels to match mosaic.")
                     new_img = np.mean(new_img, axis=2)
 
                 mosaic_gray = np.mean(mosaic, axis=2) if mosaic.ndim == 3 else mosaic
                 new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
 
+                # Debug info about mosaic_gray and new_gray
+                print(f"[DEBUG] mosaic_gray shape={mosaic_gray.shape}, range=({mosaic_gray.min():.3f}, {mosaic_gray.max():.3f})")
+                print(f"[DEBUG] new_gray shape={new_gray.shape}, range=({new_gray.min():.3f}, {new_gray.max():.3f})")
+
+                # Pre-stretch
                 mosaic_gray = stretch_mono_image(mosaic_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
                 new_gray = stretch_mono_image(new_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
+                print(f"[DEBUG] After stretch, mosaic_gray min={mosaic_gray.min():.3f}, max={mosaic_gray.max():.3f}")
+                print(f"[DEBUG] After stretch, new_gray min={new_gray.min():.3f}, max={new_gray.max():.3f}")
 
-                # --- Attempt Rough Alignment using WCS if available ---
-                # --- Attempt Rough Alignment using WCS if available ---
+                # Attempt Rough Alignment using WCS if available
                 rough_matrix = None
-                if ("header" in item and item["header"] is not None and 
-                    "CTYPE1" in item["header"] and "CTYPE2" in item["header"]):
+                if ("header" in item and item["header"] is not None 
+                    and "CTYPE1" in item["header"] and "CTYPE2" in item["header"]):
+                    print("[DEBUG] Trying compute_rough_transform (WCS-based).")
                     rough_matrix = compute_rough_transform(item["header"], base_item["header"])
                     if rough_matrix is not None:
-                        print("[DEBUG] Rough transform was computed for fallback if needed.")
+                        print("[DEBUG] Rough transform matrix:\n", rough_matrix)
 
                 mosaic_gray = mosaic_gray.astype(np.float32)
                 new_gray = new_gray.astype(np.float32)
+
                 self.status_label.setText(f"Astroaligning for {item['path']}...")
                 QApplication.processEvents()
 
-                # Predefine variables so they're in scope even if astroalign fails
                 transform_obj = None
                 transform_matrix = None
                 src_pts = None
                 dst_pts = None
 
                 try:
-                    # Attempt the astroalign transform on the full frames
-                    transform_obj, (src_pts, dst_pts) = astroalign.find_transform(
-                        new_gray, mosaic_gray
-                    )
+                    print("[DEBUG] Calling astroalign.find_transform on full frames.")
+                    new_gray = np.ascontiguousarray(new_gray, dtype=np.float32)
+                    mosaic_gray = np.ascontiguousarray(mosaic_gray, dtype=np.float32)
+                    new_gray = new_gray.astype(np.float64, copy=False)
+                    mosaic_gray = mosaic_gray.astype(np.float64, copy=False)
+
+                    transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray, max_control_points=200,detection_sigma=4, min_area=4)
                     transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
-                    print(f"[DEBUG] Astroalign success with {len(src_pts)} stars")
+                    print(f"[DEBUG] Astroalign success with {len(src_pts)} stars. transform_matrix:\n{transform_matrix}")
 
                 except Exception as e:
-                    print(f"Alignment failed: {e}")
+                    # If astroalign fails
+                    print(f"[DEBUG] astroalign.find_transform failed: {e}")
                     self.status_label.setText(f"Alignment failed: {e}")
                     QApplication.processEvents()
 
-                    # If astroalign fails but we have a valid rough_matrix, do the overlap-limited approach
+                    # If we have rough_matrix, do the overlap-limited approach
                     if rough_matrix is not None:
+                        print("[DEBUG] Attempting refine_via_overlap fallback with rough_matrix.")
                         transform_matrix = self.refine_via_overlap(new_gray, mosaic_gray, rough_matrix)
                         if transform_matrix is None:
-                            # Even the overlap approach failed
-                            print("[DEBUG] Overlap approach also failed. Skipping this image.")
+                            print("[DEBUG] Overlap approach also failed => skip this image.")
                             return False
-                        print("[DEBUG] Overlap-based refinement succeeded.")
+                        print("[DEBUG] Overlap-based refinement succeeded. transform_matrix:\n", transform_matrix)
                     else:
-                        print("[DEBUG] No rough transform available. Skipping this image.")
+                        print("[DEBUG] No rough transform => skipping image.")
                         return False
 
-                # Now decide if we have *any* transform at all
                 if transform_matrix is None:
-                    # Means astroalign failed *and* no rough_matrix fallback
                     self.status_label.setText("No transform found; skipping image.")
+                    print("[DEBUG] transform_matrix is None => returning False")
                     return False
 
-                # If we get here, transform_matrix is either from astroalign or from fallback.
-                # If transform_obj is None, we know we are in fallback mode.
                 if transform_obj is not None:
-                    # We have a successful astroalign transform
-                    self.status_label.setText(
-                        f"Astroalign success for {item['path']} ({len(src_pts)} stars)"
-                    )
+                    self.status_label.setText(f"Astroalign success for {item['path']} ({len(src_pts)} stars)")
                     QApplication.processEvents()
                 else:
-                    # We are using the rough alignment
                     self.status_label.setText(f"Using rough alignment for {item['path']}")
                     QApplication.processEvents()
 
-                # Warp new image into mosaic space.
+                print(f"[DEBUG] mosaic shape={mosaic.shape}, mosaic dtype={mosaic.dtype}")
                 if mosaic.ndim == 3:
                     h_m, w_m, _ = mosaic.shape
                 else:
                     h_m, w_m = mosaic.shape
+
+                # Debug the transform_matrix
+                print("[DEBUG] transform_matrix for warp:\n", transform_matrix)
+
                 mosaic_corners = np.array([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]], dtype=np.float32)
                 h_new, w_new = new_gray.shape
                 new_img_corners = np.array([[0, 0], [w_new, 0], [0, h_new], [w_new, h_new]], dtype=np.float32)
                 ones = np.ones((4, 1), dtype=np.float32)
                 new_img_corners_hom = np.hstack([new_img_corners, ones])
+
                 warped_corners = (transform_matrix @ new_img_corners_hom.T).T
                 all_corners = np.vstack([mosaic_corners, warped_corners])
                 min_xy = np.min(all_corners, axis=0)
@@ -11949,22 +11978,49 @@ class MosaicMasterDialog(QDialog):
                 shift = -min_xy + np.array([margin / 2, margin / 2])
                 shift_int = np.round(shift).astype(int)
                 y0, x0 = shift_int[1], shift_int[0]
+
+                print(f"[DEBUG] new_canvas_width={new_canvas_width}, new_canvas_height={new_canvas_height}")
+                print(f"[DEBUG] shift={shift}, shift_int={shift_int}, y0={y0}, x0={x0}")
+
                 if mosaic.ndim == 3:
                     channels = mosaic.shape[2]
                     new_canvas = np.zeros((new_canvas_height, new_canvas_width, channels), dtype=np.float32)
                 else:
                     new_canvas = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+
                 new_weight = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+
+                # Copy mosaic into new_canvas
                 new_canvas[y0:y0+h_m, x0:x0+w_m, ...] = mosaic
                 new_weight[y0:y0+h_m, x0:x0+w_m] = mosaic_weight
+
                 new_transform = transform_matrix.copy()
                 new_transform[0, 2] += shift[0]
                 new_transform[1, 2] += shift[1]
-                warped_new = cv2.warpAffine(new_img, new_transform, (new_canvas_width, new_canvas_height), flags=cv2.INTER_LINEAR)
+
+                # Attempt warpAffine
+                try:
+                    print("[DEBUG] Attempting cv2.warpAffine with new_transform:\n", new_transform)
+                    warped_new = cv2.warpAffine(
+                        new_img, 
+                        new_transform, 
+                        (new_canvas_width, new_canvas_height), 
+                        flags=cv2.INTER_LINEAR
+                    )
+                except cv2.error as cv2_err:
+                    # catch OpenCV-level errors
+                    print(f"[OpenCV] warpAffine error => {cv2_err}")
+                    return False
+
+                print(f"[DEBUG] warped_new shape={warped_new.shape}, dtype={warped_new.dtype}, "
+                    f"min={np.min(warped_new):.3f}, max={np.max(warped_new):.3f}")
+
                 if warped_new.ndim == 3:
                     weight_new = np.any(warped_new > 0, axis=2).astype(np.float32)
                 else:
                     weight_new = (warped_new > 0).astype(np.float32)
+
+                # Combine into mosaic
                 if warped_new.ndim == 3:
                     mask_m = np.any(new_canvas > 0, axis=2)
                     mask_n = np.any(warped_new > 0, axis=2)
@@ -11993,6 +12049,7 @@ class MosaicMasterDialog(QDialog):
                     combined[both] = picked_vals
                     combined[only_m] = new_canvas[only_m]
                     combined[only_n] = warped_new[only_n]
+
                 mosaic = combined
                 mosaic_weight = np.where((new_weight + weight_new) > 0, 1.0, 0.0)
                 self.status_label.setText(f"Integrated image: {item['path']}")
@@ -12002,11 +12059,17 @@ class MosaicMasterDialog(QDialog):
                     mosaic_gray = np.mean(mosaic, axis=2)
                 else:
                     mosaic_gray = mosaic
+
+                print("[DEBUG] process_alignment done successfully for this image.")
                 return True
-            # End of process_alignment
+
             except Exception as e:
-                print(f"process_alignment error {e}")
+                print(f"[DEBUG] process_alignment error => {e}")
+                # ============== FULL TRACEBACK HERE ===============
+                import traceback
+                traceback.print_exc()
                 return False
+
 
         # --- Process images once ---
         failed_items = []
@@ -42582,16 +42645,32 @@ if __name__ == '__main__':
 
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(icon_path))
-    
+
+    # ===================== SPLASH SCREEN CODE HERE =====================
+    # 1) Load your splash image
+    splash_pix = QPixmap(resource_path("astrosuite.png"))  # or your actual path
+    splash = QSplashScreen(splash_pix)
+
+    # 2) Show the splash screen
+    splash.show()
+    # Force the app to process events so the splash shows
+    app.processEvents()
+
     try:
-        # Create and show the main window
+        # 3) Create and initialize your main window (the big load time may happen here)
         window = AstroEditingSuite()
+
+        # 4) Now that the window is ready, display it
         window.show()
+
+        # 5) Hide the splash
+        splash.finish(window)
+
         sys.exit(app.exec())
     except Exception as e:
         # Log the error
         logging.error("Unhandled exception occurred", exc_info=True)
-        
+
         # Display a critical error message to the user
         QMessageBox.critical(
             None,
