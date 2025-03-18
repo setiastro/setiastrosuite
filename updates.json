@@ -1,9 +1,9 @@
 {
-  "version": "2.12.8",
+  "version": "2.12.9",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.8/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.9/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.9/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.9/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Seestar mode now does rough alignments with WCS first, then to astroalign, then a fall back to strictly look in the overlap region for star"
+  "notes": "Fixed invalid image format error for Stacking Suite, Mosaic Master, and other modules."
 }
