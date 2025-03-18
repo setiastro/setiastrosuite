@@ -1,61 +1,90 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 from PyInstaller.utils.hooks import (
+    collect_data_files, 
     collect_submodules,
-    collect_data_files,
-    collect_dynamic_libs
+    collect_dynamic_libs,
+    get_package_paths
 )
 
-import sys
-import types
-
-# Create a dummy module if it doesn't exist
-if "numba.core.types.old_scalars" not in sys.modules:
-    dummy = types.ModuleType("numba.core.types.old_scalars")
-    sys.modules["numba.core.types.old_scalars"] = dummy
-
-from PyInstaller.utils.hooks import collect_data_files
-from PyInstaller.utils.hooks import get_package_paths
-
-# 1) Collect photutils data (including CITATION.rst).
+########################################
+# Photutils
+########################################
 photutils_data = collect_data_files('photutils')
-
-# 2) Collect all photutils submodules (pure Python).
 photutils_submodules = collect_submodules('photutils')
-
-# 3) Collect any compiled libraries from photutils (the .pyd / .dll / .so).
 photutils_binaries = collect_dynamic_libs('photutils')
 
-
-# 1. Collect Dask data (templates, etc.)
+########################################
+# Dask data (if needed)
+########################################
 dask_data = collect_data_files('dask', include_py_files=False)
-from PyInstaller.utils.hooks import get_package_paths
 
-photutils_path = get_package_paths('photutils')[0]
+########################################
+# sep_pjw (the library that references _version)
+########################################
+sep_pjw_submodules = collect_submodules('sep_pjw')
+sep_pjw_binaries = collect_dynamic_libs('sep_pjw')
+
+# If you also need a top-level _version:
+# (Check if this is truly needed or if just 'sep_pjw._version' is enough.)
+# from PyInstaller.utils.hooks import collect_submodules
+# version_submodules = collect_submodules('_version')  # Possibly
+
+directory = '/Users/franklinmarek/cosmicclarity/setiastrosuite'
+
+########################################
+# Build hiddenimports
+########################################
+hiddenimports = [
+    # Existing photutils
+    *photutils_submodules,
+
+    # Force 'sep_pjw'
+    'sep_pjw',
+    # Force 'sep_pjw._version'
+    'sep_pjw._version',
+
+    # If you suspect a top-level _version is needed as well:
+    '_version',
+]
+
+binaries = []
+# Merge in photutils + sep_pjw binaries
+binaries += photutils_binaries
+binaries += sep_pjw_binaries
+
+########################################
+# The Analysis
+########################################
 a = Analysis(
     ['setiastrosuitemacQT6.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=[
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
-         ('celestial_catalog.csv', '.'), 
+        # Existing data files:
+        (directory + '/venv/lib/python3.12/site-packages/astroquery/CITATION', 'astroquery'),
+        (directory + '/venv/lib/python3.12/site-packages/photutils/CITATION.rst', 'photutils'),
+        ('celestial_catalog.csv', '.'), 
         ('astrosuite.png', '.'), 
-        ('numba_utils.py', '.'),
+        ('stacking.png', '.'),
         ('wimilogo.png', '.'), 
         ('wrench_icon.png', '.'), 
+        ('numba_utils.py', '.'),
+        ('mosaic.png', '.'),
         ('platesolve.png', '.'),
+        ('starregistration.png', '.'),
         ('supernova.png', '.'),
-        ('psf.png', '.'),         
+        ('psf.png', '.'),          
         ('eye.png', '.'), 
         ('disk.png', '.'), 
         ('nuke.png', '.'), 
+        ('rescale.png', '.'),  
+        ('staralign.png', '.'),          
         ('LExtract.png', '.'),
         ('LInsert.png', '.'),
         ('slot1.png', '.'),
         ('slot0.png', '.'),
         ('slot2.png', '.'),
-        ('mosaic.png', '.'),
         ('hdr.png', '.'),
         ('slot3.png', '.'),
         ('slot4.png', '.'),
@@ -63,11 +92,9 @@ a = Analysis(
         ('slot6.png', '.'),
         ('slot7.png', '.'),
         ('slot8.png', '.'),
-        ('slot9.png', '.'),  
-        ('rescale.png', '.'),  
-        ('staralign.png', '.'),
-        ('pixelmath.png', '.'),   
-        ('histogram.png', '.'),     
+        ('slot9.png', '.'),    
+        ('pixelmath.png', '.'),
+        ('histogram.png', '.'),   
         ('invert.png', '.'),
         ('fliphorizontal.png', '.'),
         ('flipvertical.png', '.'),
@@ -86,7 +113,8 @@ a = Analysis(
         ('rgbcombo.png', '.'),
         ('copyslot.png', '.'),
         ('rgbextract.png', '.'),        
-        ('hubble.png', '.'), ('staradd.png', '.'),('starnet.png', '.'),('clahe.png', '.'),('morpho.png', '.'),('whitebalance.png', '.'),('neutral.png', '.'),('green.png', '.'),
+        ('hubble.png', '.'), 
+        ('staradd.png', '.'),('starnet.png', '.'),('clahe.png', '.'),('morpho.png', '.'),('whitebalance.png', '.'),('neutral.png', '.'),('green.png', '.'),
         ('imgs', 'imgs'),
         ('collage.png', '.'), 
         ('annotated.png', '.'), 
@@ -94,10 +122,15 @@ a = Analysis(
         ('font.png', '.'), 
         ('spinner.gif', '.'), 
         ('cvs.png', '.'), 
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
-        ('/Users/franklinmarek/cosmicclarity/env/lib/python3.12/site-packages/astropy/CITATION', 'astropy')
-    ] + dask_data+ photutils_data,
-    hiddenimports=[] + photutils_submodules,
+        (directory + '/venv/lib/python3.12/site-packages/astroquery/simbad/data', 'astroquery/simbad/data'), 
+        (directory + '/venv/lib/python3.12/site-packages/astropy/CITATION', 'astropy'),
+
+        # Possibly explicitly add _version.py if physically present at top-level:
+        # (Adjust path if needed.)
+        (directory + '/venv/lib/python3.12/site-packages/_version.py', '.'),
+
+    ] + dask_data + photutils_data,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -105,6 +138,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -113,7 +147,6 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    runtime_hooks=['path/to/numba_runtime_hook.py'],
     name='setiastrosuitemac',
     debug=False,
     bootloader_ignore_signals=False,
@@ -121,15 +154,19 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Enable terminal console
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['/Users/franklinmarek/cosmicclarity/astrosuite.icns'],
-    onefile=True  # Enable single-file mode
+    icon=directory + '/astrosuite.icns',
+    onefile=True
 )
 
-
-
+#app = BUNDLE(
+#    exe,  # ✅ FIXED: Include the `exe` entry
+#    name='SetiAstroSuite.app',
+#    icon='astrosuite.icns',
+#    bundle_identifier=None  # Optional: Change to match your app
+#)
