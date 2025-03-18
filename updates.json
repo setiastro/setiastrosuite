@@ -5,5 +5,5 @@
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.10/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.10/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Added stacking algorithm code for seestar in mosaic master to stack them more than place them like traditional mosaics"
+  "notes": "Added stacking algorithm code for seestar in mosaic master to stack them more than place them like traditional mosaics This also fully utilizes the Ra and Dec header names, so full WCS isnt necessary anymore"
 }
