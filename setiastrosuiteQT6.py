@@ -42,7 +42,7 @@ from scipy.optimize import curve_fit
 import exifread
 from numba_utils import *
 import astroalign
-print("[DEBUG] astroalign version:", astroalign.__version__)
+
 import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.9"
+VERSION = "2.12.10"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -11473,7 +11473,7 @@ class MosaicMasterDialog(QDialog):
                     self.status_label.setText("Affine alignment computed. Warping image...")
                     QApplication.processEvents()
                     # Warp the reprojected image with the computed 2x3 transform.
-                    affine_aligned = cv2.warpAffine(reprojected, transform_matrix, (mosaic_width, mosaic_height), flags=cv2.INTER_LINEAR)
+                    affine_aligned = cv2.warpAffine(reprojected, transform_matrix, (mosaic_width, mosaic_height), flags=cv2.INTER_LANCZOS4)
                     print("Affine aligned image shape:", affine_aligned.shape)
                     print("Affine aligned image mean:", np.mean(affine_aligned))
                     aligned = affine_aligned
@@ -11579,7 +11579,7 @@ class MosaicMasterDialog(QDialog):
             new_gray,
             rough_matrix,
             (w_m, h_m),   # (width, height)
-            flags=cv2.INTER_LINEAR
+            flags=cv2.INTER_LANCZOS4
         )
 
         # ------------------------------------------
@@ -11613,6 +11613,7 @@ class MosaicMasterDialog(QDialog):
         try:
             refine_obj, (src_pts, dst_pts) = astroalign.find_transform(
                 warped_new_ma, mosaic_ma,
+                max_control_points=100,
                 detection_sigma=2
             )
             print(f"[DEBUG] Overlap-limited astroalign success with {len(src_pts)} stars.")
@@ -11644,6 +11645,9 @@ class MosaicMasterDialog(QDialog):
         as the initial mosaic. Then, sort and add images by increasing distance from the mosaic center.
         If WCS information is present in the header, a rough pre-alignment is computed before refining
         with astroalign.find_transform. After processing all images, failed images are reattempted.
+
+        Final image is produced by summing all warped images and dividing by the pixel counts 
+        (sum-then-divide approach).
         """
 
         if len(self.loaded_images) == 0:
@@ -11654,6 +11658,10 @@ class MosaicMasterDialog(QDialog):
         self.spinnerLabel.show()
         self.spinnerMovie.start()
         QApplication.processEvents()
+
+        # We define how many pixels to zero out on each edge AFTER warp
+        POST_WARP_BORDER = 5
+        THRESHOLD_RATIO = 0.8  # if new pixel < 0.5 * mosaic pixel, skip it
 
         # -----------------------------------------------------
         # Helper: Extract the world-coordinate center from an image header
@@ -11684,13 +11692,10 @@ class MosaicMasterDialog(QDialog):
             Expects a 2D image; if 3D, we average over channels.
             You might need to tweak fwhm/threshold for your data.
             """
-            # If image is color (3D), convert to mono
             if image.ndim == 3:
                 image = np.mean(image, axis=2)
 
-            # Estimate background stats
             mean_val, median_val, std_val = sigma_clipped_stats(image, sigma=3.0)
-
             daofind = DAOStarFinder(fwhm=3.0, threshold=5.0 * std_val)
             sources = daofind(image - median_val)
 
@@ -11715,7 +11720,7 @@ class MosaicMasterDialog(QDialog):
             return
 
         centers = np.array(centers)
-        avg_center = np.mean(centers, axis=0)  # could also do median
+        avg_center = np.mean(centers, axis=0)  # or np.median if you prefer
 
         # -----------------------------------------------------
         # Sort valid items by distance from average center
@@ -11731,8 +11736,7 @@ class MosaicMasterDialog(QDialog):
             print(f"[DEBUG] Sorted valid item: {item['path']}")
 
         # -----------------------------------------------------
-        # Select from the top few “closest to center,” pick the one
-        # with the most stars as the base item.
+        # Select from the top few “closest to center,” pick the one with the most stars as the base.
         # -----------------------------------------------------
         top_n = 5
         candidate_subset = valid_items[:top_n]
@@ -11747,7 +11751,6 @@ class MosaicMasterDialog(QDialog):
                 best_item = candidate
 
         if best_item is None:
-            # Fallback if no star-rich candidate found
             best_item = valid_items[0]
 
         base_item = best_item
@@ -11756,8 +11759,15 @@ class MosaicMasterDialog(QDialog):
         # -----------------------------------------------------
         # Reorder loaded_images so that valid (WCS) items come first
         # -----------------------------------------------------
-        remaining_items = [item for item in self.loaded_images if item not in valid_items]
+        remaining_items = []
+        valid_paths = {v["path"] for v in valid_items}  # set of valid item paths
+
+        for item in self.loaded_images:
+            if item["path"] not in valid_paths:
+                remaining_items.append(item)
+
         self.loaded_images = valid_items + remaining_items
+
 
         # -----------------------------------------------------
         # Helper: Crop a 5-pixel border from each edge
@@ -11767,12 +11777,12 @@ class MosaicMasterDialog(QDialog):
                 h, w, c = img.shape
                 if h <= 10 or w <= 10:
                     return np.empty((0, 0, c), dtype=img.dtype)
-                return img[5:-5, 5:-5, :]
+                return img[10:-10, 10:-10, :]
             else:
                 h, w = img.shape
                 if h <= 10 or w <= 10:
                     return np.empty((0, 0), dtype=img.dtype)
-                return img[5:-5, 5:-5]
+                return img[10:-10, 10:-10]
 
         # -----------------------------------------------------
         # Helper: Convert image to float32 and normalize if needed
@@ -11818,38 +11828,170 @@ class MosaicMasterDialog(QDialog):
                 print(f"Rough transform skipped: {e}")
                 return None
 
+        def compute_rough_transform_seestar(new_header, ref_header):
+            """
+            Builds a 2×3 transform matrix (rotation + translation) that
+            roughly aligns an image with RA/DEC, pixel scale, and focal length
+            to a reference image with the same kind of data.
+
+            Required header fields (example):
+            new_header["RA"]       (degrees)
+            new_header["DEC"]      (degrees)
+            new_header["XPIXSZ"]   (microns)
+            new_header["YPIXSZ"]   (microns)
+            new_header["FOCALLEN"] (mm)
+            Similarly for ref_header.
+
+            Returns:
+            A 2×3 np.float32 array suitable for cv2.warpAffine,
+            or None if missing data or something fails.
+            """
+
+            # 1) Parse required fields from new_header
+            try:
+                ra_new_deg = float(new_header["RA"])       # degrees
+                dec_new_deg = float(new_header["DEC"])     # degrees
+                xpixsz_new = float(new_header["XPIXSZ"])   # microns
+                ypixsz_new = float(new_header["YPIXSZ"])   # microns
+                flen_new   = float(new_header["FOCALLEN"]) # mm
+            except KeyError as e:
+                print(f"[DEBUG] new_header missing key {e}. No rough transform.")
+                return None
+            except Exception as e:
+                print(f"[DEBUG] parse error in new_header => {e}")
+                return None
+
+            # 2) Parse required fields from ref_header
+            try:
+                ra_ref_deg = float(ref_header["RA"])
+                dec_ref_deg = float(ref_header["DEC"])
+                xpixsz_ref = float(ref_header["XPIXSZ"])
+                ypixsz_ref = float(ref_header["YPIXSZ"])
+                flen_ref   = float(ref_header["FOCALLEN"])
+            except KeyError as e:
+                print(f"[DEBUG] ref_header missing key {e}. No rough transform.")
+                return None
+            except Exception as e:
+                print(f"[DEBUG] parse error in ref_header => {e}")
+                return None
+
+            # 3) Compute average arcsec/pixel for each image
+            #    arcsec_per_pix = 206265 * (XPIXSZ [um]) / (FOCALLEN [mm])
+            #    (assuming 1 mm = 1000 um)
+            #    If you want to be more precise, you might average XPIXSZ and YPIXSZ,
+            #    or handle them separately if the camera has rectangular pixels.
+            def arcsec_per_pixel(xpixsz, flen):
+                return 206265.0 * (xpixsz / 1000.0) / flen
+
+            scale_new = arcsec_per_pixel(xpixsz_new, flen_new)
+            scale_ref = arcsec_per_pixel(xpixsz_ref, flen_ref)
+
+            # For simplicity, let's assume the "reference" image defines the final scale.
+            # If the images have different scales, we can do a ratio of scales => ~some "zoom."
+            # Here we assume they are close enough, or you can do scale = scale_ref / scale_new
+            # to get a small difference in pixel scale if needed.
+            scale_ratio = scale_ref / scale_new  # how many ref pixels = 1 new pixel
+
+            # 4) Compute difference in RA/DEC in arcseconds
+            #    RA/DEC difference in degrees => multiply by 3600 to get arcseconds
+            #    Then convert to pixel shift in reference coordinates.
+            d_ra_deg  = (ra_new_deg  - ra_ref_deg)
+            d_dec_deg = (dec_new_deg - dec_ref_deg)
+
+            # For small fields, we can do a simple approximation ignoring spherical geometry:
+            d_ra_arcsec  = d_ra_deg  * 3600.0 * np.cos(np.radians(dec_ref_deg))  # cos(dec) if you want
+            d_dec_arcsec = d_dec_deg * 3600.0
+
+            # If you want a more precise approach, you'd do a spherical trig approach,
+            # but for small fields, this is usually good enough.
+
+            # 5) Convert arcseconds => pixel shift in "reference" image coords
+            dx_pix = d_ra_arcsec  / scale_ref
+            dy_pix = - d_dec_arcsec / scale_ref
+            # Note: we do "dy_pix = -d_dec_arcsec" if we assume +DEC => "up" in the image.
+            # You may need to invert or swap RA/DEC sign depending on your orientation.
+
+            # 6) Combine the scale ratio (if needed) and shift into a 2×3 transform.
+            #    If you want to guess rotation from the difference in rotation angles,
+            #    you can do that here. For now, we do no rotation => angle=0 => cos=1, sin=0.
+            angle_rad = 0.0
+            cos_a = np.cos(angle_rad)
+            sin_a = np.sin(angle_rad)
+
+            # scale_ratio is for "zoom," if you want to handle that.
+            # If you prefer no scale difference, set scale_ratio = 1.0
+            # or if the difference is small, ignore it.
+            # scale_ratio = 1.0
+
+            M = np.array([
+                [scale_ratio*cos_a, -scale_ratio*sin_a, dx_pix],
+                [scale_ratio*sin_a,  scale_ratio*cos_a, dy_pix]
+            ], dtype=np.float32)
+
+            print(f"[DEBUG] Seestar rough transform => dx_pix={dx_pix:.2f}, dy_pix={dy_pix:.2f}, scale={scale_ratio:.3f}")
+            return M
+
         # -----------------------------------------------------
-        # 1) Prepare the initial mosaic from the base image
+        # 1) Initialize mosaic_sum/mosaic_count from the base image
         # -----------------------------------------------------
         base_img = ensure_float32_in_01(base_item["image"])
         if base_item["path"].lower().endswith(('.fits', '.fit')):
-            if base_img.ndim == 2 and "header" in base_item and base_item["header"] is not None and base_item["header"].get('BAYERPAT'):
+            if (base_img.ndim == 2 
+                and "header" in base_item 
+                and base_item["header"] is not None 
+                and base_item["header"].get('BAYERPAT')):
                 self.status_label.setText(f"Debayering {base_item['path']}")
                 QApplication.processEvents()
                 base_img = self.debayer_image(base_img, base_item["path"], base_item["header"])
                 print(f"[DEBUG] Finished debayering base image: {base_item['path']}")
-        mosaic = crop_5px_border(base_img)
-        if mosaic.size == 0:
+
+        base_img = crop_5px_border(base_img)
+        if base_img.size == 0:
             QMessageBox.warning(self, "Crop Error", "Initial image is too small after cropping.")
             return
-        if mosaic.ndim == 3:
-            mosaic_weight = np.any(mosaic > 0, axis=2).astype(np.float32)
+    
+        base_median = np.median(base_img)
+
+        # mosaic_sum holds the sum of pixel intensities
+        mosaic_sum = base_img.astype(np.float32, copy=True)
+        # mosaic_count tracks how many images contributed at each pixel
+        if mosaic_sum.ndim == 3:
+            # For color: count “contributed” if any channel is >0
+            contrib_mask = np.any(mosaic_sum > 0, axis=2)
+            mosaic_count = np.zeros_like(mosaic_sum, dtype=np.float32)
+            for c in range(mosaic_sum.shape[2]):
+                mosaic_count[..., c][contrib_mask] = 1.0
         else:
-            mosaic_weight = (mosaic > 0).astype(np.float32)
-        mosaic_gray = np.mean(mosaic, axis=2) if mosaic.ndim == 3 else mosaic
+            contrib_mask = (mosaic_sum > 0)
+            mosaic_count = np.zeros_like(mosaic_sum, dtype=np.float32)
+            mosaic_count[contrib_mask] = 1.0
+
+        # We’ll use a helper that returns a mono “view” for alignment:
+        def get_current_mosaic_gray():
+            """Return current mosaic as a float32 array in [0..1], averaged if color."""
+            with np.errstate(divide='ignore', invalid='ignore'):
+                stacked = mosaic_sum / np.maximum(mosaic_count, 1e-6)
+            # If color, reduce to mono for astroalign
+            if stacked.ndim == 3:
+                return np.mean(stacked, axis=2).astype(np.float32)
+            else:
+                return stacked
 
         self.status_label.setText("Starting alignment of subsequent images...")
         QApplication.processEvents()
 
-        # --- Helper: Process alignment for one image ---
+        # --- Helper: Process alignment for one image, then accumulate into mosaic_sum/count ---
         def process_alignment(item):
-            nonlocal mosaic, mosaic_weight, mosaic_gray
+            nonlocal mosaic_sum, mosaic_count
+
             print(f"[DEBUG] Aligning image: {item['path']}")
+
             try:
                 new_img = item["image"].astype(np.float32)
                 print(f"[DEBUG] new_img initial shape={new_img.shape}, dtype={new_img.dtype}, "
                     f"min={np.min(new_img):.3f}, max={np.max(new_img):.3f}")
 
+                # Debayer if needed
                 if item["path"].lower().endswith(('.fits', '.fit')):
                     if (new_img.ndim == 2 
                         and "header" in item 
@@ -11861,75 +12003,80 @@ class MosaicMasterDialog(QDialog):
                             f"min={np.min(new_img):.3f}, max={np.max(new_img):.3f}")
 
                 new_img = crop_5px_border(new_img)
-                print(f"[DEBUG] After crop_5px_border, new_img shape={new_img.shape}, dtype={new_img.dtype}")
-
                 if new_img.size == 0:
                     print(f"[DEBUG] new_img is empty after cropping => skip.")
                     self.status_label.setText(f"Skipping {item['path']} (too small after crop).")
                     QApplication.processEvents()
                     return False
 
-                # Ensure channel consistency
-                print(f"[DEBUG] mosaic shape={mosaic.shape}, dtype={mosaic.dtype}, "
-                    f"mosaic range=({np.min(mosaic):.3f}, {np.max(mosaic):.3f})")
-                if mosaic.ndim == 3 and new_img.ndim == 2:
+                # If mono:
+                self.status_label.setText(f"Normalizing {item['path']}.")
+                QApplication.processEvents()
+                if new_img.ndim == 2:
+                    new_img = stretch_mono_image(new_img, target_median=base_median, normalize=False, apply_curves=False, curves_boost=0.0)
+
+                else:
+                    # color approach - you might do a single ratio or call your stretch_color_image
+                    new_img = stretch_color_image(new_img, target_median=base_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0)
+
+
+                # If mosaic is color and new_img is mono, expand new_img
+                # But remember, mosaic_sum is our "canvas"
+                if mosaic_sum.ndim == 3 and new_img.ndim == 2:
                     print("[DEBUG] Expanding new_img from 2D => 3D to match mosaic channels.")
-                    new_img = np.repeat(new_img[:, :, np.newaxis], mosaic.shape[2], axis=2)
-                elif mosaic.ndim == 2 and new_img.ndim == 3:
-                    print("[DEBUG] Converting new_img 3D => 2D by averaging channels to match mosaic.")
-                    new_img = np.mean(new_img, axis=2)
+                    new_img = np.repeat(new_img[:, :, np.newaxis], mosaic_sum.shape[2], axis=2)
+                elif mosaic_sum.ndim == 2 and new_img.ndim == 3:
+                    print("[DEBUG] new_img is color but mosaic is mono => average new_img channels.")
+                    new_img = np.mean(new_img, axis=2, dtype=np.float32)
 
-                mosaic_gray = np.mean(mosaic, axis=2) if mosaic.ndim == 3 else mosaic
-                new_gray = np.mean(new_img, axis=2) if new_img.ndim == 3 else new_img
+                # Create the grayscale for astroalign from mosaic_sum/mosaic_count
+                mosaic_gray = get_current_mosaic_gray()
 
-                # Debug info about mosaic_gray and new_gray
-                print(f"[DEBUG] mosaic_gray shape={mosaic_gray.shape}, range=({mosaic_gray.min():.3f}, {mosaic_gray.max():.3f})")
-                print(f"[DEBUG] new_gray shape={new_gray.shape}, range=({new_gray.min():.3f}, {new_gray.max():.3f})")
+                new_gray = new_img
+                if new_gray.ndim == 3:
+                    new_gray = np.mean(new_gray, axis=2)
 
-                # Pre-stretch
+                # Optional: mild stretch to help astroalign
                 mosaic_gray = stretch_mono_image(mosaic_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
                 new_gray = stretch_mono_image(new_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
-                print(f"[DEBUG] After stretch, mosaic_gray min={mosaic_gray.min():.3f}, max={mosaic_gray.max():.3f}")
-                print(f"[DEBUG] After stretch, new_gray min={new_gray.min():.3f}, max={new_gray.max():.3f}")
 
-                # Attempt Rough Alignment using WCS if available
+                # Attempt rough transform via WCS
                 rough_matrix = None
-                if ("header" in item and item["header"] is not None 
+                if ("header" in item and item["header"] is not None
                     and "CTYPE1" in item["header"] and "CTYPE2" in item["header"]):
-                    print("[DEBUG] Trying compute_rough_transform (WCS-based).")
+                    # Normal WCS approach
                     rough_matrix = compute_rough_transform(item["header"], base_item["header"])
                     if rough_matrix is not None:
-                        print("[DEBUG] Rough transform matrix:\n", rough_matrix)
-
-                mosaic_gray = mosaic_gray.astype(np.float32)
-                new_gray = new_gray.astype(np.float32)
+                        print("[DEBUG] WCS-based rough transform:\n", rough_matrix)
+                else:
+                    # Fallback: check if we have RA,DEC,XPIXSZ,FOCALLEN, etc.
+                    rough_matrix = compute_rough_transform_seestar(item["header"], base_item["header"])
+                    if rough_matrix is not None:
+                        print("[DEBUG] Seestar rough transform:\n", rough_matrix)
 
                 self.status_label.setText(f"Astroaligning for {item['path']}...")
                 QApplication.processEvents()
 
-                transform_obj = None
+                # Find transform
                 transform_matrix = None
-                src_pts = None
-                dst_pts = None
-
                 try:
-                    print("[DEBUG] Calling astroalign.find_transform on full frames.")
-                    new_gray = np.ascontiguousarray(new_gray, dtype=np.float32)
-                    mosaic_gray = np.ascontiguousarray(mosaic_gray, dtype=np.float32)
-                    new_gray = new_gray.astype(np.float64, copy=False)
-                    mosaic_gray = mosaic_gray.astype(np.float64, copy=False)
-
-                    transform_obj, (src_pts, dst_pts) = astroalign.find_transform(new_gray, mosaic_gray, max_control_points=200,detection_sigma=4, min_area=4)
+                    # astroalign wants double precision
+                    transform_obj, (src_pts, dst_pts) = astroalign.find_transform(
+                        new_gray.astype(np.float64, copy=False),
+                        mosaic_gray.astype(np.float64, copy=False),
+                        max_control_points=100,
+                        detection_sigma=4,
+                        min_area=5
+                    )
                     transform_matrix = transform_obj.params[0:2, :].astype(np.float32)
                     print(f"[DEBUG] Astroalign success with {len(src_pts)} stars. transform_matrix:\n{transform_matrix}")
 
                 except Exception as e:
-                    # If astroalign fails
                     print(f"[DEBUG] astroalign.find_transform failed: {e}")
                     self.status_label.setText(f"Alignment failed: {e}")
                     QApplication.processEvents()
 
-                    # If we have rough_matrix, do the overlap-limited approach
+                    # Fallback if rough_matrix is available
                     if rough_matrix is not None:
                         print("[DEBUG] Attempting refine_via_overlap fallback with rough_matrix.")
                         transform_matrix = self.refine_via_overlap(new_gray, mosaic_gray, rough_matrix)
@@ -11946,25 +12093,15 @@ class MosaicMasterDialog(QDialog):
                     print("[DEBUG] transform_matrix is None => returning False")
                     return False
 
-                if transform_obj is not None:
-                    self.status_label.setText(f"Astroalign success for {item['path']} ({len(src_pts)} stars)")
-                    QApplication.processEvents()
-                else:
-                    self.status_label.setText(f"Using rough alignment for {item['path']}")
-                    QApplication.processEvents()
+                self.status_label.setText(f"Astroalign success for {item['path']}")
+                QApplication.processEvents()
 
-                print(f"[DEBUG] mosaic shape={mosaic.shape}, mosaic dtype={mosaic.dtype}")
-                if mosaic.ndim == 3:
-                    h_m, w_m, _ = mosaic.shape
-                else:
-                    h_m, w_m = mosaic.shape
-
-                # Debug the transform_matrix
-                print("[DEBUG] transform_matrix for warp:\n", transform_matrix)
+                # Warp the new image onto mosaic_sum's coordinate system
+                h_m, w_m = mosaic_sum.shape[:2]
+                new_h, new_w = new_img.shape[:2]
 
                 mosaic_corners = np.array([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]], dtype=np.float32)
-                h_new, w_new = new_gray.shape
-                new_img_corners = np.array([[0, 0], [w_new, 0], [0, h_new], [w_new, h_new]], dtype=np.float32)
+                new_img_corners = np.array([[0, 0], [new_w, 0], [0, new_h], [new_w, new_h]], dtype=np.float32)
                 ones = np.ones((4, 1), dtype=np.float32)
                 new_img_corners_hom = np.hstack([new_img_corners, ones])
 
@@ -11972,6 +12109,7 @@ class MosaicMasterDialog(QDialog):
                 all_corners = np.vstack([mosaic_corners, warped_corners])
                 min_xy = np.min(all_corners, axis=0)
                 max_xy = np.max(all_corners, axis=0)
+
                 margin = 10
                 new_canvas_width = int(np.ceil(max_xy[0] - min_xy[0])) + margin
                 new_canvas_height = int(np.ceil(max_xy[1] - min_xy[1])) + margin
@@ -11982,135 +12120,183 @@ class MosaicMasterDialog(QDialog):
                 print(f"[DEBUG] new_canvas_width={new_canvas_width}, new_canvas_height={new_canvas_height}")
                 print(f"[DEBUG] shift={shift}, shift_int={shift_int}, y0={y0}, x0={x0}")
 
-                if mosaic.ndim == 3:
-                    channels = mosaic.shape[2]
-                    new_canvas = np.zeros((new_canvas_height, new_canvas_width, channels), dtype=np.float32)
+                # Expand mosaic_sum/mosaic_count to fit new canvas if needed
+                expanded_sum = None
+                expanded_count = None
+
+                if mosaic_sum.ndim == 3:
+                    channels = mosaic_sum.shape[2]
+                    expanded_sum = np.zeros((new_canvas_height, new_canvas_width, channels), dtype=np.float32)
+                    expanded_count = np.zeros_like(expanded_sum, dtype=np.float32)
+                    # Copy existing mosaic_sum/mosaic_count
+                    expanded_sum[y0:y0+h_m, x0:x0+w_m, :] = mosaic_sum
+                    expanded_count[y0:y0+h_m, x0:x0+w_m, :] = mosaic_count
                 else:
-                    new_canvas = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+                    expanded_sum = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+                    expanded_count = np.zeros_like(expanded_sum, dtype=np.float32)
+                    expanded_sum[y0:y0+h_m, x0:x0+w_m] = mosaic_sum
+                    expanded_count[y0:y0+h_m, x0:x0+w_m] = mosaic_count
 
-                new_weight = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
-
-                # Copy mosaic into new_canvas
-                new_canvas[y0:y0+h_m, x0:x0+w_m, ...] = mosaic
-                new_weight[y0:y0+h_m, x0:x0+w_m] = mosaic_weight
-
+                # Adjust transform for the shift
                 new_transform = transform_matrix.copy()
                 new_transform[0, 2] += shift[0]
                 new_transform[1, 2] += shift[1]
 
-                # Attempt warpAffine
+                # Warp the new_img
                 try:
-                    print("[DEBUG] Attempting cv2.warpAffine with new_transform:\n", new_transform)
                     warped_new = cv2.warpAffine(
-                        new_img, 
-                        new_transform, 
-                        (new_canvas_width, new_canvas_height), 
-                        flags=cv2.INTER_LINEAR
+                        new_img,
+                        new_transform,
+                        (new_canvas_width, new_canvas_height),
+                        flags=cv2.INTER_LANCZOS4
                     )
                 except cv2.error as cv2_err:
-                    # catch OpenCV-level errors
                     print(f"[OpenCV] warpAffine error => {cv2_err}")
                     return False
 
-                print(f"[DEBUG] warped_new shape={warped_new.shape}, dtype={warped_new.dtype}, "
-                    f"min={np.min(warped_new):.3f}, max={np.max(warped_new):.3f}")
+                # 1) Build the "border_mask" that excludes the outer POST_WARP_BORDER region
+                h_w, w_w = warped_new.shape[:2]
+                border_mask = np.ones((h_w, w_w), dtype=bool)
+                b = POST_WARP_BORDER
+                border_mask[:b, :] = False
+                border_mask[-b:, :] = False
+                border_mask[:, :b] = False
+                border_mask[:, -b:] = False
 
-                if warped_new.ndim == 3:
-                    weight_new = np.any(warped_new > 0, axis=2).astype(np.float32)
+                # 2) If color, define "valid_mask" as "any channel > 0"
+                #    If mono, define "valid_mask" as "warped_new > 0"
+                if warped_new.ndim == 2:
+                    # MONO
+                    valid_mask = (warped_new > 0)
                 else:
-                    weight_new = (warped_new > 0).astype(np.float32)
+                    # COLOR
+                    valid_mask = np.any(warped_new > 0, axis=2)
 
-                # Combine into mosaic
-                if warped_new.ndim == 3:
-                    mask_m = np.any(new_canvas > 0, axis=2)
-                    mask_n = np.any(warped_new > 0, axis=2)
-                    both = mask_m & mask_n
-                    only_m = mask_m & (~mask_n)
-                    only_n = mask_n & (~mask_m)
-                    combined = np.zeros_like(new_canvas)
-                    val_m = new_canvas[both]
-                    val_n = warped_new[both]
-                    condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
-                    picked_vals = np.where(condition, np.maximum(val_m, val_n), (val_m + val_n) / 2.0)
-                    combined[both] = picked_vals
-                    combined[only_m] = new_canvas[only_m]
-                    combined[only_n] = warped_new[only_n]
+                # 3) Build "mosaic_gray" = the grayscale of (expanded_sum / expanded_count)
+                #    so we know "the mosaic pixel below it" at each location.
+                mosaic_gray = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
+
+                # For MONO mosaic:
+                if expanded_sum.ndim == 2:
+                    # Where expanded_count>0, mosaic pixel = sum / count
+                    nonzero_mask = (expanded_count > 0)
+                    mosaic_gray[nonzero_mask] = expanded_sum[nonzero_mask] / expanded_count[nonzero_mask]
                 else:
-                    mask_m = (new_canvas > 0)
-                    mask_n = (warped_new > 0)
-                    both = mask_m & mask_n
-                    only_m = mask_m & (~mask_n)
-                    only_n = mask_n & (~mask_m)
-                    combined = np.zeros_like(new_canvas)
-                    val_m = new_canvas[both]
-                    val_n = warped_new[both]
-                    condition = (val_n < 0.75 * val_m) | (val_m < 0.75 * val_n)
-                    picked_vals = np.where(condition, np.maximum(val_m, val_n), (val_m + val_n) / 2.0)
-                    combined[both] = picked_vals
-                    combined[only_m] = new_canvas[only_m]
-                    combined[only_n] = warped_new[only_n]
+                    # COLOR mosaic => average across channels to get a single grayscale
+                    # sum_of_channels / count_of_channels
+                    # We do: mosaic_gray = (sum across c of expanded_sum) / (sum across c of expanded_count)
+                    sum_channels = np.sum(expanded_sum, axis=2)
+                    sum_counts = np.sum(expanded_count, axis=2)
+                    nonzero_mask = (sum_counts > 0)
+                    mosaic_gray[nonzero_mask] = sum_channels[nonzero_mask] / sum_counts[nonzero_mask]
 
-                mosaic = combined
-                mosaic_weight = np.where((new_weight + weight_new) > 0, 1.0, 0.0)
+                # 4) Build new_gray for the warped image
+                if warped_new.ndim == 2:
+                    # MONO
+                    new_gray = warped_new
+                else:
+                    # COLOR => average channels
+                    new_gray = np.mean(warped_new, axis=2)
+
+                # 5) Now define the "brightness_mask":
+                #    skip if new_gray < THRESHOLD_RATIO * mosaic_gray
+                #    => only add if new_gray >= 0.5 * mosaic_gray
+                brightness_mask = (new_gray >= THRESHOLD_RATIO * mosaic_gray)
+
+                # 6) Combine them all
+                combined_mask = border_mask & valid_mask & brightness_mask
+
+                # 7) Finally, add only those pixels
+                if warped_new.ndim == 2:
+                    # MONO
+                    expanded_sum[combined_mask] += warped_new[combined_mask]
+                    expanded_count[combined_mask] += 1.0
+                else:
+                    # COLOR => do it per channel
+                    for c in range(warped_new.shape[2]):
+                        expanded_sum[..., c][combined_mask] += warped_new[..., c][combined_mask]
+                        expanded_count[..., c][combined_mask] += 1.0
+
+                # 8) Update mosaic_sum/mosaic_count
+                mosaic_sum = expanded_sum
+                mosaic_count = expanded_count
+
                 self.status_label.setText(f"Integrated image: {item['path']}")
                 QApplication.processEvents()
-
-                if mosaic.ndim == 3:
-                    mosaic_gray = np.mean(mosaic, axis=2)
-                else:
-                    mosaic_gray = mosaic
 
                 print("[DEBUG] process_alignment done successfully for this image.")
                 return True
 
             except Exception as e:
                 print(f"[DEBUG] process_alignment error => {e}")
-                # ============== FULL TRACEBACK HERE ===============
                 import traceback
                 traceback.print_exc()
                 return False
 
-
-        # --- Process images once ---
+        # ---------------------------------------------------------
+        # Process each subsequent image once
+        # ---------------------------------------------------------
         failed_items = []
-        for item in self.loaded_images[1:]:
+        for item in self.loaded_images:
+            if item is base_item:
+                continue
             success = process_alignment(item)
             if not success:
                 failed_items.append(item)
 
-        # --- Reattempt failed images (max 1 additional attempt) ---
+        # ---------------------------------------------------------
+        # Reattempt failed images (max 1 additional attempt)
+        # ---------------------------------------------------------
         max_retries = 1
         attempt = 1
         while failed_items and attempt <= max_retries:
             self.status_label.setText(f"Reattempting alignment for {len(failed_items)} images (Attempt {attempt})")
             print(f"Reattempting alignment for {len(failed_items)} images (Attempt {attempt})")
             QApplication.processEvents()
+
             current_failures = []
             for item in failed_items:
                 success = process_alignment(item)
                 if not success:
                     current_failures.append(item)
+
             failed_items = current_failures
             attempt += 1
 
         self.status_label.setText("All alignment attempts complete.")
         QApplication.processEvents()
 
-        max_val = np.max(mosaic)
-        if max_val > 0:
-            mosaic /= max_val
+        # ---------------------------------------------------------
+        # Finally, build the average mosaic = mosaic_sum / mosaic_count
+        # ---------------------------------------------------------
+        with np.errstate(divide='ignore', invalid='ignore'):
+            final_mosaic = np.zeros_like(mosaic_sum, dtype=np.float32)
+            if final_mosaic.ndim == 2:
+                nonzero = (mosaic_count > 0)
+                final_mosaic[nonzero] = mosaic_sum[nonzero] / mosaic_count[nonzero]
+            else:
+                # color
+                for c in range(final_mosaic.shape[2]):
+                    chan_nonzero = (mosaic_count[..., c] > 0)
+                    final_mosaic[..., c][chan_nonzero] = (
+                        mosaic_sum[..., c][chan_nonzero] 
+                        / mosaic_count[..., c][chan_nonzero]
+                    )
 
-        self.final_mosaic = mosaic
+        # Optional: you could do a final normalization
+        max_val = np.max(final_mosaic)
+        if max_val > 0:
+            final_mosaic /= max_val
+
+        self.final_mosaic = final_mosaic
         self.spinnerMovie.stop()
         self.spinnerLabel.hide()
-        self.status_label.setText("Seestar Mode alignment complete.")
+        self.status_label.setText("Seestar Mode alignment (sum/divide) complete.")
         QApplication.processEvents()
 
         display_image = self.stretch_for_display(self.final_mosaic)
         mosaic_win = MosaicPreviewWindow(display_image, title="Robot Telescope Mosaic", parent=self)
         mosaic_win.show()
-
-
 
     # ---------- Star alignment using triangle matching ----------
 
@@ -12196,7 +12382,7 @@ class MosaicMasterDialog(QDialog):
                 return None
             warped_image = cv2.warpPerspective(affine_aligned, H_refined,
                                                 (affine_aligned.shape[1], affine_aligned.shape[0]),
-                                                flags=cv2.INTER_LINEAR)
+                                                flags=cv2.INTER_LANCZOS4)
             return (warped_image, inliers)
         elif method == "Polynomial Warp Based Transform":
             self.status_label.setText("Refinement: Computing Polynomial Warp based transform...")
@@ -12294,7 +12480,7 @@ class MosaicMasterDialog(QDialog):
             QApplication.processEvents()
         
         # Remap the image.
-        warped = cv2.remap(image, map_u, map_v, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        warped = cv2.remap(image, map_u, map_v, interpolation=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
         
         if status_label is not None:
             status_label.setText("Polynomial warp: Image warped.")
@@ -13818,7 +14004,7 @@ class StellarAlignmentDialog(QDialog):
         H, W = src.shape[:2]
         # Apply the computed transform to the target image.
         if tgt.ndim == 2:
-            warped_target = cv2.warpAffine(tgt, affine_transform, (W, H), flags=cv2.INTER_LINEAR)
+            warped_target = cv2.warpAffine(tgt, affine_transform, (W, H), flags=cv2.INTER_LANCZOS4)
         else:
             channels = []
             for i in range(tgt.shape[2]):
@@ -13826,7 +14012,7 @@ class StellarAlignmentDialog(QDialog):
                     tgt[:, :, i],
                     affine_transform,
                     (W, H),
-                    flags=cv2.INTER_LINEAR
+                    flags=cv2.INTER_LANCZOS4
                 )
                 channels.append(warped_channel)
             warped_target = np.stack(channels, axis=2)
@@ -14087,7 +14273,7 @@ class StarRegistrationThread(QThread):
     registration_complete = pyqtSignal(bool, str)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
-                 max_refinement_passes=5, shift_tolerance=0.2):
+                 max_refinement_passes=4, shift_tolerance=0.2):
         super().__init__()
         # Always store reference as normalized
         self.reference_image_path = os.path.normpath(reference_image_path)
@@ -14652,7 +14838,7 @@ class StarRegistrationThread(QThread):
                 image,
                 transform_matrix,
                 (w, h),
-                flags=cv2.INTER_LINEAR,
+                flags=cv2.INTER_LANCZOS4,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0
             )
@@ -14664,7 +14850,7 @@ class StarRegistrationThread(QThread):
                     image[:, :, i],
                     transform_matrix,
                     (w, h),
-                    flags=cv2.INTER_LINEAR,
+                    flags=cv2.INTER_LANCZOS4,
                     borderMode=cv2.BORDER_CONSTANT,
                     borderValue=0
                 )
@@ -19674,10 +19860,10 @@ class PolyGradientRemoval:
 
         if background.ndim == 3 and background.shape[2] == 3:
             # Resizing each channel efficiently without looping in Python
-            return np.stack([cv2.resize(background[..., c], (ow, oh), interpolation=cv2.INTER_LINEAR)
+            return np.stack([cv2.resize(background[..., c], (ow, oh), interpolation=cv2.INTER_LANCZOS4)
                             for c in range(3)], axis=-1)
         else:
-            return cv2.resize(background, (ow, oh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+            return cv2.resize(background, (ow, oh), interpolation=cv2.INTER_LANCZOS4).astype(np.float32)
     # ---------------------------------------------------------------
     # 7) Normalize
     # ---------------------------------------------------------------
@@ -20498,12 +20684,12 @@ class GradientRemovalDialog(QDialog):
         """
         if background.ndim == 2:
             # Single-channel (grayscale) input
-            return cv2.resize(background, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_LINEAR)
+            return cv2.resize(background, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_LANCZOS4)
         elif background.ndim == 3 and background.shape[2] == 1:
             # Ensure input shape is reduced to 2D for single-channel data
             background = background.squeeze()  # Remove singleton dimension
 
-        return cv2.resize(background, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_LINEAR)
+        return cv2.resize(background, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_LANCZOS4)
 
 
 
@@ -37714,8 +37900,7 @@ def stretch_mono_image(image, target_median, normalize=False, apply_curves=False
     # 7) Clip result [0..1]
     return np.clip(stretched_image, 0, 1)
 
-def stretch_color_image(image, target_median, linked=True,
-                        normalize=False, apply_curves=False, curves_boost=0.0):
+def stretch_color_image(image, target_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0):
     # If image is mono or single-channel, treat as mono
     if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
         mono = image.squeeze()
