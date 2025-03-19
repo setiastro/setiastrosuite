@@ -42,7 +42,7 @@ from scipy.optimize import curve_fit
 import exifread
 from numba_utils import *
 import astroalign
-
+import gzip
 import traceback
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.10"
+VERSION = "2.12.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1653,29 +1653,33 @@ class AstroEditingSuite(QMainWindow):
             self.hist_dialog.activateWindow()
             return
 
-        # Get the image from slot0 (or change slot as desired).
-        img = self.image_manager._images.get(0, None)
+        # Get the image from the active slot instead of slot 0.
+        current_slot = self.image_manager.current_slot
+        img = self.image_manager._images.get(current_slot, None)
         if img is None:
-            QMessageBox.warning(self, "No Image", "Slot 0 does not contain an image.")
+            QMessageBox.warning(self, "No Image", f"Slot {current_slot} does not contain an image.")
             return
         # If grayscale, replicate to 3 channels.
         if img.ndim == 2:
             img = np.stack([img]*3, axis=-1)
-        # Create the histogram dialog.
-        self.hist_dialog = HistogramDialog(img, self)
+        # Create the histogram dialog using the active slot's image.
+        self.hist_dialog = HistogramDialog(self.image_manager, self)
         
-        # Define a helper function to update the histogram when slot0 changes.
+        # Define a helper function to update the histogram when the active slot changes.
         def update_hist(slot, image, metadata):
-            if slot == 0:
+            # Update only if the changed slot is the current active slot.
+            if slot == self.image_manager.current_slot:
                 if image is None:
                     return
                 if image.ndim == 2:
                     image = np.stack([image]*3, axis=-1)
                 self.hist_dialog.updateHistogram(image)
+        
         # Connect the image_changed signal.
         self.image_manager.image_changed.connect(update_hist)
         
         self.hist_dialog.show()
+
 
     def rename_slot(self):
         """
@@ -4000,7 +4004,7 @@ class AstroEditingSuite(QMainWindow):
         file_path = event.mimeData().urls()[0].toLocalFile()
         
         # Check if the file is an image (you can customize this check as needed)
-        if file_path.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.xisf', '.fit', '.jpg', '.jpeg', '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+        if file_path.lower().endswith(('.png', '.tif', '.tiff', '.fits', '.xisf', '.fit', '.fit.gz', '.fits.gz', '.jpg', '.jpeg', '.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             try:
                 # Load the image into ImageManager
                 image, header, bit_depth, is_mono = load_image(file_path)
@@ -4220,7 +4224,7 @@ class AstroEditingSuite(QMainWindow):
         default_dir = self.settings.value("working_directory", "")
         """Open an image and load it into the ImageManager."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", default_dir, 
-                                            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
+                                            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.fits.gz *.fit.gz *.fz *.fz *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
         if file_path:
             try:
@@ -6396,67 +6400,63 @@ class MaskDisplayWindow(QDialog):
             print(f"MaskDisplayWindow: Error updating mask - {e}")
 
 class HistogramDialog(QDialog):
-    def __init__(self, image, parent=None):
+    def __init__(self, image_manager, parent=None):
         """
         Initialize the histogram dialog.
 
         Args:
-            image (np.ndarray): The image array (either grayscale or RGB).
-                                  Pixel values are expected to be in [0, 1].
+            image_manager (ImageManager): The manager providing the current image.
             parent: Parent widget.
         """
         super().__init__(parent)
         self.setWindowTitle("Histogram")
-        self.image = image  # The image from which to compute the histogram.
+        self.image_manager = image_manager
+        # Start with the active slot’s image:
+        self.image = image_manager.image  # image_manager.image returns the current slot's image.
         self.zoom_factor = 1.0  # 1.0 means 100%
         self.log_scale = False  # Default: linear x-axis
         self.initUI()
+        # Connect to the image_changed signal so that the histogram updates when the active slot changes.
+        self.image_manager.image_changed.connect(self.on_image_changed)
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
         
-        # Create a top-level horizontal layout to hold the histogram and the statistics table.
+        # Create a horizontal layout to hold the histogram and statistics table.
         top_layout = QHBoxLayout()
-
-        # Create a scroll area for the histogram display.
+        
+        # Create a scroll area for the histogram.
         self.scroll_area = QScrollArea(self)
-        # Set a fixed size for the scroll area so the dialog doesn't expand.
         self.scroll_area.setFixedSize(520, 310)
         self.scroll_area.setWidgetResizable(False)
         
-        # Create the histogram label that will be placed inside the scroll area.
+        # Create the histogram label.
         self.hist_label = QLabel(self)
         self.hist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setWidget(self.hist_label)
         top_layout.addWidget(self.scroll_area)
-
+        
         # Create the statistics table.
         self.stats_table = QTableWidget(self)
-        # We will update the number of columns in updateStatistics() based on image channels.
         self.stats_table.setRowCount(4)  # Min, Max, Median, StdDev
-        self.stats_table.setColumnCount(1)  # Default to 1 column for mono; update later if RGB.
-        # Set row headers.
+        self.stats_table.setColumnCount(1)  # Default for mono; updated later if RGB.
         self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
-        # Fix the width of the table.
         self.stats_table.setFixedWidth(360)
         top_layout.addWidget(self.stats_table)
         
-        # Add the top_layout to the main layout.
         main_layout.addLayout(top_layout)
         
-        # Controls layout: zoom slider and log toggle button.
+        # Controls for zoom and log toggle.
         controls_layout = QHBoxLayout()
-        
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
         self.zoom_slider.setRange(50, 1000)  # 50% to 1000%
-        self.zoom_slider.setValue(100)       # Default 100%
+        self.zoom_slider.setValue(100)
         self.zoom_slider.setTickInterval(10)
         self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.zoom_slider.valueChanged.connect(self.updateZoom)
         controls_layout.addWidget(QLabel("Zoom:"))
         controls_layout.addWidget(self.zoom_slider)
         
-        # Toggle button for log x-axis.
         self.log_toggle_button = QPushButton("Toggle Log X-Axis", self)
         self.log_toggle_button.setCheckable(True)
         self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
@@ -6464,8 +6464,8 @@ class HistogramDialog(QDialog):
         controls_layout.addWidget(self.log_toggle_button)
         
         main_layout.addLayout(controls_layout)
-
-        # Add a Close button.
+        
+        # Close button.
         close_btn = QPushButton("Close", self)
         close_btn.clicked.connect(self.accept)
         main_layout.addWidget(close_btn)
@@ -6473,10 +6473,14 @@ class HistogramDialog(QDialog):
         self.setLayout(main_layout)
         self.drawHistogram()
 
+    def on_image_changed(self, slot, image, metadata):
+        # Update the histogram only if the changed slot is the active one.
+        if slot == self.image_manager.current_slot:
+            self.image = image
+            self.drawHistogram()
+
     def updateHistogram(self, new_image):
-        """
-        Update the histogram with a new image.
-        """
+        """ Update the histogram with a new image. """
         self.image = new_image
         self.drawHistogram()
 
@@ -6814,7 +6818,7 @@ class StackingSuiteDialog(QDialog):
     def add_conversion_files(self):
         last_dir = self.settings.value("last_opened_folder", "", type=str)
         files, _ = QFileDialog.getOpenFileNames(self, "Select Files for Conversion", last_dir,
-                                                "Supported Files (*.fits *.fit *.tiff *.tif *.png *.jpg *.jpeg *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.xisf)")
+                                                "Supported Files (*.fits *.fit *.fz *.fz *.fits.gz *.fit.gz *.tiff *.tif *.png *.jpg *.jpeg *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef *.xisf)")
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
             for file in files:
@@ -6828,7 +6832,7 @@ class StackingSuiteDialog(QDialog):
         if directory:
             self.settings.setValue("last_opened_folder", directory)
             for file in os.listdir(directory):
-                if file.lower().endswith((".fits", ".fit", ".tiff", ".tif", ".png", ".jpg", ".jpeg", 
+                if file.lower().endswith((".fits", ".fit", ".fz", ".fz", ".fit.gz", ".fits.gz", ".tiff", ".tif", ".png", ".jpg", ".jpeg", 
                                            ".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".pef", ".xisf")):
                     full_path = os.path.join(directory, file)
                     item = QTreeWidgetItem([file, "Pending"])
@@ -7032,7 +7036,7 @@ class StackingSuiteDialog(QDialog):
         if file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             print(f"Debayering RAW image: {file_path}")
             return debayer_raw_fast(image)
-        elif file_path.lower().endswith(('.fits', '.fit')):
+        elif file_path.lower().endswith(('.fits', '.fit', '.fz')):
             bayer_pattern = header.get('BAYERPAT')
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
@@ -7982,7 +7986,7 @@ class StackingSuiteDialog(QDialog):
     def add_light_files_to_registration(self):
         """ Adds manually selected light frames while preserving grouping. """
         last_dir = self.settings.value("last_opened_folder", "", type=str)
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Light Frames", last_dir, "FITS Files (*.fits *.fit)")
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Light Frames", last_dir, "FITS Files (*.fits *.fit *.fz *.fz)")
         
         if not files:
             return
@@ -8105,7 +8109,7 @@ class StackingSuiteDialog(QDialog):
     def add_files(self, tree, title, expected_type):
         """ Adds FITS files and assigns best master files if needed. """
         last_dir = self.settings.value("last_opened_folder", "", type=str)
-        files, _ = QFileDialog.getOpenFileNames(self, title, last_dir, "FITS Files (*.fits *.fit)")
+        files, _ = QFileDialog.getOpenFileNames(self, title, last_dir, "FITS Files (*.fits *.fit *.fz *.fz)")
 
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))  # Save last opened folder
@@ -8126,7 +8130,7 @@ class StackingSuiteDialog(QDialog):
         if directory:
             self.settings.setValue("last_opened_folder", directory)  # Save last opened folder
             for file in os.listdir(directory):
-                if file.lower().endswith((".fits", ".fit")):
+                if file.lower().endswith((".fits", ".fit", ".fz", ".fz")):
                     self.process_fits_header(os.path.join(directory, file), tree, expected_type)
 
             # 🔥 Auto-assign Master Dark & Flat **if adding LIGHTS**
@@ -8138,7 +8142,7 @@ class StackingSuiteDialog(QDialog):
     def process_fits_header(self, file_path, tree, expected_type):
         try:
             # Read only the FITS header (fast)
-            header = fits.getheader(file_path)
+            header, _ = get_valid_header(file_path)
 
             try:
                 width = int(header.get("NAXIS1"))
@@ -11184,7 +11188,7 @@ class MosaicMasterDialog(QDialog):
             self,
             "Add Image(s)",
             "",
-            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.fz *.fz *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
         if paths:
             for path in paths:
@@ -11553,7 +11557,7 @@ class MosaicMasterDialog(QDialog):
         if file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             print(f"Debayering RAW image: {file_path}")
             return debayer_raw_fast(image)
-        elif file_path.lower().endswith(('.fits', '.fit')):
+        elif file_path.lower().endswith(('.fits', '.fit', '.fz', '.fz')):
             bayer_pattern = header.get('BAYERPAT')
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
@@ -11613,7 +11617,7 @@ class MosaicMasterDialog(QDialog):
         try:
             refine_obj, (src_pts, dst_pts) = astroalign.find_transform(
                 warped_new_ma, mosaic_ma,
-                max_control_points=100,
+                max_control_points=50,
                 detection_sigma=2
             )
             print(f"[DEBUG] Overlap-limited astroalign success with {len(src_pts)} stars.")
@@ -11659,9 +11663,23 @@ class MosaicMasterDialog(QDialog):
         self.spinnerMovie.start()
         QApplication.processEvents()
 
+        total_files = len(self.loaded_images)  # how many images in total
+        if total_files == 0:
+            QMessageBox.warning(self, "Align", "No images to align.")
+            return
+
+        # Create a QProgressDialog
+        progress = QProgressDialog("Aligning images...", "Cancel", 0, total_files, self)
+        progress.setWindowTitle("Seestar Alignment")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.show()
+
         # We define how many pixels to zero out on each edge AFTER warp
-        POST_WARP_BORDER = 5
-        THRESHOLD_RATIO = 0.8  # if new pixel < 0.5 * mosaic pixel, skip it
+        POST_WARP_BORDER = 10
+        THRESHOLD_RATIO = 0.9  # if new pixel < 0.5 * mosaic pixel, skip it
 
         # -----------------------------------------------------
         # Helper: Extract the world-coordinate center from an image header
@@ -11935,7 +11953,7 @@ class MosaicMasterDialog(QDialog):
         # 1) Initialize mosaic_sum/mosaic_count from the base image
         # -----------------------------------------------------
         base_img = ensure_float32_in_01(base_item["image"])
-        if base_item["path"].lower().endswith(('.fits', '.fit')):
+        if base_item["path"].lower().endswith(('.fits', '.fit', '.fz')):
             if (base_img.ndim == 2 
                 and "header" in base_item 
                 and base_item["header"] is not None 
@@ -12009,15 +12027,24 @@ class MosaicMasterDialog(QDialog):
                     QApplication.processEvents()
                     return False
 
+                self.status_label.setText(f"Removing linear gradient from {item['path']}...")
+                QApplication.processEvents()
+                # Create an instance of PolyGradientRemoval with degree 1.
+                poly_remover = PolyGradientRemoval(new_img, poly_degree=1, downsample_scale=5, num_sample_points=100)
+                # Process the image to remove the gradient
+                new_img = poly_remover.process()
+                print("[DEBUG] Finished polynomial gradient removal on subframe.")
+
                 # If mono:
                 self.status_label.setText(f"Normalizing {item['path']}.")
                 QApplication.processEvents()
+                new_img = new_img-np.min(new_img)
                 if new_img.ndim == 2:
                     new_img = stretch_mono_image(new_img, target_median=base_median, normalize=False, apply_curves=False, curves_boost=0.0)
 
                 else:
                     # color approach - you might do a single ratio or call your stretch_color_image
-                    new_img = stretch_color_image(new_img, target_median=base_median, linked=True, normalize=False, apply_curves=False, curves_boost=0.0)
+                    new_img = stretch_color_image(new_img, target_median=base_median, linked=False, normalize=False, apply_curves=False, curves_boost=0.0)
 
 
                 # If mosaic is color and new_img is mono, expand new_img
@@ -12037,8 +12064,8 @@ class MosaicMasterDialog(QDialog):
                     new_gray = np.mean(new_gray, axis=2)
 
                 # Optional: mild stretch to help astroalign
-                mosaic_gray = stretch_mono_image(mosaic_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
-                new_gray = stretch_mono_image(new_gray, target_median=0.2, normalize=False, apply_curves=False, curves_boost=0.0)
+                mosaic_gray = stretch_mono_image(mosaic_gray, target_median=0.1, normalize=False, apply_curves=False, curves_boost=0.0)
+                new_gray = stretch_mono_image(new_gray, target_median=0.1, normalize=False, apply_curves=False, curves_boost=0.0)
 
                 # Attempt rough transform via WCS
                 rough_matrix = None
@@ -12062,9 +12089,9 @@ class MosaicMasterDialog(QDialog):
                 try:
                     # astroalign wants double precision
                     transform_obj, (src_pts, dst_pts) = astroalign.find_transform(
-                        new_gray.astype(np.float64, copy=False),
-                        mosaic_gray.astype(np.float64, copy=False),
-                        max_control_points=100,
+                        new_gray,
+                        mosaic_gray,
+                        max_control_points=50,
                         detection_sigma=4,
                         min_area=5
                     )
@@ -12154,7 +12181,7 @@ class MosaicMasterDialog(QDialog):
                     print(f"[OpenCV] warpAffine error => {cv2_err}")
                     return False
 
-                # 1) Build the "border_mask" that excludes the outer POST_WARP_BORDER region
+                # 1) Build the border_mask that excludes the outer POST_WARP_BORDER region
                 h_w, w_w = warped_new.shape[:2]
                 border_mask = np.ones((h_w, w_w), dtype=bool)
                 b = POST_WARP_BORDER
@@ -12163,63 +12190,55 @@ class MosaicMasterDialog(QDialog):
                 border_mask[:, :b] = False
                 border_mask[:, -b:] = False
 
-                # 2) If color, define "valid_mask" as "any channel > 0"
-                #    If mono, define "valid_mask" as "warped_new > 0"
-                if warped_new.ndim == 2:
-                    # MONO
-                    valid_mask = (warped_new > 0)
-                else:
-                    # COLOR
-                    valid_mask = np.any(warped_new > 0, axis=2)
+                # NEW: Build a warping mask by warping an image of ones using nearest-neighbor.
+                ones_img = np.ones(new_img.shape[:2], dtype=np.uint8)
+                warped_mask = cv2.warpAffine(
+                    ones_img,
+                    new_transform,
+                    (new_canvas_width, new_canvas_height),
+                    flags=cv2.INTER_NEAREST
+                )
+                # valid_mask is now defined by where warped_mask==1 (full pixel contributions)
+                valid_mask = (warped_mask == 1)
 
-                # 3) Build "mosaic_gray" = the grayscale of (expanded_sum / expanded_count)
-                #    so we know "the mosaic pixel below it" at each location.
+                # 2) (Optional) You can still compute a brightness_mask.
+                # Build "mosaic_gray" from the expanded mosaic.
                 mosaic_gray = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
-
-                # For MONO mosaic:
                 if expanded_sum.ndim == 2:
-                    # Where expanded_count>0, mosaic pixel = sum / count
                     nonzero_mask = (expanded_count > 0)
                     mosaic_gray[nonzero_mask] = expanded_sum[nonzero_mask] / expanded_count[nonzero_mask]
                 else:
-                    # COLOR mosaic => average across channels to get a single grayscale
-                    # sum_of_channels / count_of_channels
-                    # We do: mosaic_gray = (sum across c of expanded_sum) / (sum across c of expanded_count)
                     sum_channels = np.sum(expanded_sum, axis=2)
                     sum_counts = np.sum(expanded_count, axis=2)
                     nonzero_mask = (sum_counts > 0)
                     mosaic_gray[nonzero_mask] = sum_channels[nonzero_mask] / sum_counts[nonzero_mask]
 
-                # 4) Build new_gray for the warped image
+                # Build new_gray for the warped image.
                 if warped_new.ndim == 2:
-                    # MONO
                     new_gray = warped_new
                 else:
-                    # COLOR => average channels
                     new_gray = np.mean(warped_new, axis=2)
 
-                # 5) Now define the "brightness_mask":
-                #    skip if new_gray < THRESHOLD_RATIO * mosaic_gray
-                #    => only add if new_gray >= 0.5 * mosaic_gray
+                # Define brightness_mask: only accept pixels where new_gray >= THRESHOLD_RATIO * mosaic_gray.
                 brightness_mask = (new_gray >= THRESHOLD_RATIO * mosaic_gray)
 
-                # 6) Combine them all
+                # 3) Combine all masks:
+                # Only add pixels if they are within the border, have a valid (full) contribution, and pass the brightness test.
                 combined_mask = border_mask & valid_mask & brightness_mask
 
-                # 7) Finally, add only those pixels
+                # 4) Finally, add only those pixels.
                 if warped_new.ndim == 2:
-                    # MONO
                     expanded_sum[combined_mask] += warped_new[combined_mask]
                     expanded_count[combined_mask] += 1.0
                 else:
-                    # COLOR => do it per channel
                     for c in range(warped_new.shape[2]):
                         expanded_sum[..., c][combined_mask] += warped_new[..., c][combined_mask]
                         expanded_count[..., c][combined_mask] += 1.0
 
-                # 8) Update mosaic_sum/mosaic_count
+                # 5) Update mosaic_sum/mosaic_count.
                 mosaic_sum = expanded_sum
                 mosaic_count = expanded_count
+
 
                 self.status_label.setText(f"Integrated image: {item['path']}")
                 QApplication.processEvents()
@@ -12237,12 +12256,28 @@ class MosaicMasterDialog(QDialog):
         # Process each subsequent image once
         # ---------------------------------------------------------
         failed_items = []
-        for item in self.loaded_images:
+        # We'll do a normal for-loop with enumerate so we can pass index to progress
+        for i, item in enumerate(self.loaded_images):
+            # If user cancels
+            if progress.wasCanceled():
+                self.status_label.setText("Alignment canceled by user.")
+                break
+
+            # Update the progress label
+            progress.setLabelText(f"Aligning image {i+1}/{total_files}: {item['path']}")
+            progress.setValue(i)  # update the progress bar
+
             if item is base_item:
                 continue
+
             success = process_alignment(item)
             if not success:
                 failed_items.append(item)
+
+            QApplication.processEvents()  # allow UI updates
+
+        # Final step: mark progress done
+        progress.setValue(total_files)
 
         # ---------------------------------------------------------
         # Reattempt failed images (max 1 additional attempt)
@@ -12250,19 +12285,37 @@ class MosaicMasterDialog(QDialog):
         max_retries = 1
         attempt = 1
         while failed_items and attempt <= max_retries:
-            self.status_label.setText(f"Reattempting alignment for {len(failed_items)} images (Attempt {attempt})")
-            print(f"Reattempting alignment for {len(failed_items)} images (Attempt {attempt})")
+            reattempt_count = len(failed_items)
+            self.status_label.setText(f"Reattempting alignment for {reattempt_count} images (Attempt {attempt})")
+            print(f"Reattempting alignment for {reattempt_count} images (Attempt {attempt})")
             QApplication.processEvents()
 
+            # 2) Reset the existing progress bar to track the reattempt pass
+            progress.setRange(0, reattempt_count)
+            progress.setValue(0)
+            progress.setLabelText(f"Reattempt pass {attempt}...")
+
             current_failures = []
-            for item in failed_items:
+            for i, item in enumerate(failed_items):
+                if progress.wasCanceled():
+                    self.status_label.setText("Reattempt canceled by user.")
+                    break
+
+                progress.setLabelText(f"Reattempting {item['path']} ({i+1}/{reattempt_count})")
+                progress.setValue(i)
+                QApplication.processEvents()
+
                 success = process_alignment(item)
                 if not success:
                     current_failures.append(item)
 
+            progress.setValue(reattempt_count)  # done reattempt pass
+
             failed_items = current_failures
             attempt += 1
 
+        # All passes complete
+        progress.close()
         self.status_label.setText("All alignment attempts complete.")
         QApplication.processEvents()
 
@@ -24404,57 +24457,65 @@ class XISFViewer(QWidget):
             self.on_image_changed(current_slot, image, metadata)
 
     def on_image_changed(self, slot, image, metadata):
-        """
-        This method is triggered when the image in ImageManager changes.
-        It updates the UI with the new image only if the changed slot is the active slot.
-        """
         if not self.isVisible():
             return
 
-        # If image is None, clear the display and metadata.
-        if image is None:
-            self.image_label.clear()
-            self.metadata_tree.clear()
-            print(f"XISFViewer: Cleared image display for slot {slot}.")
-            return
-
-        # Clear the previous content before updating.
+        # Clear previous content
         self.image_label.clear()
         self.metadata_tree.clear()
 
-        if not self.isVisible():
-            return   
         if image is None:
-            return             
+            print(f"XISFViewer: Cleared image display for slot {slot}.")
+            return
+
+        # Get image and metadata from the current slot
         if slot == self.image_manager.current_slot:
-            # Ensure the image is a numpy array before proceeding
             if not isinstance(image, np.ndarray):
-                image = np.array(image)  # Convert to numpy array if necessary
-            
-            self.image = image  # Set the original image
-            self.preview_image = None  # Reset the preview image
+                image = np.array(image)
+            self.image = image
+            self.preview_image = None
             self.original_header = metadata.get('original_header', None)
             self.is_mono = metadata.get('is_mono', False)
-            self.filename = metadata.get('file_path', "Unknown File") 
+            self.filename = metadata.get('file_path', "Unknown File")
 
+        # --- If the file is a FITS file with a Bayer pattern, debayer before converting to 3-channel ---
+        if self.filename.lower().endswith(('.fits', '.fit', '.fits.fz', '.fit.fz')):
+            if self.original_header and self.original_header.get('BAYERPAT'):
+                print(f"Running debayer_image on {self.filename}")
+                # Expecting the raw image to be 2D (mono)
+                if self.image.ndim == 2:
+                    debayered_image, debayered_mono = self.debayer_image(self.image, self.filename, self.original_header, True)
+                    self.image_data = debayered_image
+                    self.is_mono = debayered_mono
+                else:
+                    # If it's already 3D, skip debayering.
+                    print("Image already has multiple channels; skipping debayering.")
+                    self.image_data = self.image
+            else:
+                self.image_data = self.image
+        else:
+            self.image_data = self.image
 
-        # Display metadata
-        self.display_metadata(self.filename)
+        # --- If the image is still mono (and not debayered), convert 2D to 3-channel RGB for display ---
+        if self.is_mono and self.image_data.ndim == 2:
+            self.image_data = np.stack([self.image_data] * 3, axis=-1)
 
-        # If the image is mono, ensure it's in 3-channel RGB format for display.
-        if self.is_mono:
-            if len(image.shape) == 3 and image.shape[2] == 1:
-                image = np.squeeze(image, axis=2)  # Remove singleton channel
-            if image.ndim == 2:
-                image = np.stack([image] * 3, axis=-1)  # Convert mono to 3-channel RGB
+        # --- Autostretch if enabled ---
+        if self.autostretch_enabled:
+            self.apply_autostretch()
 
-        # Store the final image to be displayed
-        self.image_data = image
-
-        # **Ensure the UI updates properly**
+        # Display the image
         self.display_image()
 
+        # Update metadata display (if applicable)
+        if self.filename.lower().endswith(('.fits', '.fit', '.fits.fz', '.fit.fz', '.xisf',
+                                            '.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            self.display_metadata(self.filename)
+
         print(f"XISFViewer: Image updated from ImageManager slot {slot}.")
+
+
+
 
 
 
@@ -24514,7 +24575,7 @@ class XISFViewer(QWidget):
             self, 
             "Open Image File", 
             "", 
-            "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
+            "Image Files (*.png *.tif *.tiff *.fits *.fit *.fz *.fz *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef)"
         )
 
         if file_name:
@@ -24569,26 +24630,29 @@ class XISFViewer(QWidget):
 
     def debayer_image(self, image, file_path, header, is_mono):
         """Check if image is OSC (One-Shot Color) and debayer if required."""
-        # Check for OSC (Bayer pattern in FITS or RAW data)
-        if file_path.lower().endswith(('.fits', '.fit')):
-            # Check if the FITS header contains BAYERPAT (Bayer pattern)
+        # For FITS files, check for BAYERPAT in the header.
+        if file_path.lower().endswith(('.fits', '.fit', '.fz', '.fz')):
+            print(f"running debayer_image on {file_path}")
             bayer_pattern = header.get('BAYERPAT', None)
+            # If BAYERPAT not found, try iterating through HDUs.
+            if bayer_pattern is None:
+                bayer_header = get_bayer_header(file_path)
+                if bayer_header:
+                    bayer_pattern = bayer_header.get('BAYERPAT', None)
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
-                # Apply debayering logic for FITS
                 is_mono = False
                 image = self.debayer_fits(image, bayer_pattern)
-
             else:
                 print(f"No Bayer pattern found in FITS header: {file_path}")
         elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-            # If it's RAW (Bayer pattern detected), debayer it
+            # For RAW files, apply debayering (assuming debayer_raw exists)
             print(f"Debayering RAW image: {file_path}")
-            # Apply debayering to the RAW image (assuming debayer_raw exists)
             is_mono = False
             image = self.debayer_raw(image)
         
         return image, is_mono
+
 
     def debayer_fits(self, image_data, bayer_pattern):
         """Debayer a FITS image using a basic Bayer pattern (2x2)."""
@@ -24832,6 +24896,7 @@ class XISFViewer(QWidget):
             self.dragging = False
 
     def display_metadata(self, file_path):
+        print("starting display_metadata")
         """
         Load and display metadata from the given file if the file is an XISF or FITS file.
         For other file types, simply skip without failing.
@@ -24892,14 +24957,12 @@ class XISFViewer(QWidget):
                 except Exception as e:
                     print(f"Failed to load XISF metadata: {e}")
 
-            elif file_path.lower().endswith(('.fits', '.fit')):
+            elif file_path.lower().endswith(('.fits', '.fit', '.fz', '.fz')):
                 print("Loading metadata from FITS file.")
-                # FITS handling
+                # FITS handling using get_valid_header
                 try:
-                    # Open the FITS file using Astropy
-                    hdul = fits.open(file_path)
-                    header = hdul[0].header  # Extract header from primary HDU
-                    hdul.close()
+                    # Unpack the header and ignore the extension index for metadata display.
+                    header, _ = get_valid_header(file_path)
 
                     # Assign metadata to instance variables
                     self.file_meta = header
@@ -37295,11 +37358,32 @@ def load_image(filename, max_retries=3, wait_seconds=3):
             is_mono = False
             original_header = None
 
-            if filename.lower().endswith(('.fits', '.fit')):
-                print(f"Loading FITS file: {filename}")
-                with fits.open(filename) as hdul:
-                    image_data = hdul[0].data
-                    original_header = hdul[0].header  # Capture the FITS header
+            # --- Unified FITS handling ---
+            if filename.lower().endswith(('.fits', '.fit', '.fits.gz', '.fit.gz', '.fz', '.fz')):
+                # Use get_valid_header to retrieve the header and extension index.
+                original_header, ext_index = get_valid_header(filename)
+                # DEBUG: Print the composite header.
+                print("DEBUG: Composite header returned by get_valid_header:")
+                print(original_header)
+                
+                # Open the file appropriately.
+                if filename.lower().endswith(('.fits.gz', '.fit.gz')):
+                    print(f"Loading compressed FITS file: {filename}")
+                    with gzip.open(filename, 'rb') as f:
+                        file_content = f.read()
+                    hdul = fits.open(BytesIO(file_content))
+                else:
+                    if filename.lower().endswith(('.fz', '.fz')):
+                        print(f"Loading Rice-compressed FITS file: {filename}")
+                    else:
+                        print(f"Loading FITS file: {filename}")
+                    hdul = fits.open(filename)
+
+                with hdul as hdul:
+                    # Retrieve image data from the extension indicated by get_valid_header.
+                    image_data = hdul[ext_index].data
+                    if image_data is None:
+                        raise ValueError(f"No image data found in FITS file in extension {ext_index}.")
 
                     # Ensure native byte order
                     if image_data.dtype.byteorder not in ('=', '|'):
@@ -37318,55 +37402,51 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                         print("Identified 16-bit FITS image.")
                         image = image_data.astype(np.float32) / 65535.0
 
-                    elif image_data.dtype == np.uint32:
-                        bit_depth = "32-bit unsigned"
-                        print("Identified 32-bit unsigned FITS image.")
-
+                    elif image_data.dtype == np.int32:
+                        bit_depth = "32-bit signed"
+                        print("Identified 32-bit signed FITS image.")
                         bzero  = original_header.get('BZERO', 0)
                         bscale = original_header.get('BSCALE', 1)
                         image = image_data.astype(np.float32) * bscale + bzero
 
-
+                    elif image_data.dtype == np.uint32:
+                        bit_depth = "32-bit unsigned"
+                        print("Identified 32-bit unsigned FITS image.")
+                        bzero  = original_header.get('BZERO', 0)
+                        bscale = original_header.get('BSCALE', 1)
+                        image = image_data.astype(np.float32) * bscale + bzero
 
                     elif image_data.dtype == np.float32:
                         bit_depth = "32-bit floating point"
                         print("Identified 32-bit floating point FITS image.")
-                        # Already float, so just rename it
                         image = image_data
-
                     else:
                         raise ValueError(f"Unsupported FITS data type: {image_data.dtype}")
 
                     # ---------------------------------------------------------------------
                     # 2) Squeeze out any singleton dimensions (fix weird NAXIS combos)
                     # ---------------------------------------------------------------------
-                    image = np.squeeze(image)  # e.g. (H, W, 1) → (H, W)
+                    image = np.squeeze(image)
 
                     # ---------------------------------------------------------------------
                     # 3) Interpret final shape to decide if mono or color
                     # ---------------------------------------------------------------------
                     if image.ndim == 2:
-                        # (H, W) => mono
                         is_mono = True
-
                     elif image.ndim == 3:
-                        # Could be (3, H, W) or (H, W, 3)
                         if image.shape[0] == 3 and image.shape[1] > 1 and image.shape[2] > 1:
-                            # Transpose to (H, W, 3)
                             image = np.transpose(image, (1, 2, 0))
                             is_mono = False
                         elif image.shape[-1] == 3:
-                            # Already (H, W, 3)
                             is_mono = False
                         else:
                             raise ValueError(f"Unsupported 3D shape after squeeze: {image.shape}")
                     else:
                         raise ValueError(f"Unsupported FITS dimensions after squeeze: {image.shape}")
 
-                    # Now you have a robustly loaded image array in 'image'
-                    # with shape either (H, W) for mono or (H, W, 3) for color.
                     print(f"Loaded FITS image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                     return image, original_header, bit_depth, is_mono
+
 
 
             elif filename.lower().endswith(('.tiff', '.tif')):
@@ -37592,12 +37672,73 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 print(f"Error reading image {filename}: {e}")
             return None, None, None, None
 
+def get_valid_header(file_path):
+    """
+    Opens the FITS file (handling compressed files as needed), finds the first HDU
+    with image data, and then searches through all HDUs for additional keywords (e.g. BAYERPAT).
+    Returns a composite header (a copy of the image HDU header updated with extra keywords)
+    and the extension index of the image data.
+    """
+    # Open file appropriately for compressed files
+    if file_path.lower().endswith(('.fits.gz', '.fit.gz')):
+        
+        with gzip.open(file_path, 'rb') as f:
+            file_content = f.read()
+        hdul = fits.open(BytesIO(file_content))
+    else:
+        
+        hdul = fits.open(file_path)
+
+    with hdul as hdul:
+        image_hdu = None
+        image_index = None
+        # First, find the HDU that contains image data
+        for i, hdu in enumerate(hdul):
+            
+            if hdu.data is not None:
+                image_hdu = hdu
+                image_index = i
+                
+                break
+        if image_hdu is None:
+            raise ValueError("No image data found in FITS file.")
+
+        # Start with a copy of the image HDU header
+        composite_header = image_hdu.header.copy()
 
 
+        # Now search all HDUs for extra keywords (e.g. BAYERPAT)
+        for i, hdu in enumerate(hdul):
+            if 'BAYERPAT' in hdu.header:
+                composite_header['BAYERPAT'] = hdu.header['BAYERPAT']
+
+                break
+
+    return composite_header, image_index
+
+def get_bayer_header(file_path):
+    """
+    Iterates through all HDUs in the FITS file (handling compressed files if needed)
+    to find a header that contains the 'BAYERPAT' keyword.
+    Returns the header if found, otherwise None.
+    """
 
 
-
-
+    try:
+        # Check for compressed files first.
+        if file_path.lower().endswith(('.fits.gz', '.fit.gz')):
+            with gzip.open(file_path, 'rb') as f:
+                file_content = f.read()
+            hdul = fits.open(BytesIO(file_content))
+        else:
+            hdul = fits.open(file_path)
+        with hdul as hdul:
+            for hdu in hdul:
+                if 'BAYERPAT' in hdu.header:
+                    return hdu.header
+    except Exception as e:
+        print(f"Error in get_bayer_header: {e}")
+    return None
 
 def save_image(img_array, filename, original_format, bit_depth=None, original_header=None, is_mono=False, image_meta=None, file_meta=None):
  
