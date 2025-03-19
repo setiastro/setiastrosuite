@@ -1,9 +1,9 @@
 {
-  "version": "2.12.10",
+  "version": "2.12.11",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.10/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.10/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.10/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Added stacking algorithm code for seestar in mosaic master to stack them more than place them like traditional mosaics This also fully utilizes the Ra and Dec header names, so full WCS isnt necessary anymore"
+  "notes": "Main Updates: Compressed Fits support, Seestar much improved border control and gradient matching along with progress indication, histogram view follows the active slot, Image Preview now finally propely updates when the image changes"
 }
