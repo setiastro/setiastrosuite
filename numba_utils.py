@@ -3,95 +3,168 @@ from numba import njit, prange
 import cv2 
 import math
 
+
 @njit(parallel=True, fastmath=True)
 def rescale_image_numba(image, factor):
     """
     Custom rescale function using bilinear interpolation optimized with numba.
+    Supports both mono (2D) and color (3D) images.
     """
-    height, width = image.shape[:2]
-    new_width = int(width * factor)
-    new_height = int(height * factor)
+    if image.ndim == 2:
+        height, width = image.shape
+        new_width = int(width * factor)
+        new_height = int(height * factor)
+        output = np.zeros((new_height, new_width), dtype=np.float32)
+        for y in prange(new_height):
+            for x in prange(new_width):
+                src_x = x / factor
+                src_y = y / factor
+                x0, y0 = int(src_x), int(src_y)
+                x1 = x0 + 1 if x0 + 1 < width else width - 1
+                y1 = y0 + 1 if y0 + 1 < height else height - 1
+                dx = src_x - x0
+                dy = src_y - y0
+                output[y, x] = (image[y0, x0] * (1 - dx) * (1 - dy) +
+                                image[y0, x1] * dx * (1 - dy) +
+                                image[y1, x0] * (1 - dx) * dy +
+                                image[y1, x1] * dx * dy)
+        return output
+    else:
+        height, width, channels = image.shape
+        new_width = int(width * factor)
+        new_height = int(height * factor)
+        output = np.zeros((new_height, new_width, channels), dtype=np.float32)
+        for y in prange(new_height):
+            for x in prange(new_width):
+                src_x = x / factor
+                src_y = y / factor
+                x0, y0 = int(src_x), int(src_y)
+                x1 = x0 + 1 if x0 + 1 < width else width - 1
+                y1 = y0 + 1 if y0 + 1 < height else height - 1
+                dx = src_x - x0
+                dy = src_y - y0
+                for c in range(channels):
+                    output[y, x, c] = (image[y0, x0, c] * (1 - dx) * (1 - dy) +
+                                       image[y0, x1, c] * dx * (1 - dy) +
+                                       image[y1, x0, c] * (1 - dx) * dy +
+                                       image[y1, x1, c] * dx * dy)
+        return output
 
-    # Create an empty output array
-    output = np.zeros((new_height, new_width, image.shape[2]), dtype=np.float32)
-
-    for y in prange(new_height):
-        for x in prange(new_width):
-            src_x = x / factor
-            src_y = y / factor
-            x0, y0 = int(src_x), int(src_y)
-            x1, y1 = min(x0 + 1, width - 1), min(y0 + 1, height - 1)
-
-            # Bilinear interpolation
-            dx, dy = src_x - x0, src_y - y0
-            for c in range(image.shape[2]):  # Loop over channels
-                output[y, x, c] = (
-                    image[y0, x0, c] * (1 - dx) * (1 - dy)
-                    + image[y0, x1, c] * dx * (1 - dy)
-                    + image[y1, x0, c] * (1 - dx) * dy
-                    + image[y1, x1, c] * dx * dy
-                )
-
-    return output
 
 @njit(parallel=True, fastmath=True)
 def flip_horizontal_numba(image):
     """
     Flips an image horizontally using Numba JIT.
+    Works with both mono (2D) and color (3D) images.
     """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        for x in prange(width):
-            output[y, x] = image[y, width - x - 1]
-    return output
+    if image.ndim == 2:
+        height, width = image.shape
+        output = np.empty((height, width), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                output[y, x] = image[y, width - x - 1]
+        return output
+    else:
+        height, width, channels = image.shape
+        output = np.empty((height, width, channels), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                for c in range(channels):
+                    output[y, x, c] = image[y, width - x - 1, c]
+        return output
+
 
 @njit(parallel=True, fastmath=True)
 def flip_vertical_numba(image):
     """
     Flips an image vertically using Numba JIT.
+    Works with both mono (2D) and color (3D) images.
     """
-    height, width, channels = image.shape
-    output = np.empty_like(image)
-    for y in prange(height):
-        output[y] = image[height - y - 1]
-    return output
+    if image.ndim == 2:
+        height, width = image.shape
+        output = np.empty((height, width), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                output[y, x] = image[height - y - 1, x]
+        return output
+    else:
+        height, width, channels = image.shape
+        output = np.empty((height, width, channels), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                for c in range(channels):
+                    output[y, x, c] = image[height - y - 1, x, c]
+        return output
+
 
 @njit(parallel=True, fastmath=True)
 def rotate_90_clockwise_numba(image):
     """
     Rotates the image 90 degrees clockwise.
+    Works with both mono (2D) and color (3D) images.
     """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[x, height - 1 - y] = image[y, x]
-    return output
+    if image.ndim == 2:
+        height, width = image.shape
+        output = np.empty((width, height), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                output[x, height - 1 - y] = image[y, x]
+        return output
+    else:
+        height, width, channels = image.shape
+        output = np.empty((width, height, channels), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                for c in range(channels):
+                    output[x, height - 1 - y, c] = image[y, x, c]
+        return output
+
 
 @njit(parallel=True, fastmath=True)
 def rotate_90_counterclockwise_numba(image):
     """
     Rotates the image 90 degrees counterclockwise.
+    Works with both mono (2D) and color (3D) images.
     """
-    height, width, channels = image.shape
-    output = np.empty((width, height, channels), dtype=image.dtype)
-    for y in prange(height):
-        for x in prange(width):
-            output[width - 1 - x, y] = image[y, x]
-    return output
+    if image.ndim == 2:
+        height, width = image.shape
+        output = np.empty((width, height), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                output[width - 1 - x, y] = image[y, x]
+        return output
+    else:
+        height, width, channels = image.shape
+        output = np.empty((width, height, channels), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                for c in range(channels):
+                    output[width - 1 - x, y, c] = image[y, x, c]
+        return output
+
 
 @njit(parallel=True, fastmath=True)
 def invert_image_numba(image):
     """
-    Inverts an image (1 - pixel value).
+    Inverts an image (1 - pixel value) using Numba JIT.
+    Works with both mono (2D) and color (3D) images.
     """
-    output = np.empty_like(image)
-    for y in prange(image.shape[0]):
-        for x in prange(image.shape[1]):
-            for c in prange(image.shape[2]):
-                output[y, x, c] = 1.0 - image[y, x, c]
-    return output
+    if image.ndim == 2:
+        height, width = image.shape
+        output = np.empty((height, width), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                output[y, x] = 1.0 - image[y, x]
+        return output
+    else:
+        height, width, channels = image.shape
+        output = np.empty((height, width, channels), dtype=image.dtype)
+        for y in prange(height):
+            for x in prange(width):
+                for c in range(channels):
+                    output[y, x, c] = 1.0 - image[y, x, c]
+        return output
+
 
 
 @njit(parallel=True, fastmath=True)
