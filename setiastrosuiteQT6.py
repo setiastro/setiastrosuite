@@ -3814,7 +3814,7 @@ class AstroEditingSuite(QMainWindow):
         stretched_image = image.copy()
 
         # Define the target median for stretching
-        target_median = 0.25
+        target_median = 0.15
 
         # Apply the stretch for each channel independently
         for c in range(3):
@@ -12030,7 +12030,7 @@ class MosaicMasterDialog(QDialog):
                 self.status_label.setText(f"Removing linear gradient from {item['path']}...")
                 QApplication.processEvents()
                 # Create an instance of PolyGradientRemoval with degree 1.
-                poly_remover = PolyGradientRemoval(new_img, poly_degree=1, downsample_scale=5, num_sample_points=100)
+                poly_remover = PolyGradientRemoval(new_img, poly_degree=2, downsample_scale=5, num_sample_points=100)
                 # Process the image to remove the gradient
                 new_img = poly_remover.process()
                 print("[DEBUG] Finished polynomial gradient removal on subframe.")
@@ -12181,7 +12181,7 @@ class MosaicMasterDialog(QDialog):
                     print(f"[OpenCV] warpAffine error => {cv2_err}")
                     return False
 
-                # 1) Build the border_mask that excludes the outer POST_WARP_BORDER region
+                # 1) Build the "border_mask" that excludes the outer POST_WARP_BORDER region
                 h_w, w_w = warped_new.shape[:2]
                 border_mask = np.ones((h_w, w_w), dtype=bool)
                 b = POST_WARP_BORDER
@@ -12190,7 +12190,7 @@ class MosaicMasterDialog(QDialog):
                 border_mask[:, :b] = False
                 border_mask[:, -b:] = False
 
-                # NEW: Build a warping mask by warping an image of ones using nearest-neighbor.
+                # 2) Build a "valid_mask" by warping an image of ones using INTER_NEAREST.
                 ones_img = np.ones(new_img.shape[:2], dtype=np.uint8)
                 warped_mask = cv2.warpAffine(
                     ones_img,
@@ -12198,11 +12198,20 @@ class MosaicMasterDialog(QDialog):
                     (new_canvas_width, new_canvas_height),
                     flags=cv2.INTER_NEAREST
                 )
-                # valid_mask is now defined by where warped_mask==1 (full pixel contributions)
                 valid_mask = (warped_mask == 1)
 
-                # 2) (Optional) You can still compute a brightness_mask.
-                # Build "mosaic_gray" from the expanded mosaic.
+                # 2b) Compute a feathering weight from the valid_mask:
+                # Compute the distance transform of the valid_mask.
+                # This gives, for each pixel inside the valid region, its distance (in pixels)
+                # from the nearest 0 (i.e. from the border of the valid region).
+                FEATHER_RADIUS = 20  # adjust as needed; this is the maximum distance for feathering
+                # Convert valid_mask to uint8 for distance transform.
+                valid_uint8 = valid_mask.astype(np.uint8)
+                dist = cv2.distanceTransform(valid_uint8, cv2.DIST_L2, 5)
+                # Compute weights: linear ramp from 0 (at distance=0) to 1 (at distance>=FEATHER_RADIUS).
+                feather_weights = np.clip(dist / FEATHER_RADIUS, 0, 1)
+
+                # 3) Build "mosaic_gray" = the grayscale of (expanded_sum / expanded_count)
                 mosaic_gray = np.zeros((new_canvas_height, new_canvas_width), dtype=np.float32)
                 if expanded_sum.ndim == 2:
                     nonzero_mask = (expanded_count > 0)
@@ -12213,29 +12222,33 @@ class MosaicMasterDialog(QDialog):
                     nonzero_mask = (sum_counts > 0)
                     mosaic_gray[nonzero_mask] = sum_channels[nonzero_mask] / sum_counts[nonzero_mask]
 
-                # Build new_gray for the warped image.
+                # 4) Build new_gray for the warped image
                 if warped_new.ndim == 2:
                     new_gray = warped_new
                 else:
                     new_gray = np.mean(warped_new, axis=2)
 
-                # Define brightness_mask: only accept pixels where new_gray >= THRESHOLD_RATIO * mosaic_gray.
+                # 5) Build the brightness_mask: accept pixels where new_gray >= THRESHOLD_RATIO * mosaic_gray.
                 brightness_mask = (new_gray >= THRESHOLD_RATIO * mosaic_gray)
 
-                # 3) Combine all masks:
-                # Only add pixels if they are within the border, have a valid (full) contribution, and pass the brightness test.
+                # 6) Combine masks.
+                # Here we combine border_mask, brightness_mask, and valid_mask.
+                # The final effective weight will be the feathering weight from within the valid_mask,
+                # applied only where the other masks also pass.
                 combined_mask = border_mask & valid_mask & brightness_mask
 
-                # 4) Finally, add only those pixels.
+                # 7) Add only those pixels, using the feathering weights.
                 if warped_new.ndim == 2:
-                    expanded_sum[combined_mask] += warped_new[combined_mask]
-                    expanded_count[combined_mask] += 1.0
+                    # MONO: weight each pixel accordingly.
+                    expanded_sum[combined_mask] += warped_new[combined_mask] * feather_weights[combined_mask]
+                    expanded_count[combined_mask] += feather_weights[combined_mask]
                 else:
+                    # COLOR: do it per channel.
                     for c in range(warped_new.shape[2]):
-                        expanded_sum[..., c][combined_mask] += warped_new[..., c][combined_mask]
-                        expanded_count[..., c][combined_mask] += 1.0
+                        expanded_sum[..., c][combined_mask] += warped_new[..., c][combined_mask] * feather_weights[combined_mask]
+                        expanded_count[..., c][combined_mask] += feather_weights[combined_mask]
 
-                # 5) Update mosaic_sum/mosaic_count.
+                # 8) Update mosaic_sum/mosaic_count.
                 mosaic_sum = expanded_sum
                 mosaic_count = expanded_count
 
@@ -37362,9 +37375,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
             if filename.lower().endswith(('.fits', '.fit', '.fits.gz', '.fit.gz', '.fz', '.fz')):
                 # Use get_valid_header to retrieve the header and extension index.
                 original_header, ext_index = get_valid_header(filename)
-                # DEBUG: Print the composite header.
-                print("DEBUG: Composite header returned by get_valid_header:")
-                print(original_header)
+
                 
                 # Open the file appropriately.
                 if filename.lower().endswith(('.fits.gz', '.fit.gz')):
