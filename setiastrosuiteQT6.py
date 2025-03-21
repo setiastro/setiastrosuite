@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.12.11"
+VERSION = "2.13.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1063,7 +1063,7 @@ class AstroEditingSuite(QMainWindow):
         # Add individual tabs for each tool
         self.tabs.addTab(XISFViewer(image_manager=self.image_manager), "Image Viewer")
         self.tabs.addTab(BlinkTab(image_manager=self.image_manager), "Blink Comparator")
-        self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity Sharpen/Denoise")
+        self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
         self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
@@ -26689,18 +26689,36 @@ class CosmicClarityTab(QWidget):
         self.auto_stretch_button.toggled.connect(self.toggle_auto_stretch)
         left_layout.addWidget(self.auto_stretch_button)
 
-        # Radio buttons to switch between Sharpen and Denoise
+        # Left column for Sharpen, Denoise, and Both
+        left_radio_layout = QVBoxLayout()
         self.sharpen_radio = QRadioButton("Sharpen")
         self.denoise_radio = QRadioButton("Denoise")
         self.both_radio = QRadioButton("Both")
-        
-        self.sharpen_radio.setChecked(True)  # Default to Sharpen
+        self.sharpen_radio.setChecked(True)  # Default
+
+        left_radio_layout.addWidget(self.sharpen_radio)
+        left_radio_layout.addWidget(self.denoise_radio)
+        left_radio_layout.addWidget(self.both_radio)
+
+        # Right column for Super Resolution Upscaling
+        right_radio_layout = QVBoxLayout()
+        self.superres_radio = QRadioButton("Super Resolution Upscaling")
+        right_radio_layout.addWidget(self.superres_radio)
+
+        # Connect toggles to UI update method
         self.sharpen_radio.toggled.connect(self.update_ui_for_mode)
         self.denoise_radio.toggled.connect(self.update_ui_for_mode)
-        self.both_radio.toggled.connect(self.update_ui_for_mode)  
-        left_layout.addWidget(self.sharpen_radio)
-        left_layout.addWidget(self.denoise_radio)
-        left_layout.addWidget(self.both_radio)
+        self.both_radio.toggled.connect(self.update_ui_for_mode)
+        self.superres_radio.toggled.connect(self.update_ui_for_mode)
+
+        # Main horizontal layout to place columns side-by-side
+        main_radio_layout = QHBoxLayout()
+        main_radio_layout.addLayout(left_radio_layout)
+        main_radio_layout.addLayout(right_radio_layout)
+
+        # Add the combined layout to your parent layout
+        left_layout.addLayout(main_radio_layout)
+
 
         # GPU Acceleration dropdown
         self.gpu_label = QLabel("Use GPU Acceleration:")
@@ -26769,6 +26787,18 @@ class CosmicClarityTab(QWidget):
         self.denoise_mode_dropdown.addItems(["luminance", "full"])  # 'luminance' for luminance-only, 'full' for full YCbCr denoising
         left_layout.addWidget(self.denoise_mode_label)
         left_layout.addWidget(self.denoise_mode_dropdown)
+
+        # Scale factor dropdown (initially hidden)
+        self.scale_label = QLabel("Scale Factor:")
+        self.scale_dropdown = QComboBox()
+        self.scale_dropdown.addItems(["2x", "3x", "4x"])
+
+        left_layout.addWidget(self.scale_label)
+        left_layout.addWidget(self.scale_dropdown)
+
+        # Initially hidden, only show for Super Resolution
+        self.scale_label.hide()
+        self.scale_dropdown.hide()
 
         # Execute button
         self.execute_button = QPushButton("Execute")
@@ -27344,16 +27374,28 @@ class CosmicClarityTab(QWidget):
             QMessageBox.warning(self, "Warning", "No image to save.")
 
     def update_ui_for_mode(self):
-        # Show/hide controls based on the selected mode
-        if self.sharpen_radio.isChecked():
-            self.show_sharpen_controls()
-            self.hide_denoise_controls()
-        elif self.denoise_radio.isChecked():
+        if self.superres_radio.isChecked():
             self.hide_sharpen_controls()
-            self.show_denoise_controls()
-        elif self.both_radio.isChecked():
-            self.show_sharpen_controls()
-            self.show_denoise_controls()
+            self.hide_denoise_controls()
+            self.show_superres_controls()
+            self.gpu_label.hide()
+            self.gpu_dropdown.hide()
+        else:
+            self.hide_superres_controls()
+            self.gpu_label.show()
+            self.gpu_dropdown.show()
+
+            if self.sharpen_radio.isChecked():
+                self.show_sharpen_controls()
+                self.hide_denoise_controls()
+            elif self.denoise_radio.isChecked():
+                self.hide_sharpen_controls()
+                self.show_denoise_controls()
+            elif self.both_radio.isChecked():
+                self.show_sharpen_controls()
+                self.show_denoise_controls()
+
+
 
     def show_sharpen_controls(self):
         self.sharpen_mode_label.show()
@@ -27391,6 +27433,14 @@ class CosmicClarityTab(QWidget):
         self.denoise_mode_label.hide()
         self.denoise_mode_dropdown.hide()
 
+    def show_superres_controls(self):
+        self.scale_label.show()
+        self.scale_dropdown.show()
+
+    def hide_superres_controls(self):
+        self.scale_label.hide()
+        self.scale_dropdown.hide()
+
 
     def get_psf_value(self):
         """Convert the slider value to a float in the range 1.0 - 8.0."""
@@ -27399,7 +27449,15 @@ class CosmicClarityTab(QWidget):
     def run_cosmic_clarity(self, input_file_path=None):
         """Run Cosmic Clarity with the current parameters."""
         if not self.validate_cosmic_clarity_folder():
-            return  # Stop execution if the folder is not valid
+            return
+
+        if self.image is None:
+            QMessageBox.warning(self, "Warning", "Please load an image first.")
+            return
+
+        if self.superres_radio.isChecked():
+            self.execute_super_resolution()
+            return  # Skip the rest if super-resolution mode is chosen
 
         psf_value = self.get_psf_value()
         if not self.cosmic_clarity_folder:
@@ -27438,6 +27496,112 @@ class CosmicClarityTab(QWidget):
         # Start the first operation
         if self.operation_queue:
             self._execute_cosmic_clarity(*self.operation_queue.pop(0))
+
+    def execute_super_resolution(self):
+        scale_str = self.scale_dropdown.currentText()
+        scale_factor = int(scale_str.replace("x", ""))
+
+        input_folder = os.path.join(self.cosmic_clarity_folder, "input")
+        output_folder = os.path.join(self.cosmic_clarity_folder, "output")
+        os.makedirs(input_folder, exist_ok=True)
+        os.makedirs(output_folder, exist_ok=True)
+
+        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        input_path = os.path.join(input_folder, base_filename + ".tif")
+
+        # Save current image
+        self.save_input_image(input_path)
+
+        if sys.platform.startswith("win"):
+            executable_name = "setiastrocosmicclarity_superres.exe"
+        else:
+            executable_name = "setiastrocosmicclarity_superres"
+
+        executable_path = os.path.join(self.cosmic_clarity_folder, executable_name)
+
+        cmd = [
+            executable_path,
+            "--input", input_path,
+            "--output_dir", output_folder,
+            "--scale", str(scale_factor),
+            "--model_dir", self.cosmic_clarity_folder,  # or "." if models are in executable folder
+        ]
+
+        # Directly run superres.py for debugging (assuming it's in the same folder)
+        #superres_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setiastrocosmicclarity_superres.py")
+
+        #cmd = [
+        #    sys.executable,  # path to Python interpreter
+        #    superres_script,
+        #    "--input", input_path,
+        #    "--output_dir", output_folder,
+        #    "--scale", str(scale_factor),
+
+        #]
+
+        print(f"Running command: {' '.join(cmd)}")
+
+        self.process_q_superres = QProcess(self)
+        self.process_q_superres.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+        self.process_q_superres.readyReadStandardOutput.connect(self.read_superres_output)
+        self.process_q_superres.finished.connect(self.superres_finished)
+
+        self.process_q_superres.start(cmd[0], cmd[1:])
+
+        self.wait_dialog = WaitDialog(self)
+        self.wait_dialog.setWindowTitle("Super Resolution Running...")
+        self.wait_dialog.cancelled.connect(self.on_wait_cancelled_superres)
+        self.wait_dialog.show()
+
+
+    def read_superres_output(self):
+        output = self.process_q_superres.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        
+        # Check for progress lines explicitly
+        for line in output.splitlines():
+            if line.startswith("PROGRESS:"):
+                try:
+                    progress_pct = int(line.split(":")[1].strip().replace('%', ''))
+                    self.wait_dialog.set_progress(progress_pct)  # Assuming WaitDialog has set_progress()
+                except ValueError:
+                    pass  # Invalid progress line, skip
+            else:
+                self.wait_dialog.append_output(line)
+
+
+    def superres_finished(self, exitCode, exitStatus):
+        self.wait_dialog.close()
+        if exitCode != 0:
+            QMessageBox.critical(self, "Error", f"Super Resolution failed with exit code {exitCode}.")
+            return
+
+        scale_str = self.scale_dropdown.currentText()
+        base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
+        output_folder = os.path.join(self.cosmic_clarity_folder, "output")
+        suffix = f"_upscaled{scale_str}"
+        output_file_glob = os.path.join(output_folder, base_filename + suffix + ".tif")
+
+        matching_files = glob.glob(output_file_glob)
+        if matching_files:
+            output_file_path = matching_files[0]
+            # Load and display the result
+            final_img, hdr, bd, mono = load_image(output_file_path)
+            if final_img is not None:
+                self.show_image(final_img)
+                self.store_processed_image(final_img)
+                QMessageBox.information(self, "Success", "Super Resolution completed successfully.")
+                self.cleanup_files(os.path.join(self.cosmic_clarity_folder, "input", base_filename + ".tif"), output_file_path)
+            else:
+                QMessageBox.warning(self, "Error", "Failed to load Super Resolution image.")
+        else:
+            QMessageBox.warning(self, "Error", "Output file not found.")
+
+    def on_wait_cancelled_superres(self):
+        if hasattr(self, 'process_q_superres'):
+            self.process_q_superres.kill()
+            QMessageBox.information(self, "Cancelled", "Super Resolution cancelled.")
+
 
     def _execute_cosmic_clarity(self, mode, output_suffix):
         if self.loaded_image_path is None:
@@ -28365,6 +28529,9 @@ class WaitDialog(QDialog):
 
     def append_output(self, text):
         self.output_text_edit.append(text)
+
+    def set_progress(self, pct):
+        self.progress_bar.setValue(pct)        
 
 
 class WaitForFileWorker(QThread):
