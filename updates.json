@@ -1,9 +1,9 @@
 {
-  "version": "2.12.11",
+  "version": "2.13.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.12.11/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Main Updates: Compressed Fits support, Seestar much improved border control and gradient matching along with progress indication, histogram view follows the active slot, Image Preview now finally propely updates when the image changes"
+  "notes": "Supports Cosmic Clarity Super Resolution Upscaling: BE SURE TO UPDATE YOUR COSMIC CLARITY!"
 }
