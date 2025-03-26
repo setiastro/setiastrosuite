@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.0"
+VERSION = "2.13.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -2724,27 +2724,55 @@ class AstroEditingSuite(QMainWindow):
 
     def rgb_extract(self):
         """Handle the RGB Extract action."""
-        # Determine which slot to extract from. For this example, we'll extract from Slot 0.
-        slot_to_extract = 0
+        # 1. Determine which slot to extract from — use the current slot
+        slot_to_extract = self.image_manager.current_slot
         image = self.image_manager._images.get(slot_to_extract, None)
-        
+
         if image is None:
-            QMessageBox.warning(self, "No Image", f"Slot {slot_to_extract} does not contain an image to extract from.")
+            QMessageBox.warning(self, "No Image", 
+                f"Slot {slot_to_extract} does not contain an image to extract from.")
             print(f"Slot {slot_to_extract} is empty. Cannot perform RGB Extract.")
             return
-        
+
         if image.ndim != 3 or image.shape[2] != 3:
-            QMessageBox.warning(self, "Invalid Image", "The selected image is not a valid RGB image.")
+            QMessageBox.warning(self, "Invalid Image", 
+                "The selected image is not a valid 3-channel RGB image.")
             print("Invalid image format for RGB Extract. Expected a 3-channel RGB image.")
             return
-        
+
+        # 2. Helper to find the next free slot
+        def find_next_free_slot(start=0):
+            for s in range(start, self.image_manager.max_slots):
+                if self.image_manager._images[s] is None:
+                    return s
+            return -1
+
+        # 3. Check if we have enough free slots for R, G, B
+        r_slot = find_next_free_slot(0)
+        if r_slot == -1:
+            QMessageBox.warning(self, "No Free Slot", 
+                "No empty slot available for the Red channel.")
+            return
+
+        g_slot = find_next_free_slot(r_slot + 1)  # or start=0 if you want them anywhere
+        if g_slot == -1:
+            QMessageBox.warning(self, "No Free Slot", 
+                "No empty slot available for the Green channel.")
+            return
+
+        b_slot = find_next_free_slot(g_slot + 1)
+        if b_slot == -1:
+            QMessageBox.warning(self, "No Free Slot", 
+                "No empty slot available for the Blue channel.")
+            return
+
         try:
-            # Split the RGB channels
+            # 4. Split the RGB channels
             r_channel = image[..., 0].copy()
             g_channel = image[..., 1].copy()
             b_channel = image[..., 2].copy()
-            
-            # Define metadata for each channel
+
+            # 5. Define metadata for each channel
             metadata_r = {
                 'file_path': f"RGB Extract - Red Channel from Slot {slot_to_extract}",
                 'is_mono': True,
@@ -2763,46 +2791,56 @@ class AstroEditingSuite(QMainWindow):
                 'bit_depth': "32-bit floating point",
                 'original_header': None
             }
-            
-            # Store each channel in Slot 2, 3, and 4
-            self.image_manager._images[2] = r_channel
-            self.image_manager._images[3] = g_channel
-            self.image_manager._images[4] = b_channel
-            self.image_manager._metadata[2] = metadata_r
-            self.image_manager._metadata[3] = metadata_g
-            self.image_manager._metadata[4] = metadata_b
-            
-            # Update the custom slot names in the main window's slot_names dictionary
-            self.slot_names[2] = "Red"
-            self.slot_names[3] = "Green"
-            self.slot_names[4] = "Blue"
-            
-            for slot, name in zip([2, 3, 4], ["Red", "Green", "Blue"]):
-                if slot in self.slot_actions:
-                    self.slot_actions[slot].setText(name)
-                    self.slot_actions[slot].setStatusTip(f"Open preview for {name}")
 
-                if slot in self.preview_windows:
-                    self.preview_windows[slot].setWindowTitle(f"Preview - {name}")
+            # 6. Store each channel in the free slots found
+            self.image_manager._images[r_slot] = r_channel
+            self.image_manager._metadata[r_slot] = metadata_r
 
-                # --- ✅ Update Menubar Slot Names ---
-                if hasattr(self, 'menubar_slot_actions') and slot in self.menubar_slot_actions:
-                    self.menubar_slot_actions[slot].setText(name)
-                    self.menubar_slot_actions[slot].setStatusTip(f"Open preview for {name}")
+            self.image_manager._images[g_slot] = g_channel
+            self.image_manager._metadata[g_slot] = metadata_g
+
+            self.image_manager._images[b_slot] = b_channel
+            self.image_manager._metadata[b_slot] = metadata_b
+
+            # 7. Update your local slot_names / slot_actions, etc.
+            #    (Make sure these exist or adapt for your code.)
+            #    For example:
+            self.slot_names[r_slot] = "Red"
+            self.slot_names[g_slot] = "Green"
+            self.slot_names[b_slot] = "Blue"
+
+            for slot_id, name in zip([r_slot, g_slot, b_slot], ["Red", "Green", "Blue"]):
+                if slot_id in self.slot_actions:
+                    self.slot_actions[slot_id].setText(name)
+                    self.slot_actions[slot_id].setStatusTip(f"Open preview for {name}")
+
+                if slot_id in self.preview_windows:
+                    self.preview_windows[slot_id].setWindowTitle(f"Preview - {name}")
+
+                # Menubar slot names, if used:
+                if hasattr(self, 'menubar_slot_actions') and slot_id in self.menubar_slot_actions:
+                    self.menubar_slot_actions[slot_id].setText(name)
+                    self.menubar_slot_actions[slot_id].setStatusTip(f"Open preview for {name}")
 
             self.menuBar().update()
-                
-            print(f"Extracted R, G, B channels from Slot {slot_to_extract} and stored in Slots 2, 3, 4 as Red, Green, and Blue respectively.")
-            QMessageBox.information(self, "Success", "RGB channels extracted and stored in Slots 2 (Red), 3 (Green), and 4 (Blue).")
-            
-            # Open the preview windows for each extracted channel
-            self.open_preview_window(slot=2)
-            self.open_preview_window(slot=3)
-            self.open_preview_window(slot=4)
+
+            print(f"Extracted R, G, B channels from Slot {slot_to_extract} "
+                f"and stored in Slots {r_slot}, {g_slot}, {b_slot} as Red, Green, Blue.")
+
+            QMessageBox.information(
+                self, "Success",
+                f"RGB channels extracted and stored in slots {r_slot} (Red), {g_slot} (Green), {b_slot} (Blue)."
+            )
+
+            # 8. Optionally open preview windows
+            self.open_preview_window(slot=r_slot)
+            self.open_preview_window(slot=g_slot)
+            self.open_preview_window(slot=b_slot)
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to extract RGB channels: {e}")
             print(f"Error during RGB Extract: {e}")
+
 
     def extract_luminance(self):
         """Extracts the luminance from the current image and updates slots."""
@@ -4566,7 +4604,43 @@ class CopySlotDialog(QDialog):
         target_type = self.target_type_combo.currentText()
         target_slot_num = self.target_slot_combo.currentData()
         return (target_type, target_slot_num)
-           
+
+def siril_style_autostretch(image, sigma=3.0):
+    """
+    Perform a 'Siril-style histogram stretch' using MAD for robust contrast enhancement.
+    
+    Parameters:
+        image (np.ndarray): Input image, assumed to be normalized to [0, 1] range.
+        sigma (float): How many MADs to stretch from the median.
+    
+    Returns:
+        np.ndarray: Stretched image in [0, 1] range.
+    """
+    def stretch_channel(channel):
+        median = np.median(channel)
+        mad = np.median(np.abs(channel - median))
+        min_val = np.min(channel)
+        max_val = np.max(channel)
+
+        # Convert MAD to an equivalent of std (optional, keep raw MAD if preferred)
+        mad_std_equiv = mad * 1.4826
+
+        black_point = max(min_val, median - sigma * mad_std_equiv)
+        white_point = min(max_val, median + sigma * mad_std_equiv)
+
+        if white_point - black_point <= 1e-6:
+            return np.zeros_like(channel)  # Avoid divide-by-zero
+
+        stretched = (channel - black_point) / (white_point - black_point)
+        return np.clip(stretched, 0, 1)
+
+    if image.ndim == 2:
+        return stretch_channel(image)
+    elif image.ndim == 3 and image.shape[2] == 3:
+        return np.stack([stretch_channel(image[..., c]) for c in range(3)], axis=-1)
+    else:
+        raise ValueError("Unsupported image format for histogram stretch.")
+
 class CropTool(QDialog):
     """A cropping tool using QGraphicsView for better rectangle handling."""
     crop_applied = pyqtSignal(object)
@@ -4778,13 +4852,9 @@ class CropTool(QDialog):
         return super().eventFilter(source, event)
 
     def toggle_autostretch(self):
-        """Apply autostretch for visualization purposes only."""
-        stretched_image = None
-        if len(self.original_image_data.shape) == 2:  # Mono image
-            stretched_image = stretch_mono_image(self.original_image_data, target_median=0.5)
-        elif len(self.original_image_data.shape) == 3:  # Color image
-            stretched_image = stretch_color_image(self.original_image_data, target_median=0.5, linked=False)
-        
+        """Apply aggressive autostretch for visualization (Siril-style)."""
+        stretched_image = siril_style_autostretch(self.original_image_data, sigma=3.0)
+
         if stretched_image is not None:
             self.image_data = stretched_image
             saved_rect = self.current_rect if not self.current_rect.isNull() else None
@@ -4794,6 +4864,7 @@ class CropTool(QDialog):
             if saved_rect:
                 pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
                 self.selection_rect_item = self.scene.addRect(saved_rect, pen)
+
 
     def load_previous_crop(self):
         """Load the previous crop rectangle."""
@@ -9754,14 +9825,14 @@ class StackingSuiteDialog(QDialog):
         out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
         try:
             with open(out_path, "w") as f:
-                for file_path, matrix in transforms_dict.items():
-                    # *** KEY FIX: normalize the file_path before writing
-                    norm_file = os.path.normpath(file_path)
+                for norm_path, matrix in transforms_dict.items():
+                    # Use the original normalized input path (e.g., *_n.fit)
+                    orig_path = os.path.normpath(norm_path)
 
                     a, b, tx = matrix[0]
                     c, d, ty = matrix[1]
 
-                    f.write(f"FILE: {norm_file}\n")
+                    f.write(f"FILE: {orig_path}\n")
                     f.write("MATRIX:\n")
                     f.write(f"{a:.4f}, {b:.4f}, {tx:.4f}\n")
                     f.write(f"{c:.4f}, {d:.4f}, {ty:.4f}\n")
@@ -9769,6 +9840,8 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"✅ Transform file saved as {os.path.basename(out_path)}")
         except Exception as e:
             self.update_status(f"⚠️ Failed to save transform file: {e}")
+
+
 
     def load_alignment_matrices_custom(self, file_path):
 
@@ -10427,45 +10500,69 @@ class StackingSuiteDialog(QDialog):
                 deposit_func = drizzle_deposit_color_footprint # your color footprint
                 self.update_status("Using footprint drizzle deposit (color).")
 
-        # 5) Prepare the drizzle/coverage buffers
-        if is_mono:
-            # first_img.shape => (H, W)
-            h, w = first_img.shape
-            out_h = int(h * scale_factor)
-            out_w = int(w * scale_factor)
+        # 5) Prepare drizzle buffers
+        out_h = int(h * scale_factor)
+        out_w = int(w * scale_factor)
 
+        if is_mono:
             drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
             coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
-
-            finalize_func = finalize_drizzle_2d  # 2D final combination
+            finalize_func = finalize_drizzle_2d
         else:
-            # color => (H, W, C)
-            h, w, c = first_img.shape
-            out_h = int(h * scale_factor)
-            out_w = int(w * scale_factor)
-
             drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
             coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+            finalize_func = finalize_drizzle_3d
 
-            finalize_func = finalize_drizzle_3d  # 3D final combination
+        # 6) For each aligned file, find the corresponding raw file and transform
+        for aligned_file in file_list:
+            # Attempt to find the corresponding raw filename
+            aligned_base = os.path.basename(aligned_file)
+            if aligned_base.endswith("_n_r.fit"):
+                # Convert _n_r.fit → _n.fit
+                raw_base = aligned_base.replace("_n_r.fit", "_n.fit")
+            else:
+                # If it doesn't end with _n_r, assume it's already _n.fit
+                raw_base = aligned_base
 
-        # 6) Deposit each file
-        for orig_file in file_list:
-            img_data, _, _, _ = load_image(orig_file)
-            if img_data is None:
-                self.update_status(f"⚠️ Could not load {orig_file} for drizzle!")
+            # Build a path to your raw file. 
+            # If your raw files are in the same directory, do:
+            #   raw_file = os.path.join(os.path.dirname(aligned_file), raw_base)
+            # But if they are in a separate "Normalized_Images" folder, do something like:
+            #   raw_file = os.path.join(self.normalized_images_dir, raw_base)
+            #
+            # For simplicity, let's just do:
+            raw_file = os.path.join(self.stacking_directory, "Normalized_Images", raw_base)
+
+            # Load the raw image
+            raw_img_data, _, _, _ = load_image(raw_file)
+            if raw_img_data is None:
+                self.update_status(f"⚠️ Could not load raw file '{raw_file}' for drizzle!")
                 continue
 
-            norm_orig = os.path.normpath(orig_file)
-            transform = new_transforms_dict.get(norm_orig, None)
+            # Look up the transform from .sasd by the raw path
+            raw_key = os.path.normpath(raw_file)
+            transform = new_transforms_dict.get(raw_key, None)
             if transform is None:
-                self.update_status(f"⚠️ No transform found for {orig_file}! Skipping drizzle.")
+                self.update_status(f"⚠️ No transform found for raw '{raw_base}'! Skipping drizzle.")
                 continue
 
-            weight = frame_weights.get(orig_file, 1.0)
+            # Debug
+            self.update_status(f"🧩 Drizzling (raw): {raw_base}")
+            self.update_status(
+                f"    Matrix: [[{transform[0,0]:.4f}, {transform[0,1]:.4f}, {transform[0,2]:.4f}], "
+                f"[{transform[1,0]:.4f}, {transform[1,1]:.4f}, {transform[1,2]:.4f}]]"
+            )
 
+            # Weight
+            weight = frame_weights.get(aligned_file, 1.0)
+
+            # Cast transform to float32
+            if transform.dtype != np.float32:
+                transform = transform.astype(np.float32)
+
+            # Deposit raw pixels using the raw→final transform
             drizzle_buffer, coverage_buffer = deposit_func(
-                img_data,
+                raw_img_data,
                 transform,
                 drizzle_buffer,
                 coverage_buffer,
@@ -14182,87 +14279,66 @@ class RegistrationWorkerSignals(QObject):
 # Worker to Process One Image Registration
 #############################################
 class StarRegistrationWorker(QRunnable):
-    def __init__(self, file_path, 
+    def __init__(self, file_path, original_file, current_transform,
                  ref_stars, ref_triangles, output_directory, 
-                 use_triangle=False, 
-                 use_astroalign=False, 
-                 reference_image=None):
-        """
-        :param file_path: Path to the source image.
-        :param ref_stars: Star coordinates of the reference image (for RANSAC/triangle).
-        :param ref_triangles: Triangle dictionary built from reference stars.
-        :param output_directory: Where aligned images go.
-        :param use_triangle: If True, do triangle->RANSAC approach.
-        :param use_astroalign: If True, we attempt astroalign first for a rough alignment.
-        :param reference_image: The actual reference image array, needed for astroalign.
-                               Must be 2D grayscale if you want to feed it directly to astroalign.
-        """
+                 use_triangle=False, use_astroalign=False, reference_image=None):
         super().__init__()
-        self.file_path = file_path
+        # file_path is used for naming only; always load the raw image from original_file.
+        self.file_path = file_path  
+        self.original_file = original_file  # persistent key (raw image path)
+        self.current_transform = current_transform if current_transform is not None else IDENTITY_2x3
         self.ref_stars = ref_stars
         self.ref_triangles = ref_triangles
         self.output_directory = output_directory
         self.use_triangle = use_triangle
         self.use_astroalign = use_astroalign
-        self.reference_image = reference_image  # 2D reference image for astroalign
-
+        self.reference_image = reference_image  # 2D reference image
         self.signals = RegistrationWorkerSignals()
 
     def run(self):
         try:
-            # 1) Load image (color or grayscale)
-            img, img_header, img_bit_depth, img_is_mono = load_image(self.file_path)
-            if img is None:
-                self.signals.error.emit(f"Could not load {self.file_path}")
+            # Load the raw image using the persistent key.
+            raw_img, img_header, img_bit_depth, img_is_mono = load_image(self.original_file)
+            if raw_img is None:
+                self.signals.error.emit(f"Could not load {self.original_file}")
                 return
 
-            # Keep a copy of the original image (color, if applicable)
-            original_img = img.copy()
+            # Apply current cumulative transform to get the candidate image.
+            candidate_img = StarRegistrationThread.apply_affine_transform_static(raw_img, self.current_transform)
+            if candidate_img is None:
+                self.signals.error.emit(f"Failed to apply current transform to {self.original_file}")
+                return
 
-            # Create a grayscale copy for alignment calculations.
-            # Astroalign and star detection work best on 2D data.
-            if img.ndim == 3:
-                img_for_alignment = np.mean(img, axis=2)
+            # Prepare candidate for alignment: convert to 2D if needed.
+            if candidate_img.ndim == 3:
+                img_for_alignment = np.mean(candidate_img, axis=2)
             else:
-                img_for_alignment = img
+                img_for_alignment = candidate_img
 
-            # Optionally sanitize NaNs on the grayscale version.
             if np.isnan(img_for_alignment).any() or np.isinf(img_for_alignment).any():
                 img_for_alignment = np.nan_to_num(img_for_alignment, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # 2) Attempt astroalign first (if requested)
+            # Compute delta transform T_delta aligning candidate_img to the reference.
             transform = None
-            if self.use_astroalign:
-                # Make sure we have a valid 2D reference image.
-                if (self.reference_image is not None) and (self.reference_image.ndim == 2):
-                    transform = self.compute_affine_transform_astroalign(img_for_alignment, self.reference_image)
-                    if transform is not None:
-                        self.signals.progress.emit(
-                            f"Astroalign computed initial transform for {os.path.basename(self.file_path)}"
-                        )
-                    else:
-                        self.signals.progress.emit(
-                            f"Astroalign failed or was not applicable for {os.path.basename(self.file_path)}"
-                        )
+            if self.use_astroalign and (self.reference_image is not None) and (self.reference_image.ndim == 2):
+                transform = self.compute_affine_transform_astroalign(img_for_alignment, self.reference_image)
+                if transform is not None:
+                    self.signals.progress.emit(
+                        f"Astroalign computed delta transform for {os.path.basename(self.file_path)}"
+                    )
                 else:
                     self.signals.progress.emit(
-                        "Warning: reference_image is not a valid 2D array; skipping astroalign."
+                        f"Astroalign failed for {os.path.basename(self.file_path)}"
                     )
-
-            # 3) If astroalign transform is None, do your normal star-based method
             if transform is None:
-                # Detect stars in the source image (use the grayscale version)
                 self.signals.progress.emit(f"✨ Detecting stars in {os.path.basename(self.file_path)}")
-                
                 img_stars = StarRegistrationThread.detect_grid_stars_static(img_for_alignment)
                 if len(img_stars) < 9:
-                    self.signals.error.emit(f"Not enough stars in {self.file_path}")
+                    self.signals.error.emit(f"Not enough stars in {self.original_file}")
                     return
                 self.signals.progress.emit(
                     f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}"
                 )
-
-                # Compute affine transform using triangle or RANSAC methods.
                 if self.use_triangle:
                     transform = StarRegistrationThread.compute_affine_transform_triangle_then_ransac(
                         img_stars, self.ref_stars, self.ref_triangles
@@ -14271,68 +14347,73 @@ class StarRegistrationWorker(QRunnable):
                     transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
                         img_stars, self.ref_stars, self.ref_triangles
                     )
-
                 if transform is None:
-                    self.signals.error.emit(f"Alignment failed for {self.file_path}")
+                    self.signals.error.emit(f"Alignment failed for {self.original_file}")
                     return
-
                 self.signals.progress.emit(
-                    f"Computed transform for {os.path.basename(self.file_path)}"
+                    f"Computed delta transform for {os.path.basename(self.file_path)}"
                 )
 
-            # 4) Apply the transform to the original (color) image.
-            aligned_image = StarRegistrationThread.apply_affine_transform_static(original_img, transform)
+            # Compute the new cumulative transform: T_total = T_delta @ current_transform.
+            new_transform = np.array(transform, dtype=np.float64).reshape(2, 3)
+            current_transform = np.array(self.current_transform, dtype=np.float64).reshape(2, 3)
+            new_3x3 = np.vstack([new_transform, [0, 0, 1]])
+            current_3x3 = np.vstack([current_transform, [0, 0, 1]])
+            T_total = new_3x3 @ current_3x3  # This is 3x3.
+            T_total = T_total[0:2, :]  # Ensure shape is (2,3).
+
+            # Emit the delta transform so the parent can update the cumulative transform.
+            self.signals.result_transform.emit(self.original_file, transform)
+
+            # Apply the cumulative transform T_total to the raw image to generate the final aligned image.
+            aligned_image = StarRegistrationThread.apply_affine_transform_static(raw_img, T_total)
             if aligned_image is None:
-                self.signals.error.emit(f"Transform application failed for {self.file_path}")
+                self.signals.error.emit(f"Transform application failed for {self.original_file}")
                 return
 
-            # Check for NaNs in the warped image.
             if np.isnan(aligned_image).any() or np.isinf(aligned_image).any():
-                self.signals.error.emit(f"Aligned image for {self.file_path} contains NaNs/Infs")
+                self.signals.error.emit(f"Aligned image for {self.original_file} contains NaNs/Infs")
                 return
 
-            # 5) Emit the transform for storage.
-            self.signals.result_transform.emit(self.file_path, transform)
-
-            # 6) Build output filename (ensuring "_r" is appended, overwriting the same file).
+            # Build the output filename.
             base = os.path.basename(self.file_path)
             name, ext = os.path.splitext(base)
-            if not name.endswith("_r"):
+            if not (name.endswith("_r") or name.endswith("_n_r")):
                 name += "_r"
             output_filename = os.path.join(self.output_directory, f"{name}.fit")
 
-            # 7) Save the aligned (color) image.
             save_image(
                 img_array=aligned_image,
                 filename=output_filename,
                 original_format="fit",
                 bit_depth=img_bit_depth,
                 original_header=img_header,
-                is_mono=img_is_mono  # remains False for color images
+                is_mono=img_is_mono
             )
             self.signals.result.emit(output_filename)
             self.signals.progress.emit(f"Registered {os.path.basename(self.file_path)}")
 
         except Exception as e:
-            self.signals.error.emit(f"Error processing {self.file_path}: {e}")
+            self.signals.error.emit(f"Error processing {self.original_file}: {e}")
 
     @staticmethod
     def compute_affine_transform_astroalign(source_img, reference_img):
         import astroalign
-        from skimage.transform import AffineTransform
         try:
-            transform_obj, (src_list, dst_list) = astroalign.find_transform(source_img, reference_img)
-            mat_3x3 = transform_obj.params
-            affine_2x3 = mat_3x3[0:2, :]
-            return affine_2x3
+            transform_obj, _ = astroalign.find_transform(source_img, reference_img)
+            return transform_obj.params[0:2, :]
         except Exception as e:
             print(f"DEBUG: astroalign failed: {e}")
             return None
+
+      
 
 
 #############################################
 # Main Star Registration Thread (Concurrent)
 #############################################
+# Identity transform (2x3)
+IDENTITY_2x3 = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64)
 
 class StarRegistrationThread(QThread):
     progress_update = pyqtSignal(str)
@@ -14341,59 +14422,76 @@ class StarRegistrationThread(QThread):
     def __init__(self, reference_image_path, files_to_align, output_directory, 
                  max_refinement_passes=4, shift_tolerance=0.2):
         super().__init__()
-        # Always store reference as normalized
         self.reference_image_path = os.path.normpath(reference_image_path)
-        # Normalize each file in the list
-        self.files_to_align = [os.path.normpath(f) for f in files_to_align]
+        # First, assign original_files.
+        self.original_files = [os.path.normpath(f) for f in files_to_align]
+        # Copy original_files to files_to_align.
+        self.files_to_align = self.original_files.copy()
         self.output_directory = os.path.normpath(output_directory)
         self.max_refinement_passes = max_refinement_passes
         self.shift_tolerance = shift_tolerance
-
-        # alignment_matrices: { normalized_path: 2x3 transform or None }
+        # Mapping: persistent key (raw file) -> current working file.
+        self.file_key_to_current_path = {f: f for f in self.original_files}
+        # Store cumulative transforms keyed by the persistent (raw) file path.
         self.alignment_matrices = {}
-        self.transform_deltas = []
+        self.transform_deltas = []  # List of shift arrays per pass.
 
     def run(self):
         try:
-            # Load reference
+            # Load reference image.
             ref_image, _, _, _ = load_image(self.reference_image_path)
             if ref_image is None:
                 self.registration_complete.emit(False, "Reference image failed to load!")
                 return
 
-            # Convert to 2D if needed
+            # Convert to 2D if needed.
             if ref_image.ndim == 3:
                 ref_image = np.mean(ref_image, axis=2)
-            # Replace any NaNs
             ref_image = np.nan_to_num(ref_image, nan=0.0, posinf=0.0, neginf=0.0)
-            if ref_image is None:
-                self.registration_complete.emit(False, "Reference image failed to load!")
-                return
-            if np.isnan(ref_image).any() or np.isinf(ref_image).any():
-                print("DEBUG: Found NaNs/Infs in reference image. Replacing with zeros.")
-                ref_image = np.nan_to_num(ref_image, nan=0.0, posinf=0.0, neginf=0.0)
             self.reference_image_2d = ref_image    
 
-            # Detect reference stars, etc...
+            # Detect reference stars.
             ref_stars = self.detect_stars(ref_image)
             if len(ref_stars) < 10:
                 self.registration_complete.emit(False, "Insufficient stars in reference image!")
                 return
             ref_triangles = self.build_triangle_dict(ref_stars)
 
-            # Do multiple passes
+            # --- Pre-save all files with the _n_r suffix ---
+            pre_saved_files = []
+            for fpath in self.files_to_align:
+                image, header, fmt, bit_depth = load_image(fpath)
+                if image is None:
+                    self.progress_update.emit(f"Error loading {fpath} during pre-save.")
+                    continue
+                base = os.path.basename(fpath)
+                name, ext = os.path.splitext(base)
+                # Remove trailing _n if present.
+                if name.endswith("_n"):
+                    name = name[:-2]
+                if not name.endswith("_n_r"):
+                    name += "_n_r"
+                pre_saved = os.path.join(self.output_directory, f"{name}.fit")
+                save_image(
+                    img_array=image,
+                    filename=pre_saved,
+                    original_format="fit",
+                    bit_depth=bit_depth,
+                    original_header=header,
+                    is_mono=(image.ndim == 2)
+                )
+                pre_saved_files.append(pre_saved)
+                self.progress_update.emit(f"Pre-saved {base} as {os.path.basename(pre_saved)}")
+            self.files_to_align = pre_saved_files
+
+            # --- Registration Passes ---
             for pass_idx in range(self.max_refinement_passes):
                 self.progress_update.emit(
                     f"⏳ Refinement Pass {pass_idx+1}/{self.max_refinement_passes}..."
                 )
-                success, msg = self.run_one_registration_pass(
-                    ref_stars, ref_triangles, pass_idx
-                )
+                success, msg = self.run_one_registration_pass(ref_stars, ref_triangles, pass_idx)
                 if not success:
-                    # If everything failed, abort
-                    any_aligned = any(
-                        x is not None for x in self.alignment_matrices.values()
-                    )
+                    any_aligned = any(x is not None for x in self.alignment_matrices.values())
                     if not any_aligned:
                         self.registration_complete.emit(False, "No frames could be aligned. Aborting.")
                         return
@@ -14401,48 +14499,22 @@ class StarRegistrationThread(QThread):
                         self.progress_update.emit("Partial success: some frames permanently failed.")
                         break
 
-                # Check convergence
                 if self.transform_deltas and max(self.transform_deltas[-1]) < self.shift_tolerance:
                     self.progress_update.emit("✅ Convergence reached! Stopping refinement.")
                     break
 
-            # 🚀 Reject frames with >2px final shift *OR* >2° rotation
-            final_shifts = self.transform_deltas[-1]  # Last pass shift values
-
+            # Final rejection check using delta shifts only.
+            final_shifts = self.transform_deltas[-1]  # Delta shifts from the last pass.
             old_files = self.files_to_align
             new_files = []
             rejected_files = []
-
-            for f, shift in zip(old_files, final_shifts):
-                transform = self.alignment_matrices.get(f, None)
-                if transform is None:
-                    # No transform => definitely reject
+            for f, delta in zip(old_files, final_shifts):
+                # If the delta shift (the correction computed in the final pass)
+                # exceeds 2 pixels, reject the frame.
+                if delta > 2.0:
                     rejected_files.append(f)
-                    continue
-
-                # Extract elements from the 2×3 matrix
-                # transform = [[a, b, tx],
-                #              [c, d, ty]]
-                a, b, tx = transform[0]
-                c, d, ty = transform[1]
-
-                # 1) SHIFT check
-                if shift > 2.0:
-                    rejected_files.append(f)
-                    continue
-
-                # 2) ROTATION check
-                # For a typical 2D rigid transform, rotation angle (in radians) is arctan2(b, a).
-                # Then convert to degrees and compare to 2°.
-                rotation_radians = np.arctan2(b, a)
-                rotation_degrees = abs(np.degrees(rotation_radians))
-                if rotation_degrees > 2.0:
-                    rejected_files.append(f)
-                    continue
-
-                # If both shift and rotation are within limits, keep the file
-                new_files.append(f)
-
+                else:
+                    new_files.append(f)
             self.files_to_align = new_files
 
             if rejected_files:
@@ -14450,7 +14522,6 @@ class StarRegistrationThread(QThread):
                     f"🚨 Rejected {len(rejected_files)} frame(s) due to shift >2px or rotation >2°."
                 )
 
-            # Finished passes
             aligned_count = sum(1 for v in self.alignment_matrices.values() if v is not None)
             total_count = len(self.alignment_matrices)
             summary = f"Registration complete. Valid frames: {aligned_count}/{total_count}."
@@ -14465,35 +14536,24 @@ class StarRegistrationThread(QThread):
         pool.setMaxThreadCount(num_cores)
         self.progress_update.emit(f"Using {num_cores} cores for pass {pass_index+1}.")
 
-        transformed_files = []
-        remaining_files = []
-        
-        # Use astroalign for the first 2 passes; for passes 3+ use RANSAC (with triangle matching if pass_index >= 2)
-        use_astroalign = (pass_index < 2)
-        
-        for fpath in self.files_to_align:
-            transform = self.alignment_matrices.get(fpath, None)
-            if transform is not None:
-                tx, ty = transform[0, 2], transform[1, 2]
-                shift_delta = np.sqrt(tx**2 + ty**2)
-                if shift_delta <= 0.1:
-                    self.progress_update.emit(
-                        f"✅ Skipping {os.path.basename(fpath)} (Shift: {shift_delta:.2f}px)"
-                    )
-                    remaining_files.append(fpath)
-                    continue
+        # New mappings for this pass.
+        transformed_files = {}
+        remaining_files = {}
 
-            # For pass >= 2, use the triangle approach with RANSAC refinement.
-            do_triangle = (pass_index >= 3)
-            
+        use_astroalign = (pass_index < 2)
+        for original_file, current_file in self.file_key_to_current_path.items():
+            # Get current cumulative transform for persistent key.
+            current_transform = self.alignment_matrices.get(original_file, IDENTITY_2x3)
             worker = StarRegistrationWorker(
-                file_path=fpath,
+                file_path=current_file,
+                original_file=original_file,
+                current_transform=current_transform,
                 ref_stars=ref_stars,
                 ref_triangles=ref_triangles,
                 output_directory=self.output_directory,
-                use_triangle=do_triangle,
+                use_triangle=(pass_index >= 3),
                 use_astroalign=use_astroalign,
-                reference_image=self.reference_image_2d  # 2D reference image for astroalign
+                reference_image=self.reference_image_2d
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
@@ -14505,54 +14565,78 @@ class StarRegistrationThread(QThread):
         pass_deltas = []
         aligned_count = 0
 
-        for fpath in self.files_to_align:
-            transform = self.alignment_matrices.get(fpath, None)
-            if transform is not None:
+        # Iterate over the persistent mapping using the delta shift computed in this pass.
+        for original_file, current_file in self.file_key_to_current_path.items():
+            # Use the delta shift from the current pass; default to 0 if none.
+            delta_shift = self.delta_transforms.get(original_file, 0.0)
+            pass_deltas.append(delta_shift)
+            # If the delta is above threshold (e.g., 0.2 pixels), update the file.
+            if delta_shift > 0.2:
+                # Load current working file and re-apply cumulative transform.
+                image, original_header, original_format, bit_depth = load_image(current_file)
+                transformed_image = self.apply_affine_transform_static(image, self.alignment_matrices.get(original_file))
+                if transformed_image is not None and (np.isnan(transformed_image).any() or np.isinf(transformed_image).any()):
+                    transformed_image = np.nan_to_num(transformed_image, nan=0.0)
+                base = os.path.basename(current_file)
+                name, ext = os.path.splitext(base)
+                if not (name.endswith("_r") or name.endswith("_n_r")):
+                    name += "_r"
+                transformed_path = os.path.join(self.output_directory, f"{name}.fit")
+                save_image(
+                    img_array=transformed_image,
+                    filename=transformed_path,
+                    original_format="fit",
+                    bit_depth=bit_depth,
+                    original_header=original_header,
+                    is_mono=False
+                )
+                transformed_files[original_file] = transformed_path
+            else:
+                # Delta is small, so we consider this frame converged.
+                remaining_files[original_file] = current_file
                 aligned_count += 1
-                tx, ty = transform[0, 2], transform[1, 2]
-                shift_delta = np.sqrt(tx**2 + ty**2)
-                pass_deltas.append(shift_delta)
-                # Only refine if the shift is larger than our tolerance.
-                if shift_delta > 0.2:
-                    # Load the current (possibly already refined) image.
-                    image, original_header, original_format, bit_depth = load_image(fpath)
-                    transformed_image = self.apply_affine_transform_static(image, transform)
-                    if transformed_image is not None and (
-                        np.isnan(transformed_image).any() or np.isinf(transformed_image).any()
-                    ):
-                        transformed_image = np.nan_to_num(transformed_image, nan=0.0)
-                    # Build the output filename.
-                    base = os.path.basename(fpath)
-                    name, ext = os.path.splitext(base)
-                    if not name.endswith("_r"):
-                        name += "_r"
-                    transformed_path = os.path.join(self.output_directory, f"{name}.fit")
-                    # Overwrite the existing file.
-                    save_image(
-                        img_array=transformed_image,
-                        filename=transformed_path,
-                        original_format="fit",
-                        bit_depth=bit_depth,
-                        original_header=original_header,
-                        is_mono=False
-                    )
-                    transformed_files.append(transformed_path)
-                else:
-                    remaining_files.append(fpath)
+
         self.transform_deltas.append(pass_deltas)
-        # Update files_to_align so that subsequent passes operate on the same (overwritten) _r files.
-        self.files_to_align = transformed_files + remaining_files
+        # Update the persistent mapping for the next pass.
+        self.file_key_to_current_path = {**transformed_files, **remaining_files}
+
         preview = ", ".join([f"{d:.2f}" for d in pass_deltas[:10]])
         if len(pass_deltas) > 10:
             preview += f" ... ({len(pass_deltas)} total)"
-        self.progress_update.emit(f"Pass {pass_index+1} shift deltas: [{preview}]")
+        self.progress_update.emit(f"Pass {pass_index+1} delta shifts: [{preview}]")
 
         if aligned_count == 0:
             return False, "All frames already aligned within tolerance."
-        failed_count = len(self.files_to_align) - aligned_count
+        failed_count = len(self.file_key_to_current_path) - aligned_count
         if failed_count > 0:
             return True, f"Pass complete. {failed_count} frame(s) failed."
         return True, "Pass complete (all succeeded)."
+
+    def on_worker_result_transform(self, persistent_key, new_transform):
+        persistent_key = os.path.normpath(persistent_key)
+        # Ensure new_transform is a float64 array with shape (2,3)
+        new_transform = np.array(new_transform, dtype=np.float64).reshape(2, 3)
+        # Compute the delta shift (from the delta transform)
+        delta_shift = np.sqrt(new_transform[0,2]**2 + new_transform[1,2]**2)
+        # Record the delta shift in a new dictionary.
+        if not hasattr(self, 'delta_transforms'):
+            self.delta_transforms = {}
+        self.delta_transforms[persistent_key] = delta_shift
+
+        # Now update the cumulative transform.
+        prev_transform = self.alignment_matrices.get(persistent_key)
+        if prev_transform is not None:
+            prev_transform = np.array(prev_transform, dtype=np.float64).reshape(2, 3)
+            prev_3x3 = np.vstack([prev_transform, [0, 0, 1]])
+            new_3x3 = np.vstack([new_transform, [0, 0, 1]])
+            combined = new_3x3 @ prev_3x3
+            self.alignment_matrices[persistent_key] = combined[0:2, :]
+        else:
+            self.alignment_matrices[persistent_key] = new_transform
+
+        print(f"Persistent key: {persistent_key}")
+        print(f"T_delta:\n{new_transform}")
+        print(f"Delta shift: {delta_shift}")
 
 
     
@@ -14655,9 +14739,8 @@ class StarRegistrationThread(QThread):
             return None
         return (sides[1] / sides[0], sides[2] / sides[0])
 
-    # NEW METHOD: store transforms in self.alignment_matrices
-    def on_worker_result_transform(self, file_path, transform):
-        self.alignment_matrices[file_path] = transform
+
+
         
 
 
@@ -14897,6 +14980,11 @@ class StarRegistrationThread(QThread):
 
     @staticmethod
     def apply_affine_transform_static(image, transform_matrix):
+        import numpy as np
+        import cv2
+        # Ensure the transform matrix is a NumPy array of shape (2,3) and type float32.
+        transform_matrix = np.array(transform_matrix, dtype=np.float32).reshape(2, 3)
+        
         h, w = image.shape[:2]
         # If grayscale, use warpAffine directly.
         if image.ndim == 2:
@@ -14922,8 +15010,9 @@ class StarRegistrationThread(QThread):
                 )
                 channels.append(warped_channel)
             aligned = np.stack(channels, axis=2)
-
+        
         return aligned
+
 
     @staticmethod
     def compute_affine_transform_from_triangles(img_stars, ref_stars, ref_triangles, method='auto', max_stars=100):
@@ -20247,7 +20336,7 @@ class GradientRemovalDialog(QDialog):
         Applies auto-stretch to the displayed image without affecting the original image.
         """
         # Stretch the original image for display
-        stretched_image = self.stretch_image(self.image)
+        stretched_image = siril_style_autostretch(self.image)
 
         # Get the current pixmap size from the pixmap_item.
         current_pixmap = self.pixmap_item.pixmap()
@@ -21454,6 +21543,10 @@ class GraXpertThread(QThread):
 
     def run(self):
         """Run the GraXpert command and capture output."""
+        print(f"[DEBUG] Running command: {self.command}")
+        if isinstance(self.command, list):
+            print(f"[DEBUG] First item (executable): {self.command[0]}")
+
         process = subprocess.Popen(
             self.command,
             stdout=subprocess.PIPE,
@@ -24148,6 +24241,28 @@ class PixelMathDialog(QDialog):
         else:
             return new_arr
 
+    def get_active_mask(self):
+        """
+        Retrieves the currently applied mask from MaskManager.
+        
+        Returns:
+            np.ndarray or None: The active mask as a NumPy array normalized between 0 and 1,
+                                or None if no mask is applied.
+        """
+        if self.image_manager and self.image_manager.mask_manager:
+            mask = self.image_manager.mask_manager.get_applied_mask()
+            if mask is not None:
+                if mask.dtype != np.float32 and mask.dtype != np.float64:
+                    mask = mask.astype(np.float32) / 255.0
+                if self.image_manager.image.ndim == 3 and mask.ndim == 2:
+                    mask = np.expand_dims(mask, axis=-1)
+                if mask.shape[:2] != self.image_manager.image.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
+                    return None
+                return mask
+        return None
+
+
     def evaluate_multiline_expression(self, expr, safe_namespace):
         """
         Allows multiple lines in the user expression.
@@ -24203,7 +24318,21 @@ class PixelMathDialog(QDialog):
                 current_slot = self.image_manager.current_slot
                 metadata = self.image_manager._metadata.get(current_slot, {}).copy()
                 metadata['pixel_math'] = expr
+                mask = self.get_active_mask()
+                if mask is not None:
+                    original = self.image_manager.image
+                    if original.ndim == 2:
+                        original = np.stack([original]*3, axis=-1)
+                    if mask.ndim == 2:
+                        mask = np.expand_dims(mask, axis=-1)
+                    if mask.shape[2] == 1 and original.ndim == 3:
+                        mask = np.repeat(mask, original.shape[2], axis=2)
+
+                    new_img = new_img * mask + original * (1 - mask)
+                    new_img = np.clip(new_img, 0.0, 1.0)
+
                 self.image_manager.set_image(new_img, metadata)
+
                 QMessageBox.information(self, "Pixel Math", "Pixel math operation applied successfully.")
                 self.accept()
             except Exception as e:
@@ -24273,7 +24402,21 @@ class PixelMathDialog(QDialog):
                 current_slot = self.image_manager.current_slot
                 metadata = self.image_manager._metadata.get(current_slot, {}).copy()
                 metadata['pixel_math'] = f"R:{expr_r}, G:{expr_g}, B:{expr_b}"
+                mask = self.get_active_mask()
+                if mask is not None:
+                    original = self.image_manager.image
+                    if original.ndim == 2:
+                        original = np.stack([original]*3, axis=-1)
+                    if mask.ndim == 2:
+                        mask = np.expand_dims(mask, axis=-1)
+                    if mask.shape[2] == 1 and original.ndim == 3:
+                        mask = np.repeat(mask, original.shape[2], axis=2)
+
+                    combined = combined * mask + original * (1 - mask)
+                    combined = np.clip(combined, 0.0, 1.0)
+
                 self.image_manager.set_image(combined, metadata)
+
 
                 QMessageBox.information(self, "Pixel Math", 
                                         "Pixel math operation (per-channel) applied successfully.")
@@ -31045,6 +31188,13 @@ class FullCurvesTab(QWidget):
             if mask.shape[:2] != self.original_image.shape[:2]:
                 QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
                 return
+
+            if mask.ndim == 2:
+                mask = np.expand_dims(mask, axis=-1)
+
+            # Now broadcast mask to match image shape if needed
+            if self.original_image.ndim == 3 and mask.shape[2] == 1:
+                mask = np.repeat(mask, self.original_image.shape[2], axis=2)
 
             # Blend the adjusted image with the original image using the mask
             # Formula: blended = adjusted * mask + original * (1 - mask)
