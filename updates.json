@@ -1,9 +1,9 @@
 {
-  "version": "2.13.0",
+  "version": "2.13.1",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.0/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.1/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.1/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.1/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Supports Cosmic Clarity Super Resolution Upscaling: BE SURE TO UPDATE YOUR COSMIC CLARITY!"
+  "notes": "Improved Autostretch for Crop and ADBE to really let you see stacking artifacts and gradients.  RGB Extraction now extracts the active slot and puts the R, G, and B in the first available free slots. Mask integrated with Pixel Math.  Drizzle fixed in Stacking Suite"
 }
