@@ -2264,27 +2264,52 @@ def numba_unstretch(image: np.ndarray, stretch_original_medians: np.ndarray, str
 
 
 @njit(fastmath=True)
-def drizzle_deposit_numba_naive(img_data, transform, drizzle_buffer, coverage_buffer,
-                                drizzle_factor, frame_weight):
+def drizzle_deposit_numba_naive(
+    img_data,       # shape (H, W), mono
+    transform,      # shape (2, 3), e.g. [[a,b,tx],[c,d,ty]]
+    drizzle_buffer, # shape (outH, outW)
+    coverage_buffer,# shape (outH, outW)
+    drizzle_factor: float,
+    frame_weight: float
+):
     """
     Naive deposit: each input pixel is mapped to exactly one output pixel,
-    ignoring drop_shrink. 2D single-channel version for brevity.
+    ignoring drop_shrink. 2D single-channel version (mono).
     """
     h, w = img_data.shape
     out_h, out_w = drizzle_buffer.shape
 
-    a, b, tx = transform[0]
-    c, d, ty = transform[1]
+    # Build a 3×3 matrix M
+    # transform is 2×3, so we expand to 3×3 for the standard [x, y, 1] approach
+    M = np.zeros((3, 3), dtype=np.float32)
+    M[0, 0] = transform[0, 0]  # a
+    M[0, 1] = transform[0, 1]  # b
+    M[0, 2] = transform[0, 2]  # tx
+    M[1, 0] = transform[1, 0]  # c
+    M[1, 1] = transform[1, 1]  # d
+    M[1, 2] = transform[1, 2]  # ty
+    M[2, 2] = 1.0
+
+    # We'll reuse a small input vector for each pixel
+    in_coords = np.zeros(3, dtype=np.float32)
+    in_coords[2] = 1.0
 
     for y in range(h):
         for x in range(w):
             val = img_data[y, x]
             if val == 0:
                 continue
-            X = a*x + b*y + tx
-            Y = c*x + d*y + ty
 
-            # multiply by drizzle_factor
+            # Fill the input vector
+            in_coords[0] = x
+            in_coords[1] = y
+
+            # Multiply
+            out_coords = M @ in_coords
+            X = out_coords[0]
+            Y = out_coords[1]
+
+            # Multiply by drizzle_factor
             Xo = int(X * drizzle_factor)
             Yo = int(Y * drizzle_factor)
 
@@ -2297,18 +2322,33 @@ def drizzle_deposit_numba_naive(img_data, transform, drizzle_buffer, coverage_bu
 
 @njit(fastmath=True)
 def drizzle_deposit_numba_footprint(
-    img_data, transform, drizzle_buffer, coverage_buffer,
-    drizzle_factor, drop_shrink, frame_weight
+    img_data,       # shape (H, W), mono
+    transform,      # shape (2, 3)
+    drizzle_buffer, # shape (outH, outW)
+    coverage_buffer,# shape (outH, outW)
+    drizzle_factor: float,
+    drop_shrink: float,
+    frame_weight: float
 ):
     """
-    Distributes each input pixel over a bounding box (width=drop_shrink)
+    Distributes each input pixel over a bounding box of width=drop_shrink
     in the drizzle (out) plane. (Mono 2D version)
     """
     h, w = img_data.shape
     out_h, out_w = drizzle_buffer.shape
 
-    a, b, tx = transform[0]
-    c, d, ty = transform[1]
+    # Build a 3×3 matrix M
+    M = np.zeros((3, 3), dtype=np.float32)
+    M[0, 0] = transform[0, 0]  # a
+    M[0, 1] = transform[0, 1]  # b
+    M[0, 2] = transform[0, 2]  # tx
+    M[1, 0] = transform[1, 0]  # c
+    M[1, 1] = transform[1, 1]  # d
+    M[1, 2] = transform[1, 2]  # ty
+    M[2, 2] = 1.0
+
+    in_coords = np.zeros(3, dtype=np.float32)
+    in_coords[2] = 1.0
 
     footprint_radius = drop_shrink * 0.5
 
@@ -2318,21 +2358,24 @@ def drizzle_deposit_numba_footprint(
             if val == 0:
                 continue
 
-            # 1) Transform to output coords
-            X = a*x + b*y + tx
-            Y = c*x + d*y + ty
+            # Transform to output coords
+            in_coords[0] = x
+            in_coords[1] = y
+            out_coords = M @ in_coords
+            X = out_coords[0]
+            Y = out_coords[1]
 
-            # 2) Upsample
+            # Upsample
             Xo = X * drizzle_factor
             Yo = Y * drizzle_factor
 
-            # 3) Determine bounding box
+            # bounding box
             min_x = int(np.floor(Xo - footprint_radius))
             max_x = int(np.floor(Xo + footprint_radius))
             min_y = int(np.floor(Yo - footprint_radius))
             max_y = int(np.floor(Yo + footprint_radius))
 
-            # 4) Clip bounding box to output
+            # clip
             if max_x < 0 or min_x >= out_w or max_y < 0 or min_y >= out_h:
                 continue
             if min_x < 0:
@@ -2350,7 +2393,6 @@ def drizzle_deposit_numba_footprint(
             if area_pixels <= 0:
                 continue
 
-            # 5) Distribute flux *and* coverage
             deposit_val = (val * frame_weight) / area_pixels
             coverage_fraction = frame_weight / area_pixels
 
@@ -2380,61 +2422,50 @@ def finalize_drizzle_2d(drizzle_buffer, coverage_buffer, final_out):
 
 @njit(fastmath=True)
 def drizzle_deposit_color_naive(
-    img_data,          # shape (H,W,C)
-    transform,         # shape (2,3)
-    drizzle_buffer,    # shape (outH,outW,C)
-    coverage_buffer,   # shape (outH,outW,C)
-    drizzle_factor,
-    drop_shrink,       # not used here, but included for signature consistency
-    frame_weight
+    img_data,         # shape (H,W,C)
+    transform,        # shape (2,3)
+    drizzle_buffer,   # shape (outH,outW,C)
+    coverage_buffer,  # shape (outH,outW,C)
+    drizzle_factor: float,
+    drop_shrink: float,  # unused here
+    frame_weight: float
 ):
     """
     Naive color deposit:
-    Each input pixel (for each channel) is mapped to exactly one output pixel in (outH,outW,C).
-    We ignore drop_shrink and place all flux into a single pixel.
-
-    Parameters
-    ----------
-    img_data : np.ndarray, shape (H,W,C)
-        The color input image data for one frame.
-    transform : np.ndarray, shape (2,3)
-        The affine matrix [ [a,b,tx], [c,d,ty] ] from registration.
-    drizzle_buffer : np.ndarray, shape (outH,outW,C)
-        The upsampled output array where we accumulate flux.
-    coverage_buffer : np.ndarray, shape (outH,outW,C)
-        Parallel buffer tracking coverage for each channel.
-    drizzle_factor : float
-        E.g. 2.0 for 2× upsampling.
-    drop_shrink : float
-        Not used in this naive approach, but included for function signature compatibility.
-    frame_weight : float
-        A per-frame weight (e.g. from star-count weighting).
-
-    Returns
-    -------
-    drizzle_buffer, coverage_buffer : updated arrays with the newly deposited flux.
+    Each input pixel is mapped to exactly one output pixel (ignores drop_shrink).
     """
-
     H, W, channels = img_data.shape
     outH, outW, outC = drizzle_buffer.shape
 
-    # Unpack affine transform
-    a, b, tx = transform[0]
-    c_, d, ty = transform[1]
+    # Build 3×3 matrix M
+    M = np.zeros((3, 3), dtype=np.float32)
+    M[0, 0] = transform[0, 0]
+    M[0, 1] = transform[0, 1]
+    M[0, 2] = transform[0, 2]
+    M[1, 0] = transform[1, 0]
+    M[1, 1] = transform[1, 1]
+    M[1, 2] = transform[1, 2]
+    M[2, 2] = 1.0
+
+    in_coords = np.zeros(3, dtype=np.float32)
+    in_coords[2] = 1.0
 
     for y in range(H):
         for x in range(W):
-            # 1) Compute transformed coordinates
-            X = a*x + b*y + tx
-            Y = c_*x + d*y + ty
+            # 1) Transform
+            in_coords[0] = x
+            in_coords[1] = y
+            out_coords = M @ in_coords
+            X = out_coords[0]
+            Y = out_coords[1]
 
             # 2) Upsample
             Xo = int(X * drizzle_factor)
             Yo = int(Y * drizzle_factor)
 
-            # 3) Bounds check
+            # 3) Check bounds
             if 0 <= Xo < outW and 0 <= Yo < outH:
-                # 4) Loop over channels
+                # 4) For each channel
                 for cidx in range(channels):
                     val = img_data[y, x, cidx]
                     if val != 0:
@@ -2442,50 +2473,57 @@ def drizzle_deposit_color_naive(
                         coverage_buffer[Yo, Xo, cidx] += frame_weight
 
     return drizzle_buffer, coverage_buffer
-
 @njit(fastmath=True)
 def drizzle_deposit_color_footprint(
-    img_data,          # shape (H,W,C)
-    transform,         # shape (2,3)
-    drizzle_buffer,    # shape (outH,outW,C)
-    coverage_buffer,   # shape (outH,outW,C)
-    drizzle_factor, 
-    drop_shrink,
-    frame_weight
+    img_data,         # shape (H,W,C)
+    transform,        # shape (2,3)
+    drizzle_buffer,   # shape (outH,outW,C)
+    coverage_buffer,  # shape (outH,outW,C)
+    drizzle_factor: float,
+    drop_shrink: float,
+    frame_weight: float
 ):
     """
-    Distributes each input pixel (for each channel) over a bounding-box footprint
-    of width=drop_shrink in the output plane. (Color 3D version)
+    Color version with a bounding-box footprint of width=drop_shrink
+    for distributing flux in the output plane.
     """
-
     H, W, channels = img_data.shape
     outH, outW, outC = drizzle_buffer.shape
 
-    # Unpack affine transform
-    a, b, tx = transform[0]
-    c_, d, ty = transform[1]
+    # Build 3×3 matrix
+    M = np.zeros((3, 3), dtype=np.float32)
+    M[0, 0] = transform[0, 0]
+    M[0, 1] = transform[0, 1]
+    M[0, 2] = transform[0, 2]
+    M[1, 0] = transform[1, 0]
+    M[1, 1] = transform[1, 1]
+    M[1, 2] = transform[1, 2]
+    M[2, 2] = 1.0
 
-    # The half-width of the footprint in output coords
+    in_coords = np.zeros(3, dtype=np.float32)
+    in_coords[2] = 1.0
+
     footprint_radius = drop_shrink * 0.5
 
     for y in range(H):
         for x in range(W):
-            # We'll handle each channel separately
-            # so we compute the transform once
-            X = a*x + b*y + tx
-            Y = c_*x + d*y + ty
+            # Transform once per pixel
+            in_coords[0] = x
+            in_coords[1] = y
+            out_coords = M @ in_coords
+            X = out_coords[0]
+            Y = out_coords[1]
 
-            # Multiply by drizzle_factor => upsampled coords
+            # Upsample
             Xo = X * drizzle_factor
             Yo = Y * drizzle_factor
 
-            # bounding box in output coords
+            # bounding box
             min_x = int(np.floor(Xo - footprint_radius))
             max_x = int(np.floor(Xo + footprint_radius))
             min_y = int(np.floor(Yo - footprint_radius))
             max_y = int(np.floor(Yo + footprint_radius))
 
-            # Clip to output
             if max_x < 0 or min_x >= outW or max_y < 0 or min_y >= outH:
                 continue
             if min_x < 0:
@@ -2511,9 +2549,8 @@ def drizzle_deposit_color_footprint(
                 deposit_val = (val * frame_weight) / area_pixels
                 coverage_fraction = frame_weight / area_pixels
 
-                # deposit in bounding box
-                for oy in range(min_y, max_y+1):
-                    for ox in range(min_x, max_x+1):
+                for oy in range(min_y, max_y + 1):
+                    for ox in range(min_x, max_x + 1):
                         drizzle_buffer[oy, ox, cidx] += deposit_val
                         coverage_buffer[oy, ox, cidx] += coverage_fraction
 
