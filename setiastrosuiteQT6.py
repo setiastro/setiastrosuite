@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.1"
+VERSION = "2.13.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3747,20 +3747,29 @@ class AstroEditingSuite(QMainWindow):
 
         # Step 10: Prompt user to save Stars Only Image
         working_dir = self.settings.value("working_directory", os.getcwd())
-        save_path, _ = QFileDialog.getSaveFileName(
+        save_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save Stars Only Image",
-            working_dir,  # Now using the working directory from preferences
+            working_dir,
             "TIFF Files (*.tif *.tiff);;PNG Files (*.png)"
         )
 
         if save_path:
+            # If no extension was provided, append one based on the selected filter
+            _, ext = os.path.splitext(save_path)
+            ext = ext.lower()
+            if not ext:
+                if "TIFF" in selected_filter:
+                    save_path += ".tif"
+                    ext = ".tif"
+                elif "PNG" in selected_filter:
+                    save_path += ".png"
+                    ext = ".png"
+
             print(f"Saving stars-only image to {save_path}...")
             dialog.append_text(f"Saving stars-only image to {save_path}...\n")
             try:
                 # Determine the format and bit depth based on the file extension
-                _, ext = os.path.splitext(save_path)
-                ext = ext.lower()
                 if ext in ['.tif', '.tiff']:
                     original_format = 'tiff'
                     bit_depth = '16-bit'
@@ -3780,10 +3789,10 @@ class AstroEditingSuite(QMainWindow):
                     filename=save_path,
                     original_format=original_format,
                     bit_depth=bit_depth,
-                    original_header=None,  # Pass actual header if available
-                    is_mono=False,        # Set to True if image is monochrome
-                    image_meta=None,      # Pass image metadata if needed
-                    file_meta=None        # Pass file metadata if needed
+                    original_header=None,
+                    is_mono=False,
+                    image_meta=None,
+                    file_meta=None
                 )
                 QMessageBox.information(self, "Success", "Stars only image saved successfully.")
                 print("Stars-only image saved successfully.")
@@ -4105,14 +4114,24 @@ class AstroEditingSuite(QMainWindow):
         
         # If slot == 0 and we have a valid image, update dimensions
         if image is not None:
-            # image should be a numpy array with shape (height, width[, channels])
-            h, w = image.shape[:2]
-            self.dim_label.setText(f"{w} x {h}")
-            print(f"Image dimensions updated to: {w} x {h}")
+            # Check the number of dimensions in the image array.
+            if image.ndim == 2:
+                # 2D image (height, width)
+                h, w = image.shape
+                self.dim_label.setText(f"{w} x {h}")
+                print(f"Image dimensions updated to: {w} x {h}")
+            elif image.ndim == 3:
+                # 3D image (height, width, channels)
+                h, w, c = image.shape
+                self.dim_label.setText(f"{w} x {h} x {c}")
+                print(f"Image dimensions updated to: {w} x {h} x {c}")
+            else:
+                self.dim_label.setText("Unknown dimensions")
+                print("Image dimensions not updated due to unrecognized shape.")
         else:
-            # If another slot changed or no image, set to "—"
+            # No image available
             self.dim_label.setText("—")
-            print("Image dimensions not updated.")       
+            print("Image dimensions not updated.")   
 
     def apply_theme(self, theme):
         """Apply the selected theme to the application."""
@@ -6759,6 +6778,224 @@ class BatchSettingsDialog(QDialog):
             self.exptime_edit.text(),
             self.filter_edit.text()
         )
+
+class ReferenceFrameReviewDialog(QDialog):
+    def __init__(self, ref_frame_path, stats, parent=None):
+        """
+        Parameters:
+            ref_frame_path (str): Path to the auto-selected reference frame.
+            stats (dict): Dictionary with statistics (e.g. star_count, eccentricity, mean).
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Reference Frame Review")
+        self.ref_frame_path = ref_frame_path
+        self.stats = stats  # e.g., {"star_count": 250, "eccentricity": 0.12, "mean": 0.45}
+        self.autostretch_enabled = False
+        self.original_image = None  # Will store the loaded image array
+        # Use the reference median from stats as the target for stretching
+        self.target_median = self.stats.get("mean", 0.25)
+        self.user_choice = None  # Will be set to 'use' or 'select_other'
+        self.zoom_factor = 1.0
+        self.current_preview_image = None  # Store the image array currently shown in preview
+
+        # For panning functionality
+        self._panning = False
+        self._last_mouse_pos = QPoint()
+
+        self.initUI()
+        self.loadImageArray()  # Load the image into self.original_image
+
+    def initUI(self):
+        main_layout = QVBoxLayout(self)
+        
+        # Create a scroll area for the preview image
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setMinimumSize(QSize(600, 400))
+        self.previewLabel = QLabel("Reference Preview", self)
+        self.previewLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scrollArea.setWidget(self.previewLabel)
+        main_layout.addWidget(self.scrollArea)
+        # Install event filter for mouse wheel zoom and mouse panning
+        self.scrollArea.viewport().installEventFilter(self)
+        
+        # Zoom control buttons
+        zoom_layout = QHBoxLayout()
+        self.zoomInButton = QPushButton("Zoom In", self)
+        self.zoomInButton.clicked.connect(self.zoomIn)
+        zoom_layout.addWidget(self.zoomInButton)
+        self.zoomOutButton = QPushButton("Zoom Out", self)
+        self.zoomOutButton.clicked.connect(self.zoomOut)
+        zoom_layout.addWidget(self.zoomOutButton)
+        main_layout.addLayout(zoom_layout)
+        
+        # Stats display (could be replaced with an embedded chart)
+        stats_text = (
+            f"Star Count: {self.stats.get('star_count', 'N/A')}\n"
+            f"Eccentricity: {self.stats.get('eccentricity', 'N/A'):.4f}\n"
+            f"Mean: {self.stats.get('mean', 'N/A'):.4f}"
+        )
+        self.statsLabel = QLabel(stats_text, self)
+        main_layout.addWidget(self.statsLabel)
+        
+        # Buttons layout for reference selection and autostretch toggle
+        button_layout = QHBoxLayout()
+        self.toggleAutoStretchButton = QPushButton("Enable Autostretch", self)
+        self.toggleAutoStretchButton.clicked.connect(self.toggleAutostretch)
+        button_layout.addWidget(self.toggleAutoStretchButton)
+        self.useRefButton = QPushButton("Use This Reference Frame", self)
+        self.useRefButton.clicked.connect(self.useReference)
+        button_layout.addWidget(self.useRefButton)
+        self.selectOtherButton = QPushButton("Select Other Reference Frame", self)
+        self.selectOtherButton.clicked.connect(self.selectOtherReference)
+        button_layout.addWidget(self.selectOtherButton)
+        main_layout.addLayout(button_layout)
+        
+        self.setLayout(main_layout)
+    
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Now that the dialog is shown and sizes are set, update the preview.
+        if self.original_image is not None:
+            self.updatePreview(self.original_image)
+    
+    def loadImageArray(self):
+        """
+        Load the image from the reference frame file using the global load_image function.
+        """
+        image_data, header, _, _ = load_image(self.ref_frame_path)
+        if image_data is not None:
+            # If image is stored as H x W x 1, squeeze it to H x W.
+            if image_data.ndim == 3 and image_data.shape[-1] == 1:
+                image_data = np.squeeze(image_data, axis=-1)
+            self.original_image = image_data
+        else:
+            QMessageBox.critical(self, "Error", "Failed to load the reference image.")
+    
+    def updatePreview(self, image):
+        """
+        Convert a given image array to a QPixmap and update the preview label.
+        """
+        self.current_preview_image = image
+        pixmap = self.convertArrayToPixmap(image)
+        if pixmap is None or pixmap.isNull():
+            self.previewLabel.setText("Unable to load preview.")
+        else:
+            # Scale based on the scroll area's viewport and current zoom factor.
+            available_size = self.scrollArea.viewport().size()
+            new_size = QSize(int(available_size.width() * self.zoom_factor),
+                             int(available_size.height() * self.zoom_factor))
+            scaled_pixmap = pixmap.scaled(new_size, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation)
+            self.previewLabel.setPixmap(scaled_pixmap)
+    
+    def convertArrayToPixmap(self, image):
+        """
+        Convert a normalized float image array (with values in [0,1]) into a QPixmap.
+        """
+        if image is None:
+            return None
+        # Convert image to 8-bit
+        display_image = (image * 255).clip(0, 255).astype(np.uint8)
+        if display_image.ndim == 2:
+            h, w = display_image.shape
+            bytes_per_line = w
+            q_image = QImage(display_image.tobytes(), w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+        elif display_image.ndim == 3 and display_image.shape[2] == 3:
+            h, w, _ = display_image.shape
+            bytes_per_line = 3 * w
+            q_image = QImage(display_image.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        else:
+            return None
+        return QPixmap.fromImage(q_image)
+    
+    def toggleAutostretch(self):
+        """
+        Toggle autostretch for the preview image. Uses the global stretch functions.
+        """
+        if self.original_image is None:
+            QMessageBox.warning(self, "Error", "Reference image not loaded.")
+            return
+        self.autostretch_enabled = not self.autostretch_enabled
+        if self.autostretch_enabled:
+            # Apply autostretch: use stretch_mono_image for mono or stretch_color_image for RGB.
+            if self.original_image.ndim == 2:
+                new_image = stretch_mono_image(self.original_image, target_median=0.3,
+                                               normalize=True, apply_curves=False)
+            elif self.original_image.ndim == 3 and self.original_image.shape[2] == 3:
+                new_image = stretch_color_image(self.original_image, target_median=0.3,
+                                                linked=False, normalize=True, apply_curves=False)
+            else:
+                new_image = self.original_image
+            self.toggleAutoStretchButton.setText("Disable Autostretch")
+        else:
+            new_image = self.original_image
+            self.toggleAutoStretchButton.setText("Enable Autostretch")
+        self.updatePreview(new_image)
+    
+    def zoomIn(self):
+        self.zoom_factor *= 1.2
+        if self.current_preview_image is not None:
+            self.updatePreview(self.current_preview_image)
+    
+    def zoomOut(self):
+        self.zoom_factor /= 1.2
+        if self.current_preview_image is not None:
+            self.updatePreview(self.current_preview_image)
+    
+    def eventFilter(self, source, event):
+        if source is self.scrollArea.viewport():
+            # Handle zooming with the mouse wheel
+            if event.type() == QEvent.Type.Wheel:
+                if event.angleDelta().y() > 0:
+                    self.zoomIn()
+                else:
+                    self.zoomOut()
+                return True
+
+            # Handle mouse press for panning
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._panning = True
+                    self._last_mouse_pos = event.pos()
+                    self.scrollArea.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return True
+
+            # Handle mouse move for panning
+            if event.type() == QEvent.Type.MouseMove:
+                if self._panning:
+                    delta = event.pos() - self._last_mouse_pos
+                    self._last_mouse_pos = event.pos()
+                    h_bar = self.scrollArea.horizontalScrollBar()
+                    v_bar = self.scrollArea.verticalScrollBar()
+                    h_bar.setValue(h_bar.value() - delta.x())
+                    v_bar.setValue(v_bar.value() - delta.y())
+                    return True
+
+            # Handle mouse release to stop panning
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._panning = False
+                    self.scrollArea.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                    return True
+
+        return super().eventFilter(source, event)
+    
+    def resizeEvent(self, event):
+        if self.current_preview_image is not None:
+            self.updatePreview(self.current_preview_image)
+        super().resizeEvent(event)
+    
+    def useReference(self):
+        self.user_choice = "use"
+        self.accept()  # Close dialog with Accepted status
+    
+    def selectOtherReference(self):
+        self.user_choice = "select_other"
+        self.reject()  # Close dialog with Rejected status
+    
+    def getUserChoice(self):
+        return self.user_choice
 
 class StackingSuiteDialog(QDialog):
     def __init__(self):
@@ -9554,6 +9791,14 @@ class StackingSuiteDialog(QDialog):
         best_frame, best_weight = max(filtered, key=lambda x: x[1])
         return best_frame
 
+    def prompt_for_reference_frame(self):
+        new_ref, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select New Reference Frame",
+            "",  # default directory
+            "FITS Files (*.fit *.fits);;All Files (*)"
+        )
+        return new_ref if new_ref else None
 
     def register_images(self):
         """ 
@@ -9705,6 +9950,33 @@ class StackingSuiteDialog(QDialog):
             return
         ref_median = np.median(ref_data)
         self.update_status(f"📊 Reference median: {ref_median:.4f}")
+
+        stats = {
+            "star_count": c,         # Replace with the actual star count
+            "eccentricity": ecc,        # Replace with the computed eccentricity
+            "mean": ref_median
+        }
+
+
+        # Show the review dialog (pausing further processing until user responds)
+        dialog = ReferenceFrameReviewDialog(self.reference_frame, stats, parent=self)
+        result = dialog.exec()
+        user_choice = dialog.getUserChoice()  # This returns "use", "select_other", or None
+
+        if result == QDialog.DialogCode.Accepted:
+            # User chose to use the auto-selected reference via the "Use This Reference Frame" button.
+            self.update_status("User accepted the auto-selected reference frame.")
+        elif user_choice == "select_other":
+            # User actively clicked "Select Other Reference Frame"
+            new_ref = self.prompt_for_reference_frame()  # Open a file dialog or list of frames
+            if new_ref:
+                self.reference_frame = new_ref
+                self.update_status(f"User selected a new reference frame: {new_ref}")
+            else:
+                self.update_status("No new reference frame selected. Using auto-selected frame.")
+        else:
+            # The dialog was closed (e.g. via the window’s close button) without an active selection.
+            self.update_status("Dialog closed without selection. Using auto-selected frame.")
 
         # ------------------------------------------------
         # 4) Normalize Each Frame to ref_median in Batches
@@ -9986,73 +10258,148 @@ class StackingSuiteDialog(QDialog):
             drizzle_dict=drizzle_dict
         )
 
+    def save_rejection_map_sasr(self, rejection_map, out_file):
+        """
+        Writes the per-file rejection map to a custom text file.
+        Format:
+            FILE: path/to/file1
+            x1, y1
+            x2, y2
 
+            FILE: path/to/file2
+            ...
+        """
+        with open(out_file, "w") as f:
+            for fpath, coords_list in rejection_map.items():
+                f.write(f"FILE: {fpath}\n")
+                for (x, y) in coords_list:
+                    # Convert to Python int in case they're NumPy int64
+                    f.write(f"{int(x)}, {int(y)}\n")
+                f.write("\n")  # blank line to separate blocks
+
+    def load_rejection_map_sasr(self, in_file):
+        """
+        Reads a .sasr text file and rebuilds the rejection map dictionary.
+        Returns a dict { fpath: [(x, y), (x, y), ...], ... }
+        """
+        rejections = {}
+        with open(in_file, "r") as f:
+            content = f.read().strip()
+
+        # Split on blank lines
+        blocks = re.split(r"\n\s*\n", content)
+        for block in blocks:
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+
+            # First line should be 'FILE: <path>'
+            if lines[0].startswith("FILE:"):
+                raw_path = lines[0].replace("FILE:", "").strip()
+                coords = []
+                for line in lines[1:]:
+                    # Each subsequent line is "x, y"
+                    parts = line.split(",")
+                    if len(parts) == 2:
+                        x_str, y_str = parts
+                        x = int(x_str.strip())
+                        y = int(y_str.strip())
+                        coords.append((x, y))
+                rejections[raw_path] = coords
+        return rejections
 
     def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
         """
-        Goes group by group. If drizzle_enabled, do drizzle on that group.
-        Otherwise do the normal stacking.
-        
-        Parameters:
-        -----------
-        grouped_files : dict
-            { group_key: [file_list], ... }
-        frame_weights : dict
-            { orig_file_path: float_weight, ... }
-        transforms_dict : dict
-            { orig_file_path: 2x3_affine_matrix, ... }
-        drizzle_dict : dict
-            {
-            group_key: {
-                "files": [...],
-                "drizzle_enabled": bool,
-                "scale_factor": float,
-                "drop_shrink": float
-            },
-            ...
-            }
+        New flow:
+        1. Run normal integration for each group to get an integrated image AND a per-file rejection map.
+        2. Save the integrated image with a properly updated FITS header.
+        3. If drizzle is enabled for the group, run drizzle stacking with that per-file rejection map.
         """
+        self.update_status("🔄 Running normal integration to record rejected pixel positions...")
+        QApplication.processEvents()
+        group_integration_data = {}
+
         for group_key, file_list in grouped_files.items():
-            # 1) Retrieve drizzle config from drizzle_dict
-            dconf = drizzle_dict.get(group_key, None)
-            if not dconf:
-                # Fallback: no drizzle data => normal stack
-                self.stack_one_group_normal(group_key, file_list, frame_weights)
+            # 1) Normal integration => integrated_image, per_file_rejections, ref_header
+            integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
+                group_key, file_list, frame_weights
+            )
+
+            if integrated_image is None:
+                # Integration failed or no frames
                 continue
 
-            drizzle_enabled = dconf["drizzle_enabled"]
-            scale_factor = dconf["scale_factor"]
-            drop_shrink = dconf["drop_shrink"]
+            # 2) Construct a final header for the integrated image
+            #    (similar to your chunked stacking approach)
+            if ref_header is None:
+                ref_header = fits.Header()
 
-            if drizzle_enabled:
+            ref_header["IMAGETYP"] = "MASTER STACK"
+            ref_header["BITPIX"]   = -32
+            ref_header["STACKED"]  = (True, "Stacked using normal_integration_with_rejection")
+            ref_header["CREATOR"]  = "SetiAstroSuite"
+            ref_header["DATE-OBS"] = datetime.utcnow().isoformat()
+
+            # If mono, set NAXIS=2; if color, set NAXIS=3
+            is_mono = (integrated_image.ndim == 2)
+            if is_mono:
+                ref_header["NAXIS"]  = 2
+                ref_header["NAXIS1"] = integrated_image.shape[1]
+                ref_header["NAXIS2"] = integrated_image.shape[0]
+            else:
+                ref_header["NAXIS"]  = 3
+                ref_header["NAXIS1"] = integrated_image.shape[1]
+                ref_header["NAXIS2"] = integrated_image.shape[0]
+                ref_header["NAXIS3"] = 3
+
+            # 3) Save the integrated image
+            out_path = os.path.join(self.stacking_directory, f"MasterLight_{group_key}.fit")
+            save_image(
+                img_array=integrated_image,
+                filename=out_path,
+                original_format="fit",
+                bit_depth="32-bit floating point",
+                original_header=ref_header,
+                is_mono=is_mono
+            )
+            self.update_status(f"✅ Saved normal integrated image for group '{group_key}': {out_path}")
+            QApplication.processEvents()
+
+            # 3.5) (Optional) Serialize the rejection_map to a JSON file for future reference
+            sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
+            self.save_rejection_map_sasr(rejection_map, sasr_path)
+            self.update_status(f"✅ Saved rejection map to {sasr_path}")
+
+            # 4) Store integration data for drizzle
+            group_integration_data[group_key] = {
+                "integrated_image": integrated_image,
+                "rejection_map": rejection_map
+            }
+
+        # 5) Drizzle if enabled
+        for group_key, file_list in grouped_files.items():
+            dconf = drizzle_dict.get(group_key, None)
+            if dconf and dconf.get("drizzle_enabled", False):
+                scale_factor = dconf["scale_factor"]
+                drop_shrink = dconf["drop_shrink"]
+                # Retrieve the per-file rejection map from step 4
+                rejections_for_group = group_integration_data[group_key]["rejection_map"]
+
                 self.update_status(f"📐 Drizzle for group '{group_key}' at {scale_factor}× (drop={drop_shrink}).")
+                QApplication.processEvents()
                 self.drizzle_stack_one_group(
                     group_key=group_key,
                     file_list=file_list,
                     transforms_dict=transforms_dict,
-                    frame_weights=frame_weights,  # <-- Pass weights here
+                    frame_weights=frame_weights,
                     scale_factor=scale_factor,
-                    drop_shrink=drop_shrink
+                    drop_shrink=drop_shrink,
+                    rejection_map=rejections_for_group  # <--- per-file dictionary
                 )
             else:
-                self.update_status(f"🌀 Normal stacking for group '{group_key}'.")
-                self.stack_one_group_normal(group_key, file_list, frame_weights)
+                self.update_status(f"✅ Group '{group_key}' not set for drizzle. Already saved the integrated image from normal integration.")
+                QApplication.processEvents()
 
-
-    def stack_one_group_normal(self, group_key, file_list, frame_weights):
-        """
-        Uses the chunked stacking method for normal stacking.
-        """
-        chunk_h = self.chunk_height  # or self.settings.value("stacking/chunk_height", 1024, type=int)
-        chunk_w = self.chunk_width   # or self.settings.value("stacking/chunk_width", 1024, type=int)
-
-        single_group_dict = { group_key: file_list }
-        self.stack_registered_images_chunked(
-            grouped_files=single_group_dict,
-            frame_weights=frame_weights,
-            chunk_height=chunk_h,
-            chunk_width=chunk_w
-        )
 
 
     def save_registered_images(self, success, msg, frame_weights):
@@ -10082,44 +10429,39 @@ class StackingSuiteDialog(QDialog):
     ):
         """
         Chunked stacking of already-aligned and pre-normalized FITS images.
-        Reads small tiles from each image, applies outlier rejection, writes
-        the result into a memory-mapped array, and saves a final stacked FITS.
-
-        No local tile normalization is performed here, because each image
-        was already scaled to the reference median beforehand.
+        Reads small tiles from each image, applies outlier rejection (using the new rejection-map output),
+        writes the result into a memory-mapped array, and saves a final stacked FITS.
         """
-
         self.update_status(f"✅ Chunked stacking {len(grouped_files)} group(s)...")
+
+        # We'll also accumulate a list of rejected pixel positions (global coordinates)
+        all_rejection_coords = []
 
         for group_key, file_list in grouped_files.items():
             num_files = len(file_list)
             self.update_status(f"📊 Group '{group_key}' has {num_files} aligned file(s).")
             QApplication.processEvents()
 
-            # Debug: show the exact files we are about to stack
-
             if num_files < 2:
                 self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to stack.")
                 continue
 
-            # 1) Identify the reference file just for shape/header
-            ref_file = file_list[0]  # or use self.reference_frame if it's definitely in file_list
+            # 1) Identify the reference file to get shape and header
+            ref_file = file_list[0]
             if not os.path.exists(ref_file):
                 self.update_status(f"⚠️ Reference file '{ref_file}' not found, skipping group.")
                 continue
 
-            # 2) Load the reference image fully once to get shape
             ref_data, ref_header, _, _ = load_image(ref_file)
             if ref_data is None:
                 self.update_status(f"⚠️ Could not load reference '{ref_file}', skipping group.")
                 continue
 
-            # No local "reference_median" needed now
             is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
             height, width = ref_data.shape[:2]
             channels = 3 if is_color else 1
 
-            # 3) Prepare a memmap for the final stacked image
+            # 2) Prepare a memmap for the final stacked image.
             memmap_path = os.path.join(self.stacking_directory, f"chunked_{group_key}.dat")
             final_stacked = np.memmap(
                 memmap_path,
@@ -10128,7 +10470,7 @@ class StackingSuiteDialog(QDialog):
                 shape=(height, width, channels)
             )
 
-            # Build a list of file paths and weights for this group
+            # Build list of valid files and corresponding weights.
             aligned_paths = []
             weights_list = []
             for fpath in file_list:
@@ -10147,7 +10489,11 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
             QApplication.processEvents()
 
-            # 4) Loop over tiles in the final image, using actual leftover sizes
+            # Initialize a list to collect rejected pixel coordinates for this group.
+            rejection_coords = []
+
+            # 3) Loop over tiles
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             for y_start in range(0, height, chunk_height):
                 y_end = min(y_start + chunk_height, height)
                 tile_h = y_end - y_start
@@ -10156,11 +10502,9 @@ class StackingSuiteDialog(QDialog):
                     x_end = min(x_start + chunk_width, width)
                     tile_w = x_end - x_start
 
-                    # Note: tile_w might be < 2048 if x_end is near the image's right edge.
-                    # So we allocate tile_stack accordingly:
-                    tile_stack = np.zeros((len(aligned_paths), tile_h, tile_w, channels), dtype=np.float32)
-
-                    # Load each tile in parallel
+                    # Build tile stack: shape (N, tile_h, tile_w, channels)
+                    N = len(aligned_paths)
+                    tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float32)
                     num_cores = os.cpu_count() or 4
                     with ThreadPoolExecutor(max_workers=num_cores) as executor:
                         future_to_index = {}
@@ -10173,75 +10517,74 @@ class StackingSuiteDialog(QDialog):
                             sub_img = future.result()
                             if sub_img is None:
                                 continue
-
-                            # If sub_img is (H, W) & channels=3, expand => (H, W, 3)
-                            if sub_img.ndim == 2 and channels == 3:
-                                sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
-                            elif sub_img.ndim == 2 and channels == 1:
+                            # Ensure sub_img is shaped (tile_h, tile_w, channels)
+                            if sub_img.ndim == 2:
                                 sub_img = sub_img[:, :, np.newaxis]
-
-                            # If sub_img is (3, H, W) but we want (H, W, 3), transpose
-                            if sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
+                                if channels == 3:
+                                    sub_img = np.repeat(sub_img, 3, axis=2)
+                            elif sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
                                 sub_img = sub_img.transpose(1, 2, 0)
-
                             sub_img = sub_img.astype(np.float32, copy=False)
-                            tile_stack[i] = sub_img  # shape=(tile_h, tile_w, channels)
+                            tile_stack[i] = sub_img
 
-
-                    # 4B) Outlier rejection
+                    # 4) Apply the chosen rejection algorithm and get the rejection map.
                     algo = self.rejection_algorithm
                     if algo == "Simple Median (No Rejection)":
                         tile_result = np.median(tile_stack, axis=0)
+                        tile_rej_map = np.zeros(tile_stack.shape[1:], dtype=np.bool_)
                     elif algo == "Simple Average (No Rejection)":
                         tile_result = np.average(tile_stack, axis=0, weights=weights_list)
+                        tile_rej_map = np.zeros(tile_stack.shape[1:], dtype=np.bool_)
                     elif algo == "Weighted Windsorized Sigma Clipping":
-                        tile_result = windsorized_sigma_clip_weighted(
-                            tile_stack, weights_list,
-                            lower=self.sigma_low,
-                            upper=self.sigma_high
-                        )
+                        tile_result, tile_rej_map = windsorized_sigma_clip_weighted(tile_stack, weights_list,
+                            lower=self.sigma_low, upper=self.sigma_high)
                     elif algo == "Kappa-Sigma Clipping":
-                        tile_result = kappa_sigma_clip_weighted(
-                            tile_stack, weights_list,
-                            kappa=self.kappa,
-                            iterations=self.iterations
-                        )
+                        tile_result, tile_rej_map = kappa_sigma_clip_weighted(tile_stack, weights_list,
+                            kappa=self.kappa, iterations=self.iterations)
                     elif algo == "Trimmed Mean":
-                        tile_result = trimmed_mean_weighted(
-                            tile_stack, weights_list,
-                            trim_fraction=self.trim_fraction
-                        )
+                        tile_result, tile_rej_map = trimmed_mean_weighted(tile_stack, weights_list,
+                            trim_fraction=self.trim_fraction)
                     elif algo == "Extreme Studentized Deviate (ESD)":
-                        tile_result = esd_clip_weighted(
-                            tile_stack, weights_list,
-                            threshold=self.esd_threshold
-                        )
+                        tile_result, tile_rej_map = esd_clip_weighted(tile_stack, weights_list,
+                            threshold=self.esd_threshold)
                     elif algo == "Biweight Estimator":
-                        tile_result = biweight_location_weighted(
-                            tile_stack, weights_list,
-                            tuning_constant=self.biweight_constant
-                        )
+                        tile_result, tile_rej_map = biweight_location_weighted(tile_stack, weights_list,
+                            tuning_constant=self.biweight_constant)
                     elif algo == "Modified Z-Score Clipping":
-                        tile_result = modified_zscore_clip_weighted(
-                            tile_stack, weights_list,
-                            threshold=self.modz_threshold
-                        )
+                        tile_result, tile_rej_map = modified_zscore_clip_weighted(tile_stack, weights_list,
+                            threshold=self.modz_threshold)
                     else:
-                        tile_result = windsorized_sigma_clip_weighted(
-                            tile_stack, weights_list,
-                            lower=self.sigma_low,
-                            upper=self.sigma_high
-                        )
+                        tile_result, tile_rej_map = windsorized_sigma_clip_weighted(tile_stack, weights_list,
+                            lower=self.sigma_low, upper=self.sigma_high)
 
+                    # 5) Insert integrated tile into final image.
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
 
-            # 5) Now final_stacked is complete. Do final black-point / min-max
+                    # 6) Use the returned tile_rej_map to record rejected pixel positions.
+                    # For rejection maps with per-frame output, combine along the frame axis.
+                    if tile_rej_map.ndim == 3:  # mono: (N, tile_h, tile_w)
+                        combined_rej = np.any(tile_rej_map, axis=0)  # shape: (tile_h, tile_w)
+                    elif tile_rej_map.ndim == 4:  # color: (N, tile_h, tile_w, channels)
+                        # First combine along the frame axis, then across channels.
+                        combined_rej = np.any(tile_rej_map, axis=0)  # shape: (tile_h, tile_w, channels)
+                        combined_rej = np.any(combined_rej, axis=-1)  # shape: (tile_h, tile_w)
+                    else:
+                        combined_rej = np.zeros(tile_stack.shape[1:3], dtype=np.bool_)
+
+                    ys_tile, xs_tile = np.where(combined_rej)
+                    for dx, dy in zip(xs_tile, ys_tile):
+                        global_x = x_start + dx
+                        global_y = y_start + dy
+                        rejection_coords.append((global_x, global_y))
+
+            # 7) After processing all tiles, finish up the integrated image.
             final_array = np.array(final_stacked)
             del final_stacked
 
+            # Apply a black-point offset and scale if needed.
             flat_array = final_array.ravel()
             nonzero_indices = np.where(flat_array > 0)[0]
-            if len(nonzero_indices) > 0:
+            if nonzero_indices.size > 0:
                 first_nonzero = flat_array[nonzero_indices[0]]
                 final_array -= first_nonzero
 
@@ -10254,12 +10597,11 @@ class StackingSuiteDialog(QDialog):
                 else:
                     final_array = np.zeros_like(final_array, dtype=np.float32)
 
-            # Squeeze if mono
             if final_array.ndim == 3 and final_array.shape[-1] == 1:
                 final_array = final_array[..., 0]
             is_mono = (final_array.ndim == 2)
 
-            # 6) Save final stacked image
+            # 8) Save the final stacked image.
             if ref_header is None:
                 ref_header = fits.Header()
 
@@ -10281,7 +10623,6 @@ class StackingSuiteDialog(QDialog):
 
             output_filename = f"MasterLight_{group_key}.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
-
             save_image(
                 img_array=final_array,
                 filename=output_path,
@@ -10294,11 +10635,17 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"✅ Group '{group_key}' chunked stacking complete! Saved: {output_path}")
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
 
+            # Optionally, you might want to store or log 'rejection_coords' (here appended to all_rejection_coords)
+            all_rejection_coords.extend(rejection_coords)
+
             # Clean up memmap file
             try:
                 os.remove(memmap_path)
             except OSError:
                 pass
+
+        # Optionally, you could return the global rejection coordinate list.
+        return all_rejection_coords
 
 
 
@@ -10431,6 +10778,31 @@ class StackingSuiteDialog(QDialog):
         # 6) Finally, call the chunked stacking method using the already registered images
         self.stack_registered_images_chunked(self.light_files, self.frame_weights, chunk_height=chunk_h, chunk_width=chunk_w)
 
+    @staticmethod
+    def invert_affine_transform(matrix):
+        """
+        Inverts a 2x3 affine transformation matrix.
+        Given matrix = [[a, b, tx],
+                        [c, d, ty]],
+        returns the inverse matrix.
+        """
+        A = matrix[:, :2]
+        t = matrix[:, 2]
+        A_inv = np.linalg.inv(A)
+        t_inv = -A_inv @ t
+        inv = np.hstack([A_inv, t_inv.reshape(2, 1)])
+        return inv
+
+    @staticmethod
+    def apply_affine_transform_point(matrix, x, y):
+        """
+        Applies a 2x3 affine transformation to a point (x, y).
+        Returns the transformed (x, y) coordinates.
+        """
+        point = np.array([x, y])
+        result = matrix[:, :2] @ point + matrix[:, 2]
+        return result[0], result[1]
+
     def drizzle_stack_one_group(
         self,
         group_key,
@@ -10438,25 +10810,32 @@ class StackingSuiteDialog(QDialog):
         transforms_dict,
         frame_weights,
         scale_factor=2.0,
-        drop_shrink=0.65
+        drop_shrink=0.65,
+        rejection_map=None
     ):
         """
-        Drizzle a single group, handling both mono (H,W) and color (H,W,C).
-        We choose naive vs. footprint deposit based on drop_shrink.
-        Then we do a final combination with the appropriate finalize function.
+        Drizzle a single group. Now, we only skip the pixels that are actually rejected for
+        each file (based on the per-file rejection_map).
+        
+        'rejection_map' is a dict: { file_path: [(x_r, y_r), (x_r, y_r), ...], ... }
+        where (x_r, y_r) are coordinates in the aligned (_n_r) space that were rejected
+        for THAT particular file.
         """
-
+        # Count how many total rejections across all files (for debug)
+        total_rej = 0
+        if rejection_map is not None:
+            total_rej = sum(len(v) for v in rejection_map.values())
         self.update_status(
-            f"🔭 Starting drizzle stacking for group '{group_key}' "
-            f"at {scale_factor}× with drop shrink={drop_shrink}"
+            f"🔭 Drizzle stacking for group '{group_key}' with {total_rej} total rejected pixels across files."
         )
+        QApplication.processEvents()
 
         # 1) Check we have enough frames
         if len(file_list) < 2:
             self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to drizzle.")
             return
 
-        # 2) Load transforms from disk (assuming we always do it this way)
+        # 2) Load transforms from disk
         transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
         if not os.path.exists(transforms_path):
             self.update_status(f"⚠️ No alignment_transforms.sasd found at {transforms_path}!")
@@ -10464,6 +10843,7 @@ class StackingSuiteDialog(QDialog):
 
         new_transforms_dict = self.load_alignment_matrices_custom(transforms_path)
         self.update_status(f"✅ Loaded {len(new_transforms_dict)} transforms from disk for drizzle.")
+        QApplication.processEvents()
 
         # 3) Load the first file to determine shape + color/mono
         first_file = file_list[0]
@@ -10472,38 +10852,33 @@ class StackingSuiteDialog(QDialog):
             self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
             return
 
-
         if first_img.ndim == 2:
-            # MONO (H,W)
             is_mono = True
             h, w = first_img.shape
         else:
-            # COLOR (H,W,C)
             is_mono = False
             h, w, c = first_img.shape
 
-        # 4) Decide deposit function (naive vs footprint) for mono or color
+        # 4) Decide deposit function (naive vs footprint)
         if drop_shrink >= 0.99:
-            # Naive deposit
             if is_mono:
-                deposit_func = drizzle_deposit_numba_naive  # your mono naive
+                deposit_func = drizzle_deposit_numba_naive
                 self.update_status("Using naive drizzle deposit (mono).")
             else:
-                deposit_func = drizzle_deposit_color_naive  # you'd need to define drizzle_deposit_color_naive
+                deposit_func = drizzle_deposit_color_naive
                 self.update_status("Using naive drizzle deposit (color).")
         else:
-            # Footprint deposit
             if is_mono:
-                deposit_func = drizzle_deposit_numba_footprint  # your mono footprint
+                deposit_func = drizzle_deposit_numba_footprint
                 self.update_status("Using footprint drizzle deposit (mono).")
             else:
-                deposit_func = drizzle_deposit_color_footprint # your color footprint
+                deposit_func = drizzle_deposit_color_footprint
                 self.update_status("Using footprint drizzle deposit (color).")
+        QApplication.processEvents()
 
         # 5) Prepare drizzle buffers
         out_h = int(h * scale_factor)
         out_w = int(w * scale_factor)
-
         if is_mono:
             drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
             coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
@@ -10513,54 +10888,54 @@ class StackingSuiteDialog(QDialog):
             coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
             finalize_func = finalize_drizzle_3d
 
-        # 6) For each aligned file, find the corresponding raw file and transform
+        # 6) For each aligned file, deposit raw pixels—skipping only that file's rejections
         for aligned_file in file_list:
-            # Attempt to find the corresponding raw filename
             aligned_base = os.path.basename(aligned_file)
             if aligned_base.endswith("_n_r.fit"):
-                # Convert _n_r.fit → _n.fit
                 raw_base = aligned_base.replace("_n_r.fit", "_n.fit")
             else:
-                # If it doesn't end with _n_r, assume it's already _n.fit
                 raw_base = aligned_base
 
-            # Build a path to your raw file. 
-            # If your raw files are in the same directory, do:
-            #   raw_file = os.path.join(os.path.dirname(aligned_file), raw_base)
-            # But if they are in a separate "Normalized_Images" folder, do something like:
-            #   raw_file = os.path.join(self.normalized_images_dir, raw_base)
-            #
-            # For simplicity, let's just do:
             raw_file = os.path.join(self.stacking_directory, "Normalized_Images", raw_base)
-
-            # Load the raw image
             raw_img_data, _, _, _ = load_image(raw_file)
             if raw_img_data is None:
                 self.update_status(f"⚠️ Could not load raw file '{raw_file}' for drizzle!")
                 continue
 
-            # Look up the transform from .sasd by the raw path
+            # Look up transform
             raw_key = os.path.normpath(raw_file)
             transform = new_transforms_dict.get(raw_key, None)
             if transform is None:
                 self.update_status(f"⚠️ No transform found for raw '{raw_base}'! Skipping drizzle.")
                 continue
 
-            # Debug
             self.update_status(f"🧩 Drizzling (raw): {raw_base}")
             self.update_status(
                 f"    Matrix: [[{transform[0,0]:.4f}, {transform[0,1]:.4f}, {transform[0,2]:.4f}], "
                 f"[{transform[1,0]:.4f}, {transform[1,1]:.4f}, {transform[1,2]:.4f}]]"
             )
+            QApplication.processEvents()
 
-            # Weight
             weight = frame_weights.get(aligned_file, 1.0)
-
-            # Cast transform to float32
             if transform.dtype != np.float32:
                 transform = transform.astype(np.float32)
 
-            # Deposit raw pixels using the raw→final transform
+            # Only skip rejections for THIS file
+            coords_for_this_file = []
+            if rejection_map is not None:
+                coords_for_this_file = rejection_map.get(aligned_file, [])
+
+            # Mask out those pixels in the raw image
+            if coords_for_this_file:
+                inv_transform = self.invert_affine_transform(transform)
+                for (x_r, y_r) in coords_for_this_file:
+                    x_raw, y_raw = self.apply_affine_transform_point(inv_transform, x_r, y_r)
+                    x_raw = int(round(x_raw))
+                    y_raw = int(round(y_raw))
+                    if 0 <= x_raw < raw_img_data.shape[1] and 0 <= y_raw < raw_img_data.shape[0]:
+                        raw_img_data[y_raw, x_raw] = 0.0
+
+            # Deposit raw pixels using the transform
             drizzle_buffer, coverage_buffer = deposit_func(
                 raw_img_data,
                 transform,
@@ -10571,15 +10946,13 @@ class StackingSuiteDialog(QDialog):
                 weight
             )
 
-        # 7) Final combination
-        #    Allocate final array matching drizzle_buffer's shape
+        # 7) Finalize drizzle
         final_drizzle = np.zeros_like(drizzle_buffer, dtype=np.float32)
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
-        # 8) Save
+        # 8) Save final drizzle image
         out_filename = f"MasterLight_{group_key}_drizzle.fit"
         out_path = os.path.join(self.stacking_directory, out_filename)
-
         if hdr is None:
             hdr = fits.Header()
         hdr["IMAGETYP"]  = "MASTER STACK - DRIZZLE"
@@ -10588,35 +10961,213 @@ class StackingSuiteDialog(QDialog):
         hdr["CREATOR"]    = "SetiAstroSuite"
         hdr["DATE-OBS"]   = datetime.utcnow().isoformat()
 
-        # Determine if the drizzle-stacked image is color or mono
         if final_drizzle.ndim == 3 and final_drizzle.shape[-1] == 3:
-            is_mono = False  # Color (H, W, C)
+            is_mono = False
         else:
-            is_mono = True   # Mono (H, W)
+            is_mono = True
 
-        # ✅ Ensure header matches image dimensions
         if is_mono:
             hdr["NAXIS"] = 2
-            hdr["NAXIS1"] = final_drizzle.shape[1]  # Width
-            hdr["NAXIS2"] = final_drizzle.shape[0]  # Height
+            hdr["NAXIS1"] = final_drizzle.shape[1]
+            hdr["NAXIS2"] = final_drizzle.shape[0]
         else:
             hdr["NAXIS"] = 3
-            hdr["NAXIS1"] = final_drizzle.shape[1]  # Width
-            hdr["NAXIS2"] = final_drizzle.shape[0]  # Height
-            hdr["NAXIS3"] = 3  # OSC: 3 color channels
+            hdr["NAXIS1"] = final_drizzle.shape[1]
+            hdr["NAXIS2"] = final_drizzle.shape[0]
+            hdr["NAXIS3"] = 3
 
-        # ✅ Save using the global save_image() method.
         save_image(
             img_array=final_drizzle,
             filename=out_path,
             original_format="fit",
             bit_depth="32-bit floating point",
             original_header=hdr,
-            is_mono=is_mono  # Pass corrected flag
+            is_mono=is_mono
         )
 
-
         self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
+
+
+    def normal_integration_with_rejection(self, group_key, file_list, frame_weights):
+        """
+        Performs chunked stacking integration of aligned (_n_r) images using the current
+        rejection algorithm. Returns:
+        integrated_image: Final integrated (stacked) image as a NumPy array.
+        per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y) 
+                            coordinates that were rejected for THAT file only.
+        ref_header: the header from the reference file (or a new one if missing)
+        """
+        import os
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # 1) Load a reference image to determine dimensions and channels
+        ref_file = file_list[0]
+        if not os.path.exists(ref_file):
+            self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
+            return None, {}, None
+        ref_data, ref_header, _, _ = load_image(ref_file)
+        if ref_data is None:
+            self.update_status(f"⚠️ Could not load reference '{ref_file}' for group '{group_key}'.")
+            return None, {}, None
+
+        if ref_header is None:
+            ref_header = fits.Header()  # fallback if no header was present
+
+        is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
+        height, width = ref_data.shape[:2]
+        channels = 3 if is_color else 1
+        self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
+        QApplication.processEvents()
+        # 2) Allocate final integrated image and set up a dictionary for rejections
+        integrated_image = np.zeros((height, width, channels), dtype=np.float32)
+        per_file_rejections = {f: [] for f in file_list}
+
+        # 3) Define tile dimensions
+        chunk_h = self.chunk_height
+        chunk_w = self.chunk_width
+
+        # 4) Process the image tile by tile
+        for y_start in range(0, height, chunk_h):
+            y_end = min(y_start + chunk_h, height)
+            tile_h = y_end - y_start
+
+            for x_start in range(0, width, chunk_w):
+                x_end = min(x_start + chunk_w, width)
+                tile_w = x_end - x_start
+
+                # Build a tile stack: shape (N, tile_h, tile_w, channels)
+                N = len(file_list)
+                tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float32)
+                weights_list = []
+                num_cores = os.cpu_count() or 4
+
+                with ThreadPoolExecutor(max_workers=num_cores) as executor:
+                    future_to_index = {}
+                    for i, fpath in enumerate(file_list):
+                        future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
+                        future_to_index[future] = i
+                        weights_list.append(frame_weights.get(fpath, 1.0))
+
+                    for future in as_completed(future_to_index):
+                        i = future_to_index[future]
+                        sub_img = future.result()
+                        if sub_img is None:
+                            continue
+                        # Ensure shape => (tile_h, tile_w, channels)
+                        if sub_img.ndim == 2:
+                            sub_img = sub_img[:, :, np.newaxis]
+                            if channels == 3:
+                                sub_img = np.repeat(sub_img, 3, axis=2)
+                        elif sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
+                            sub_img = sub_img.transpose(1, 2, 0)
+                        sub_img = sub_img.astype(np.float32, copy=False)
+                        tile_stack[i] = sub_img
+
+                weights_array = np.array(weights_list, dtype=np.float32)
+
+                # 5) Run your chosen rejection algorithm => (tile_result, tile_rej_map)
+                algo = self.rejection_algorithm
+                if algo == "Simple Median (No Rejection)":
+                    tile_result = np.median(tile_stack, axis=0)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                elif algo == "Simple Average (No Rejection)":
+                    tile_result = np.average(tile_stack, axis=0, weights=weights_array)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                elif algo == "Weighted Windsorized Sigma Clipping":
+                    tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
+                        tile_stack, weights_array,
+                        lower=self.sigma_low, upper=self.sigma_high
+                    )
+                elif algo == "Kappa-Sigma Clipping":
+                    tile_result, tile_rej_map = kappa_sigma_clip_weighted(
+                        tile_stack, weights_array,
+                        kappa=self.kappa, iterations=self.iterations
+                    )
+                elif algo == "Trimmed Mean":
+                    tile_result, tile_rej_map = trimmed_mean_weighted(
+                        tile_stack, weights_array,
+                        trim_fraction=self.trim_fraction
+                    )
+                elif algo == "Extreme Studentized Deviate (ESD)":
+                    tile_result, tile_rej_map = esd_clip_weighted(
+                        tile_stack, weights_array,
+                        threshold=self.esd_threshold
+                    )
+                elif algo == "Biweight Estimator":
+                    tile_result, tile_rej_map = biweight_location_weighted(
+                        tile_stack, weights_array,
+                        tuning_constant=self.biweight_constant
+                    )
+                elif algo == "Modified Z-Score Clipping":
+                    tile_result, tile_rej_map = modified_zscore_clip_weighted(
+                        tile_stack, weights_array,
+                        threshold=self.modz_threshold
+                    )
+                else:
+                    tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
+                        tile_stack, weights_array,
+                        lower=self.sigma_low, upper=self.sigma_high
+                    )
+
+                # 6) Place the integrated tile into the final image
+                integrated_image[y_start:y_end, x_start:x_end, :] = tile_result
+
+                # 7) For color, tile_rej_map is shape (N, tile_h, tile_w, C). Combine channels if needed.
+                if tile_rej_map.ndim == 4:
+                    # shape => (N, tile_h, tile_w, channels)
+                    # reduce across channels => (N, tile_h, tile_w)
+                    tile_rej_map = np.any(tile_rej_map, axis=-1)
+
+                # 8) Now tile_rej_map is shape (N, tile_h, tile_w). Record the rejections per file
+                for i, fpath in enumerate(file_list):
+                    frame_mask = tile_rej_map[i]  # shape (tile_h, tile_w)
+                    ys_tile, xs_tile = np.where(frame_mask)
+                    for dx, dy in zip(xs_tile, ys_tile):
+                        global_x = x_start + dx
+                        global_y = y_start + dy
+                        per_file_rejections[fpath].append((global_x, global_y))
+
+        # 9) Squeeze if mono
+        if channels == 1:
+            integrated_image = integrated_image[..., 0]
+
+        # Return integrated_image, the per-file rejection dictionary, and the reference header
+        return integrated_image, per_file_rejections, ref_header
+
+
+    def outlier_rejection_with_mask(self, tile_stack, weights_array):
+        """
+        Example outlier rejection routine that computes the weighted median of the tile stack
+        and returns both the integrated tile and a rejection mask.
+        
+        Parameters:
+        tile_stack: numpy array of shape (N, H, W, C)
+        weights_array: numpy array of shape (N,)
+        
+        Returns:
+        tile_result: numpy array of shape (H, W, C)
+        rejection_mask: boolean numpy array of shape (H, W) where True indicates a rejected pixel.
+        
+        This is a simple example. Replace this logic with your actual rejection algorithm.
+        """
+        # Compute the weighted median along axis 0.
+        # For simplicity, we'll use the unweighted median here.
+        tile_result = np.median(tile_stack, axis=0)
+        
+        # Compute the absolute deviation for each frame and take the median deviation.
+        # Then mark as rejected any pixel in any frame that deviates by more than a threshold.
+        # Here we define a threshold factor (this value may need tuning).
+        threshold_factor = 1.5
+        abs_deviation = np.abs(tile_stack - tile_result)
+        # Compute the median deviation per pixel over the frames.
+        median_deviation = np.median(abs_deviation, axis=0)
+        # Define a rejection mask: True if the median deviation exceeds a threshold.
+        # (For demonstration, assume threshold = threshold_factor * some constant; here we choose 0.05.)
+        rejection_mask = median_deviation[..., 0] > (threshold_factor * 0.05)
+        # If color, you might combine channels or process each channel separately.
+        
+        return tile_result, rejection_mask
+
 
 def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
     """
@@ -13840,16 +14391,22 @@ class StellarAlignmentDialog(QDialog):
         self.setLayout(main_layout)
 
     def toggle_autostretch(self):
+        if self.aligned_image is None:
+            QMessageBox.warning(self, "Warning", "No aligned image available to apply autostretch.")
+            return
+
         self.autostretch_enabled = not self.autostretch_enabled
         if self.autostretch_enabled:
             self.apply_autostretch()
         else:
-            self.stretched_image = self.aligned_image  # Reset to original image if stretch is disabled
+            self.stretched_image = self.aligned_image  # Reset to the original image if stretch is disabled
 
         self.update_preview(self.result_preview_label, self.stretched_image)
 
+
     def apply_autostretch(self):
-        # Determine if the aligned image is mono or color
+        if self.aligned_image is None:
+            return  # or handle it as needed
         if len(self.aligned_image.shape) == 2:  # Mono image
             self.stretched_image = stretch_mono_image(self.aligned_image, target_median=0.25, normalize=True)
         else:  # Color image
@@ -14539,6 +15096,7 @@ class StarRegistrationThread(QThread):
         # New mappings for this pass.
         transformed_files = {}
         remaining_files = {}
+        skipped_files = []  # List to track skipped images
 
         use_astroalign = (pass_index < 2)
         for original_file, current_file in self.file_key_to_current_path.items():
@@ -14595,6 +15153,7 @@ class StarRegistrationThread(QThread):
                 # Delta is small, so we consider this frame converged.
                 remaining_files[original_file] = current_file
                 aligned_count += 1
+                skipped_files.append(os.path.basename(current_file))  # Log the filename
 
         self.transform_deltas.append(pass_deltas)
         # Update the persistent mapping for the next pass.
@@ -14604,6 +15163,10 @@ class StarRegistrationThread(QThread):
         if len(pass_deltas) > 10:
             preview += f" ... ({len(pass_deltas)} total)"
         self.progress_update.emit(f"Pass {pass_index+1} delta shifts: [{preview}]")
+        
+        # Emit a message listing skipped images if any.
+        if skipped_files:
+            self.progress_update.emit(f"Skipped images (delta shift < 0.2px): {', '.join(skipped_files)}")
 
         if aligned_count == 0:
             return False, "All frames already aligned within tolerance."
@@ -14974,7 +15537,7 @@ class StarRegistrationThread(QThread):
         scale_x = np.sqrt(a**2 + c**2)
         scale_y = np.sqrt(b**2 + d**2)
         skew = np.abs((a * b + c * d) / (a**2 + c**2))
-        if not (0.4 <= scale_x <= 2.1 and 0.4 <= scale_y <= 2.1):
+        if not (0.9 <= scale_x <= 1.1 and 0.9 <= scale_y <= 1.1):
             return False
         return True
 
@@ -21451,15 +22014,16 @@ class ImagePreview(QWidget):
 
     def update_image_display(self):
         """Update the QLabel with the current image."""
-        # Use the stretched image data if AutoStretch is applied
+        # Choose the display image: either autostretched or the original.
         display_image = self.stretched_image_data if self.is_autostretched else self.image_data
 
-        # Normalize image data to [0, 255] and convert to uint8
+        # Normalize image data if necessary
         if display_image.dtype != np.uint8:
             image_data_normalized = np.clip(display_image * 255, 0, 255).astype('uint8')
         else:
             image_data_normalized = display_image
 
+        # Create QImage from the numpy array
         if len(image_data_normalized.shape) == 2:  # Grayscale image
             height, width = image_data_normalized.shape
             bytes_per_line = width
@@ -21472,13 +22036,19 @@ class ImagePreview(QWidget):
             QMessageBox.warning(self, "Invalid Image", "Unsupported image format for display.")
             return
 
+        # Convert to pixmap and store the original if not already stored
         pixmap = QPixmap.fromImage(qimage)
-        scaled_pixmap = pixmap.scaled(
-            self.image_label.size() * self.zoom_factor,
+        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull():
+            self.original_pixmap = pixmap
+
+        # Scale from the original pixmap size using the current zoom factor
+        scaled_pixmap = self.original_pixmap.scaled(
+            self.original_pixmap.size() * self.zoom_factor,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
         self.image_label.setPixmap(scaled_pixmap)
+
 
     def resizeEvent(self, event):
         """Ensure the image scales appropriately when the window is resized."""
@@ -21497,8 +22067,21 @@ class ImagePreview(QWidget):
 
     def fit_to_preview(self):
         """Fit the image to the preview window."""
-        self.zoom_factor = 1.0
-        self.zoom_slider.setValue(100)
+        # Ensure we have the original pixmap
+        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull():
+            return
+
+        # Get available size from the scroll area's viewport
+        available_size = self.scroll_area.viewport().size()
+        pixmap_size = self.original_pixmap.size()
+
+        # Calculate the zoom factor to fit the image
+        zoom_factor_w = available_size.width() / pixmap_size.width()
+        zoom_factor_h = available_size.height() / pixmap_size.height()
+        self.zoom_factor = min(zoom_factor_w, zoom_factor_h)
+
+        # Update the slider value accordingly (convert to percentage)
+        self.zoom_slider.setValue(int(self.zoom_factor * 100))
         self.update_image_display()
 
     def swap_with_slot_zero(self):
@@ -27723,7 +28306,7 @@ class CosmicClarityTab(QWidget):
         base_filename = os.path.splitext(os.path.basename(self.loaded_image_path))[0]
         output_folder = os.path.join(self.cosmic_clarity_folder, "output")
         suffix = f"_upscaled{scale_str}"
-        output_file_glob = os.path.join(output_folder, base_filename + suffix + ".tif")
+        output_file_glob = os.path.join(output_folder, base_filename + suffix + ".fit")
 
         matching_files = glob.glob(output_file_glob)
         if matching_files:
@@ -31417,12 +32000,13 @@ class FullCurvesTab(QWidget):
 
 
     def show_image(self, image):
-        """
-        Display the loaded image in the imageLabel.
-        """
         try:
             # Normalize image to 0-255 and convert to uint8
             display_image = (image * 255).astype(np.uint8)
+
+            # If the image has a singleton third dimension, squeeze it out
+            if display_image.ndim == 3 and display_image.shape[2] == 1:
+                display_image = display_image.squeeze(axis=2)
 
             if display_image.ndim == 3 and display_image.shape[2] == 3:
                 # RGB Image
@@ -31450,6 +32034,7 @@ class FullCurvesTab(QWidget):
         except Exception as e:
             print(f"Error displaying image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
+
 
 
     def update_image_display(self):
@@ -37848,7 +38433,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     # We know it's mono. Already normalized in `image`.
                     is_mono = True
                     # If you really want to store it in an RGB shape:
-                    image = np.stack([image] * 3, axis=-1)
+                    #image = np.stack([image] * 3, axis=-1)
 
                 elif image_data.ndim == 3 and image_data.shape[2] == 1:
                     # It's mono with shape (H, W, 1)
@@ -37856,7 +38441,7 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     # Squeeze the normalized image, not the original image_data
                     image = np.squeeze(image, axis=2)
                     # If you want an RGB shape, you can do:
-                    image = np.stack([image] * 3, axis=-1)
+                    #image = np.stack([image] * 3, axis=-1)
 
                 elif image_data.ndim == 3 and image_data.shape[2] == 3:
                     is_mono = False
