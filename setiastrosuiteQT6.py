@@ -8763,21 +8763,19 @@ class StackingSuiteDialog(QDialog):
                             lower=self.sigma_low,
                             upper=self.sigma_high
                         )
+                        # If the function returns a tuple, extract the first element.
+                        if isinstance(tile_result, tuple):
+                            tile_result = tile_result[0]
                     else:
                         # tile_stack => shape (F,H,W,1) or (F,H,W)
                         # If shape=(F,H,W,1), we can squeeze or just call 3D version
-                        tile_stack_3d = tile_stack[...,0] if tile_stack.ndim==4 else tile_stack
-                        tile_result_3d = windsorized_sigma_clip_3d(
-                            tile_stack_3d,
-                            lower=self.sigma_low,
-                            upper=self.sigma_high
-                        )
-                        # tile_result_3d shape => (H,W)
-                        if channels == 1:
-                            # Expand to (H,W,1) for storing
-                            tile_result = tile_result_3d[..., np.newaxis]
-                        else:
-                            tile_result = tile_result_3d
+                        tile_stack_3d = tile_stack[..., 0] if tile_stack.ndim == 4 else tile_stack
+                        tile_result_3d = windsorized_sigma_clip_3d(tile_stack_3d, lower=self.sigma_low, upper=self.sigma_high)
+                        # If the function returns a tuple, extract the first element.
+                        if isinstance(tile_result_3d, tuple):
+                            tile_result_3d = tile_result_3d[0]
+                        # Now, ensure the result has shape (H, W, 1)
+                        tile_result = tile_result_3d[..., np.newaxis]
 
                     # (E) Store tile_result in final_stacked
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
@@ -9213,15 +9211,23 @@ class StackingSuiteDialog(QDialog):
                     # (D3) Outlier rejection
                     if channels == 3:
                         # tile_stack => shape (F,H,W,3)
-                        tile_result = windsorized_sigma_clip_4d(tile_stack, lower=self.sigma_low, upper=self.sigma_high)
+                        tile_result = windsorized_sigma_clip_4d(
+                            tile_stack,
+                            lower=self.sigma_low,
+                            upper=self.sigma_high
+                        )
+                        # If the function returns a tuple, extract the first element.
+                        if isinstance(tile_result, tuple):
+                            tile_result = tile_result[0]
                     else:
                         # tile_stack => shape (F,H,W) or (F,H,W,1)
-                        tile_stack_3d = tile_stack[...,0] if (channels==1 and tile_stack.ndim==4) else tile_stack
+                        tile_stack_3d = tile_stack[..., 0] if tile_stack.ndim == 4 else tile_stack
                         tile_result_3d = windsorized_sigma_clip_3d(tile_stack_3d, lower=self.sigma_low, upper=self.sigma_high)
-                        if channels == 1:
-                            tile_result = tile_result_3d[..., np.newaxis]
-                        else:
-                            tile_result = tile_result_3d
+                        # If the function returns a tuple, extract the first element.
+                        if isinstance(tile_result_3d, tuple):
+                            tile_result_3d = tile_result_3d[0]
+                        # Now, ensure the result has shape (H, W, 1)
+                        tile_result = tile_result_3d[..., np.newaxis]
 
                     # (D4) Store tile_result in final_stacked
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
