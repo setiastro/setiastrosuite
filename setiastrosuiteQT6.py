@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.2"
+VERSION = "2.13.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -2706,19 +2706,11 @@ class AstroEditingSuite(QMainWindow):
         """Handle the RGB Combination action."""
         dialog = RGBCombinationDialog(self, image_manager=self.image_manager)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            combined_rgb = dialog.rgb_image  # Numpy array with shape (H, W, 3) normalized to [0,1]
-            metadata = {
-                'file_path': "RGB Combination",
-                'is_mono': False,
-                'bit_depth': "32-bit floating point",
-                'original_header': None  # Add header information if available
-            }
-            # Store the combined RGB image in Slot 0
-            self.image_manager._images[0] = combined_rgb
-            self.image_manager._metadata[0] = metadata
-            self.image_manager.image_changed.emit(0, combined_rgb, metadata)
-            print("RGB image stored in Slot 0.")
-            QMessageBox.information(self, "Success", "RGB image combined and stored in Slot 0.")
+            # The RGBCombinationDialog calls image_manager.set_image() to store the image in the active slot.
+            active_slot = self.image_manager.current_slot
+            slot_name = self.image_manager.get_slot_name(active_slot)
+            print(f"RGB image stored in {slot_name}.")
+            QMessageBox.information(self, "Success", f"RGB image combined and stored in {slot_name}.")
         else:
             print("RGB Combination cancelled by the user.")
 
@@ -3319,18 +3311,16 @@ class AstroEditingSuite(QMainWindow):
             
             # Proceed with the copy operation
             try:
-                # Save current state of the target slot to undo stack
+                # Save current state of the target slot to undo stack (only for images)
                 if is_occupied:
                     if target_type == "Image":
                         self.image_manager._undo_stacks[target_slot_num].append(
                             (self.image_manager._images[target_slot_num].copy(),
                             self.image_manager._metadata[target_slot_num].copy())
                         )
-                    elif target_type == "Mask":
-                        self.mask_manager._undo_stacks[target_slot_num].append(
-                            (self.mask_manager.get_mask(target_slot_num).copy(),)
-                        )
-                    print(f"{target_type} Slot {target_slot_num} state saved to undo stack.")
+                        print(f"Image Slot {target_slot_num} state saved to undo stack.")
+                    # For masks, skip saving to an undo stack.
+
             
             
                 # Deep copy to prevent unintended modifications
@@ -4714,19 +4704,24 @@ class CropTool(QDialog):
 
     def load_image(self):
         """Load and display the image in the QGraphicsView."""
-        if len(self.image_data.shape) == 3:  # Color image
-            height, width, channels = self.image_data.shape
+        # Squeeze out the singleton channel if necessary.
+        img = self.image_data
+        if img.ndim == 3 and img.shape[2] == 1:
+            img = img.squeeze(axis=2)
+
+        if img.ndim == 3:  # Color image
+            height, width, channels = img.shape
             q_image = QImage(
-                (self.image_data * 255).astype(np.uint8).tobytes(),
+                (img * 255).astype(np.uint8).tobytes(),
                 width,
                 height,
                 3 * width,
                 QImage.Format.Format_RGB888
             )
-        elif len(self.image_data.shape) == 2:  # Mono image
-            height, width = self.image_data.shape
+        elif img.ndim == 2:  # Mono image
+            height, width = img.shape
             q_image = QImage(
-                (self.image_data * 255).astype(np.uint8).tobytes(),
+                (img * 255).astype(np.uint8).tobytes(),
                 width,
                 height,
                 width,
@@ -4741,6 +4736,7 @@ class CropTool(QDialog):
         self.scene.addItem(self.pixmap_item)
         # Fit the image in view while keeping the aspect ratio.
         self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
 
     def resizeEvent(self, event):
         """
@@ -22153,13 +22149,19 @@ class RGBCombinationDialog(QDialog):
         self.g_image_path = None
         self.b_image_path = None
         self.use_existing_slots = False
-        
+
+        # Retrieve slot_names from parent if available; otherwise use empty dict.
+        if parent is not None and hasattr(parent, "slot_names"):
+            self.slot_names = parent.slot_names
+        else:
+            self.slot_names = {}
+
         # Create UI components
         self.mode_label = QLabel("Select RGB Combination Mode:")
         
         # Radio buttons for mode selection
         self.load_files_radio = QRadioButton("Load Individual Files")
-        self.use_slots_radio = QRadioButton("Use Existing Slots (2, 3, 4)")
+        self.use_slots_radio = QRadioButton("Use Existing Slots")
         self.load_files_radio.setChecked(True)  # Default mode
         
         # Button group to ensure only one radio button is selected
@@ -22198,15 +22200,45 @@ class RGBCombinationDialog(QDialog):
         self.load_files_layout.addWidget(self.b_label)
         self.load_files_layout.addWidget(self.load_b_button)
         
-        # Use Existing Slots Mode Widgets
-        self.use_slots_label = QLabel("Ensure Slots 2, 3, and 4 contain R, G, B channels respectively.")
-        self.use_slots_button = QPushButton("Use Slots 2, 3, 4")
-        self.use_slots_button.clicked.connect(self.use_existing_slots_method)
+        # Use Existing Slots Mode Widgets: Three dropdowns for selecting slots for R, G, and B
+        self.slots_selection_widget = QGroupBox("Select Slots for R, G, B")
+        slots_layout = QHBoxLayout()
+        # Red Slot ComboBox
+        red_layout = QVBoxLayout()
+        red_layout.addWidget(QLabel("Red Slot:"))
+        self.red_slot_combo = QComboBox()
+        red_layout.addWidget(self.red_slot_combo)
+        slots_layout.addLayout(red_layout)
+        # Green Slot ComboBox
+        green_layout = QVBoxLayout()
+        green_layout.addWidget(QLabel("Green Slot:"))
+        self.green_slot_combo = QComboBox()
+        green_layout.addWidget(self.green_slot_combo)
+        slots_layout.addLayout(green_layout)
+        # Blue Slot ComboBox
+        blue_layout = QVBoxLayout()
+        blue_layout.addWidget(QLabel("Blue Slot:"))
+        self.blue_slot_combo = QComboBox()
+        blue_layout.addWidget(self.blue_slot_combo)
+        slots_layout.addLayout(blue_layout)
+        self.slots_selection_widget.setLayout(slots_layout)
         
-        # Layout for Use Slots Mode
-        self.use_slots_layout = QVBoxLayout()
-        self.use_slots_layout.addWidget(self.use_slots_label)
-        self.use_slots_layout.addWidget(self.use_slots_button)
+        # Populate the slot dropdowns.
+        # Use the image_manager.max_slots if available; for each slot, try to get the name from self.slot_names.
+        if self.image_manager is not None and hasattr(self.image_manager, "max_slots"):
+            for i in range(self.image_manager.max_slots):
+                # Use the stored name if available; note that your rgb_extract stores names keyed by slot number.
+                display_text = self.slot_names.get(i, f"Slot {i + 1}")
+                self.red_slot_combo.addItem(display_text, i)
+                self.green_slot_combo.addItem(display_text, i)
+                self.blue_slot_combo.addItem(display_text, i)
+        else:
+            # Fallback: assume 10 slots.
+            for i in range(10):
+                display_text = self.slot_names.get(i, f"Slot {i + 1}")
+                self.red_slot_combo.addItem(display_text, i)
+                self.green_slot_combo.addItem(display_text, i)
+                self.blue_slot_combo.addItem(display_text, i)
         
         # Combine and Cancel buttons
         self.combine_button = QPushButton("Combine")
@@ -22227,36 +22259,35 @@ class RGBCombinationDialog(QDialog):
         self.main_layout.addWidget(self.mode_label)
         self.main_layout.addWidget(self.mode_groupbox)
         self.main_layout.addLayout(self.load_files_layout)
-        self.main_layout.addLayout(self.use_slots_layout)
+        self.main_layout.addWidget(self.slots_selection_widget)
         self.main_layout.addLayout(buttons_layout)
         
         self.setLayout(self.main_layout)
+        
+        # Set initial state: show file mode, hide slot selection
+        self.set_mode_visibility()
     
-    def update_mode(self):
-        """Update the UI based on the selected mode."""
+    def set_mode_visibility(self):
         if self.load_files_radio.isChecked():
             self.use_existing_slots = False
-            self.load_r_button.setEnabled(True)
-            self.load_g_button.setEnabled(True)
-            self.load_b_button.setEnabled(True)
-            self.r_label.setEnabled(True)
-            self.g_label.setEnabled(True)
-            self.b_label.setEnabled(True)
-            self.use_slots_button.setEnabled(False)
+            for widget in [self.r_label, self.load_r_button,
+                           self.g_label, self.load_g_button,
+                           self.b_label, self.load_b_button]:
+                widget.setEnabled(True)
+            self.slots_selection_widget.hide()
         else:
             self.use_existing_slots = True
-            self.load_r_button.setEnabled(False)
-            self.load_g_button.setEnabled(False)
-            self.load_b_button.setEnabled(False)
-            self.r_label.setEnabled(False)
-            self.g_label.setEnabled(False)
-            self.b_label.setEnabled(False)
-            self.use_slots_button.setEnabled(True)
-        
+            for widget in [self.r_label, self.load_r_button,
+                           self.g_label, self.load_g_button,
+                           self.b_label, self.load_b_button]:
+                widget.setEnabled(False)
+            self.slots_selection_widget.show()
         self.check_inputs()
     
+    def update_mode(self):
+        self.set_mode_visibility()
+    
     def load_r_image(self):
-        """Load the Red channel image."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Red Image", "", 
             "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
@@ -22267,7 +22298,6 @@ class RGBCombinationDialog(QDialog):
             self.check_inputs()
     
     def load_g_image(self):
-        """Load the Green channel image."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Green Image", "", 
             "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
@@ -22278,7 +22308,6 @@ class RGBCombinationDialog(QDialog):
             self.check_inputs()
     
     def load_b_image(self):
-        """Load the Blue channel image."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Blue Image", "", 
             "Image Files (*.png *.tif *.tiff *.fits *.fit *.xisf *.jpg *.jpeg);;All Files (*)"
@@ -22288,63 +22317,39 @@ class RGBCombinationDialog(QDialog):
             self.b_label.setText(f"Blue Image: {os.path.basename(file_path)}")
             self.check_inputs()
     
-    def use_existing_slots_method(self):
-        """Use existing images from slots 2, 3, and 4."""
-        # Check if slots 2, 3, and 4 have images
-        slots = [2, 3, 4]
-        images = []
-        for slot in slots:
-            img = self.image_manager._images.get(slot, None)
-            if img is None:
-                QMessageBox.warning(
-                    self, 
-                    "Missing Image", 
-                    f"Slot {slot} does not contain an image. Please extract RGB channels first."
-                )
-                print(f"Slot {slot} is empty. Cannot use existing slots for RGB Combination.")
-                return
-            images.append(img)
-        
-        self.r_image_path = None  # Indicate that we're using existing slots
-        self.g_image_path = None
-        self.b_image_path = None
-        self.combine_button.setEnabled(True)  # Enable Combine button as inputs are ready
-    
     def check_inputs(self):
-        """Enable the Combine button if all required inputs are available."""
         if self.use_existing_slots:
-            # Check if slots 2,3,4 have images
-            slots = [2, 3, 4]
-            for slot in slots:
-                if self.image_manager._images.get(slot, None) is None:
-                    self.combine_button.setEnabled(False)
-                    return
-            self.combine_button.setEnabled(True)
+            red_slot = self.red_slot_combo.currentData()
+            green_slot = self.green_slot_combo.currentData()
+            blue_slot = self.blue_slot_combo.currentData()
+            if (self.image_manager._images.get(red_slot) is not None and
+                self.image_manager._images.get(green_slot) is not None and
+                self.image_manager._images.get(blue_slot) is not None):
+                self.combine_button.setEnabled(True)
+            else:
+                self.combine_button.setEnabled(False)
         else:
-            # Check if all three images are loaded
             if self.r_image_path and self.g_image_path and self.b_image_path:
                 self.combine_button.setEnabled(True)
             else:
                 self.combine_button.setEnabled(False)
     
     def combine_images(self):
-        """Combine the loaded R, G, B images into a single RGB image."""
         try:
             if self.use_existing_slots:
-                # Use images from slots 2, 3, 4
-                r = self.image_manager._images.get(2).copy()
-                g = self.image_manager._images.get(3).copy()
-                b = self.image_manager._images.get(4).copy()
+                red_slot = self.red_slot_combo.currentData()
+                green_slot = self.green_slot_combo.currentData()
+                blue_slot = self.blue_slot_combo.currentData()
+                r = self.image_manager._images.get(red_slot).copy()
+                g = self.image_manager._images.get(green_slot).copy()
+                b = self.image_manager._images.get(blue_slot).copy()
             else:
-                # Load images using the global load_image function
                 r, _, _, _ = load_image(self.r_image_path)
                 g, _, _, _ = load_image(self.g_image_path)
                 b, _, _, _ = load_image(self.b_image_path)
-
                 if r is None or g is None or b is None:
                     raise ValueError("One or more images failed to load.")
-
-            # Ensure images are grayscale (extract first channel if they are multi-channel)
+    
             if r.ndim == 3 and r.shape[2] > 1:
                 print("Red channel image has multiple channels, extracting first channel.")
                 r = r[:, :, 0]
@@ -22354,21 +22359,21 @@ class RGBCombinationDialog(QDialog):
             if b.ndim == 3 and b.shape[2] > 1:
                 print("Blue channel image has multiple channels, extracting first channel.")
                 b = b[:, :, 0]
-
-            # Ensure all images have the same dimensions
+    
             if not (r.shape == g.shape == b.shape):
                 raise ValueError("All images must have the same dimensions.")
-
-            # Stack channels to form RGB image
+    
             rgb_image = np.stack([r, g, b], axis=2)
-
-            self.rgb_image = rgb_image  # Store the combined image
-            self.accept()  # Close the dialog with success
+            self.rgb_image = rgb_image  # Store the combined image.
+    
+            # Use ImageManager.set_image to set the image in the active slot.
+            self.image_manager.set_image(new_image=self.rgb_image, metadata={"description": "RGB Combined Image"})
+    
+            self.accept()  # Close the dialog with success.
             print("RGB Combination successful.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to combine images: {e}")
             print(f"Error in RGB Combination: {e}")
-
 
 class StarNetThread(QThread):
     # Define signals to communicate with the main thread
@@ -27900,11 +27905,7 @@ class CosmicClarityTab(QWidget):
                 if len(image.shape) == 3 and image.shape[2] == 1:
                     print(f"Mono image detected with shape: {image.shape}. Squeezing singleton dimension.")
                     image = np.squeeze(image, axis=2)  # Convert (H, W, 1) to (H, W)
-
-                # Convert 2D grayscale to RGB by stacking it
-                if len(image.shape) == 2:
-                    print(f"Converting mono image with shape: {image.shape} to 3-channel RGB.")
-                    image = np.stack([image] * 3, axis=-1)
+                # Do not convert a mono image to 3-channel RGB; keep it as 2D.
 
             elif len(image.shape) == 3 and image.shape[2] not in [1, 3]:
                 # Catch unexpected formats like (H, W, C) where C is not 1 or 3
@@ -28091,8 +28092,12 @@ class CosmicClarityTab(QWidget):
                 # Force saving as `.tif` format
                 if not file_path.endswith(".tif"):
                     file_path += ".tif"
-                imwrite(file_path, self.image.astype(np.float32))
-                print(f"Image saved as TIFF to {file_path}")  # Debug print
+                # If image is mono with shape (H, W, 1), squeeze it to (H, W)
+                image_to_save = self.image.astype(np.float32)
+                if image_to_save.ndim == 3 and image_to_save.shape[2] == 1:
+                    image_to_save = image_to_save.squeeze(axis=2)
+                imwrite(file_path, image_to_save)
+                print(f"Image saved as TIFF to {file_path}")
             except Exception as e:
                 print(f"Error saving input image: {e}")
                 QMessageBox.critical(self, "Error", f"Failed to save input image:\n{e}")
@@ -32715,55 +32720,49 @@ class FullCurvesProcessingThread(QThread):
 
     @staticmethod
     def process_curve(image, curve_mode, curve_func):
-        """
-        Main entry point to apply the user's curve in 'curve_mode'
-        to 'image' using a single big LUT for [0..1].
-        """
         import numpy as np
 
         if image is None or curve_func is None:
             return image
 
-        # 1) Convert to float32 [0..1]
+        # Ensure image is float32 [0..1]
         if image.dtype != np.float32:
             image = image.astype(np.float32, copy=False)
 
-        # 2) Build a big LUT
+        # Build a big LUT
         lut = build_curve_lut(curve_func, size=65536)
 
-        # 3) If single-channel, reshape to (H,W,1) for uniform handling
-        is_gray = (image.ndim == 2 or image.shape[2] == 1)
+        # Determine if image is mono
+        is_gray = (image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1))
         if is_gray:
-            image = image.reshape(image.shape[0], image.shape[1], 1)
+            # Convert to 2D if needed
+            if image.ndim == 3:
+                image = image.reshape(image.shape[0], image.shape[1])
+            # For mono images, no matter if the mode is "R", "G", "B", or "K (Brightness)",
+            # we simply apply the LUT to the entire image.
+            out = image.copy()
+            apply_lut_mono_inplace(out, lut)
+            return out  # Return a 2D array for mono images.
 
-        mode = curve_mode.lower()
+
 
         # ----------------------------------------------------------------------
         # R/G/B/K (Brightness) => direct LUT application
         # ----------------------------------------------------------------------
+        mode = curve_mode.lower()
         if mode == 'r':
-            # Apply LUT only to channel 0
-            # We do it manually:
             out = image.copy()
-            H, W, _ = out.shape
-            # channel 0
-            apply_lut_mono_inplace(out[...,0], lut)
+            apply_lut_mono_inplace(out[..., 0], lut)
             return out
-
         elif mode == 'g':
-            # channel 1
             out = image.copy()
-            apply_lut_mono_inplace(out[...,1], lut)
+            apply_lut_mono_inplace(out[..., 1], lut)
             return out
-
         elif mode == 'b':
-            # channel 2
             out = image.copy()
-            apply_lut_mono_inplace(out[...,2], lut)
+            apply_lut_mono_inplace(out[..., 2], lut)
             return out
-
         elif mode == 'k (brightness)':
-            # Apply LUT to all channels
             out = image.copy()
             apply_lut_color_inplace(out, lut)
             return out
