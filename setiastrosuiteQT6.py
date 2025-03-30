@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.3"
+VERSION = "2.13.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -10176,22 +10176,29 @@ class StackingSuiteDialog(QDialog):
             if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
-        # 2) Build dictionary from the normalized `_n.fit` → final aligned `_n_r.fit`
+        # 2) Build dictionary from the normalized `_n.fit` or `_n.fits` → final aligned `_n_r.fit`
         self.valid_transforms = {}
         for norm_path, shift in file_shift_pairs:
             transform = all_transforms[norm_path]
             if transform is not None and shift <= 2.0:
                 base = os.path.basename(norm_path)
-                # If it ends with `_n.fit`, produce `_n_r.fit`. Otherwise `_r.fit`.
-                if base.endswith("_n.fit"):
+                # Check for both .fits and .fit extensions for normalized files.
+                if base.endswith("_n.fits"):
+                    aligned_name = base.replace("_n.fits", "_n_r.fit")
+                elif base.endswith("_n.fit"):
                     aligned_name = base.replace("_n.fit", "_n_r.fit")
-                else:
+                elif base.endswith(".fits"):
+                    aligned_name = base.replace(".fits", "_r.fit")
+                elif base.endswith(".fit"):
                     aligned_name = base.replace(".fit", "_r.fit")
+                else:
+                    # Fallback if unexpected extension
+                    aligned_name = base + "_r"
 
                 aligned_path = os.path.join(
                     self.stacking_directory, "Aligned_Images", aligned_name
                 )
-                # Key the dictionary by the *same* `_n.fit` path used by the alignment
+                # Key the dictionary by the *same* normalized path used by the alignment
                 self.valid_transforms[os.path.normpath(norm_path)] = aligned_path
 
         # Identify rejected
@@ -10215,23 +10222,16 @@ class StackingSuiteDialog(QDialog):
         # 3) Save numeric transforms
         self.save_alignment_matrices_sasd(valid_matrices)
 
-        # Gather drizzle
+        # Gather drizzle settings
         drizzle_dict = self.gather_drizzle_settings_from_tree()
 
         # ===========================
         # DEBUG PRINTS BEFORE FILTER
         # ===========================
 
-
         # 4) Filter `light_files`
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
-            
-            for f in file_list:
-                normed_f = os.path.normpath(f)
-                in_dict = (normed_f in self.valid_transforms)
-                
-
             filtered_light_files[group] = [
                 f for f in file_list if os.path.normpath(f) in self.valid_transforms
             ]
@@ -10239,22 +10239,24 @@ class StackingSuiteDialog(QDialog):
                 f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
             )
 
-        # 5) **Build a second dict** that replaces each `_n.fit` with its `_n_r.fit` path
-        #    so the stacking method sees only the aligned files.
+        # 5) **Build a second dict** that replaces each normalized file with its aligned counterpart.
         aligned_light_files = {}
         for group, file_list in filtered_light_files.items():
+            self.update_status(f"DEBUG: After filtering, group '{group}' has {len(file_list)} files.")
             new_list = []
             for f in file_list:
                 normed_f = os.path.normpath(f)
                 aligned_f = self.valid_transforms.get(normed_f, None)
+                self.update_status(f"DEBUG: For file '{normed_f}', aligned file is '{aligned_f}'")
                 if aligned_f and os.path.exists(aligned_f):
                     new_list.append(aligned_f)
+                else:
+                    self.update_status(f"DEBUG: File '{aligned_f}' does not exist on disk.")
             aligned_light_files[group] = new_list
-
 
         # Finally, pass the aligned_light_files to stacking
         self.stack_images_mixed_drizzle(
-            grouped_files=aligned_light_files,  # <--- Now we pass the _n_r.fit paths
+            grouped_files=aligned_light_files,  # Now we pass the aligned _r.fit paths
             frame_weights=self.frame_weights,
             transforms_dict=self.valid_transforms,
             drizzle_dict=drizzle_dict
@@ -10322,6 +10324,7 @@ class StackingSuiteDialog(QDialog):
         group_integration_data = {}
 
         for group_key, file_list in grouped_files.items():
+            self.update_status(f"DEBUG: Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
             # 1) Normal integration => integrated_image, per_file_rejections, ref_header
             integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
                 group_key, file_list, frame_weights
@@ -11001,7 +11004,10 @@ class StackingSuiteDialog(QDialog):
         """
         import os
         from concurrent.futures import ThreadPoolExecutor, as_completed
-
+        self.update_status(f"DEBUG: Starting integration for group '{group_key}' with {len(file_list)} files.")
+        if not file_list:
+            self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
+            return None, {}, None
         # 1) Load a reference image to determine dimensions and channels
         ref_file = file_list[0]
         if not os.path.exists(ref_file):
@@ -11046,6 +11052,7 @@ class StackingSuiteDialog(QDialog):
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
                     future_to_index = {}
                     for i, fpath in enumerate(file_list):
+                        self.update_status(f"DEBUG: Submitting tile load for file: {fpath}")
                         future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
                         future_to_index[future] = i
                         weights_list.append(frame_weights.get(fpath, 1.0))
@@ -11054,6 +11061,7 @@ class StackingSuiteDialog(QDialog):
                         i = future_to_index[future]
                         sub_img = future.result()
                         if sub_img is None:
+                            self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
                             continue
                         # Ensure shape => (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
@@ -20324,83 +20332,6 @@ class PolyGradientRemoval:
     # ---------------------------------------------------------------
     # Helper: Stretch / Unstretch
     # ---------------------------------------------------------------
-    def pixel_math_stretch(self, image: np.ndarray) -> np.ndarray:
-        """
-        Unlinked linear stretch using your existing Numba functions.
-
-        Steps:
-        1) If single-channel, replicate to 3-ch so we can store stats & do consistent logic.
-        2) For each channel c: subtract the channel's min => data is >= 0.
-        3) Compute the median after min subtraction for that channel.
-        4) Call the appropriate Numba function:
-            - If single-channel (was originally 1-ch), call numba_mono_final_formula
-            on the 1-ch array.
-            - If 3-ch color, call numba_color_final_formula_unlinked.
-        5) Clip to [0,1].
-        6) Store self.stretch_original_mins / medians so we can unstretch later.
-        """
-        target_median = 0.25
-
-        # 1) Handle single-channel => replicate to 3 channels
-        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
-            self.was_single_channel = True
-            image_3ch = np.stack([image.squeeze()] * 3, axis=-1)
-        else:
-            self.was_single_channel = False
-            image_3ch = image
-
-        image_3ch = image_3ch.astype(np.float32, copy=True)
-
-        H, W, C = image_3ch.shape
-        # We assume C=3 now.
-
-        self.stretch_original_mins = []
-        self.stretch_original_medians = []
-
-        # 2) Subtract min per channel
-        for c in range(C):
-            cmin = image_3ch[..., c].min()
-            image_3ch[..., c] -= cmin
-            self.stretch_original_mins.append(float(cmin))
-
-        # 3) Compute median after min subtraction
-        medians_after_sub = []
-        for c in range(C):
-            cmed = float(np.median(image_3ch[..., c]))
-            medians_after_sub.append(cmed)
-        self.stretch_original_medians = medians_after_sub
-
-        # 4) Apply the final formula with your Numba functions
-        if self.was_single_channel:
-            # If originally single-channel, let's do a single pass with numba_mono_final_formula
-            # on the single channel. We can do that by extracting one channel from image_3ch.
-            # Then replicate the result to 3 channels, or keep it as 1-ch?
-            # Typically we keep it as 1-ch in the end, so let's do that.
-
-            # We'll just pick channel 0, run the mono formula, store it back in a 2D array.
-            mono_array = image_3ch[..., 0]  # shape (H,W)
-            cmed = medians_after_sub[0]     # The median for that channel
-            # We call the numba function
-            stretched_mono = numba_mono_final_formula(mono_array, cmed, target_median)
-
-            # Now place it back into image_3ch for consistency
-            for c in range(3):
-                image_3ch[..., c] = stretched_mono
-        else:
-            # 3-channel unlinked
-            medians_rescaled = np.array(medians_after_sub, dtype=np.float32)
-            # 'image_3ch' is our 'rescaled'
-            stretched_3ch = numba_color_final_formula_unlinked(
-                image_3ch, medians_rescaled, target_median
-            )
-            image_3ch = stretched_3ch
-
-        # 5) Clip to [0..1]
-        np.clip(image_3ch, 0.0, 1.0, out=image_3ch)
-        image = image_3ch
-        return image
-
-
     def pixel_math_stretch(self, image: np.ndarray) -> np.ndarray:
         """
         Unlinked linear stretch using your existing Numba functions.
