@@ -1,9 +1,9 @@
 {
-  "version": "2.13.3",
+  "version": "2.13.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.3/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.3/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.3/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.4/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.4/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Stacking Suite: Drizzling now utilizes Rejection maps to reject pixels during drizzle process. Numerous bug fixes: CC Upscale, Image Preview Zoom, Stellar alignment autostretch, Starnet extension, Curves unknown image type, and more."
+  "notes": "Bug fix in stacking suite"
 }
