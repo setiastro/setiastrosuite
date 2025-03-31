@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.4"
+VERSION = "2.13.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -2833,66 +2833,77 @@ class AstroEditingSuite(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to extract RGB channels: {e}")
             print(f"Error during RGB Extract: {e}")
 
-
     def extract_luminance(self):
-        """Extracts the luminance from the current image and updates slots."""
+        """Extracts the luminance from the active image and stores it in a user-selected slot."""
+        # Use the active image as the source.
         if self.image_manager.image is None:
             QMessageBox.warning(self, "No Image", "Please load an image before extracting luminance.")
             return
 
-        # Ensure the image is RGB
         current_image = self.image_manager.image
         if current_image.ndim != 3 or current_image.shape[2] != 3:
             QMessageBox.warning(self, "Invalid Image", "Luminance extraction requires an RGB image.")
             return
 
-        # Clip the current image to [0, 1] to avoid any unexpected values outside the valid range
+        # Ensure the image is clipped to [0,1]
         current_image = np.clip(current_image, 0.0, 1.0)
 
-        # Convert the RGB image to Lab to extract L* (luminance)
+        # Convert the RGB image to Lab and extract L* (luminance)
         lab_image = self.rgb_to_lab(current_image)
-        luminance = lab_image[..., 0] / 100.0  # Normalize L* to [0, 1] for storage
+        luminance = lab_image[..., 0] / 100.0  # Normalize L* to [0, 1]
 
-        # --- Swap assignments: ---
-        # Store the original RGB image in Slot 0.
-        self.image_manager._images[0] = current_image
-        self.image_manager._metadata[0] = self.image_manager._metadata[self.image_manager.current_slot].copy()
-        print("Original RGB image moved to slot 0.")
+        # Build a list of available slots (0 to max_slots-1) with display names
+        max_slots = self.image_manager.max_slots if hasattr(self.image_manager, "max_slots") else 10
+        slots = list(range(max_slots))
+        # Use parent's slot_names dictionary if available; otherwise, use default names.
+        if hasattr(self, "slot_names"):
+            display_names = [self.slot_names.get(i, f"Slot {i+1}") for i in slots]
+        else:
+            display_names = [f"Slot {i+1}" for i in slots]
 
-        # Store the luminance image in Slot 1.
+        # Prompt user to select target slot for the luminance image.
+        item, ok = QInputDialog.getItem(
+            self,
+            "Select Target Slot",
+            "Select the slot to store the luminance image:",
+            display_names,
+            editable=False
+        )
+        if not ok:
+            QMessageBox.information(self, "Operation Cancelled", "Luminance extraction was cancelled.")
+            return
+        # Determine the target slot number based on the selected item.
+        target_slot = display_names.index(item)
+
+        # Store the original RGB image in the active slot (or leave it as is)
+        # For this example, we leave the original image in the active slot.
+
+        # Store the luminance image in the selected target slot.
         luminance_metadata = {
             'file_path': "Luminance Extracted",
             'is_mono': True,
             'bit_depth': "32-bit floating point",
         }
-        self.image_manager._images[1] = luminance
-        self.image_manager._metadata[1] = luminance_metadata
-        print("Luminance image updated in slot 1.")
+        self.image_manager._images[target_slot] = luminance
+        self.image_manager._metadata[target_slot] = luminance_metadata
+        print(f"Luminance image updated in slot {target_slot}.")
+        self.image_manager.image_changed.emit(target_slot, luminance, luminance_metadata)
 
-        # Emit signals for both slots to refresh views if necessary.
-        self.image_manager.image_changed.emit(0, current_image, self.image_manager._metadata[0])
+        # Update the slot name if you maintain one.
+        if hasattr(self, "slot_names"):
+            self.slot_names[target_slot] = "Luminance"
 
-
-        # --- Update custom slot names to reflect the new content ---
-        # Assuming your main window stores custom names in self.slot_names and slot actions in self.slot_actions.
-        if hasattr(self, 'slot_names'):
-            self.slot_names[1] = "Luminance"
-        if hasattr(self, 'slot_actions') and 1 in self.slot_actions:
-            self.slot_actions[1].setText("Luminance")
-            self.slot_actions[1].setStatusTip("Open preview for Luminance")
-        if hasattr(self, 'preview_windows') and 1 in self.preview_windows:
-            self.preview_windows[1].setWindowTitle("Preview - Luminance")
-
-        # --- ✅ Update Menubar Slot Name ---
-        if hasattr(self, 'menubar_slot_actions') and 1 in self.menubar_slot_actions:
-            self.menubar_slot_actions[1].setText("Luminance")
-            self.menubar_slot_actions[1].setStatusTip("Open preview for Luminance")
-
+        # Optionally, update any UI elements (such as slot actions or menubar names)
+        if hasattr(self, 'slot_actions') and target_slot in self.slot_actions:
+            self.slot_actions[target_slot].setText("Luminance")
+            self.slot_actions[target_slot].setStatusTip("Open preview for Luminance")
+        if hasattr(self, 'menubar_slot_actions') and target_slot in self.menubar_slot_actions:
+            self.menubar_slot_actions[target_slot].setText("Luminance")
+            self.menubar_slot_actions[target_slot].setStatusTip("Open preview for Luminance")
         self.menuBar().update()
 
-        # Open a preview for the luminance image in Slot 1.
-        self.open_preview_window(slot=1)
-
+        # Open a preview for the luminance image in the chosen slot.
+        self.open_preview_window(slot=target_slot)
 
     def remove_gradient_with_graxpert(self):
         """Integrate GraXpert for gradient removal."""
@@ -3040,7 +3051,7 @@ class AstroEditingSuite(QMainWindow):
         """Recombines luminance from a selected slot with the RGB image from another selected slot."""
         
         # Define the available slot range
-        available_slots = list(range(5))  # Slots 0-4
+        available_slots = list(range(9))  # Slots 0-4
         
         # Initialize and display the custom dialog
         dialog = RecombineDialog(available_slots, self)
@@ -9736,61 +9747,32 @@ class StackingSuiteDialog(QDialog):
         self.light_files = new_light_files  # ✅ Only use extracted files
         print(f"✅ Extracted Light Files: {sum(len(v) for v in self.light_files.values())} total")
 
-    def select_reference_frame_robust(self, frame_weights, sigma_threshold=2.0):
+    def select_reference_frame_robust(self, frame_weights, sigma_threshold=1.0):
         """
-        Return the file path of a more robustly chosen reference frame.
-        We exclude outlier frames whose weights are too far from the cluster,
-        then pick the max from what remains.
-
+        Instead of sigma filtering, pick the frame at the 75th percentile of frame weights.
+        This assumes that higher weights are better and that the 75th percentile represents
+        a good-quality frame.
+        
         Parameters
         ----------
         frame_weights : dict
-            { file_path: weight_value }
-        sigma_threshold : float
-            How many std devs away from the median to consider an outlier.
-
+            Mapping { file_path: weight_value } for each frame.
+        
         Returns
         -------
-        best_frame : str
-            The file path of the chosen reference frame.
+        best_frame : str or None
+            The file path of the chosen reference frame, or None if no frames are available.
         """
-
-        # 1) Convert weights to a list
-        items = list(frame_weights.items())  # [(file_path, weight), ...]
+        items = list(frame_weights.items())  # List of (file_path, weight) pairs
         if not items:
-            return None  # No frames
+            return None
 
-        # 2) Compute median & std
-        weights_array = np.array([w for (_, w) in items], dtype=np.float32)
-        median_w = np.median(weights_array)
-        std_w = np.std(weights_array)
-
-        # If std == 0, everything is the same. Just pick any.
-        if std_w < 1e-12:
-            # everything is identical
-            # pick any arbitrary item
-            return items[0][0]
-
-        # 3) Create a filtered list that excludes frames whose weights
-        #    are far above/below the cluster:
-        lower_bound = median_w - sigma_threshold * std_w
-        upper_bound = median_w + sigma_threshold * std_w
-
-        filtered = []
-        for fp, w in items:
-            if lower_bound <= w <= upper_bound:
-                filtered.append((fp, w))
-
-        if not filtered:
-            # If everything was excluded, just fallback to the median or something.
-            # or pick a random frame
-            self.update_status("⚠️ All frames are outliers? Falling back to median!")
-            # fallback: pick the one with weight closest to the median
-            best = min(items, key=lambda x: abs(x[1] - median_w))
-            return best[0]
-
-        # 4) Among filtered frames, pick the max weight
-        best_frame, best_weight = max(filtered, key=lambda x: x[1])
+        # Sort frames by weight in ascending order.
+        items.sort(key=lambda x: x[1])
+        n = len(items)
+        # Get the index corresponding to the 75th percentile.
+        index = int(0.75 * (n - 1))
+        best_frame = items[index][0]
         return best_frame
 
     def prompt_for_reference_frame(self):
@@ -10242,12 +10224,12 @@ class StackingSuiteDialog(QDialog):
         # 5) **Build a second dict** that replaces each normalized file with its aligned counterpart.
         aligned_light_files = {}
         for group, file_list in filtered_light_files.items():
-            self.update_status(f"DEBUG: After filtering, group '{group}' has {len(file_list)} files.")
+            
             new_list = []
             for f in file_list:
                 normed_f = os.path.normpath(f)
                 aligned_f = self.valid_transforms.get(normed_f, None)
-                self.update_status(f"DEBUG: For file '{normed_f}', aligned file is '{aligned_f}'")
+                
                 if aligned_f and os.path.exists(aligned_f):
                     new_list.append(aligned_f)
                 else:
@@ -10324,7 +10306,7 @@ class StackingSuiteDialog(QDialog):
         group_integration_data = {}
 
         for group_key, file_list in grouped_files.items():
-            self.update_status(f"DEBUG: Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
+            self.update_status(f"Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
             # 1) Normal integration => integrated_image, per_file_rejections, ref_header
             integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
                 group_key, file_list, frame_weights
@@ -11004,7 +10986,7 @@ class StackingSuiteDialog(QDialog):
         """
         import os
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        self.update_status(f"DEBUG: Starting integration for group '{group_key}' with {len(file_list)} files.")
+        self.update_status(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
         if not file_list:
             self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
             return None, {}, None
@@ -11052,7 +11034,7 @@ class StackingSuiteDialog(QDialog):
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
                     future_to_index = {}
                     for i, fpath in enumerate(file_list):
-                        self.update_status(f"DEBUG: Submitting tile load for file: {fpath}")
+                        
                         future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
                         future_to_index[future] = i
                         weights_list.append(frame_weights.get(fpath, 1.0))
