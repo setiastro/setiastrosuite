@@ -2131,6 +2131,44 @@ def _cosmetic_correction_numba_fixed(corrected, H, W, C, hot_sigma, cold_sigma):
                     else:
                         corrected[y, x] = M  # Replace center pixel in grayscale image
 
+def bulk_cosmetic_correction_bayer(image, hot_sigma=5.0, cold_sigma=5.0):
+    """
+    Perform cosmetic correction on a single-channel Bayer mosaic.
+    Assumes a default Bayer pattern "RGGB":
+      - Red: even rows, even columns
+      - Green1: even rows, odd columns
+      - Green2: odd rows, even columns
+      - Blue: odd rows, odd columns
+    Applies cosmetic correction separately on each channel and reassembles them.
+    """
+    H, W = image.shape
+    # Create a copy to hold the corrected image.
+    corrected = image.astype(np.float32).copy()
+    
+    # For each channel, extract the subarray and apply the standard correction.
+    # We use your existing bulk_cosmetic_correction_numba function, which accepts a 2D array.
+    # Red channel (even rows, even cols)
+    red = corrected[0:H:2, 0:W:2]
+    red_corrected = bulk_cosmetic_correction_numba(red, hot_sigma, cold_sigma)
+    corrected[0:H:2, 0:W:2] = red_corrected
+
+    # Blue channel (odd rows, odd cols)
+    blue = corrected[1:H:2, 1:W:2]
+    blue_corrected = bulk_cosmetic_correction_numba(blue, hot_sigma, cold_sigma)
+    corrected[1:H:2, 1:W:2] = blue_corrected
+
+    # Green channel: two sets:
+    # Green1 (even rows, odd cols)
+    green1 = corrected[0:H:2, 1:W:2]
+    green1_corrected = bulk_cosmetic_correction_numba(green1, hot_sigma, cold_sigma)
+    corrected[0:H:2, 1:W:2] = green1_corrected
+
+    # Green2 (odd rows, even cols)
+    green2 = corrected[1:H:2, 0:W:2]
+    green2_corrected = bulk_cosmetic_correction_numba(green2, hot_sigma, cold_sigma)
+    corrected[1:H:2, 0:W:2] = green2_corrected
+
+    return corrected
 
 def bulk_cosmetic_correction_numba(image, hot_sigma=3.0, cold_sigma=3.0, window_size=3):
     """
