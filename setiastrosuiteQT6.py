@@ -3765,7 +3765,7 @@ class AstroEditingSuite(QMainWindow):
                     # Unexpected shape; skip this slot.
                     continue
 
-                if h <= 10 or w <= 10:
+                if h <= 10 and w <= 10:
                     available_slot = slot
                     break
 
@@ -5101,9 +5101,6 @@ class ImageManager(QObject):
         if slot is None:
             slot = self.current_slot
 
-        if slot == 1:
-            print("Warning: Attempting to update reserved slot 1.")
-            return  # Prevent overwriting slot 1 unless explicitly allowed
 
         self._images[slot] = updated_image
         if metadata:
@@ -22075,7 +22072,6 @@ class GraXpertThread(QThread):
         for line in process.stderr:
             self.stderr_signal.emit(line.strip())
         self.finished_signal.emit(process.wait())
-
 
 
 class RGBCombinationDialog(QDialog):
