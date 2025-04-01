@@ -1,9 +1,9 @@
 {
-  "version": "2.13.5",
+  "version": "2.13.6",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.5/setiastrosuite_windows.exe",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.6/setiastrosuite_windows.exe",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.6/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.6/setiastrosuite_linux.tar.xz"
   },
-  "notes": "https://github.com/setiastro/setiastrosuite/releases/tag/V2.13.5"
+  "notes": "Changed Star Removal to import starless and stars only images, fixed slot preview, fixed stacking suite directory removal, added reference frame preview selection, fixed cosmetic correction to work with bayered images now!"
 }
