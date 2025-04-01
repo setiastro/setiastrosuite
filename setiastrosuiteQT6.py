@@ -22054,17 +22054,29 @@ class GraXpertThread(QThread):
         if isinstance(self.command, list):
             print(f"[DEBUG] First item (executable): {self.command[0]}")
 
+        # Copy the current environment and remove variables that might interfere.
+        env = os.environ.copy()
+        env.pop("PYTHONHOME", None)
+        env.pop("PYTHONPATH", None)
+        env.pop("DYLD_LIBRARY_PATH", None)
+        env.pop("DYLD_FALLBACK_LIBRARY_PATH", None)
+        env.pop("PYTHONEXECUTABLE", None)
+
         process = subprocess.Popen(
             self.command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            env=env,
+            start_new_session=True
         )
         for line in process.stdout:
             self.stdout_signal.emit(line.strip())
         for line in process.stderr:
             self.stderr_signal.emit(line.strip())
         self.finished_signal.emit(process.wait())
+
+
 
 class RGBCombinationDialog(QDialog):
     def __init__(self, parent=None, image_manager=None):
