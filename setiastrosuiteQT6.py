@@ -26619,7 +26619,7 @@ class BlinkTab(QWidget):
             self,
             "Open Images",
             "",
-            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)"
+            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)"
         )
         
         # Filter out already loaded images to prevent duplicates
@@ -26640,14 +26640,15 @@ class BlinkTab(QWidget):
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
                 # Apply debayering logic for FITS
-                image = self.debayer_fits(image, bayer_pattern)
+                image = debayer_fits_fast(image, bayer_pattern)
             else:
                 print(f"No Bayer pattern found in FITS header: {file_path}")
-        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+        elif file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
             # If it's RAW (Bayer pattern detected), debayer it
             print(f"Debayering RAW image: {file_path}")
             # Apply debayering to the RAW image (assuming debayer_raw exists)
-            image = self.debayer_raw(image)
+            image = debayer_raw_fast(image, bayer_pattern="RGGB")
+
         
         return image
 
@@ -26761,53 +26762,50 @@ class BlinkTab(QWidget):
 
 
     def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
-        """Debayer a RAW image based on the Bayer pattern."""
-        if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern (Debayering logic example)
-            r = raw_image_data[::2, ::2]  # Red
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            b = raw_image_data[1::2, 1::2]  # Blue
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
+        """Debayer a RAW image based on the Bayer pattern, ensuring even dimensions."""
+        H, W = raw_image_data.shape
+        # Crop to even dimensions if necessary
+        if H % 2 != 0:
+            raw_image_data = raw_image_data[:H-1, :]
+        if W % 2 != 0:
+            raw_image_data = raw_image_data[:, :W-1]
         
+        if bayer_pattern == 'RGGB':
+            r = raw_image_data[::2, ::2]      # Red
+            g1 = raw_image_data[::2, 1::2]     # Green 1
+            g2 = raw_image_data[1::2, ::2]     # Green 2
+            b = raw_image_data[1::2, 1::2]     # Blue
+
+            # Average green channels
+            g = (g1 + g2) / 2
+            return np.stack([r, g, b], axis=-1)
         elif bayer_pattern == 'BGGR':
-            # BGGR Bayer pattern
-            b = raw_image_data[::2, ::2]  # Blue
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            r = raw_image_data[1::2, 1::2]  # Red
+            b = raw_image_data[::2, ::2]      # Blue
+            g1 = raw_image_data[::2, 1::2]     # Green 1
+            g2 = raw_image_data[1::2, ::2]     # Green 2
+            r = raw_image_data[1::2, 1::2]     # Red
 
-            # Average green channels
             g = (g1 + g2) / 2
             return np.stack([r, g, b], axis=-1)
-
         elif bayer_pattern == 'GRBG':
-            # GRBG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            r = raw_image_data[::2, 1::2]  # Red
-            b = raw_image_data[1::2, ::2]  # Blue
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
+            g1 = raw_image_data[::2, ::2]     # Green 1
+            r = raw_image_data[::2, 1::2]      # Red
+            b = raw_image_data[1::2, ::2]      # Blue
+            g2 = raw_image_data[1::2, 1::2]     # Green 2
 
-            # Average green channels
             g = (g1 + g2) / 2
             return np.stack([r, g, b], axis=-1)
-
         elif bayer_pattern == 'GBRG':
-            # GBRG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            b = raw_image_data[::2, 1::2]  # Blue
-            r = raw_image_data[1::2, ::2]  # Red
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
+            g1 = raw_image_data[::2, ::2]     # Green 1
+            b = raw_image_data[::2, 1::2]      # Blue
+            r = raw_image_data[1::2, ::2]      # Red
+            g2 = raw_image_data[1::2, 1::2]     # Green 2
 
-            # Average green channels
             g = (g1 + g2) / 2
             return np.stack([r, g, b], axis=-1)
-
         else:
             raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+
     
 
 
