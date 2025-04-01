@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.5"
+VERSION = "2.13.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3746,67 +3746,54 @@ class AstroEditingSuite(QMainWindow):
         print("Stars-only image generated.")
         dialog.append_text("Stars-only image generated.\n")
 
-        # Step 10: Prompt user to save Stars Only Image
-        working_dir = self.settings.value("working_directory", os.getcwd())
-        save_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Save Stars Only Image",
-            working_dir,
-            "TIFF Files (*.tif *.tiff);;PNG Files (*.png)"
-        )
-
-        if save_path:
-            # If no extension was provided, append one based on the selected filter
-            _, ext = os.path.splitext(save_path)
-            ext = ext.lower()
-            if not ext:
-                if "TIFF" in selected_filter:
-                    save_path += ".tif"
-                    ext = ".tif"
-                elif "PNG" in selected_filter:
-                    save_path += ".png"
-                    ext = ".png"
-
-            print(f"Saving stars-only image to {save_path}...")
-            dialog.append_text(f"Saving stars-only image to {save_path}...\n")
-            try:
-                # Determine the format and bit depth based on the file extension
-                if ext in ['.tif', '.tiff']:
-                    original_format = 'tiff'
-                    bit_depth = '16-bit'
-                elif ext == '.png':
-                    original_format = 'png'
-                    bit_depth = '8-bit'
+        # Step 10: Push Stars Only Image to the next available slot
+        available_slot = None
+        for slot in range(self.image_manager.max_slots):
+            image_data = self.image_manager._images.get(slot)
+            # Consider the slot empty if there's no data,
+            # or if the data is too small (i.e. 10x10 or smaller)
+            if image_data is None:
+                available_slot = slot
+                break
+            elif isinstance(image_data, np.ndarray):
+                # Check dimensions (assumes image shape is (height, width) or (height, width, channels))
+                if image_data.ndim == 2:
+                    h, w = image_data.shape
+                elif image_data.ndim == 3:
+                    h, w = image_data.shape[:2]
                 else:
-                    QMessageBox.warning(self, "Unsupported Format", f"The selected format '{ext}' is not supported.")
-                    print(f"Unsupported file extension: {ext}")
-                    dialog.append_text(f"Unsupported file extension: {ext}\n")
-                    dialog.close()
-                    return
+                    # Unexpected shape; skip this slot.
+                    continue
 
-                # Call the global save_image function
-                save_image(
-                    img_array=stars_only,
-                    filename=save_path,
-                    original_format=original_format,
-                    bit_depth=bit_depth,
-                    original_header=None,
-                    is_mono=False,
-                    image_meta=None,
-                    file_meta=None
-                )
-                QMessageBox.information(self, "Success", "Stars only image saved successfully.")
-                print("Stars-only image saved successfully.")
-                dialog.append_text("Stars-only image saved successfully.\n")
-            except Exception as e:
-                QMessageBox.critical(self, "Save Error", f"Failed to save stars only image:\n{e}")
-                print(f"Failed to save stars only image: {e}")
-                dialog.append_text(f"Failed to save stars only image: {e}\n")
+                if h <= 10 or w <= 10:
+                    available_slot = slot
+                    break
+
+        if available_slot is None:
+            QMessageBox.warning(self, "Slot Error", "No available slot found for Stars Only image.")
+            print("No available slot found for Stars Only image.")
+            dialog.append_text("No available slot found for Stars Only image.\n")
         else:
-            QMessageBox.warning(self, "Save Cancelled", "Stars only image was not saved.")
-            print("User cancelled saving the stars-only image.")
-            dialog.append_text("User cancelled saving the stars-only image.\n")
-
+            metadata = {'slot_name': 'Stars_Only'}
+            # Push the stars-only image into the available slot.
+            self.image_manager.update_image(stars_only, metadata=metadata, slot=available_slot)
+            # Directly update the image manager's metadata
+            self.image_manager._metadata[available_slot]['slot_name'] = "Stars_Only"
+            # Now update the local slot naming and related UI elements like in RGB extract:
+            self.slot_names[available_slot] = "Stars_Only"
+            if available_slot in self.slot_actions:
+                self.slot_actions[available_slot].setText("Stars_Only")
+                self.slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
+            if available_slot in self.preview_windows:
+                self.preview_windows[available_slot].setWindowTitle("Preview - Stars_Only")
+            if hasattr(self, 'menubar_slot_actions') and available_slot in self.menubar_slot_actions:
+                self.menubar_slot_actions[available_slot].setText("Stars_Only")
+                self.menubar_slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
+            self.menuBar().update()
+            self.open_preview_window(slot=available_slot)
+            print(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.")
+            dialog.append_text(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.\n")
+            
         # Step 11: Update ImageManager with Starless Image
         print("Updating ImageManager with the starless image.")
         dialog.append_text("Updating ImageManager with the starless image.\n")
@@ -6788,18 +6775,12 @@ class BatchSettingsDialog(QDialog):
 
 class ReferenceFrameReviewDialog(QDialog):
     def __init__(self, ref_frame_path, stats, parent=None):
-        """
-        Parameters:
-            ref_frame_path (str): Path to the auto-selected reference frame.
-            stats (dict): Dictionary with statistics (e.g. star_count, eccentricity, mean).
-        """
         super().__init__(parent)
         self.setWindowTitle("Reference Frame Review")
         self.ref_frame_path = ref_frame_path
         self.stats = stats  # e.g., {"star_count": 250, "eccentricity": 0.12, "mean": 0.45}
         self.autostretch_enabled = False
         self.original_image = None  # Will store the loaded image array
-        # Use the reference median from stats as the target for stretching
         self.target_median = self.stats.get("mean", 0.25)
         self.user_choice = None  # Will be set to 'use' or 'select_other'
         self.zoom_factor = 1.0
@@ -6811,6 +6792,11 @@ class ReferenceFrameReviewDialog(QDialog):
 
         self.initUI()
         self.loadImageArray()  # Load the image into self.original_image
+        if self.original_image is not None:
+            self.updatePreview(self.original_image)  # Ensure the first image is shown
+        if self.original_image is not None:
+            QTimer.singleShot(0, self.zoomIn)            
+
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
@@ -6823,7 +6809,6 @@ class ReferenceFrameReviewDialog(QDialog):
         self.previewLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scrollArea.setWidget(self.previewLabel)
         main_layout.addWidget(self.scrollArea)
-        # Install event filter for mouse wheel zoom and mouse panning
         self.scrollArea.viewport().installEventFilter(self)
         
         # Zoom control buttons
@@ -6836,7 +6821,7 @@ class ReferenceFrameReviewDialog(QDialog):
         zoom_layout.addWidget(self.zoomOutButton)
         main_layout.addLayout(zoom_layout)
         
-        # Stats display (could be replaced with an embedded chart)
+        # Stats display
         stats_text = (
             f"Star Count: {self.stats.get('star_count', 'N/A')}\n"
             f"Eccentricity: {self.stats.get('eccentricity', 'N/A'):.4f}\n"
@@ -6850,29 +6835,56 @@ class ReferenceFrameReviewDialog(QDialog):
         self.toggleAutoStretchButton = QPushButton("Enable Autostretch", self)
         self.toggleAutoStretchButton.clicked.connect(self.toggleAutostretch)
         button_layout.addWidget(self.toggleAutoStretchButton)
+        
+        # New button to let the user select a new reference frame file
+        self.selectNewRefButton = QPushButton("Select New Reference Frame", self)
+        self.selectNewRefButton.clicked.connect(self.selectNewReferenceFrame)
+        button_layout.addWidget(self.selectNewRefButton)
+        
         self.useRefButton = QPushButton("Use This Reference Frame", self)
         self.useRefButton.clicked.connect(self.useReference)
         button_layout.addWidget(self.useRefButton)
-        self.selectOtherButton = QPushButton("Select Other Reference Frame", self)
-        self.selectOtherButton.clicked.connect(self.selectOtherReference)
-        button_layout.addWidget(self.selectOtherButton)
-        main_layout.addLayout(button_layout)
         
+        self.selectOtherButton = QPushButton("Cancel", self)
+        self.selectOtherButton.clicked.connect(self.reject)
+        button_layout.addWidget(self.selectOtherButton)
+        
+        main_layout.addLayout(button_layout)
         self.setLayout(main_layout)
+        self.zoomIn()
     
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Now that the dialog is shown and sizes are set, update the preview.
-        if self.original_image is not None:
-            self.updatePreview(self.original_image)
-    
+    def fitToPreview(self):
+        """Calculate and set the zoom factor so that the image fills the preview area."""
+        if self.original_image is None:
+            return
+        # Get the available size from the scroll area's viewport.
+        available_size = self.scrollArea.viewport().size()
+        # Determine the original image dimensions.
+        if self.original_image.ndim == 2:
+            orig_height, orig_width = self.original_image.shape
+        elif self.original_image.ndim == 3:
+            orig_height, orig_width = self.original_image.shape[:2]
+        else:
+            return
+        # Calculate the zoom factor that will allow the image to fit.
+        factor = min(available_size.width() / orig_width,
+                    available_size.height() / orig_height)
+        self.zoom_factor = factor
+        # Choose the current preview image if available, otherwise use the original image.
+        if self.current_preview_image is not None:
+            image = self.current_preview_image
+        else:
+            image = self.original_image
+        self.updatePreview(image)
+
+
+
     def loadImageArray(self):
         """
         Load the image from the reference frame file using the global load_image function.
         """
         image_data, header, _, _ = load_image(self.ref_frame_path)
         if image_data is not None:
-            # If image is stored as H x W x 1, squeeze it to H x W.
             if image_data.ndim == 3 and image_data.shape[-1] == 1:
                 image_data = np.squeeze(image_data, axis=-1)
             self.original_image = image_data
@@ -6888,7 +6900,6 @@ class ReferenceFrameReviewDialog(QDialog):
         if pixmap is None or pixmap.isNull():
             self.previewLabel.setText("Unable to load preview.")
         else:
-            # Scale based on the scroll area's viewport and current zoom factor.
             available_size = self.scrollArea.viewport().size()
             new_size = QSize(int(available_size.width() * self.zoom_factor),
                              int(available_size.height() * self.zoom_factor))
@@ -6897,12 +6908,8 @@ class ReferenceFrameReviewDialog(QDialog):
             self.previewLabel.setPixmap(scaled_pixmap)
     
     def convertArrayToPixmap(self, image):
-        """
-        Convert a normalized float image array (with values in [0,1]) into a QPixmap.
-        """
         if image is None:
             return None
-        # Convert image to 8-bit
         display_image = (image * 255).clip(0, 255).astype(np.uint8)
         if display_image.ndim == 2:
             h, w = display_image.shape
@@ -6917,15 +6924,11 @@ class ReferenceFrameReviewDialog(QDialog):
         return QPixmap.fromImage(q_image)
     
     def toggleAutostretch(self):
-        """
-        Toggle autostretch for the preview image. Uses the global stretch functions.
-        """
         if self.original_image is None:
             QMessageBox.warning(self, "Error", "Reference image not loaded.")
             return
         self.autostretch_enabled = not self.autostretch_enabled
         if self.autostretch_enabled:
-            # Apply autostretch: use stretch_mono_image for mono or stretch_color_image for RGB.
             if self.original_image.ndim == 2:
                 new_image = stretch_mono_image(self.original_image, target_median=0.3,
                                                normalize=True, apply_curves=False)
@@ -6952,23 +6955,18 @@ class ReferenceFrameReviewDialog(QDialog):
     
     def eventFilter(self, source, event):
         if source is self.scrollArea.viewport():
-            # Handle zooming with the mouse wheel
             if event.type() == QEvent.Type.Wheel:
                 if event.angleDelta().y() > 0:
                     self.zoomIn()
                 else:
                     self.zoomOut()
                 return True
-
-            # Handle mouse press for panning
             if event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._panning = True
                     self._last_mouse_pos = event.pos()
                     self.scrollArea.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                     return True
-
-            # Handle mouse move for panning
             if event.type() == QEvent.Type.MouseMove:
                 if self._panning:
                     delta = event.pos() - self._last_mouse_pos
@@ -6978,14 +6976,11 @@ class ReferenceFrameReviewDialog(QDialog):
                     h_bar.setValue(h_bar.value() - delta.x())
                     v_bar.setValue(v_bar.value() - delta.y())
                     return True
-
-            # Handle mouse release to stop panning
             if event.type() == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.LeftButton:
                     self._panning = False
                     self.scrollArea.viewport().setCursor(Qt.CursorShape.ArrowCursor)
                     return True
-
         return super().eventFilter(source, event)
     
     def resizeEvent(self, event):
@@ -6993,13 +6988,27 @@ class ReferenceFrameReviewDialog(QDialog):
             self.updatePreview(self.current_preview_image)
         super().resizeEvent(event)
     
+    def selectNewReferenceFrame(self):
+        """Open a file dialog to select a new reference frame, update preview accordingly."""
+        new_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select New Reference Frame",
+            "",
+            "FITS Files (*.fits *.fit);;All Files (*)"
+        )
+        if new_file:
+            self.ref_frame_path = new_file
+            self.loadImageArray()          # Reload the new image
+            self.updatePreview(self.original_image)  # Update the preview
+            # Optionally, you could also update stats if needed.
+    
     def useReference(self):
         self.user_choice = "use"
-        self.accept()  # Close dialog with Accepted status
+        self.accept()
     
     def selectOtherReference(self):
         self.user_choice = "select_other"
-        self.reject()  # Close dialog with Rejected status
+        self.reject()
     
     def getUserChoice(self):
         return self.user_choice
@@ -8059,7 +8068,7 @@ class StackingSuiteDialog(QDialog):
 
 
     def clear_tree_selection(self, tree):
-        """ Clears the selection in the given tree widget and removes items from dictionaries. """
+        """Clears the selection in the given tree widget and removes items from dictionaries."""
         selected_items = tree.selectedItems()
         if not selected_items:
             return  # Nothing to remove
@@ -8069,38 +8078,32 @@ class StackingSuiteDialog(QDialog):
         for item in selected_items:
             parent = item.parent()
             if parent:
-                # ✅ Handle child items (specific files)
-                group_key = parent.text(0)
+                # For LIGHT files, the file item is a grandchild.
+                if parent.parent() is not None:
+                    # Build key as "FilterName - ExposureText"
+                    group_key = f"{parent.parent().text(0)} - {parent.text(0)}"
+                else:
+                    group_key = parent.text(0)
                 filename = item.text(0)
-
                 if group_key in self.light_files:
                     self.light_files[group_key] = [
-                        f for f in self.light_files[group_key] if os.path.basename(f) != filename
+                        f for f in self.light_files[group_key]
+                        if os.path.basename(f) != filename
                     ]
-                    if not self.light_files[group_key]:  # If empty, mark for deletion
+                    if not self.light_files[group_key]:
                         removed_keys.append(group_key)
-
                 parent.removeChild(item)
             else:
-                # ✅ Handle parent groups (remove entire category)
+                # Handle top-level items (e.g., entire groups)
                 group_key = item.text(0)
                 if group_key in self.light_files:
-                    del self.light_files[group_key]  # Remove all associated files
+                    del self.light_files[group_key]
                 removed_keys.append(group_key)
-
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
-        # ✅ Ensure removed groups are deleted from dictionary
+        # Ensure removed groups are deleted from the dictionary.
         for key in removed_keys:
             self.light_files.pop(key, None)
-
-        # 🔹 If no files remain, clear the reference frame
-        remaining_files = sum(len(v) for v in self.light_files.values())
-        if remaining_files == 0:
-            self.reference_frame = None
-            self.update_status("All items cleared. Reference frame reset.")
-
-        print(f"✅ Cleared selection. Remaining files: {remaining_files} total")
 
 
     def populate_calibrated_lights(self, manual_addition=False):
@@ -9561,7 +9564,6 @@ class StackingSuiteDialog(QDialog):
         group_item.setText(4, new_text)
 
 
-
     def calibrate_lights(self):
         """Performs calibration on selected light frames using Master Darks and Flats, considering overrides."""
         if not self.stacking_directory:
@@ -9676,9 +9678,16 @@ class StackingSuiteDialog(QDialog):
 
                     # 🔹 Apply Cosmetic Correction
                     if apply_cosmetic:
-                        light_data = bulk_cosmetic_correction_numba(light_data)
-                        self.update_status("Cosmetic Correction Applied")  
-                        QApplication.processEvents()  
+                        if hdr is not None and hdr.get('BAYERPAT'):
+                            # For Bayer-pattern images, use a specialized function.
+                            light_data = bulk_cosmetic_correction_bayer(light_data)
+                            self.update_status("Cosmetic Correction Applied for Bayer Pattern")  
+                            QApplication.processEvents()                             
+                        else:
+                            # For mono or standard color images, use the existing correction.
+                            light_data = bulk_cosmetic_correction_numba(light_data)
+                            self.update_status("Cosmetic Correction Applied")  
+                            QApplication.processEvents()  
 
                     # ✅ Convert back to (H, W, C) before saving if OSC
                     if not is_mono and light_data.shape[0] == 3:
@@ -21923,7 +21932,7 @@ class ImagePreview(QWidget):
             return stretch_mono_image(image, target_median)
         elif image.ndim == 3:
             # Color image (assumes channels are in the last dimension)
-            return stretch_color_image(image, target_median)
+            return stretch_color_image(image, target_median, linked=False)
         else:
             raise ValueError("Unsupported image dimensions: must be 2D or 3D")
 
@@ -21953,8 +21962,8 @@ class ImagePreview(QWidget):
 
         # Convert to pixmap and store the original if not already stored
         pixmap = QPixmap.fromImage(qimage)
-        if not hasattr(self, 'original_pixmap') or self.original_pixmap.isNull():
-            self.original_pixmap = pixmap
+        self.original_pixmap = pixmap  # Always update to the current image
+
 
         # Scale from the original pixmap size using the current zoom factor
         scaled_pixmap = self.original_pixmap.scaled(
@@ -29790,6 +29799,7 @@ class ImagePreviewDialog(QDialog):
 
     def apply_autostretch(self):
         """Apply or remove autostretch while maintaining 32-bit precision."""
+        print("applying autostretch")
         target_median = 0.25  # Target median for stretching
 
         if self.autostretch_enabled:
@@ -29815,12 +29825,18 @@ class ImagePreviewDialog(QDialog):
     def zoom_in(self):
         """Increase the zoom factor and refresh the display."""
         self.zoom_factor *= 1.2  # Increase zoom by 20%
-        self.display_qimage(self.np_image)
+        if self.autostretch_enabled:
+            self.apply_autostretch()
+        else:
+            self.display_qimage(self.np_image)
 
     def zoom_out(self):
         """Decrease the zoom factor and refresh the display."""
         self.zoom_factor /= 1.2  # Decrease zoom by 20%
-        self.display_qimage(self.np_image)
+        if self.autostretch_enabled:
+            self.apply_autostretch()
+        else:
+            self.display_qimage(self.np_image)
 
     def eventFilter(self, source, event):
         """Handle mouse wheel events for zooming."""
