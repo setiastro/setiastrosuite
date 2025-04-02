@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.6"
+VERSION = "2.13.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -4418,6 +4418,21 @@ class AstroEditingSuite(QMainWindow):
         else:
             QMessageBox.information(self, "Redo", "No actions to redo.")            
 
+    def closeEvent(self, event):
+        """Prompt the user before exiting the application."""
+        reply = QMessageBox.question(
+            self,
+            "Exit Confirmation",
+            "Are you sure you want to exit?\nDon't forget to save your work.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
@@ -7644,7 +7659,7 @@ class StackingSuiteDialog(QDialog):
         dark_frames_layout.addLayout(btn_layout)
 
         self.clear_dark_selection_btn = QPushButton("Clear Selection")
-        self.clear_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.dark_tree))
+        self.clear_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.dark_tree, self.dark_files))
         dark_frames_layout.addWidget(self.clear_dark_selection_btn)
 
         darks_layout.addLayout(dark_frames_layout, 2)  # Dark Frames Tree takes more space
@@ -7744,7 +7759,7 @@ class StackingSuiteDialog(QDialog):
 
         # Add "Clear Selection" button for Flat Frames
         self.clear_flat_selection_btn = QPushButton("Clear Selection")
-        self.clear_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.flat_tree))
+        self.clear_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection_flat(self.flat_tree, self.flat_files))
         flat_frames_layout.addWidget(self.clear_flat_selection_btn)
 
         flats_layout.addLayout(flat_frames_layout, 2)  # Left side takes more space
@@ -7845,7 +7860,7 @@ class StackingSuiteDialog(QDialog):
         layout.addLayout(btn_layout)
 
         clear_selection_btn = QPushButton("Remove Selected")
-        clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.light_tree))
+        clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection_light(self.light_tree))
         layout.addWidget(clear_selection_btn)
 
         # Cosmetic Correction & Pedestal Controls
@@ -8064,8 +8079,88 @@ class StackingSuiteDialog(QDialog):
             self.ref_frame_path.setText(os.path.basename(file_path))
 
 
-    def clear_tree_selection(self, tree):
-        """Clears the selection in the given tree widget and removes items from dictionaries."""
+    def clear_tree_selection_light(self, tree):
+        """Clears the selection in the light tree and updates self.light_files accordingly."""
+        selected_items = tree.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            parent = item.parent()
+            if parent is None:
+                # Top-level filter node selected.
+                filter_name = item.text(0)
+                # Remove all groups whose keys start with "Filter - "
+                keys_to_remove = [key for key in list(self.light_files.keys())
+                                if key.startswith(f"{filter_name} - ")]
+                for key in keys_to_remove:
+                    del self.light_files[key]
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+            else:
+                # Either a child (exposure node) or a grandchild (file node) is selected.
+                if parent.parent() is None:
+                    # Child node selected: this is an exposure node.
+                    # Its parent is the filter.
+                    filter_name = parent.text(0)
+                    exposure_text = item.text(0)
+                    group_key = f"{filter_name} - {exposure_text}"
+                    if group_key in self.light_files:
+                        del self.light_files[group_key]
+                    parent.removeChild(item)
+                else:
+                    # Grandchild node selected: this is a file node.
+                    filter_name = parent.parent().text(0)
+                    exposure_text = parent.text(0)
+                    group_key = f"{filter_name} - {exposure_text}"
+                    filename = item.text(0)
+                    if group_key in self.light_files:
+                        self.light_files[group_key] = [
+                            f for f in self.light_files[group_key]
+                            if os.path.basename(f) != filename
+                        ]
+                        if not self.light_files[group_key]:
+                            del self.light_files[group_key]
+                    parent.removeChild(item)
+
+    def clear_tree_selection_flat(self, tree, file_dict):
+        """Clears the selection in the given tree widget and removes items from the corresponding dictionary."""
+        selected_items = tree.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            parent = item.parent()
+            if parent:
+                # For items at the grandchild level (file items)
+                # In the flats tab, the structure is:
+                #   Top-level: filter name (e.g., "R")
+                #   Child: exposure (e.g., "0.5s (8288x5644)")
+                #   Grandchild: file item (filename)
+                if parent.parent() is not None:
+                    group_key = f"{parent.parent().text(0)} - {parent.text(0)}"
+                else:
+                    group_key = parent.text(0)
+                filename = item.text(0)
+                if group_key in file_dict:
+                    file_dict[group_key] = [
+                        f for f in file_dict[group_key]
+                        if os.path.basename(f) != filename
+                    ]
+                    if not file_dict[group_key]:
+                        del file_dict[group_key]
+                parent.removeChild(item)
+            else:
+                # Top-level item selected (e.g. a filter name)
+                # In flats, the keys are compound: "Filter - Exposure (WxH)"
+                group_text = item.text(0)
+                # Remove all keys starting with "group_text - "
+                keys_to_remove = [key for key in list(file_dict.keys()) if key.startswith(group_text + " - ")]
+                for key in keys_to_remove:
+                    del file_dict[key]
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+
+    def clear_tree_selection(self, tree, file_dict):
+        """Clears the selection in the given tree widget and removes items from the corresponding dictionary."""
         selected_items = tree.selectedItems()
         if not selected_items:
             return  # Nothing to remove
@@ -8075,32 +8170,31 @@ class StackingSuiteDialog(QDialog):
         for item in selected_items:
             parent = item.parent()
             if parent:
-                # For LIGHT files, the file item is a grandchild.
+                # For grouped files like "Filter - Exposure", get the group key
                 if parent.parent() is not None:
-                    # Build key as "FilterName - ExposureText"
                     group_key = f"{parent.parent().text(0)} - {parent.text(0)}"
                 else:
                     group_key = parent.text(0)
                 filename = item.text(0)
-                if group_key in self.light_files:
-                    self.light_files[group_key] = [
-                        f for f in self.light_files[group_key]
+                if group_key in file_dict:
+                    file_dict[group_key] = [
+                        f for f in file_dict[group_key]
                         if os.path.basename(f) != filename
                     ]
-                    if not self.light_files[group_key]:
+                    if not file_dict[group_key]:
                         removed_keys.append(group_key)
                 parent.removeChild(item)
             else:
-                # Handle top-level items (e.g., entire groups)
                 group_key = item.text(0)
-                if group_key in self.light_files:
-                    del self.light_files[group_key]
+                if group_key in file_dict:
+                    del file_dict[group_key]
                 removed_keys.append(group_key)
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
-        # Ensure removed groups are deleted from the dictionary.
+        # Final cleanup
         for key in removed_keys:
-            self.light_files.pop(key, None)
+            file_dict.pop(key, None)
+
 
 
     def populate_calibrated_lights(self, manual_addition=False):
