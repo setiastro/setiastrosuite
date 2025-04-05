@@ -219,7 +219,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.7"
+VERSION = "2.13.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3506,13 +3506,31 @@ class AstroEditingSuite(QMainWindow):
 
     def remove_stars(self):
         """
-        Removes stars from the current image using StarNet and generates a stars-only image.
+        Prompts the user to select a star removal tool and then removes stars from the current image
+        using either StarNet or CosmicClarityDarkStar and generates a stars-only image.
         Supports Windows, macOS, and Linux platforms.
         """
-        # Refresh the StarNet executable path from preferences.
+        # Prompt the user to select which tool to use.
+        tool, ok = QInputDialog.getItem(
+            self,
+            "Select Star Removal Tool",
+            "Choose a tool:",
+            ["StarNet", "CosmicClarityDarkStar"],
+            0,
+            False
+        )
+        if not ok:
+            print("User cancelled star removal tool selection.")
+            return
+
+        if tool == "CosmicClarityDarkStar":
+            self.remove_stars_darkstar()
+            return
+
+        # --- StarNet branch (existing code) ---
         self.starnet_exe_path = self.settings.value("starnet/exe_path", "")
 
-        print("Starting star removal process...")
+        print("Starting star removal process using StarNet...")
 
         # Step 1: Verify StarNet Executable Path
         if not self.starnet_exe_path:
@@ -3575,7 +3593,6 @@ class AstroEditingSuite(QMainWindow):
 
             # Apply stretch
             stretched_image = self.stretch_image(processing_image)
-            # Use stretched_image for processing
             processing_image = stretched_image
             print("Image stretched successfully.")
             self.image_was_stretched = True
@@ -3595,14 +3612,12 @@ class AstroEditingSuite(QMainWindow):
 
         # Convert image from [0,1] to [0, 65535] for 16-bit TIFF
         image_16bit = (original_image * 65535).astype(np.uint16)
-        # Convert RGB to BGR for OpenCV
         image_bgr_16bit = cv2.cvtColor(image_16bit, cv2.COLOR_RGB2BGR)
         cv2.imwrite(self.input_image_path, image_bgr_16bit)
         print(f"Input image saved at {self.input_image_path}")
 
         # Prepare the command based on the OS
         if current_os == "Windows":
-            # Windows requires the stride parameter
             stride = 256
             command = [
                 self.starnet_exe_path,
@@ -3612,7 +3627,6 @@ class AstroEditingSuite(QMainWindow):
             ]
             print("Preparing command for Windows.")
         elif current_os == "Linux":
-            # Linux requires the stride parameter
             stride = 256
             command = [
                 self.starnet_exe_path,
@@ -3624,7 +3638,6 @@ class AstroEditingSuite(QMainWindow):
         elif current_os == "Darwin":
             executable_name = os.path.basename(self.starnet_exe_path).lower()
             if "starnet2" in executable_name:
-                # Using StarNet2's flag-based interface for macOS
                 command = [
                     self.starnet_exe_path,
                     "--input", self.input_image_path,
@@ -3632,14 +3645,12 @@ class AstroEditingSuite(QMainWindow):
                 ]
                 print("Preparing command for macOS using StarNet2 arguments.")
             else:
-                # Using the older StarNet++ style arguments
                 command = [
                     self.starnet_exe_path,
                     self.input_image_path,
                     self.output_image_path
                 ]
                 print("Preparing command for macOS using StarNet++ arguments.")
-
 
         print(f"StarNet command: {' '.join(command)}")
 
@@ -3648,7 +3659,7 @@ class AstroEditingSuite(QMainWindow):
             if not os.access(self.starnet_exe_path, os.X_OK):
                 print(f"StarNet executable not executable. Setting execute permissions for {self.starnet_exe_path}")
                 try:
-                    os.chmod(self.starnet_exe_path, 0o755)  # Add execute permissions
+                    os.chmod(self.starnet_exe_path, 0o755)
                     print("Execute permissions set.")
                 except Exception as e:
                     QMessageBox.critical(self, "Permission Error",
@@ -3669,12 +3680,9 @@ class AstroEditingSuite(QMainWindow):
         self.starnet_thread.stdout_signal.connect(starnet_dialog.append_text)
         self.starnet_thread.stderr_signal.connect(starnet_dialog.append_text)
         self.starnet_thread.finished_signal.connect(lambda return_code: self.on_starnet_finished(return_code, starnet_dialog, self.output_image_path))
-
-        # Handle cancellation
         starnet_dialog.cancel_button.clicked.connect(self.starnet_thread.stop)
-
-        # Start the thread
         self.starnet_thread.start()
+
 
     def on_starnet_finished(self, return_code, dialog, output_image_path):
         """
@@ -3706,11 +3714,7 @@ class AstroEditingSuite(QMainWindow):
 
         print("Starless image loaded successfully.")
         dialog.append_text("Starless image loaded successfully.\n")
-
-        # Convert back to RGB and normalize to [0,1]
         starless_rgb = cv2.cvtColor(starless_bgr, cv2.COLOR_BGR2RGB).astype('float32') / 65535.0
-
-
 
         # Check and apply unstretch if necessary
         if getattr(self, 'image_was_stretched', False):
@@ -3729,7 +3733,6 @@ class AstroEditingSuite(QMainWindow):
         else:
             starless_rgb = starless_rgb
 
-        # Convert image_manager.image to 3-channel if needed
         if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
             print("Converting single-channel original image to 3-channel RGB...")
             original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
@@ -3750,19 +3753,15 @@ class AstroEditingSuite(QMainWindow):
         available_slot = None
         for slot in range(self.image_manager.max_slots):
             image_data = self.image_manager._images.get(slot)
-            # Consider the slot empty if there's no data,
-            # or if the data is too small (i.e. 10x10 or smaller)
             if image_data is None:
                 available_slot = slot
                 break
             elif isinstance(image_data, np.ndarray):
-                # Check dimensions (assumes image shape is (height, width) or (height, width, channels))
                 if image_data.ndim == 2:
                     h, w = image_data.shape
                 elif image_data.ndim == 3:
                     h, w = image_data.shape[:2]
                 else:
-                    # Unexpected shape; skip this slot.
                     continue
 
                 if h <= 10 and w <= 10:
@@ -3775,11 +3774,8 @@ class AstroEditingSuite(QMainWindow):
             dialog.append_text("No available slot found for Stars Only image.\n")
         else:
             metadata = {'slot_name': 'Stars_Only'}
-            # Push the stars-only image into the available slot.
             self.image_manager.update_image(stars_only, metadata=metadata, slot=available_slot)
-            # Directly update the image manager's metadata
             self.image_manager._metadata[available_slot]['slot_name'] = "Stars_Only"
-            # Now update the local slot naming and related UI elements like in RGB extract:
             self.slot_names[available_slot] = "Stars_Only"
             if available_slot in self.slot_actions:
                 self.slot_actions[available_slot].setText("Stars_Only")
@@ -3793,7 +3789,7 @@ class AstroEditingSuite(QMainWindow):
             self.open_preview_window(slot=available_slot)
             print(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.")
             dialog.append_text(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.\n")
-            
+                
         # Step 11: Update ImageManager with Starless Image
         print("Updating ImageManager with the starless image.")
         dialog.append_text("Updating ImageManager with the starless image.\n")
@@ -3823,7 +3819,272 @@ class AstroEditingSuite(QMainWindow):
             dialog.append_text(f"Failed to delete temporary files: {e}\n")
 
         dialog.close()
- 
+
+
+    def remove_stars_darkstar(self):
+        """
+        Removes stars from the current image using CosmicClarityDarkStar headless mode
+        and generates a stars-only image. In this branch no linearity or conversion is needed –
+        the input image is assumed to be a 32-bit, 0-1 normalized array.
+        """
+        print("Starting star removal process using CosmicClarityDarkStar...")
+
+        # Retrieve the parent Cosmic Clarity folder from settings.
+        cosmic_clarity_folder = self.settings.value("cosmic_clarity_folder", "")
+        if not cosmic_clarity_folder:
+            QMessageBox.critical(self, "Cosmic Clarity Folder Error",
+                                "Cosmic Clarity folder not set in preferences.")
+            print("Cosmic Clarity folder not set in preferences.")
+            return
+
+        # Determine the CosmicClarityDarkStar executable based on OS.
+        current_os = platform.system()
+        if current_os == "Windows":
+            executable_name = "setiastrocosmicclarity_darkstar.exe"
+        else:
+            executable_name = "setiastrocosmicclarity_darkstar"
+        darkstar_exe_path = os.path.join(cosmic_clarity_folder, executable_name)
+        print(f"Using CosmicClarityDarkStar executable: {darkstar_exe_path}")
+
+        if not os.path.exists(darkstar_exe_path):
+            QMessageBox.critical(self, "CosmicClarityDarkStar Not Found",
+                                f"CosmicClarityDarkStar executable not found at {darkstar_exe_path}. Aborting star removal process.")
+            print(f"CosmicClarityDarkStar executable not found: {darkstar_exe_path}")
+            return
+
+        # Step 2: Ensure current image is loaded
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image", "Please load an image before removing stars.")
+            print("No image loaded. Exiting star removal process.")
+            return
+
+        print("Image is loaded. Proceeding with star removal using CosmicClarityDarkStar.")
+
+        # Prompt the user for Dark Star parameters:
+        disable_gpu_item, ok1 = QInputDialog.getItem(
+            self, "GPU Acceleration", "Disable GPU acceleration?", ["No", "Yes"], 0, False
+        )
+        if not ok1:
+            print("User cancelled GPU acceleration selection.")
+            return
+        disable_gpu = (disable_gpu_item == "Yes")
+
+        mode, ok2 = QInputDialog.getItem(
+            self, "Star Removal Mode", "Select star removal mode:", ["additive", "unscreen"], 1, False
+        )
+        if not ok2:
+            print("User cancelled star removal mode selection.")
+            return
+
+        show_stars_item, ok3 = QInputDialog.getItem(
+            self, "Show Extracted Stars", "Output an additional image with only the extracted stars?", ["No", "Yes"], 0, False
+        )
+        if not ok3:
+            print("User cancelled extracted stars selection.")
+            return
+        show_extracted_stars = (show_stars_item == "Yes")
+
+        # Set up input/output folders (which Dark Star will use automatically)
+        input_dir = os.path.join(cosmic_clarity_folder, "input")
+        output_dir = os.path.join(cosmic_clarity_folder, "output")
+        os.makedirs(input_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Save the current image in the input folder as a 32-bit TIFF.
+        # (Assumes self.image_manager.image is already float32 in [0,1].)
+        base_filename = "imagetoremovestars.tif"
+        self.input_image_path = os.path.join(input_dir, base_filename)
+        # Save directly as 32-bit float; no scaling or color conversion required.
+        print(f"Saving input image as 32-bit float TIFF to {self.input_image_path} ...")
+        save_image(
+            self.image_manager.image,          # the NumPy array
+            self.input_image_path,             # the output path
+            original_format="tif",             # we want a TIFF
+            bit_depth="32-bit floating point",                      # 32-bit floating point
+            original_header=None,
+            is_mono=False,
+            image_meta=None,
+            file_meta=None
+        )
+        print(f"Input image saved at {self.input_image_path}")
+
+        # Build command arguments based on user choices.
+        args_list = []
+        if disable_gpu:
+            args_list.append("--disable_gpu")
+        args_list.extend(["--star_removal_mode", mode])
+        if show_extracted_stars:
+            args_list.append("--show_extracted_stars")
+
+        # Build final command.
+        command = [darkstar_exe_path] + args_list
+        print(f"CosmicClarityDarkStar command: {' '.join(command)}")
+
+        # Ensure the Dark Star executable has execute permissions on macOS/Linux.
+        if current_os in ["Darwin", "Linux"]:
+            if not os.access(darkstar_exe_path, os.X_OK):
+                print(f"DarkStar executable not executable. Setting execute permissions for {darkstar_exe_path}")
+                try:
+                    os.chmod(darkstar_exe_path, 0o755)
+                    print("Execute permissions set.")
+                except Exception as e:
+                    QMessageBox.critical(self, "Permission Error",
+                                        f"Failed to set execute permissions for DarkStar executable: {e}")
+                    print(f"Failed to set execute permissions for {darkstar_exe_path}: {e}")
+                    return
+            else:
+                print("DarkStar executable already has execute permissions.")
+        else:
+            print("No need to set execute permissions for Windows.")
+
+        # Initialize and show a progress dialog (reuse StarNetDialog)
+        darkstar_dialog = StarNetDialog()
+        darkstar_dialog.show()
+
+        # Initialize DarkStarThread (reusing StarNetThread for thread management)
+        self.darkstar_thread = StarNetThread(command, output_dir)
+        self.darkstar_thread.stdout_signal.connect(darkstar_dialog.append_text)
+        self.darkstar_thread.stderr_signal.connect(darkstar_dialog.append_text)
+        self.darkstar_thread.finished_signal.connect(
+            lambda return_code: self.on_darkstar_finished(return_code, darkstar_dialog, output_dir)
+        )
+        darkstar_dialog.cancel_button.clicked.connect(self.darkstar_thread.stop)
+        self.darkstar_thread.start()
+
+
+    def on_darkstar_finished(self, return_code, dialog, output_dir):
+        """
+        Handles the completion of the CosmicClarityDarkStar process.
+        Loads the starless image (with _starless suffix) and, if generated, the stars-only image (with _stars_only suffix).
+        Updates the ImageManager and cleans up temporary files.
+        """
+        dialog.append_text(f"\nProcess finished with return code {return_code}.\n")
+        if return_code != 0:
+            QMessageBox.critical(self, "CosmicClarityDarkStar Error",
+                                f"CosmicClarityDarkStar failed with return code {return_code}.")
+            print(f"CosmicClarityDarkStar failed with return code {return_code}.")
+            dialog.close()
+            return
+
+        # Load the starless image.
+        starless_output_filename = "imagetoremovestars_starless.tif"
+        starless_output_path = os.path.join(output_dir, starless_output_filename)
+        if not os.path.exists(starless_output_path):
+            QMessageBox.critical(self, "CosmicClarityDarkStar Error", "Starless image was not created.")
+            print(f"Starless image was not created at {starless_output_path}.")
+            dialog.close()
+            return
+
+        print(f"Starless image found at {starless_output_path}. Loading image...")
+        dialog.append_text(f"Starless image found at {starless_output_path}. Loading image...\n")
+        starless = cv2.imread(starless_output_path, cv2.IMREAD_UNCHANGED)
+        if starless is None:
+            QMessageBox.critical(self, "CosmicClarityDarkStar Error", "Failed to load starless image.")
+            print(f"Failed to load starless image from {starless_output_path}.")
+            dialog.close()
+            return
+
+        print("Starless image loaded successfully.")
+        dialog.append_text("Starless image loaded successfully.\n")
+        # Assume output image is stored as float32 in [0,1]
+        starless_rgb = cv2.cvtColor(starless, cv2.COLOR_BGR2RGB).astype('float32')
+
+        # Prepare original image for stars-only calculation.
+        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
+            print("Converting single-channel original image to 3-channel RGB...")
+            original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
+        else:
+            original_image_rgb = self.image_manager.image
+
+        # Attempt to load stars-only image if generated.
+        stars_only_filename = "imagetoremovestars_stars_only.tif"
+        stars_only_path = os.path.join(output_dir, stars_only_filename)
+        if os.path.exists(stars_only_path):
+            print(f"Stars-only image found at {stars_only_path}. Loading image...")
+            dialog.append_text(f"Stars-only image found at {stars_only_path}. Loading image...\n")
+            stars_only = cv2.imread(stars_only_path, cv2.IMREAD_UNCHANGED)
+            if stars_only is not None:
+                stars_only_rgb = cv2.cvtColor(stars_only, cv2.COLOR_BGR2RGB).astype('float32')
+                # Push the stars-only image into the next available slot.
+                available_slot = None
+                for slot in range(self.image_manager.max_slots):
+                    image_data = self.image_manager._images.get(slot)
+                    if image_data is None:
+                        available_slot = slot
+                        break
+                    elif isinstance(image_data, np.ndarray):
+                        if image_data.ndim == 2:
+                            h, w = image_data.shape
+                        elif image_data.ndim == 3:
+                            h, w = image_data.shape[:2]
+                        else:
+                            continue
+                        if h <= 10 and w <= 10:
+                            available_slot = slot
+                            break
+                if available_slot is not None:
+                    metadata = {'slot_name': 'Stars_Only'}
+                    self.image_manager.update_image(stars_only_rgb, metadata=metadata, slot=available_slot)
+                    self.image_manager._metadata[available_slot]['slot_name'] = "Stars_Only"
+                    self.slot_names[available_slot] = "Stars_Only"
+                    if available_slot in self.slot_actions:
+                        self.slot_actions[available_slot].setText("Stars_Only")
+                        self.slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
+                    if available_slot in self.preview_windows:
+                        self.preview_windows[available_slot].setWindowTitle("Preview - Stars_Only")
+                    if hasattr(self, 'menubar_slot_actions') and available_slot in self.menubar_slot_actions:
+                        self.menubar_slot_actions[available_slot].setText("Stars_Only")
+                        self.menubar_slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
+                    self.menuBar().update()
+                    self.open_preview_window(slot=available_slot)
+                    print(f"Stars-only image pushed to slot {available_slot} as 'Stars_Only'.")
+                    dialog.append_text(f"Stars-only image pushed to slot {available_slot} as 'Stars_Only'.\n")
+                else:
+                    QMessageBox.warning(self, "Slot Error", "No available slot found for Stars Only image.")
+                    print("No available slot found for Stars Only image.")
+                    dialog.append_text("No available slot found for Stars Only image.\n")
+            else:
+                print("Failed to load stars-only image.")
+                dialog.append_text("Failed to load stars-only image.\n")
+        else:
+            print("Stars-only image not generated.")
+            dialog.append_text("Stars-only image not generated.\n")
+
+        # Update ImageManager with the starless image.
+        print("Updating ImageManager with the starless image.")
+        dialog.append_text("Updating ImageManager with the starless image.\n")
+        self.image_manager.set_image(
+            starless_rgb,
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+        )
+        QMessageBox.information(self, "Success", "Starless image updated successfully via CosmicClarityDarkStar.")
+        print("ImageManager updated with starless image.")
+        dialog.append_text("ImageManager updated with starless image.\n")
+
+        # Clean up temporary files.
+        try:
+            print("Cleaning up temporary files...")
+            dialog.append_text("Cleaning up temporary files...\n")
+            if os.path.exists(self.input_image_path):
+                os.remove(self.input_image_path)
+                print(f"Deleted temporary input image at {self.input_image_path}.")
+                dialog.append_text(f"Deleted temporary input image at {self.input_image_path}.\n")
+            if os.path.exists(starless_output_path):
+                os.remove(starless_output_path)
+                print(f"Deleted temporary starless image at {starless_output_path}.")
+                dialog.append_text(f"Deleted temporary starless image at {starless_output_path}.\n")
+            if os.path.exists(stars_only_path):
+                os.remove(stars_only_path)
+                print(f"Deleted temporary stars-only image at {stars_only_path}.")
+                dialog.append_text(f"Deleted temporary stars-only image at {stars_only_path}.\n")
+        except Exception as e:
+            QMessageBox.warning(self, "Cleanup Warning", f"Failed to delete temporary files:\n{e}")
+            print(f"Failed to delete temporary files: {e}")
+            dialog.append_text(f"Failed to delete temporary files: {e}\n")
+
+        dialog.close()
+
+    
     def stretch_image(self, image):
         """
         Perform an unlinked linear stretch on the image.
@@ -39414,7 +39675,12 @@ otype_long_name_lookup = {
 
 
 # Configure Simbad to include the necessary fields, including redshift
-Simbad.add_votable_fields('otype', 'otypes', 'diameter', 'z_value')
+try:
+    from astroquery.simbad import Simbad
+    Simbad.add_votable_fields('otype', 'otypes', 'diameter', 'z_value')
+except Exception as e:
+    print("Warning: SIMBAD service is currently unavailable. SIMBAD-dependent features may be disabled.")
+
 Simbad.ROW_LIMIT = 0  # Remove row limit for full results
 Simbad.TIMEOUT = 60  # Increase timeout for long queries
 
