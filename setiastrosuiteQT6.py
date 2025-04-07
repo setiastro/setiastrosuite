@@ -220,7 +220,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.9"
+VERSION = "2.13.10"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -24324,20 +24324,24 @@ class WhiteBalanceDialog(QDialog):
         star_info = QLabel("Star-Based White Balance automatically detects stars to adjust colors.")
         self.star_layout.addWidget(star_info)
 
-        # Sensitivity Slider for Star Detection Threshold
+        # Sensitivity Slider for Star Detection Threshold (scaled from 1.00 to 5.00)
         sensitivity_group = QGroupBox("Detection Sensitivity")
         sensitivity_layout = QHBoxLayout()
 
         self.sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sensitivity_slider.setMinimum(100)
-        self.sensitivity_slider.setMaximum(255)
-        self.sensitivity_slider.setValue(180)  # Default threshold
-        self.sensitivity_slider.setTickInterval(5)
+        self.sensitivity_slider.setMinimum(100)   # 1.00
+        self.sensitivity_slider.setMaximum(500)   # 5.00
+        self.sensitivity_slider.setValue(180)       # Default threshold: 1.80
+        self.sensitivity_slider.setTickInterval(10)
         self.sensitivity_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.sensitivity_label = QLabel("Threshold: 180")
+        self.sensitivity_label = QLabel("Threshold: 1.80")
 
         # Connect slider to update label and re-run detection
-        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity_label)
+        def update_sensitivity_label(value):
+            float_value = value / 100.0
+            self.sensitivity_label.setText(f"Threshold: {float_value:.2f}")
+
+        self.sensitivity_slider.valueChanged.connect(update_sensitivity_label)
         self.sensitivity_slider.valueChanged.connect(self.detect_and_display_stars)
 
         sensitivity_layout.addWidget(QLabel("Threshold:"))
@@ -24345,6 +24349,13 @@ class WhiteBalanceDialog(QDialog):
         sensitivity_layout.addWidget(self.sensitivity_label)
         sensitivity_group.setLayout(sensitivity_layout)
         self.star_layout.addWidget(sensitivity_group)
+
+        # Autostretch Checkbox
+        self.autostretch_checkbox = QCheckBox("Autostretch Display")
+        self.autostretch_checkbox.setChecked(True)  # Enable by default
+        self.autostretch_checkbox.stateChanged.connect(self.detect_and_display_stars)
+        self.star_layout.addWidget(self.autostretch_checkbox)
+
 
         # Label to show number of detected stars
         self.star_count_label = QLabel("Detecting stars...")
@@ -24397,10 +24408,15 @@ class WhiteBalanceDialog(QDialog):
         try:
             image = self.image_manager.image
             if image is not None:
-                threshold = self.sensitivity_slider.value()
-                balanced_image, star_count, image_with_stars = apply_star_based_white_balance(image, threshold)
-                
-                # Convert the image with stars to QImage and then to QPixmap
+                threshold = self.sensitivity_slider.value() / 100.0  # Convert to float
+                autostretch_enabled = self.autostretch_checkbox.isChecked()
+
+                # Apply star-based WB with optional stretch for display
+                balanced_image, star_count, image_with_stars = apply_star_based_white_balance(
+                    image, threshold, autostretch=autostretch_enabled
+                )
+
+                # Convert image_with_stars to QPixmap for display
                 height, width, channel = image_with_stars.shape
                 bytes_per_line = 3 * width
                 q_image = QImage(image_with_stars.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
@@ -24417,6 +24433,7 @@ class WhiteBalanceDialog(QDialog):
             self.star_count_label.setText("Detection failed.")
             self.star_image_label.clear()
             QMessageBox.critical(self, "Error", f"Failed to detect stars:\n{e}")
+
 
     def apply_white_balance(self):
         wb_type = self.type_combo.currentText()
@@ -38297,82 +38314,81 @@ def apply_auto_white_balance(image: np.ndarray) -> np.ndarray:
     balanced = np.clip(balanced, 0.0, 1.0)
     return balanced
 
-def apply_star_based_white_balance(image: np.ndarray, threshold: int = 180) -> tuple:
+def apply_star_based_white_balance(image: np.ndarray, threshold: float = 1.5, autostretch: bool = True) -> tuple:
     """
-    Applies white balance based on detected stars in the image using thresholding and contour detection.
-
+    Applies white balance based on SEP-detected stars in a normalized RGB image.
+    
     Parameters:
-        image (np.ndarray): Input RGB image as a NumPy array normalized to [0,1].
-        threshold (int): Threshold value for binary segmentation to detect stars.
+        image (np.ndarray): Input RGB image as float32 normalized to [0,1].
+        threshold (float): SEP detection threshold in sigma.
+        autostretch (bool): If True, apply autostretch before rendering star overlays.
 
     Returns:
-        tuple: (White-balanced RGB image, Number of detected stars, Image with detected stars marked)
+        tuple: (White-balanced RGB image, Number of detected stars, Image with ellipses for preview)
     """
-    # Convert to grayscale
-    gray = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("Input must be an RGB image.")
 
-    # Apply Gaussian Blur to reduce noise
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    gray = np.mean(image, axis=2).astype(np.float32)
 
-    # Apply Contrast Limited Adaptive Histogram Equalization (CLAHE)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(blurred)
+    # Subtract background
+    bkg = sep.Background(gray)
+    data_sub = gray - bkg.back()
+    err_val = bkg.globalrms
 
-    # Apply binary thresholding to isolate bright regions (stars)
-    # Lower the threshold to detect fainter stars
-    _, thresh = cv2.threshold(enhanced, threshold, 255, cv2.THRESH_BINARY)
+    try:
+        sources = sep.extract(data_sub, threshold, err=err_val)
+    except Exception as e:
+        raise RuntimeError(f"SEP extraction failed: {e}")
 
-    # Perform morphological operations to enhance star features
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel, iterations=1)
-
-    # Find contours in the thresholded image
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    star_pixels = []
-    image_with_stars = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if 2 < area < 300:  # Adjusted area thresholds for more sensitivity
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * (area / (perimeter * perimeter))
-            if circularity > 0.5:  # Lowered circularity to detect less perfect circles
-                # Compute the centroid
-                M = cv2.moments(cnt)
-                if M["m00"] != 0:
-                    cX = int(M["m10"] / M["m00"])
-                    cY = int(M["m01"] / M["m00"])
-                    star_pixels.append(image[cY, cX, :])
-                    # Draw a circle around the detected star
-                    cv2.circle(image_with_stars, (cX, cY), 10, (0, 255, 0), 3)
-
-    star_count = len(star_pixels)
-
-    if star_count == 0:
+    if len(sources) == 0:
         raise ValueError("No stars detected for Star-Based White Balance.")
 
-    # Calculate average color of stars
-    star_pixels = np.array(star_pixels)
-    avg_color = np.mean(star_pixels, axis=0)  # [R, G, B]
+    try:
+        r, _ = sep.flux_radius(gray, sources['x'], sources['y'], 6.0 * sources['a'], 0.5,
+                               normflux=sources['flux'], subpix=5)
+    except Exception as e:
+        raise RuntimeError(f"Failed to calculate flux radius: {e}")
 
-    # Calculate scaling factors to normalize average color to neutral gray (average of R, G, B)
+    # Prepare display image
+
+    display_image = stretch_color_image(image.copy(), 0.25) if autostretch else image.copy()
+
+    image_with_stars = cv2.cvtColor((display_image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    star_pixels = []
+    for i in range(len(sources)):
+        x = sources['x'][i]
+        y = sources['y'][i]
+        a = sources['a'][i]
+        b = sources['b'][i]
+        theta = sources['theta'][i] * 180. / np.pi
+
+        if r[i] > 0 and 0 <= int(y) < image.shape[0] and 0 <= int(x) < image.shape[1]:
+            star_pixels.append(image[int(y), int(x), :])
+            center = (int(x), int(y))
+            axes = (int(3 * a), int(3 * b))
+            cv2.ellipse(image_with_stars, center, axes, angle=theta, startAngle=0, endAngle=360,
+                        color=(0, 0, 255), thickness=1)
+
+    star_count = len(star_pixels)
+    if star_count == 0:
+        raise ValueError("No stars passed filtering for white balance.")
+
+    star_pixels = np.array(star_pixels)
+    avg_color = np.mean(star_pixels, axis=0)
     avg = np.mean(avg_color)
     if avg == 0:
-        raise ValueError("Average star color is zero, cannot apply White Balance.")
-    scaling_factors = avg / avg_color
+        raise ValueError("Star average color is zero, cannot normalize.")
 
-    # Apply scaling factors
+    scaling_factors = avg / avg_color
     balanced = image.copy()
-    balanced[:, :, 0] *= scaling_factors[0]  # Red channel
-    balanced[:, :, 1] *= scaling_factors[1]  # Green channel
-    balanced[:, :, 2] *= scaling_factors[2]  # Blue channel
+    for ch in range(3):
+        balanced[:, :, ch] *= scaling_factors[ch]
     balanced = np.clip(balanced, 0.0, 1.0)
 
     return balanced, star_count, image_with_stars
+
 
 def apply_morphology(image: np.ndarray, operation: str = 'erosion', kernel_size: int = 3, iterations: int = 1) -> np.ndarray:
     """
