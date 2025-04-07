@@ -7344,6 +7344,8 @@ class StackingSuiteDialog(QDialog):
         self.manual_dark_overrides = {}  
         self.manual_flat_overrides = {}
         self.conversion_output_directory = None
+        self.reg_files = {}
+
 
         # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
@@ -8291,7 +8293,8 @@ class StackingSuiteDialog(QDialog):
         btn_layout.addWidget(self.add_reg_files_btn)
 
         self.clear_selection_btn = QPushButton("Remove Selected")
-        self.clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.reg_tree))
+        self.clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection_registration(self.reg_tree))
+
         btn_layout.addWidget(self.clear_selection_btn)
 
         layout.addLayout(btn_layout)
@@ -8469,41 +8472,33 @@ class StackingSuiteDialog(QDialog):
                     del file_dict[key]
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
-    def clear_tree_selection(self, tree, file_dict):
-        """Clears the selection in the given tree widget and removes items from the corresponding dictionary."""
+    def clear_tree_selection_registration(self, tree):
+        """Clears the selection in the registration tree and updates self.reg_files accordingly."""
         selected_items = tree.selectedItems()
         if not selected_items:
-            return  # Nothing to remove
-
-        removed_keys = []
+            return
 
         for item in selected_items:
             parent = item.parent()
-            if parent:
-                # For grouped files like "Filter - Exposure", get the group key
-                if parent.parent() is not None:
-                    group_key = f"{parent.parent().text(0)} - {parent.text(0)}"
-                else:
-                    group_key = parent.text(0)
+            if parent is None:
+                # Top-level group (e.g. "Filter - Exposure - Size")
+                group_key = item.text(0)
+                if group_key in self.reg_files:
+                    del self.reg_files[group_key]
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+            else:
+                # Individual file item under a group
+                group_key = parent.text(0)
                 filename = item.text(0)
-                if group_key in file_dict:
-                    file_dict[group_key] = [
-                        f for f in file_dict[group_key]
+                if group_key in self.reg_files:
+                    self.reg_files[group_key] = [
+                        f for f in self.reg_files[group_key]
                         if os.path.basename(f) != filename
                     ]
-                    if not file_dict[group_key]:
-                        removed_keys.append(group_key)
+                    if not self.reg_files[group_key]:
+                        del self.reg_files[group_key]
                 parent.removeChild(item)
-            else:
-                group_key = item.text(0)
-                if group_key in file_dict:
-                    del file_dict[group_key]
-                removed_keys.append(group_key)
-                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
-        # Final cleanup
-        for key in removed_keys:
-            file_dict.pop(key, None)
 
 
 
