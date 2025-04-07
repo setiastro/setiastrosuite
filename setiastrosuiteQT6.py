@@ -44,6 +44,7 @@ from numba_utils import *
 import astroalign
 import gzip
 import traceback
+import sep
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -219,7 +220,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.8"
+VERSION = "2.13.9"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -275,6 +276,7 @@ if hasattr(sys, '_MEIPASS'):
     supernova_path = os.path.join(sys._MEIPASS, 'supernova.png')
     starregistration_path = os.path.join(sys._MEIPASS, 'starregistration.png')
     stacking_path = os.path.join(sys._MEIPASS, 'stacking.png')
+    pedestal_icon_path = os.path.join(sys._MEIPASS, 'pedestal.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -328,6 +330,7 @@ else:
     supernova_path = 'supernova.png'
     starregistration_path = 'starregistration.png'
     stacking_path = 'stacking.png'
+    pedestal_icon_path = 'pedestal.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -472,6 +475,14 @@ class AstroEditingSuite(QMainWindow):
         crop_action.setStatusTip('Crop the current image')
         crop_action.triggered.connect(self.open_crop_tool)
         functions_menu.addAction(crop_action)
+
+        pedestal_icon = QIcon(pedestal_icon_path)  # Define pedestal_icon_path appropriately.
+        pedestal_action = QAction(pedestal_icon, "Pedestal Remover", self)
+        pedestal_action.setShortcut('Ctrl+P')  # Example shortcut
+        pedestal_action.setStatusTip("Subtract the minimum value from the active image")
+        pedestal_action.triggered.connect(self.remove_pedestal)
+
+        functions_menu.addAction(pedestal_action)
 
         # Create Remove Green QAction
         remove_green_action = QAction("Remove Green", self)
@@ -872,6 +883,12 @@ class AstroEditingSuite(QMainWindow):
         add_stars_action.setToolTip("Add Stars back to the image")
         toolbar.addAction(add_stars_action)  # Add the same QAction to the toolbar
 
+        pedestal_icon = QIcon(pedestal_icon_path)  # Define pedestal_icon_path appropriately.
+        pedestal_action = QAction(pedestal_icon, "Pedestal Remover", self)
+        pedestal_action.setShortcut('Ctrl+P')  # Example shortcut
+        pedestal_action.setStatusTip("Subtract the minimum value from the active image")
+        pedestal_action.triggered.connect(self.remove_pedestal)
+        toolbar.addAction(pedestal_action)
 
         # Add "Remove Green" Button to Toolbar with Icon
         remove_green_icon = QIcon(green_path)
@@ -1132,6 +1149,38 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+
+    def remove_pedestal(self):
+        """
+        Remove the pedestal from the active image by subtracting the minimum value.
+        For a monochrome image, subtract the overall minimum.
+        For an RGB image, subtract the minimum value from each channel separately.
+        Uses the ImageManager to retrieve and update the active image.
+        """
+        # Retrieve the active image and its metadata from the image manager.
+        image, metadata = self.image_manager.get_current_image_and_metadata()
+        if image is None:
+            QMessageBox.warning(self, "Pedestal Removal", "No active image found for pedestal removal.")
+            return
+
+        # Perform pedestal removal.
+        if image.ndim == 2:
+            # Monochrome image: subtract overall minimum.
+            new_image = image - np.min(image)
+        elif image.ndim == 3:
+            # RGB or RGBA image: subtract the minimum value from each channel.
+            new_image = np.empty_like(image)
+            channels = image.shape[2]
+            for ch in range(channels):
+                new_image[:, :, ch] = image[:, :, ch] - np.min(image[:, :, ch])
+        else:
+            QMessageBox.warning(self, "Pedestal Removal", "Unsupported image format for pedestal removal.")
+            return
+
+        # Update the active image using the image manager.
+        self.image_manager.set_image(new_image, metadata)
+        QMessageBox.information(self, "Pedestal Removal", "Pedestal removal completed.")
+
 
 
     def star_registration(self):
@@ -17679,8 +17728,7 @@ class BatchPlateSolverDialog(QDialog):
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
-        Initialize the PSF Viewer dialog.
-        Prompts the user for a mode (Quick or Detailed) before computing the star catalog.
+        Initialize the PSF Viewer dialog using SEP for star detection.
         """
         super().__init__(parent)
         self.setWindowTitle("PSF Viewer")
@@ -17689,203 +17737,12 @@ class PSFViewer(QDialog):
         self.log_scale = False
         self.star_catalog = None
         self.histogram_mode = 'PSF'  # Can be toggled later
-        # Prompt the user for mode.
-        mode, ok = QInputDialog.getItem(
-            self,
-            "Select Mode",
-            "Select PSF catalog mode:",
-            ["Quick", "Detailed"],
-            0,
-            False
-        )
-        if ok:
-            self.mode = mode
-        else:
-            self.mode = "Quick"
-        
-        # Compute the star catalog based on the chosen mode.
-        if self.mode == "Quick":
-            self.compute_star_catalog_quick()
-        else:
-            self.compute_star_catalog_detailed()
-        
         self.initUI()
-
-    def updateImage(self, new_image):
-        """
-        Update the current image, recompute the star catalog,
-        and redraw the histogram.
-        """
-        self.image = new_image
-        self.compute_star_catalog_quick()
-        self.drawHistogram()
-
-    def compute_star_catalog_quick(self):
-        """
-        Run DAOStarFinder for FWHM values from 2.5, then 3, 4, ..., 10,
-        update a progress dialog, and combine results. If a star is detected
-        at multiple FWHM values, merge the detections by taking the median of
-        the FWHM values (e.g. if detected at 2 and 3, use 2.5; if detected at
-        2, 3, and 4, use 3). Duplicate stars (by x,y centroid) are merged.
+        QTimer.singleShot(0, self.compute_star_catalog)
+        # Compute the star catalog using SEP (one-pass detection).
         
-        Note: DAOStarFinder returns various parameters for each star (e.g., 
-        xcentroid, ycentroid, sharpness, roundness1, npix, sky, peak, flux). 
-        Here we record the detection FWHM value in the column 'fwhm_used'.
-        """
-        # Build the list of FWHM values: start with 2.5, then 3, 4, ..., 10.
-        fwhm_list = [2.5] + list(range(3, 11))
-        total_steps = len(fwhm_list)
-
-        # Create a progress dialog with a range from 0 to total_steps.
-        progress = QProgressDialog("Computing star catalog...", "Cancel", 0, total_steps, self)
-        progress.setWindowTitle("Please Wait")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.show()
-
-        all_stars = []
         
-        # Convert image to grayscale if necessary.
-        if self.image.ndim == 3:
-            image_gray = np.mean(self.image, axis=2)
-        else:
-            image_gray = self.image
-
-        # Estimate background statistics.
-        mean, median, std = sigma_clipped_stats(image_gray)
         
-        # Loop over each FWHM value.
-        for i, fwhm in enumerate(fwhm_list):
-            progress.setLabelText(f"Processing FWHM = {fwhm}...")
-            QApplication.processEvents()  # Allow UI to update.
-
-            daofind = DAOStarFinder(fwhm=float(fwhm), threshold=5.0 * std)
-            stars = daofind(image_gray - median)
-            if stars is not None and len(stars) > 0:
-                # Record the detection FWHM value.
-                stars['fwhm_used'] = np.full(len(stars), fwhm)
-                all_stars.append(stars)
-            
-            progress.setValue(i + 1)
-            if progress.wasCanceled():
-                progress.close()
-                return
-
-        progress.close()
-
-        if all_stars:
-            # Combine all detections into one table.
-            star_catalog = vstack(all_stars)
-            # Group stars by rounded x,y centroids.
-            grouped = {}
-            for star in star_catalog:
-                key = (round(star['xcentroid'], 1), round(star['ycentroid'], 1))
-                if key not in grouped:
-                    grouped[key] = []
-                # Convert the Row to a dictionary for easier merging.
-                grouped[key].append(dict(star))
-            
-            merged_entries = []
-            for key, group in grouped.items():
-                if len(group) == 1:
-                    # Only one detection; use it as-is.
-                    merged_entries.append(group[0])
-                else:
-                    # Merge detections: compute the median of the fwhm_used values.
-                    fwhm_values = [entry['fwhm_used'] for entry in group]
-                    median_fwhm = float(np.median(fwhm_values))
-                    # Choose one entry (here, the first) and update its fwhm_used.
-                    merged_entry = group[0].copy()
-                    merged_entry['fwhm_used'] = median_fwhm
-                    merged_entries.append(merged_entry)
-            # Create the final star catalog table from the merged entries.
-            self.star_catalog = Table(rows=merged_entries)
-        else:
-            self.star_catalog = None
-
-
-
-    def compute_star_catalog_detailed(self):
-        """
-        Run DAOStarFinder for FWHM values ranging from 2.1 to 10.0 in increments of 0.1,
-        update a progress dialog, and combine results. If a star is detected at multiple FWHM values,
-        merge the detections by computing the median of the fwhm_used values.
-        
-        Extra information provided by DAOStarFinder (e.g., sharpness, roundness1, npix, sky, peak, flux)
-        is retained. Duplicate detections (grouped by rounded x and y centroids) are merged.
-        """
-        # Create an array of FWHM values from 2.1 to 10.0 (inclusive) in steps of 0.1.
-        fwhm_values = np.arange(2.0, 10.01, 0.1)
-        
-        # Create a progress dialog.
-        progress = QProgressDialog("Computing star catalog...", "Cancel", 0, len(fwhm_values), self)
-        progress.setWindowTitle("Please Wait")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.show()
-
-        all_stars = []
-        
-        # Convert image to grayscale if necessary.
-        if self.image.ndim == 3:
-            image_gray = np.mean(self.image, axis=2)
-        else:
-            image_gray = self.image
-
-        # Estimate background statistics.
-        mean, median, std = sigma_clipped_stats(image_gray)
-        
-        # Loop over each FWHM value.
-        for i, fwhm in enumerate(fwhm_values):
-            progress.setLabelText(f"Processing FWHM = {fwhm:.1f}...")
-            QApplication.processEvents()  # Update the UI.
-
-            daofind = DAOStarFinder(fwhm=float(fwhm), threshold=5.0 * std)
-            stars = daofind(image_gray - median)
-            if stars is not None and len(stars) > 0:
-                # Record the detection FWHM value.
-                stars['fwhm_used'] = np.full(len(stars), fwhm)
-                all_stars.append(stars)
-
-            progress.setValue(i + 1)
-            if progress.wasCanceled():
-                progress.close()
-                return
-
-        progress.close()
-
-        if all_stars:
-            # Combine all detections into one table.
-            star_catalog = vstack(all_stars)
-            # Group stars by rounded x and y centroids.
-            grouped = {}
-            for star in star_catalog:
-                key = (round(star['xcentroid'], 1), round(star['ycentroid'], 1))
-                if key not in grouped:
-                    grouped[key] = []
-                grouped[key].append(dict(star))  # Convert Row to dict.
-            
-            merged_entries = []
-            for key, group in grouped.items():
-                if len(group) == 1:
-                    # Only one detection; use it as is.
-                    merged_entries.append(group[0])
-                else:
-                    # Merge detections: compute the median fwhm_used value.
-                    fwhm_values_list = [entry['fwhm_used'] for entry in group]
-                    median_fwhm = float(np.median(fwhm_values_list))
-                    # Use the first entry as the base and update its fwhm_used.
-                    merged_entry = group[0].copy()
-                    merged_entry['fwhm_used'] = median_fwhm
-                    merged_entries.append(merged_entry)
-            
-            # Create the final star catalog from the merged entries.
-            self.star_catalog = Table(rows=merged_entries)
-        else:
-            self.star_catalog = None
-
-
-
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
@@ -17893,7 +17750,7 @@ class PSFViewer(QDialog):
         # Top layout holds the histogram display and the statistics table.
         top_layout = QHBoxLayout()
 
-        # Scroll area for histogram
+        # Scroll area for histogram.
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setFixedSize(520, 310)
         self.scroll_area.setWidgetResizable(False)
@@ -17902,10 +17759,10 @@ class PSFViewer(QDialog):
         self.scroll_area.setWidget(self.hist_label)
         top_layout.addWidget(self.scroll_area)
 
-        # Statistics table (4 rows: Min, Max, Median, StdDev)
+        # Statistics table (4 rows: Min, Max, Median, StdDev).
         self.stats_table = QTableWidget(self)
         self.stats_table.setRowCount(4)
-        # We use 1 column (can update header text later)
+        # We'll update the number of columns later based on available data.
         self.stats_table.setColumnCount(1)
         self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
         self.stats_table.setFixedWidth(360)
@@ -17913,6 +17770,10 @@ class PSFViewer(QDialog):
 
         main_layout.addLayout(top_layout)
 
+        # Add a status label to show extraction progress.
+        self.status_label = QLabel("Status: Ready", self)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.status_label)
         # Controls layout: Zoom slider, Log scale toggle, and a histogram mode toggle.
         controls_layout = QHBoxLayout()
         
@@ -17939,15 +17800,100 @@ class PSFViewer(QDialog):
         
         main_layout.addLayout(controls_layout)
         
-        # Close button
+        # Close button.
         close_btn = QPushButton("Close", self)
         close_btn.clicked.connect(self.accept)
         main_layout.addWidget(close_btn)
         
         self.setLayout(main_layout)
         
-        # Draw initial histogram
+        # Draw initial histogram.
         self.drawHistogram()
+        QApplication.processEvents()
+
+        
+
+
+    def updateImage(self, new_image):
+        """
+        Update the current image, recompute the star catalog using SEP,
+        and redraw the histogram.
+        """
+        self.image = new_image
+        self.compute_star_catalog()
+        self.drawHistogram()
+
+    def compute_star_catalog(self):
+        """
+        Use SEP to detect stars in one pass.
+        This subtracts the background and extracts sources.
+        We approximate the effective FWHM as 2 * a (where 'a' is the semi-major axis
+        returned by SEP). Other parameters (flux, x, y, etc.) are recorded in the star catalog.
+        """
+        # Convert image to grayscale if necessary.
+        if self.image.ndim == 3:
+            image_gray = np.mean(self.image, axis=2)
+        else:
+            image_gray = self.image
+
+        # SEP requires a float32 array.
+        data = image_gray.astype(np.float32)
+        
+        # Estimate background.
+        bkg = sep.Background(data)
+        data_sub = data - bkg.back()
+        threshold = 3  # Adjust this threshold as needed.
+        
+        # Extract sources.
+        # Run SEP extraction.
+        try:
+            err_val = bkg.globalrms  # globalrms should be a scalar.
+        except Exception as e:
+            err_val = np.median(bkg.rms())
+        
+        # Update status message before extraction.
+        self.status_label.setText("Status: Starting Stellar extraction...")
+        QApplication.processEvents()
+
+        try:
+            sources = sep.extract(data_sub, threshold, err=err_val)
+            n_sources = len(sources) if sources is not None else 0
+            self.status_label.setText(f"Status: Extraction Completed. Detected {n_sources} objects.")
+        except Exception as e:
+            self.status_label.setText(f"Status: Extraction Failed: {e}")
+            sources = None
+
+        QApplication.processEvents()
+
+        
+        if sources is None or len(sources) == 0:
+            self.star_catalog = None
+            return
+
+        # Define an effective FWHM. Here we use 2*a, so that HFR = a.
+        # Now compute the flux radius (HFR) for a flux fraction of 0.5.
+        # Use an aperture of 6 * a as recommended.
+        try:
+            r, flag = sep.flux_radius(data, sources['x'], sources['y'], 6.0 * sources['a'],
+                                    0.5, normflux=sources['flux'], subpix=5)
+        except Exception as e:
+            self.status_label.setText(f"Status: Flux radius computation failed: {e}")
+            r = np.zeros(len(sources))
+        r = 2*sources['a']
+        # Build an Astropy Table for the star catalog.
+        from astropy.table import Table
+        star_catalog = Table()
+        star_catalog['xcentroid'] = sources['x']
+        star_catalog['ycentroid'] = sources['y']
+        star_catalog['flux'] = sources['flux']
+        star_catalog['HFR'] = r  # Use the computed flux radius as HFR.
+        star_catalog['a'] = sources['a']
+        star_catalog['b'] = sources['b']
+        star_catalog['theta'] = sources['theta']
+
+        self.star_catalog = star_catalog
+        self.drawHistogram()
+        QApplication.processEvents()
 
     def updateZoom(self, value):
         self.zoom_factor = value / 100.0
@@ -17959,7 +17905,7 @@ class PSFViewer(QDialog):
 
     def toggleHistogramMode(self):
         """
-        Toggle between displaying a histogram of PSF (FWHM) values and flux values.
+        Toggle between displaying a histogram of PSF (FWHM used) values and flux values.
         """
         if self.histogram_mode == 'PSF':
             self.histogram_mode = 'Flux'
@@ -17971,7 +17917,7 @@ class PSFViewer(QDialog):
 
     def drawHistogram(self):
         """
-        Draws the histogram of either PSF (FWHM used) or flux values from the star catalog.
+        Draw the histogram of either PSF (FWHM used) or flux values from the star catalog.
         """
         # Create a pixmap for drawing.
         base_width = 512
@@ -17982,31 +17928,29 @@ class PSFViewer(QDialog):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        bin_count = 50  # Adjust number of bins as desired
+        bin_count = 50  # Adjust number of bins as desired.
         
-        # Determine the data to histogram:
+        # Determine the data to histogram.
         if self.star_catalog is None or len(self.star_catalog) == 0:
             data = np.array([])
             bin_edges = np.linspace(0, 1, bin_count + 1)
         else:
             if self.histogram_mode == 'PSF':
-                # Use the HFR (Half Flux Radius) by dividing the FWHM values by 2.
-                data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
-                # Set bin range accordingly (e.g. 0 to 5 if original FWHM ranged from 0 to 10).
-                bin_edges = np.linspace(0, 5, bin_count + 1)
+                # Use HFR (Half Flux Radius) by dividing the fwhm_used values by 2.
+                data = np.array(self.star_catalog['HFR'], dtype=float)
+                # With FWHM up to 15, HFR could be up to 7.5.
+                bin_edges = np.linspace(0, 7.5, bin_count + 1)
             else:
-                # Use the 'flux' column; let bins span the range of flux.
+                # Use the 'flux' column.
                 data = np.array(self.star_catalog['flux'])
                 if data.size > 0:
                     bin_edges = np.linspace(data.min(), data.max(), bin_count + 1)
                 else:
                     bin_edges = np.linspace(0, 1, bin_count + 1)
         
-        # For log-scale x-axis, adjust the bin edges.
+        # Adjust bin edges for log scale if needed.
         if self.log_scale:
-            # Avoid zero for log scale.
             eps = 1e-4
-            # Ensure the lower bound is not below eps.
             lower = max(bin_edges[0], eps)
             upper = bin_edges[-1]
             bin_edges = np.logspace(np.log10(lower), np.log10(upper), bin_count + 1)
@@ -18019,7 +17963,6 @@ class PSFViewer(QDialog):
         # Compute histogram counts.
         if data.size > 0:
             hist, _ = np.histogram(data, bins=bin_edges)
-            # Normalize for display.
             if hist.max() > 0:
                 hist = hist.astype(np.float32) / hist.max()
             else:
@@ -18064,37 +18007,40 @@ class PSFViewer(QDialog):
 
     def updateStatistics(self):
         """
-        Compute and update summary statistics (Min, Max, Median, StdDev) for each numeric column
-        in the star catalog (excluding id, xcentroid, ycentroid, mag, daofind_mag). The table columns
-        are reordered so that 'fwhm_used' appears first.
+        Compute and update summary statistics (Min, Max, Median, StdDev) for the following columns in the star catalog:
+        HFR, eccentricity, a, b, theta, flux.
+        Eccentricity is computed as sqrt(1 - (b/a)**2).
         """
         if self.star_catalog is None or len(self.star_catalog) == 0:
             colnames = []
         else:
-            # Get all column names.
-            all_cols = self.star_catalog.colnames
-            # Columns to remove.
-            skip_cols = ['id', 'xcentroid', 'ycentroid', 'mag', 'daofind_mag']
-            # Filter out the unwanted columns.
-            colnames = [col for col in all_cols if col not in skip_cols]
-            # If 'fwhm_used' is present, move it to the front.
-            if 'fwhm_used' in colnames:
-                colnames.remove('fwhm_used')
-                # Replace with HFR as the displayed column name.
-                colnames.insert(0, 'HFR')
+            # Our desired column order.
+            desired_cols = ['HFR', 'eccentricity', 'a', 'b', 'theta', 'flux']
+            # We'll only include columns that exist (eccentricity is computed).
+            colnames = [col for col in desired_cols if col in self.star_catalog.colnames or col == 'eccentricity']
 
-        # Update the table to have one column per desired parameter.
+            # Compute eccentricity from 'a' and 'b'
+            try:
+                a = np.array(self.star_catalog['a'], dtype=float)
+                b = np.array(self.star_catalog['b'], dtype=float)
+                # Avoid division by zero:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ecc = np.sqrt(1.0 - (b / a) ** 2)
+                # Replace any NaNs with zero.
+                ecc = np.nan_to_num(ecc)
+            except Exception:
+                ecc = np.zeros(len(self.star_catalog))
+
         self.stats_table.setColumnCount(len(colnames))
         self.stats_table.setHorizontalHeaderLabels(colnames)
         self.stats_table.setRowCount(4)
         self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
 
-        # For each column, compute and display the statistics.
+        # Loop over each desired column.
         for col_index, col in enumerate(colnames):
             try:
-                if col == 'HFR':
-                    # Get the original fwhm_used values and convert them to HFR.
-                    col_data = np.array(self.star_catalog['fwhm_used'], dtype=float) / 2.0
+                if col == 'eccentricity':
+                    col_data = ecc
                 else:
                     col_data = np.array(self.star_catalog[col], dtype=float)
                 min_val = np.min(col_data)
@@ -18108,9 +18054,6 @@ class PSFViewer(QDialog):
                 item = QTableWidgetItem(f"{val:.3f}")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row_index, col_index, item)
-
-
-
 
 
 class SupernovaAsteroidHunterTab(QWidget):
