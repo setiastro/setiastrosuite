@@ -10758,15 +10758,20 @@ class StackingSuiteDialog(QDialog):
             QApplication.processEvents()
 
             # 3.5) (Optional) Serialize the rejection_map to a JSON file for future reference
-            sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
-            self.save_rejection_map_sasr(rejection_map, sasr_path)
-            self.update_status(f"✅ Saved rejection map to {sasr_path}")
+            # 3.5) Only save rejection map + integration data if drizzle is enabled
+            dconf = drizzle_dict.get(group_key, {})
+            if dconf.get("drizzle_enabled", False):
+                sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
+                self.save_rejection_map_sasr(rejection_map, sasr_path)
+                self.update_status(f"✅ Saved rejection map to {sasr_path}")
 
-            # 4) Store integration data for drizzle
-            group_integration_data[group_key] = {
-                "integrated_image": integrated_image,
-                "rejection_map": rejection_map
-            }
+                group_integration_data[group_key] = {
+                    "integrated_image": integrated_image,
+                    "rejection_map": rejection_map
+                }
+            else:
+                self.update_status(f"ℹ️ Skipping rejection map save for '{group_key}' (drizzle disabled).")
+
 
         # 5) Drizzle if enabled
         for group_key, file_list in grouped_files.items():
