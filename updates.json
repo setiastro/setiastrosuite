@@ -1,9 +1,9 @@
 {
-  "version": "2.13.9",
+  "version": "2.13.10",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.9/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.9/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.9/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.10/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.10/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.10/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Function: Pedestal Remover.  Update to PSFViewer using much more robust SEP libraries"
+  "notes": "New Function: Pedestal Remover.  Update to PSFViewer and White Balance using much more robust SEP libraries"
 }
