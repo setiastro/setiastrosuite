@@ -97,6 +97,9 @@ from scipy.ndimage import convolve
 import rawpy
 import numpy.ma as ma
 
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from matplotlib.patches import Circle
 
 #################################
 # PyQt6 Imports
@@ -220,7 +223,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.10"
+VERSION = "2.13.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -24461,12 +24464,23 @@ class WhiteBalanceDialog(QDialog):
                     QMessageBox.information(self, "Success", "Auto White Balance applied successfully.")
                     self.accept()
                 elif wb_type == "Star-Based":
-                    threshold = self.sensitivity_slider.value()
-                    balanced_image, star_count, _ = apply_star_based_white_balance(image, threshold)
+                    threshold = self.sensitivity_slider.value() / 100.0
+                    balanced_image, star_count, _, raw_star_colors, after_star_colors = apply_star_based_white_balance(
+                        image,
+                        threshold,
+                        autostretch=False,
+                        reuse_cached_sources=True,
+                        return_star_colors=True  # ✅ enable star color scatter plot
+                    )
+
+                    # Show the technical scatter plot after applying WB
+                    plot_star_color_ratios_comparison(raw_star_colors, after_star_colors)
+
                     self.image_manager.update_image(
                         updated_image=balanced_image,
                         metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
                     )
+
                     QMessageBox.information(self, "Success", f"Star-Based White Balance applied successfully.\nDetected {star_count} stars.")
                     self.accept()
                 else:
@@ -38314,46 +38328,147 @@ def apply_auto_white_balance(image: np.ndarray) -> np.ndarray:
     balanced = np.clip(balanced, 0.0, 1.0)
     return balanced
 
-def apply_star_based_white_balance(image: np.ndarray, threshold: float = 1.5, autostretch: bool = True) -> tuple:
-    """
-    Applies white balance based on SEP-detected stars in a normalized RGB image.
-    
-    Parameters:
-        image (np.ndarray): Input RGB image as float32 normalized to [0,1].
-        threshold (float): SEP detection threshold in sigma.
-        autostretch (bool): If True, apply autostretch before rendering star overlays.
+cached_star_sources = None
+cached_flux_radii = None
 
-    Returns:
-        tuple: (White-balanced RGB image, Number of detected stars, Image with ellipses for preview)
-    """
+
+def plot_star_color_ratios_comparison(raw_pixels: np.ndarray, after_pixels: np.ndarray):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.patches import Circle
+    from matplotlib.ticker import MaxNLocator
+
+    def compute_ratios(pixels):
+        rb = pixels[:, 0] / (pixels[:, 2] + 1e-8)
+        gb = pixels[:, 1] / (pixels[:, 2] + 1e-8)
+        return rb, gb
+
+    rb_before, gb_before = compute_ratios(raw_pixels)
+    rb_after, gb_after = compute_ratios(after_pixels)
+
+    # Define plot bounds
+    rmin, rmax = 0.5, 2.0
+    gmin, gmax = 0.5, 2.0
+    res = 200  # resolution of the background grid
+
+    # Create background color grid
+    rb_vals = np.linspace(rmin, rmax, res)
+    gb_vals = np.linspace(gmin, gmax, res)
+    rb_grid, gb_grid = np.meshgrid(rb_vals, gb_vals)
+
+    rgb_image = np.stack([rb_grid, gb_grid, np.ones_like(rb_grid)], axis=-1)
+    rgb_image /= np.max(rgb_image, axis=2, keepdims=True)  # Normalize to [0,1]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True)
+
+    def plot_panel(ax, rb_data, gb_data, title):
+        ax.imshow(rgb_image, extent=(rmin, rmax, gmin, gmax), origin='lower', aspect='auto')
+
+        ax.scatter(rb_data, gb_data, alpha=0.6, edgecolors='k', label="Stars")
+
+        # Fit best line
+        m, b = np.polyfit(rb_data, gb_data, 1)
+        x_vals = np.linspace(rmin, rmax, 100)
+        ax.plot(x_vals, m * x_vals + b, 'r--', label=f"Best Fit\ny = {m:.2f}x + {b:.2f}")
+
+        # Neutral indicators
+        ax.axhline(1.0, color='gray', linestyle=':', linewidth=1)
+        ax.axvline(1.0, color='gray', linestyle=':', linewidth=1)
+        ax.add_patch(Circle((1.0, 1.0), 0.2, fill=False, edgecolor='blue', linestyle='--', linewidth=1.5))
+        ax.text(1.03, 1.17, "Neutral Region", color='blue', fontsize=9)
+
+        ax.set_xlim(rmin, rmax)
+        ax.set_ylim(gmin, gmax)
+        ax.set_title(f"{title} White Balance")
+        ax.set_xlabel("Red / Blue Ratio")
+        ax.set_ylabel("Green / Blue Ratio")
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(True)
+        ax.legend()
+
+    plot_panel(ax1, rb_before, gb_before, "Before")
+    plot_panel(ax2, rb_after, gb_after, "After")
+
+    plt.suptitle("Star Color Ratios with RGB Mapping", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
+def apply_star_based_white_balance(
+    image: np.ndarray,
+    threshold: float = 1.5,
+    autostretch: bool = True,
+    reuse_cached_sources: bool = False,
+    return_star_colors: bool = False
+) -> tuple:
+    global cached_star_sources, cached_flux_radii
+
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError("Input must be an RGB image.")
 
-    gray = np.mean(image, axis=2).astype(np.float32)
+    # Step 1: Neutralize background using darkest patch
+    patch_size = 10
+    h, w = image.shape[:2]
+    patch_h = h // patch_size
+    patch_w = w // patch_size
 
-    # Subtract background
-    bkg = sep.Background(gray)
-    data_sub = gray - bkg.back()
-    err_val = bkg.globalrms
+    min_median_sum = float("inf")
+    best_patch = None
 
-    try:
+    for i in range(patch_size):
+        for j in range(patch_size):
+            y0 = i * patch_h
+            x0 = j * patch_w
+            y1 = min(y0 + patch_h, h)
+            x1 = min(x0 + patch_w, w)
+
+            patch = image[y0:y1, x0:x1, :]
+            medians = np.median(patch, axis=(0, 1))
+            if np.sum(medians) < min_median_sum:
+                min_median_sum = np.sum(medians)
+                best_patch = medians
+
+    if best_patch is None:
+        raise RuntimeError("Failed to find a neutral background patch.")
+
+    avg_median = np.mean(best_patch)
+
+    # Apply tone-preserving background neutralization (first pass)
+    bg_neutralized = image.copy()
+    for c in range(3):
+        diff = best_patch[c] - avg_median
+        denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
+        bg_neutralized[:, :, c] = np.clip((bg_neutralized[:, :, c] - diff) / denom, 0.0, 1.0)
+
+    # Step 2: Detect or reuse star positions
+    gray_neutral = np.mean(bg_neutralized, axis=2).astype(np.float32)
+    bkg2 = sep.Background(gray_neutral)
+    data_sub = gray_neutral - bkg2.back()
+    err_val = bkg2.globalrms
+
+    if reuse_cached_sources and cached_star_sources is not None:
+        sources = cached_star_sources
+        r = cached_flux_radii
+    else:
         sources = sep.extract(data_sub, threshold, err=err_val)
-    except Exception as e:
-        raise RuntimeError(f"SEP extraction failed: {e}")
-
-    if len(sources) == 0:
-        raise ValueError("No stars detected for Star-Based White Balance.")
-
-    try:
-        r, _ = sep.flux_radius(gray, sources['x'], sources['y'], 6.0 * sources['a'], 0.5,
+        if len(sources) == 0:
+            raise ValueError("No stars detected for Star-Based White Balance.")
+        r, _ = sep.flux_radius(gray_neutral, sources['x'], sources['y'], 2.0 * sources['a'], 0.2,
                                normflux=sources['flux'], subpix=5)
-    except Exception as e:
-        raise RuntimeError(f"Failed to calculate flux radius: {e}")
+        cached_star_sources = sources
+        cached_flux_radii = r
 
-    # Prepare display image
+    # NEW: Sample star colors from original image (before any adjustments)
+    raw_star_pixels = []
+    for i in range(len(sources)):
+        x = int(sources['x'][i])
+        y = int(sources['y'][i])
+        if r[i] > 0 and 0 <= y < h and 0 <= x < w:
+            raw_star_pixels.append(image[y, x, :])  # use original image here
 
-    display_image = stretch_color_image(image.copy(), 0.25) if autostretch else image.copy()
-
+    # Step 3: Create preview with ellipses
+    display_image = stretch_color_image(bg_neutralized.copy(), 0.25) if autostretch else bg_neutralized.copy()
     image_with_stars = cv2.cvtColor((display_image * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
     star_pixels = []
@@ -38364,8 +38479,8 @@ def apply_star_based_white_balance(image: np.ndarray, threshold: float = 1.5, au
         b = sources['b'][i]
         theta = sources['theta'][i] * 180. / np.pi
 
-        if r[i] > 0 and 0 <= int(y) < image.shape[0] and 0 <= int(x) < image.shape[1]:
-            star_pixels.append(image[int(y), int(x), :])
+        if r[i] > 0 and 0 <= int(y) < h and 0 <= int(x) < w:
+            star_pixels.append(bg_neutralized[int(y), int(x), :])
             center = (int(x), int(y))
             axes = (int(3 * a), int(3 * b))
             cv2.ellipse(image_with_stars, center, axes, angle=theta, startAngle=0, endAngle=360,
@@ -38375,20 +38490,57 @@ def apply_star_based_white_balance(image: np.ndarray, threshold: float = 1.5, au
     if star_count == 0:
         raise ValueError("No stars passed filtering for white balance.")
 
+    # Step 4: White balance using brightest average channel
     star_pixels = np.array(star_pixels)
     avg_color = np.mean(star_pixels, axis=0)
-    avg = np.mean(avg_color)
-    if avg == 0:
-        raise ValueError("Star average color is zero, cannot normalize.")
+    max_val = np.max(avg_color)
+    scaling_factors = max_val / avg_color
 
-    scaling_factors = avg / avg_color
-    balanced = image.copy()
+    balanced = bg_neutralized.copy()
     for ch in range(3):
         balanced[:, :, ch] *= scaling_factors[ch]
     balanced = np.clip(balanced, 0.0, 1.0)
 
-    return balanced, star_count, image_with_stars
+    # Step 5: Final background neutralization using updated image
+    patch_size = 10
+    h, w = balanced.shape[:2]
+    patch_h = h // patch_size
+    patch_w = w // patch_size
 
+    min_median_sum = float("inf")
+    best_patch = None
+
+    for i in range(patch_size):
+        for j in range(patch_size):
+            y0 = i * patch_h
+            x0 = j * patch_w
+            y1 = min(y0 + patch_h, h)
+            x1 = min(x0 + patch_w, w)
+
+            patch = balanced[y0:y1, x0:x1, :]
+            medians = np.median(patch, axis=(0, 1))
+            if np.sum(medians) < min_median_sum:
+                min_median_sum = np.sum(medians)
+                best_patch = medians
+
+    if best_patch is not None:
+        avg_median = np.mean(best_patch)
+        for c in range(3):
+            diff = best_patch[c] - avg_median
+            denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
+            balanced[:, :, c] = np.clip((balanced[:, :, c] - diff) / denom, 0.0, 1.0)
+
+  # Step 6: Collect "after" star pixels from balanced image            
+    after_star_pixels = []
+    for i in range(len(sources)):
+        x = int(sources['x'][i])
+        y = int(sources['y'][i])
+        if r[i] > 0 and 0 <= y < h and 0 <= x < w:
+            after_star_pixels.append(balanced[y, x, :])
+
+    if return_star_colors:
+        return balanced, star_count, image_with_stars, np.array(raw_star_pixels), np.array(after_star_pixels)
+    return balanced, star_count, image_with_stars
 
 def apply_morphology(image: np.ndarray, operation: str = 'erosion', kernel_size: int = 3, iterations: int = 1) -> np.ndarray:
     """
