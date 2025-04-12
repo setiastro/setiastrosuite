@@ -29,6 +29,10 @@ import pywt
 from io import BytesIO
 import re
 from scipy.spatial import Delaunay, KDTree
+from scipy.ndimage import gaussian_filter
+import scipy.ndimage as ndi
+
+
 import random
 if sys.stdout is not None:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -223,7 +227,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.13.11"
+VERSION = "2.14.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -280,6 +284,8 @@ if hasattr(sys, '_MEIPASS'):
     starregistration_path = os.path.join(sys._MEIPASS, 'starregistration.png')
     stacking_path = os.path.join(sys._MEIPASS, 'stacking.png')
     pedestal_icon_path = os.path.join(sys._MEIPASS, 'pedestal.png')
+    starspike_path = os.path.join(sys._MEIPASS, 'starspike.png')
+    aperture_path = os.path.join(sys._MEIPASS, 'aperture.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -334,6 +340,8 @@ else:
     starregistration_path = 'starregistration.png'
     stacking_path = 'stacking.png'
     pedestal_icon_path = 'pedestal.png'
+    starspike_path = 'starspike.png'
+    aperture_path = 'aperture.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -814,6 +822,12 @@ class AstroEditingSuite(QMainWindow):
         supernova_action.triggered.connect(self.open_supernova_hunter)
         mosaic_menu.addAction(supernova_action)    
 
+        star_spike_icon = QIcon(starspike_path)  # the path to your star spike icon
+        star_spike_action = QAction(star_spike_icon, "Star Spike Tool", self)
+        star_spike_action.setStatusTip("Add diffraction spikes to stars in the active image")
+        star_spike_action.triggered.connect(self.starspiketool)  # connects to the method below
+        mosaic_menu.addAction(star_spike_action)
+
         # --------------------
         # Toolbar
         # --------------------
@@ -968,6 +982,7 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar.addAction(plate_solver_action)
         mosaictoolbar.addAction(psf_viewer_action)     
         mosaictoolbar.addAction(supernova_action)   
+        mosaictoolbar.addAction(star_spike_action)
         
         # --------------------
         # Mask Toolbar
@@ -1152,6 +1167,10 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+
+    def starspiketool(self):
+        dialog = StarSpikeTool(self.image_manager, parent=self)
+        dialog.exec()
 
     def remove_pedestal(self):
         """
@@ -5361,6 +5380,34 @@ class ImageManager(QObject):
             print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
         self._images[slot] = new_image
         self._metadata[slot] = metadata
+        self.image_changed.emit(slot, new_image, metadata)
+        print(f"ImageManager: Image set for slot {slot} with new metadata.")
+
+    def set_image_for_slot(self, slot, new_image, metadata):
+        """
+        Similar to set_image, but allows specifying which slot to update,
+        and pushes the previous image to the undo stack.
+        """
+        if slot < 0 or slot >= self.max_slots:
+            print(f"ImageManager: Slot {slot} is out of range. Max slots={self.max_slots}")
+            return
+
+        # If there's an existing image in that slot, push it to undo
+        if self._images[slot] is not None:
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+            self._redo_stacks[slot].clear()
+            print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
+        else:
+            print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
+
+        # Update the slot with the new image + metadata
+        self._images[slot] = new_image
+        self._metadata[slot] = metadata
+
+        # Optionally set this slot as current
+        self.current_slot = slot
+
+        # Emit the change
         self.image_changed.emit(slot, new_image, metadata)
         print(f"ImageManager: Image set for slot {slot} with new metadata.")
 
@@ -15382,7 +15429,7 @@ class StarRegistrationThread(QThread):
     registration_complete = pyqtSignal(bool, str)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
-                 max_refinement_passes=4, shift_tolerance=0.2):
+                 max_refinement_passes=3, shift_tolerance=0.2):
         super().__init__()
         self.reference_image_path = os.path.normpath(reference_image_path)
         # First, assign original_files.
@@ -15503,7 +15550,7 @@ class StarRegistrationThread(QThread):
         remaining_files = {}
         skipped_files = []  # List to track skipped images
 
-        use_astroalign = (pass_index < 2)
+        use_astroalign = (pass_index < 4)
         for original_file, current_file in self.file_key_to_current_path.items():
             # Get current cumulative transform for persistent key.
             current_transform = self.alignment_matrices.get(original_file, IDENTITY_2x3)
@@ -15514,7 +15561,7 @@ class StarRegistrationThread(QThread):
                 ref_stars=ref_stars,
                 ref_triangles=ref_triangles,
                 output_directory=self.output_directory,
-                use_triangle=(pass_index >= 3),
+                use_triangle=(pass_index >= 5),
                 use_astroalign=use_astroalign,
                 reference_image=self.reference_image_2d
             )
@@ -22690,7 +22737,6 @@ class StarNetDialog(QDialog):
     def cancel_process(self):
         self.reject()  # Close the dialog
 
-
 class AddStarsDialog(QDialog):
     """
     Dialog for configuring and previewing star additions to an image.
@@ -23184,6 +23230,776 @@ class AddStarsDialog(QDialog):
             QTimer.singleShot(0, self.fit_to_preview)  # Schedule fit_to_preview after the event loop
             self.fitted = True
             print("Dialog shown and image fitted to preview.")
+
+class ApertureHelpWindow(QDialog):
+    """
+    A simple dialog that displays an image to help the user understand
+    the aperture parameters (number of vanes, pupil radius, obstruction, vane width, etc.)
+    """
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Aperture Help")
+        self.setMinimumSize(400, 400)
+        layout = QVBoxLayout(self)
+
+        try:
+            pixmap = QPixmap(image_path)
+            if pixmap.isNull():
+                raise ValueError("Could not load image.")
+            label = QLabel()
+            label.setPixmap(pixmap)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load aperture help image: {e}")
+        self.setLayout(layout)
+
+class StarSpikePreviewWindow(QDialog):
+    """
+    A separate window to display the final star-spiked image for preview.
+    Includes:
+      - Zoom In, Zoom Out, Fit to Preview controls
+      - An optional "Save to Slot" button if an ImageManager is provided
+    """
+    def __init__(self, parent=None, image_manager=None):
+        super().__init__(parent)
+        self.setWindowTitle("Star Spike Preview")
+        self.setMinimumSize(400, 400)
+
+        # (Optional) If we want to allow saving to slots
+        self.image_manager = image_manager
+        self.preview_image = None  # We'll store the display image here
+
+        # Zoom parameters
+        self.zoom_factor = 1.0
+        self.zoom_step = 1.25
+        self.zoom_min = 0.1
+        self.zoom_max = 5.0
+
+        # Main layout
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        # 1) Create the image display area (QGraphicsView)
+        self._create_image_display_area()
+
+        # 2) Create the zoom controls
+        self._create_zoom_controls()
+
+        # 3) Optionally create a "Save to Slot" button if image_manager is present
+        if self.image_manager is not None:
+            self._create_save_button()
+
+    def _create_image_display_area(self):
+        """Create a QGraphicsView & QGraphicsScene for the preview image."""
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+
+        # Enable panning with mouse drag
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+
+        # Enable scroll bars
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        # Add the graphics view to the main layout
+        self.main_layout.addWidget(self.graphics_view)
+
+    def _create_zoom_controls(self):
+        """Create a group with Zoom In, Zoom Out, and Fit to Preview buttons."""
+        self.zoom_controls_group = QGroupBox("Zoom Controls")
+        zoom_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self._zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self._zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        self.zoom_controls_group.setLayout(zoom_layout)
+        self.main_layout.addWidget(self.zoom_controls_group)
+
+    def _create_save_button(self):
+        """Create a 'Save to Slot' button if we have an image_manager."""
+        self.save_button = QPushButton("Save to Slot")
+        self.save_button.clicked.connect(self._save_to_slot)
+        self.main_layout.addWidget(self.save_button)
+
+    def _zoom_in(self):
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+        else:
+            QMessageBox.information(self, "Zoom In", "Maximum zoom level reached.")
+
+    def _zoom_out(self):
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+        else:
+            QMessageBox.information(self, "Zoom Out", "Minimum zoom level reached.")
+
+    def _fit_to_preview(self):
+        """Fit the entire image within the QGraphicsView."""
+        if self.pixmap_item.pixmap().isNull():
+            return  # No image
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.zoom_factor = 1.0
+
+    def _apply_zoom(self):
+        """Apply the current zoom factor to the graphics view."""
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+
+    def update_image(self, image_array):
+        """
+        Update the preview with the given image array (color or mono).
+        image_array: np.ndarray (H,W) or (H,W,3) in [0..1] or up to e.g. 65535.
+        """
+        try:
+            # Convert to 8-bit for display
+            # If float [0..1], scale to 0..255. 
+            arr = np.clip(image_array, 0, 1) * 255.0
+            arr = arr.astype(np.uint8)
+
+            # Determine shape
+            if arr.ndim == 2:
+                # Mono => QImage.Format_Grayscale8
+                h, w = arr.shape
+                qimage = QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+            elif arr.ndim == 3 and arr.shape[2] == 3:
+                # Color => QImage.Format_RGB888
+                h, w, _ = arr.shape
+                qimage = QImage(arr.data, w, h, 3*w, QImage.Format.Format_RGB888)
+            else:
+                raise ValueError("Unsupported image shape for preview.")
+
+            pixmap = QPixmap.fromImage(qimage)
+            self.pixmap_item.setPixmap(pixmap)
+            self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+            self._fit_to_preview()
+
+            # Store the final array if we want to save it
+            self.preview_image = image_array
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to update preview: {e}")
+
+    def _save_to_slot(self):
+        """
+        If we have an image_manager, let user pick a slot and store self.preview_image.
+        We'll push old image to that slot's undo stack if you have a method like set_image_for_slot(...).
+        """
+        if self.preview_image is None:
+            QMessageBox.warning(self, "No Image", "No preview image to save.")
+            return
+
+        if self.image_manager is None:
+            QMessageBox.warning(self, "No Manager", "No ImageManager passed to preview window.")
+            return
+
+        # Prompt user for a slot index
+        slot_idx, ok = QInputDialog.getInt(
+            self,
+            "Save to Slot",
+            f"Enter slot number (0..{self.image_manager.max_slots - 1}):",
+            self.image_manager.current_slot,  # default
+            0,
+            self.image_manager.max_slots - 1,
+            1
+        )
+        if not ok:
+            return
+
+        # Build metadata
+        new_metadata = {
+            "description": "Star-Spiked from Preview",
+            "is_float": True
+        }
+
+        # If you have set_image_for_slot(...):
+        if hasattr(self.image_manager, "set_image_for_slot"):
+            self.image_manager.set_image_for_slot(slot_idx, self.preview_image, new_metadata)
+        else:
+            # fallback to add_image(...) if you want
+            self.image_manager.add_image(slot_idx, self.preview_image, new_metadata)
+
+        QMessageBox.information(self, "Saved", f"Preview image saved to slot {slot_idx}.")
+
+class AdvancedOptionsDialog(QDialog):
+    """
+    A popup dialog for advanced parameters.
+    Contains advanced parameters such as Flux Max Range, BrightScale Min/Max,
+    Shrink Min/Max, and Color Boost.
+    When accepted, the values can be retrieved by the calling code.
+    """
+    def __init__(self, parent=None, initial_values=None):
+        """
+        initial_values: a dict of advanced parameter initial values.
+          Expected keys: 'flux_max', 'bscale_min', 'bscale_max', 'shrink_min', 'shrink_max', 'color_boost'
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Advanced Options")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        # Create spin boxes. Adjust min/max/initial as needed.
+        self.flux_max_spin = CustomDoubleSpinBox(minimum=1.0, maximum=999999.0,
+                                                   initial=initial_values.get('flux_max', 300.0),
+                                                   step=50.0)
+        form.addRow("Flux Max Range:", self.flux_max_spin)
+
+        self.bscale_min_spin = CustomDoubleSpinBox(minimum=0.1, maximum=999.0,
+                                                    initial=initial_values.get('bscale_min', 10.0),
+                                                    step=1.0)
+        form.addRow("BrightScale Min:", self.bscale_min_spin)
+
+        self.bscale_max_spin = CustomDoubleSpinBox(minimum=1.0, maximum=999.0,
+                                                    initial=initial_values.get('bscale_max', 30.0),
+                                                    step=1.0)
+        form.addRow("BrightScale Max:", self.bscale_max_spin)
+
+        self.shrink_min_spin = CustomDoubleSpinBox(minimum=0.1, maximum=999.0,
+                                                    initial=initial_values.get('shrink_min', 1.0),
+                                                    step=0.2)
+        form.addRow("Shrink Min:", self.shrink_min_spin)
+
+        self.shrink_max_spin = CustomDoubleSpinBox(minimum=0.1, maximum=999.0,
+                                                   initial=initial_values.get('shrink_max', 5.0),
+                                                   step=0.2)
+        form.addRow("Shrink Max:", self.shrink_max_spin)
+
+        self.color_boost_spin = CustomDoubleSpinBox(minimum=0.1, maximum=10.0,
+                                                    initial=initial_values.get('color_boost', 1.5),
+                                                    step=0.1)
+        form.addRow("Color Boost:", self.color_boost_spin)
+
+        layout.addLayout(form)
+
+        # OK and Cancel buttons
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+    def get_values(self):
+        """
+        Returns a dictionary with the advanced parameter values.
+        """
+        return {
+            'flux_max': self.flux_max_spin.value(),
+            'bscale_min': self.bscale_min_spin.value(),
+            'bscale_max': self.bscale_max_spin.value(),
+            'shrink_min': self.shrink_min_spin.value(),
+            'shrink_max': self.shrink_max_spin.value(),
+            'color_boost': self.color_boost_spin.value()
+        }
+    
+class StarSpikeTool(QDialog):
+    """
+    A stand-alone dialog that integrates with AstroEditingSuite.
+    - Reads the active image from image_manager.
+    - Lets the user define star detection & diffraction parameters.
+    - Generates star spikes with multi-threading.
+    - Optionally overwrites the same slot in image_manager.
+    """
+
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Star Spike Tool")
+
+        self.image_manager = image_manager
+        self.final_image = None
+
+        # Set default advanced parameters in a dict.
+        self.advanced_params = {
+            'flux_max': 300.0,
+            'bscale_min': 10.0,
+            'bscale_max': 30.0,
+            'shrink_min': 1.0,
+            'shrink_max': 5.0,
+            'color_boost': 1.5
+        }
+        # UI Setup
+        self._init_ui()
+        self._image_data = None
+
+    def _init_ui(self):
+        """Builds the layout with basic form parameters & run/save buttons, plus an advanced options popup."""
+        main_layout = QVBoxLayout(self)
+        # Status label at the top
+
+        # Basic parameters form
+        basic_form = QFormLayout()
+        self.num_vanes_spin = CustomSpinBox(minimum=2, maximum=8, initial=4, step=1)
+        basic_form.addRow("Number of Vanes:", self.num_vanes_spin)
+
+        self.obstruction_spin = CustomDoubleSpinBox(minimum=0.0, maximum=0.99, initial=0.2, step=0.05)
+        basic_form.addRow("Obstruction:", self.obstruction_spin)
+
+        self.radius_spin = CustomDoubleSpinBox(minimum=1.0, maximum=512.0, initial=128.0, step=1.0)
+        basic_form.addRow("Pupil Radius:", self.radius_spin)
+
+        self.vane_width_spin = CustomDoubleSpinBox(minimum=0.1, maximum=50.0, initial=4.0, step=0.5)
+        basic_form.addRow("Vane Width:", self.vane_width_spin)
+
+        # --- New: Rotation angle for star spikes ---
+        self.rotation_spin = CustomDoubleSpinBox(minimum=0.0, maximum=360.0, initial=0.0, step=1.0)
+        basic_form.addRow("Rotation Angle (deg):", self.rotation_spin)
+
+        self.blur_sigma_spin = CustomDoubleSpinBox(minimum=0.1, maximum=10.0, initial=2.0, step=0.1)
+        basic_form.addRow("PSF Blur Sigma:", self.blur_sigma_spin)
+
+        self.detect_thresh_spin = CustomDoubleSpinBox(minimum=0.0, maximum=100.0, initial=5.0, step=0.1)
+        basic_form.addRow("Detect Threshold:", self.detect_thresh_spin)
+
+        self.flux_min_spin = CustomDoubleSpinBox(minimum=0.0, maximum=999999.0, initial=30.0, step=10.0)
+        basic_form.addRow("Flux Min:", self.flux_min_spin)
+
+        main_layout.addLayout(basic_form)
+
+        # Advanced Options button (instead of an embedded group box)
+        self.adv_options_btn = QPushButton("Advanced Options...")
+        self.adv_options_btn.setToolTip("Configure advanced parameters")
+        self.adv_options_btn.clicked.connect(self._show_advanced_options)
+        main_layout.addWidget(self.adv_options_btn)
+
+        # Buttons: Generate and Save to Slot
+        btn_layout = QHBoxLayout()
+        self.run_button = QPushButton("Generate Spikes")
+        self.run_button.clicked.connect(self._run_spikes)
+        btn_layout.addWidget(self.run_button)
+
+        self.save_button = QPushButton("Save to Slot")
+        self.save_button.clicked.connect(self._save_to_slot)
+        self.save_button.setEnabled(False)
+        btn_layout.addWidget(self.save_button)
+        main_layout.addLayout(btn_layout)
+
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        main_layout.addWidget(self.progress_bar)
+        self.status_label = QLabel("Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(self.status_label)
+        # Help Button
+        self.help_button = QPushButton("Help")
+        self.help_button.setToolTip("Click to view an example diagram of the telescope aperture and PSF parameters.")
+        self.help_button.clicked.connect(self._show_aperture_help)
+        main_layout.addWidget(self.help_button)
+
+        self.setLayout(main_layout)
+
+    def _show_advanced_options(self):
+        """Opens a popup dialog for advanced options."""
+        dialog = AdvancedOptionsDialog(parent=self, initial_values=self.advanced_params)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.advanced_params = dialog.get_values()
+            # Optionally update UI or print the new values for debugging:
+            print("Advanced parameters updated:")
+            print(self.advanced_params)
+
+
+    def _show_aperture_help(self):
+        """Opens a help window to display the aperture/PSF example image."""
+        try:
+            # Replace 'aperture_path' with your actual file path for the help image.
+            help_dialog = ApertureHelpWindow(aperture_path, parent=self)
+            help_dialog.show()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open help image: {e}")
+
+
+    # --------------------------- Primary logic ---------------------------
+    def _run_spikes(self):
+        """
+        Main entry point to run star detection & add spikes.
+        """
+        self.status_label.setText("Loading active image...")
+        QApplication.processEvents()
+        blur_sigma = self.blur_sigma_spin.value()
+        # 1) Get the active image array + metadata from image_manager
+        image_data, metadata = self.image_manager.get_current_image_and_metadata()
+        if image_data is None or image_data.size == 0:
+            QMessageBox.warning(self, "No Image", "No image found in the active slot!")
+            return
+
+        # Convert to float32 if needed
+        self._image_data = image_data.astype(np.float32)
+        # If RGBA, strip alpha
+        if self._image_data.ndim == 3 and self._image_data.shape[2] == 4:
+            self._image_data = self._image_data[..., :3]
+
+        # 2) Gather user params from spinboxes
+        num_vanes   = self.num_vanes_spin.value
+        obstruction = self.obstruction_spin.value()
+        radius      = self.radius_spin.value()
+        vane_width  = self.vane_width_spin.value()
+        rotation     = self.rotation_spin.value()  # New: rotation angle in degrees
+        detect_thresh= self.detect_thresh_spin.value()
+        flux_min     = self.flux_min_spin.value()
+        flux_max   = self.advanced_params.get('flux_max', 300.0)
+        bscale_min = self.advanced_params.get('bscale_min', 10.0)
+        bscale_max = self.advanced_params.get('bscale_max', 30.0)
+        shrink_min = self.advanced_params.get('shrink_min', 1.0)
+        shrink_max = self.advanced_params.get('shrink_max', 5.0)
+        color_boost = self.advanced_params.get('color_boost', 1.5)
+
+        # 3) "un-stretch" with midtones(0.95)
+        if self._image_data.ndim == 3:
+            # apply midtones to each channel
+            lin_img = self._image_data.copy()
+            for c in range(3):
+                lin_img[..., c] = self._midtones_m(lin_img[..., c], 0.95)
+            base_for_detect = 0.2126*lin_img[...,0] + 0.7152*lin_img[...,1] + 0.0722*lin_img[...,2]
+        else:
+            lin_img = self._midtones_m(self._image_data, 0.95)
+            base_for_detect = lin_img
+
+        # 4) detect stars
+        self.status_label.setText("Detecting stars...")
+        QApplication.processEvents()
+        stars = self._detect_stars(base_for_detect, detect_thresh, flux_min, 1.0)
+        self.status_label.setText(f"Detected {len(stars)} stars.")
+        QApplication.processEvents()
+        if len(stars) == 0:
+            QMessageBox.information(self, "No Stars", "No stars found above flux_min.")
+            return
+
+        # 5) build a single pupil for all
+        self.status_label.setText("Building pupil and PSFs...")
+        QApplication.processEvents()
+        big_pupil = self._make_pupil(size=1024, radius=radius,
+                                      obstruction=obstruction,
+                                      vane_width=vane_width,
+                                      num_vanes=num_vanes,
+                                      rotation=rotation) 
+        psf_r = self._simulate_psf(big_pupil, wavelength_scale=1.1, blur_sigma=blur_sigma)
+        psf_g = self._simulate_psf(big_pupil, wavelength_scale=1.0, blur_sigma=blur_sigma)
+        psf_b = self._simulate_psf(big_pupil, wavelength_scale=0.9, blur_sigma=blur_sigma)
+
+
+        # 6) Multi-thread star overlay
+        self.status_label.setText("Generating star overlay...")
+        if lin_img.ndim == 3:
+            H, W, _ = lin_img.shape
+        else:
+            H, W = lin_img.shape
+        canvas = np.zeros((H, W, 3), dtype=np.float32)
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        total = len(stars)
+        self.progress_bar.setValue(0)
+        next_update = 0.05
+
+        def star_runner(i):
+            x, y, flux, a, b = stars[i]
+            brightness = np.clip(np.log1p(flux)/8.0, 0.1, 3.0)
+            tile_size  = int(256 + brightness*20)
+            tile_size  = min(tile_size, 768)
+            tile_size += tile_size % 2
+            pad = tile_size // 2
+            if not (pad <= x < W - pad and pad <= y < H - pad):
+                return None
+
+            # Extract & scale
+            # measure star color from original image (the "lin_img" or maybe the raw image_data)
+            r_ratio, g_ratio, b_ratio = self.measure_star_color(self._image_data, x, y, sampling_radius=3)
+
+            # Then incorporate that ratio
+            tile_r = self._extract_center_tile(psf_r, tile_size) * brightness * r_ratio
+            tile_g = self._extract_center_tile(psf_g, tile_size) * brightness * g_ratio
+            tile_b = self._extract_center_tile(psf_b, tile_size) * brightness * b_ratio
+
+            # Then your existing color_boost if you want a global multiplier
+            tile_r *= color_boost
+            tile_g *= color_boost
+            tile_b *= color_boost
+
+
+            # flux-based final scale
+            b_scale, s_factor = self._compute_boost_and_shrink_from_flux(
+                flux, 1.0, flux_max, bscale_min, bscale_max, shrink_min, shrink_max
+            )
+            final_r = self._shrink_and_boost(tile_r, brightness_scale=b_scale, shrink_factor=s_factor)
+            final_g = self._shrink_and_boost(tile_g, brightness_scale=b_scale, shrink_factor=s_factor)
+            final_b = self._shrink_and_boost(tile_b, brightness_scale=b_scale, shrink_factor=s_factor)
+
+            new_size = final_r.shape[0]
+            pad_new  = new_size // 2
+            y0, y1   = y - pad_new, y - pad_new + new_size
+            x0, x1   = x - pad_new, x - pad_new + new_size
+            if (y0 < 0 or y1 > H or x0 < 0 or x1 > W):
+                return None
+
+            part = np.zeros((H, W, 3), dtype=np.float32)
+            part[y0:y1, x0:x1, 0] = final_r
+            part[y0:y1, x0:x1, 1] = final_g
+            part[y0:y1, x0:x1, 2] = final_b
+            return part
+
+        with ThreadPoolExecutor() as exec_:
+            futures = {exec_.submit(star_runner, i): i for i in range(total)}
+            for idx, fut in enumerate(as_completed(futures)):
+                partial = fut.result()
+                if partial is not None:
+                    canvas += partial
+                pct = (idx + 1) / total
+                if pct >= next_update:
+                    self.progress_bar.setValue(int(pct * 100))
+                    next_update += 0.05
+
+        # 7) combine with lin_img
+        self.status_label.setText("Combining star overlay with original image...")
+        if lin_img.ndim == 3:
+            spiked_lin = np.clip(lin_img + canvas, 0, 1)
+        else:
+            # If the input is mono but the spikes are RGB, convert spikes to mono before adding
+            spikes_mono = 0.2126 * canvas[..., 0] + 0.7152 * canvas[..., 1] + 0.0722 * canvas[..., 2]
+            spiked_lin = np.clip(lin_img + spikes_mono, 0, 1)
+
+        # 8) re-stretch with midtones(0.05)
+        final = np.zeros_like(spiked_lin)
+        if spiked_lin.ndim == 3:
+            for c in range(3):
+                final[..., c] = self._midtones_m(spiked_lin[..., c], 0.05)
+        else:
+            final = self._midtones_m(spiked_lin, 0.05)
+
+        self.final_image = final
+        self.save_button.setEnabled(True)
+        self.progress_bar.setValue(100)
+        self.status_label.setText("Star spike generation completed.")
+        self._preview_spiked_image()
+
+    def _preview_spiked_image(self):
+        if self.final_image is None:
+            return
+
+        # create and display the preview
+        preview = StarSpikePreviewWindow(parent=self, image_manager=self.image_manager)
+        preview.update_image(self.final_image)
+        preview.show()
+
+    def _save_to_slot(self):
+        if self.final_image is None:
+            QMessageBox.warning(self, "No Output", "Please run spikes first.")
+            return
+
+        # 1) Let the user pick which slot to save into
+        slot_idx, ok = QInputDialog.getInt(
+            self,
+            "Save to Slot",
+            f"Enter slot number (0..{self.image_manager.max_slots-1}):",
+            self.image_manager.current_slot,  # default
+            0,                                # min
+            self.image_manager.max_slots-1,   # max
+            1                                 # step
+        )
+        if not ok:
+            return  # user canceled
+
+        # 2) Build metadata
+        new_metadata = {
+            "description": "Star-Spiked",
+            "is_float": True  # or any other flags you want
+        }
+
+        # 3) Save the final image to the chosen slot
+        self.image_manager.set_image_for_slot(slot_idx, self.final_image, new_metadata)
+
+        QMessageBox.information(self, "Saved", f"Spiked image saved to slot {slot_idx}.")
+        self.close()
+
+
+
+    # ---------------------- Helper Methods as Private ----------------------
+
+    def _midtones_m(self, x, m):
+        """Encapsulated midtones code inside the class."""
+        x = np.clip(x, 0.0, 1.0).astype(np.float32)
+        out = np.zeros_like(x, dtype=np.float32)
+        mask0 = (x == 0)
+        out[mask0] = 0.0
+        mask1 = (x == 1)
+        out[mask1] = 1.0
+        eps = 1e-7
+        maskm = (np.abs(x - m) < eps)
+        out[maskm] = 0.5
+        mask_oth = ~(mask0 | mask1 | maskm)
+        xm = x[mask_oth]
+        num = (m - 1.0)*xm
+        den = (2.0*m - 1.0)*xm - m
+        out[mask_oth] = np.clip(num/(den+1e-12),0,1)
+        return out
+
+    def _make_pupil(self, size=512, radius=100, obstruction=0.3, vane_width=2, num_vanes=4, rotation=0):
+        """
+        Create a pupil (aperture mask) with a central obstruction and diffraction vanes.
+        The vane pattern is rotated by 'rotation' degrees.
+        """
+        y, x = np.indices((size, size)) - size // 2
+        r = np.sqrt(x**2 + y**2)
+        pupil = (r <= radius).astype(np.float32)
+        pupil[r < radius * obstruction] = 0.0
+        if num_vanes >= 2:
+            # Convert rotation angle from degrees to radians.
+            rotation_radians = np.deg2rad(rotation)
+            # Create vane angles with the given rotation offset.
+            for angle in np.linspace(0, np.pi, num_vanes, endpoint=False) + rotation_radians:
+                xp = x * np.cos(angle) + y * np.sin(angle)
+                vane = np.abs(xp) < vane_width
+                pupil[vane] = 0.0
+        return pupil
+
+    def _simulate_psf(self, pupil, wavelength_scale=1.0, blur_sigma=1.0):
+        # Apply a Gaussian blur to the pupil to simulate wavelength-dependent phase variations.
+        scaled_pupil = gaussian_filter(pupil, sigma=0.1 * wavelength_scale)
+        # Compute Fourier transform to get the raw diffraction pattern.
+        fft = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(scaled_pupil)))
+        intensity = np.abs(fft)**2
+        intensity /= (intensity.max() + 1e-8)
+        # Apply a second Gaussian filter (blur_sigma) to simulate additional spreading.
+        blurred = gaussian_filter(intensity, sigma=blur_sigma)
+        psf = blurred / max(blurred.max(), 1e-8)
+        
+        # **New step:** Scale the spatial dimensions of the PSF.
+        # Here, a lower wavelength_scale (e.g. for blue) produces a smaller PSF.
+        # If wavelength_scale=1.0 is our nominal size, then for a channel with
+        # wavelength_scale < 1.0 the PSF should be smaller, and vice versa.
+        zoom_factor = wavelength_scale   # Adjust this mapping as needed.
+        if zoom_factor != 1.0:
+            psf = ndi.zoom(psf, zoom=zoom_factor, order=1)
+            psf /= psf.max()  # Re-normalize after zooming.
+        return psf
+
+    def _extract_center_tile(self, psf, tile_size):
+        center = psf.shape[0]//2
+        half   = tile_size//2
+        y0, x0 = max(0, center-half), max(0, center-half)
+        y1, x1 = y0+tile_size, x0+tile_size
+        cropped= psf[y0:y1, x0:x1]
+        if cropped.shape != (tile_size, tile_size):
+            padded = np.zeros((tile_size,tile_size), dtype=np.float32)
+            ph, pw = cropped.shape
+            padded[:ph, :pw]= cropped
+            return padded
+        return cropped
+
+    def _detect_stars(self, image, threshold=5.0, flux_min=30.0, size_min=1.0):
+        data = image.astype(np.float32)
+        bkg = sep.Background(data)
+        data_sub = data - bkg.back()
+        err_val = bkg.globalrms
+
+        try:
+            objects = sep.extract(data_sub, threshold, err=err_val)
+        except Exception as e:
+            if "internal pixel buffer full" in str(e):
+                print("[ERROR] Star detection failed: internal pixel buffer full.")
+                QMessageBox.warning(
+                    self,
+                    "Star Detection Failed",
+                    "Star detection failed because the internal pixel buffer was exceeded.\n\n"
+                    "Try increasing the detection threshold (sigma) or the minimum flux."
+                )
+            else:
+                print(f"[ERROR] Star detection failed: {e}")
+                QMessageBox.critical(
+                    self,
+                    "Unexpected Error",
+                    f"An unexpected error occurred during star detection:\n\n{e}"
+                )
+            return []
+
+        star_list = []
+        for obj in objects:
+            flux = obj['flux']
+            a = obj['a']
+            b = obj['b']
+            star_size = max(a, b)
+            if flux >= flux_min and star_size >= size_min:
+                star_list.append((int(obj['x']), int(obj['y']), flux, a, b))
+        return star_list
+
+    def _shrink_and_boost(self, tile, brightness_scale=2.0, shrink_factor=1.5):
+        tile = tile*brightness_scale
+        tile = np.clip(tile, 0.0, 1.0)
+        in_size = tile.shape[0]
+        out_size= int(in_size//shrink_factor)
+        out_size+= out_size%2
+        zoom_factor= out_size/float(in_size)
+        smaller= ndi.zoom(tile, zoom_factor, order=1)
+        return np.clip(smaller, 0.0,1.0)
+
+    def _compute_boost_and_shrink_from_flux(self,
+                                            flux, flux_min, flux_max,
+                                            bscale_min, bscale_max,
+                                            shrink_min,shrink_max):
+        flux_c= np.clip(flux, flux_min, flux_max)
+        alpha = 0.0
+        if flux_max>flux_min:
+            alpha= (flux_c - flux_min)/(flux_max - flux_min)
+        brightness_scale= bscale_min + alpha*(bscale_max - bscale_min)
+        # invert for shrink => bigger flux => smaller factor
+        factor= shrink_max - alpha*(shrink_max - shrink_min)
+        return brightness_scale, factor
+
+    def measure_star_color(self, img_color, x, y, sampling_radius=20):
+        """
+        Measures star color at (x, y) and returns ratios where the brightest channel is 1.0.
+        """
+        if img_color.ndim == 2:
+            print(f"[DEBUG] Mono image at ({x:.1f}, {y:.1f}) – returning white")
+            return (1.0, 1.0, 1.0)
+
+        H, W, C = img_color.shape
+        if C != 3:
+            return (1.0, 1.0, 1.0)
+
+        x0 = max(0, int(x - sampling_radius))
+        x1 = min(W, int(x + sampling_radius + 1))
+        y0 = max(0, int(y - sampling_radius))
+        y1 = min(H, int(y + sampling_radius + 1))
+
+        if x1 <= x0 or y1 <= y0:
+            return (1.0, 1.0, 1.0)
+
+        patch = img_color[y0:y1, x0:x1, :]
+        mean_col = np.mean(patch, axis=(0, 1))  # shape (3,)
+        max_col = np.max(mean_col)
+
+        if max_col < 1e-9:
+            return (1.0, 1.0, 1.0)
+
+        r_ratio = mean_col[0] / max_col
+        g_ratio = mean_col[1] / max_col
+        b_ratio = mean_col[2] / max_col
+
+        return (r_ratio, g_ratio, b_ratio)
+
+
 
 class BackgroundNeutralizationDialog(QDialog):
     def __init__(self, image_manager, parent=None):
