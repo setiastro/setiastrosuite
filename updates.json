@@ -1,9 +1,9 @@
 {
-  "version": "2.13.11",
+  "version": "2.14.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.11/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.11/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.13.11/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "White Balance update including graphs.  Stacking Suite update to only create the large drizzle pixel rejection mapping if you have drizzle enabled"
+  "notes": "Diffraction Spike Tool.  Simulate diffraction spikes on your stars by passing the stellar flux through a simulated telescope aperture"
 }
