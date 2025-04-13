@@ -227,7 +227,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.0"
+VERSION = "2.14.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -286,6 +286,7 @@ if hasattr(sys, '_MEIPASS'):
     pedestal_icon_path = os.path.join(sys._MEIPASS, 'pedestal.png')
     starspike_path = os.path.join(sys._MEIPASS, 'starspike.png')
     aperture_path = os.path.join(sys._MEIPASS, 'aperture.png')
+    jwstpupil_path = os.path.join(sys._MEIPASS, 'jwstpupil.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -342,6 +343,7 @@ else:
     pedestal_icon_path = 'pedestal.png'
     starspike_path = 'starspike.png'
     aperture_path = 'aperture.png'
+    jwstpupil_path = 'jwstpupil.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -3656,11 +3658,6 @@ class AstroEditingSuite(QMainWindow):
 
         if reply == QMessageBox.StandardButton.Yes:
             print("Image is linear. Applying stretch.")
-            dialog_msg = QMessageBox(self)
-            dialog_msg.setWindowTitle("Stretching Image")
-            dialog_msg.setText("Stretching the image for StarNet processing...")
-            dialog_msg.setStandardButtons(QMessageBox.StandardButton.Ok)
-            dialog_msg.exec()
 
             # Apply stretch
             stretched_image = self.stretch_image(processing_image)
@@ -22713,7 +22710,7 @@ class StarNetThread(QThread):
 class StarNetDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("StarNet Progress")
+        self.setWindowTitle("Star Removal Progress")
         self.setMinimumSize(600, 400)
         self.initUI()
 
@@ -23443,21 +23440,16 @@ class AdvancedOptionsDialog(QDialog):
     """
     A popup dialog for advanced parameters.
     Contains advanced parameters such as Flux Max Range, BrightScale Min/Max,
-    Shrink Min/Max, and Color Boost.
+    Shrink Min/Max, and now Detect Threshold.
     When accepted, the values can be retrieved by the calling code.
     """
     def __init__(self, parent=None, initial_values=None):
-        """
-        initial_values: a dict of advanced parameter initial values.
-          Expected keys: 'flux_max', 'bscale_min', 'bscale_max', 'shrink_min', 'shrink_max', 'color_boost'
-        """
         super().__init__(parent)
         self.setWindowTitle("Advanced Options")
         self.setModal(True)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
-        # Create spin boxes. Adjust min/max/initial as needed.
         self.flux_max_spin = CustomDoubleSpinBox(minimum=1.0, maximum=999999.0,
                                                    initial=initial_values.get('flux_max', 300.0),
                                                    step=50.0)
@@ -23483,10 +23475,11 @@ class AdvancedOptionsDialog(QDialog):
                                                    step=0.2)
         form.addRow("Shrink Max:", self.shrink_max_spin)
 
-        self.color_boost_spin = CustomDoubleSpinBox(minimum=0.1, maximum=10.0,
-                                                    initial=initial_values.get('color_boost', 1.5),
-                                                    step=0.1)
-        form.addRow("Color Boost:", self.color_boost_spin)
+        # Move Detect Threshold into the advanced options.
+        self.detect_thresh_spin = CustomDoubleSpinBox(minimum=0.0, maximum=100.0,
+                                                      initial=initial_values.get('detect_thresh', 5.0),
+                                                      step=0.1)
+        form.addRow("Detect Threshold:", self.detect_thresh_spin)
 
         layout.addLayout(form)
 
@@ -23503,18 +23496,17 @@ class AdvancedOptionsDialog(QDialog):
         self.setLayout(layout)
 
     def get_values(self):
-        """
-        Returns a dictionary with the advanced parameter values.
-        """
         return {
             'flux_max': self.flux_max_spin.value(),
             'bscale_min': self.bscale_min_spin.value(),
             'bscale_max': self.bscale_max_spin.value(),
             'shrink_min': self.shrink_min_spin.value(),
             'shrink_max': self.shrink_max_spin.value(),
-            'color_boost': self.color_boost_spin.value()
+            'detect_thresh': self.detect_thresh_spin.value(),
+            # Note: color boost is now in the basic UI.
         }
-    
+       
+
 class StarSpikeTool(QDialog):
     """
     A stand-alone dialog that integrates with AstroEditingSuite.
@@ -23523,68 +23515,96 @@ class StarSpikeTool(QDialog):
     - Generates star spikes with multi-threading.
     - Optionally overwrites the same slot in image_manager.
     """
-
     def __init__(self, image_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Star Spike Tool")
-
         self.image_manager = image_manager
         self.final_image = None
 
-        # Set default advanced parameters in a dict.
+        # Set default advanced parameters.
         self.advanced_params = {
             'flux_max': 300.0,
             'bscale_min': 10.0,
             'bscale_max': 30.0,
             'shrink_min': 1.0,
             'shrink_max': 5.0,
-            'color_boost': 1.5
+            'detect_thresh': 5.0  # default advanced detect threshold.
         }
         # UI Setup
         self._init_ui()
         self._image_data = None
 
     def _init_ui(self):
-        """Builds the layout with basic form parameters & run/save buttons, plus an advanced options popup."""
+        """Builds the layout with basic form parameters, an advanced options popup, and other controls."""
         main_layout = QVBoxLayout(self)
-        # Status label at the top
 
-        # Basic parameters form
+        # Basic parameters form.
         basic_form = QFormLayout()
-        self.num_vanes_spin = CustomSpinBox(minimum=2, maximum=8, initial=4, step=1)
-        basic_form.addRow("Number of Vanes:", self.num_vanes_spin)
 
-        self.obstruction_spin = CustomDoubleSpinBox(minimum=0.0, maximum=0.99, initial=0.2, step=0.05)
-        basic_form.addRow("Obstruction:", self.obstruction_spin)
+        # New: Toggle switch for pupil type.
+        # Using a QCheckBox as a toggle. When checked, we simulate a JWST pupil.
+        # -- Toggle Switch Button for Aperture Type --
+        self.pupil_toggle_button = QPushButton("Circular")
+        self.pupil_toggle_button.setCheckable(True)
+        self.pupil_toggle_button.setChecked(False)  # Start off in 'Circular' mode
+        self.pupil_toggle_button.toggled.connect(self._on_pupil_toggle)
+        # Optionally style it to look like a sliding switch:
+        self.pupil_toggle_button.setStyleSheet("""
+            QPushButton {
+                min-width: 60px;   max-width: 60px;
+                min-height: 28px;  max-height: 28px;
+                border-radius: 14px;
+                background-color: #ccc;
+                border: 1px solid #999;
+            }
+            QPushButton:checked {
+                background-color: #66bb6a; /* A greenish color */
+            }
+        """)
+        basic_form.addRow("Aperture Type:", self.pupil_toggle_button)
 
+        # Store labels for vanes, vane width, and obstruction.
+        self.radius_label = QLabel("Pupil Radius:")
         self.radius_spin = CustomDoubleSpinBox(minimum=1.0, maximum=512.0, initial=128.0, step=1.0)
-        basic_form.addRow("Pupil Radius:", self.radius_spin)
+        basic_form.addRow(self.radius_label, self.radius_spin)
 
+        self.obstruction_label = QLabel("Obstruction:")
+        self.obstruction_spin = CustomDoubleSpinBox(minimum=0.0, maximum=0.99, initial=0.2, step=0.05)
+        basic_form.addRow(self.obstruction_label, self.obstruction_spin)
+
+        self.num_vanes_label = QLabel("Number of Vanes:")
+        self.num_vanes_spin = CustomSpinBox(minimum=2, maximum=8, initial=2, step=1)
+        basic_form.addRow(self.num_vanes_label, self.num_vanes_spin)
+
+        self.vane_width_label = QLabel("Vane Width:")
         self.vane_width_spin = CustomDoubleSpinBox(minimum=0.1, maximum=50.0, initial=4.0, step=0.5)
-        basic_form.addRow("Vane Width:", self.vane_width_spin)
+        basic_form.addRow(self.vane_width_label, self.vane_width_spin)
 
-        # --- New: Rotation angle for star spikes ---
+        # New: Rotation angle.
         self.rotation_spin = CustomDoubleSpinBox(minimum=0.0, maximum=360.0, initial=0.0, step=1.0)
         basic_form.addRow("Rotation Angle (deg):", self.rotation_spin)
+
+        # The Color Boost control is now in basic UI.
+        self.color_boost_spin = CustomDoubleSpinBox(minimum=0.1, maximum=10.0, initial=1.5, step=0.1)
+        basic_form.addRow("Spike Boost:", self.color_boost_spin)
 
         self.blur_sigma_spin = CustomDoubleSpinBox(minimum=0.1, maximum=10.0, initial=2.0, step=0.1)
         basic_form.addRow("PSF Blur Sigma:", self.blur_sigma_spin)
 
-        self.detect_thresh_spin = CustomDoubleSpinBox(minimum=0.0, maximum=100.0, initial=5.0, step=0.1)
-        basic_form.addRow("Detect Threshold:", self.detect_thresh_spin)
-
+        # Remove Detect Threshold from basic form (will be in advanced)
+        # And we already have Flux Min here.
         self.flux_min_spin = CustomDoubleSpinBox(minimum=0.0, maximum=999999.0, initial=30.0, step=10.0)
         basic_form.addRow("Flux Min:", self.flux_min_spin)
 
         main_layout.addLayout(basic_form)
 
-        # Advanced Options button (instead of an embedded group box)
+        # Advanced Options button.
         self.adv_options_btn = QPushButton("Advanced Options...")
         self.adv_options_btn.setToolTip("Configure advanced parameters")
         self.adv_options_btn.clicked.connect(self._show_advanced_options)
         main_layout.addWidget(self.adv_options_btn)
 
-        # Buttons: Generate and Save to Slot
+        # Buttons: Generate Spikes and Save to Slot.
         btn_layout = QHBoxLayout()
         self.run_button = QPushButton("Generate Spikes")
         self.run_button.clicked.connect(self._run_spikes)
@@ -23596,14 +23616,15 @@ class StarSpikeTool(QDialog):
         btn_layout.addWidget(self.save_button)
         main_layout.addLayout(btn_layout)
 
-        # Progress Bar
+        # Progress Bar.
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         main_layout.addWidget(self.progress_bar)
+        # Status label at the bottom.
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.status_label)
-        # Help Button
+        # Help Button.
         self.help_button = QPushButton("Help")
         self.help_button.setToolTip("Click to view an example diagram of the telescope aperture and PSF parameters.")
         self.help_button.clicked.connect(self._show_aperture_help)
@@ -23611,12 +23632,40 @@ class StarSpikeTool(QDialog):
 
         self.setLayout(main_layout)
 
+        # Initialize state of advanced controls based on pupil type.
+        self._on_pupil_toggle(self.pupil_toggle_button.isChecked())
+
+
+    def _on_pupil_toggle(self, checked: bool):
+        """
+        When toggled, if checked (JWST mode) hide the controls that are not applicable.
+        Otherwise, show them.
+        """
+        if checked:
+            self.pupil_toggle_button.setText("JWST")
+            self.num_vanes_label.hide()
+            self.num_vanes_spin.hide()
+            self.vane_width_label.hide()
+            self.vane_width_spin.hide()
+            self.obstruction_label.hide()
+            self.obstruction_spin.hide()
+            # Optionally, you might hide the pupil radius control as well if fixed.
+            self.radius_spin.hide()
+        else:
+            self.pupil_toggle_button.setText("Circular")
+            self.num_vanes_label.show()
+            self.num_vanes_spin.show()
+            self.vane_width_label.show()
+            self.vane_width_spin.show()
+            self.obstruction_label.show()
+            self.obstruction_spin.show()
+            self.radius_spin.show()
+
     def _show_advanced_options(self):
         """Opens a popup dialog for advanced options."""
         dialog = AdvancedOptionsDialog(parent=self, initial_values=self.advanced_params)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.advanced_params = dialog.get_values()
-            # Optionally update UI or print the new values for debugging:
             print("Advanced parameters updated:")
             print(self.advanced_params)
 
@@ -23657,14 +23706,14 @@ class StarSpikeTool(QDialog):
         radius      = self.radius_spin.value()
         vane_width  = self.vane_width_spin.value()
         rotation     = self.rotation_spin.value()  # New: rotation angle in degrees
-        detect_thresh= self.detect_thresh_spin.value()
+        detect_thresh= self.advanced_params.get('detect_thresh', 5.0)
         flux_min     = self.flux_min_spin.value()
         flux_max   = self.advanced_params.get('flux_max', 300.0)
         bscale_min = self.advanced_params.get('bscale_min', 10.0)
         bscale_max = self.advanced_params.get('bscale_max', 30.0)
         shrink_min = self.advanced_params.get('shrink_min', 1.0)
         shrink_max = self.advanced_params.get('shrink_max', 5.0)
-        color_boost = self.advanced_params.get('color_boost', 1.5)
+        color_boost = self.color_boost_spin.value()
 
         # 3) "un-stretch" with midtones(0.95)
         if self._image_data.ndim == 3:
@@ -23856,22 +23905,63 @@ class StarSpikeTool(QDialog):
 
     def _make_pupil(self, size=512, radius=100, obstruction=0.3, vane_width=2, num_vanes=4, rotation=0):
         """
-        Create a pupil (aperture mask) with a central obstruction and diffraction vanes.
-        The vane pattern is rotated by 'rotation' degrees.
+        Creates a pupil (aperture mask) based on the selected pupil type.
+        If the pupil_type_slider value is >= 50, uses the JWST pupil.
+        Otherwise, generates a standard circular pupil with diffraction vanes.
+        The 'rotation' argument rotates the vane pattern.
         """
-        y, x = np.indices((size, size)) - size // 2
-        r = np.sqrt(x**2 + y**2)
-        pupil = (r <= radius).astype(np.float32)
-        pupil[r < radius * obstruction] = 0.0
-        if num_vanes >= 2:
-            # Convert rotation angle from degrees to radians.
-            rotation_radians = np.deg2rad(rotation)
-            # Create vane angles with the given rotation offset.
-            for angle in np.linspace(0, np.pi, num_vanes, endpoint=False) + rotation_radians:
-                xp = x * np.cos(angle) + y * np.sin(angle)
-                vane = np.abs(xp) < vane_width
-                pupil[vane] = 0.0
-        return pupil
+        # Use the slider value instead of a checkbox.
+        if self.pupil_toggle_button.isChecked():
+            # JWST pupil from a PNG
+            return self._load_pupil_from_png(jwstpupil_path, size=size, rotation=rotation)
+        else:
+            # Build a standard circular pupil.
+            y, x = np.indices((size, size)) - size // 2
+            r = np.sqrt(x**2 + y**2)
+            pupil = (r <= radius).astype(np.float32)
+            pupil[r < radius * obstruction] = 0.0
+            if num_vanes >= 2:
+                rotation_radians = np.deg2rad(rotation)
+                for angle in np.linspace(0, np.pi, num_vanes, endpoint=False) + rotation_radians:
+                    xp = x * np.cos(angle) + y * np.sin(angle)
+                    vane = np.abs(xp) < vane_width
+                    pupil[vane] = 0.0
+            return pupil
+
+    def _load_pupil_from_png(self, filepath, size=1024, rotation=0.0):
+        """
+        Loads a JWST pupil mask from a PNG file using OpenCV.
+
+        Args:
+            filepath (str): The path to the JWST pupil PNG file.
+            size (int): The desired output size (size x size).
+            rotation (float): Rotation angle in degrees. Positive values rotate counterclockwise.
+
+        Returns:
+            np.ndarray: A (size x size) float32 array with values normalized to [0, 1].
+        """
+        # Load the image in grayscale
+        img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError(f"Failed to load image from {filepath}")
+        
+        # Normalize to [0, 1] (assuming white = open, black = blocked)
+        img = img.astype(np.float32) / 255.0
+
+        # Resize if necessary
+        if img.shape != (size, size):
+            img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+        
+        # Apply rotation if needed
+        if abs(rotation) > 1e-3:
+            center = (size // 2, size // 2)
+            # Get the rotation matrix. Note that cv2.getRotationMatrix2D expects rotation in degrees.
+            M = cv2.getRotationMatrix2D(center, rotation, 1.0)
+            img = cv2.warpAffine(img, M, (size, size), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        
+        return img
+
 
     def _simulate_psf(self, pupil, wavelength_scale=1.0, blur_sigma=1.0):
         # Apply a Gaussian blur to the pupil to simulate wavelength-dependent phase variations.
