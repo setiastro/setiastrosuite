@@ -227,7 +227,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.1"
+VERSION = "2.14.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -287,6 +287,7 @@ if hasattr(sys, '_MEIPASS'):
     starspike_path = os.path.join(sys._MEIPASS, 'starspike.png')
     aperture_path = os.path.join(sys._MEIPASS, 'aperture.png')
     jwstpupil_path = os.path.join(sys._MEIPASS, 'jwstpupil.png')
+    signature_icon_path = os.path.join(sys._MEIPASS, 'pen.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -344,6 +345,7 @@ else:
     starspike_path = 'starspike.png'
     aperture_path = 'aperture.png'
     jwstpupil_path = 'jwstpupil.png'
+    signature_icon_path = 'pen.png'
 
 
 class AstroEditingSuite(QMainWindow):
@@ -615,7 +617,13 @@ class AstroEditingSuite(QMainWindow):
         pixel_math_action = QAction(QIcon(pixelmath_path), "Pixel Math", self)
         pixel_math_action.setStatusTip("Perform pixel math operations on the current image")
         pixel_math_action.triggered.connect(self.open_pixel_math_dialog)
-        functions_menu.addAction(pixel_math_action)             
+        functions_menu.addAction(pixel_math_action)         
+
+        self.signature_insert_action = QAction(QIcon(signature_icon_path), "Signature/Insert", self)
+        self.signature_insert_action.setStatusTip("Open Signature/Insert tool")
+        self.signature_insert_action.triggered.connect(self.open_signature_insert_window)
+        functions_menu.addAction(self.signature_insert_action)
+        
 
         # --------------------
         # Geometry Menu
@@ -960,6 +968,8 @@ class AstroEditingSuite(QMainWindow):
 
         toolbar.addAction(pixel_math_action)
 
+        toolbar.addAction(self.signature_insert_action)        
+
         geometrybar = QToolBar("Geometry Toolbar")
 
         geometrybar.addAction(invert_action)
@@ -1204,6 +1214,10 @@ class AstroEditingSuite(QMainWindow):
         # Update the active image using the image manager.
         self.image_manager.set_image(new_image, metadata)
         QMessageBox.information(self, "Pedestal Removal", "Pedestal removal completed.")
+
+    def open_signature_insert_window(self):
+        self.signature_insert_window = SignatureInsertWindow(self.image_manager, parent=self)
+        self.signature_insert_window.show()
 
 
 
@@ -23744,9 +23758,9 @@ class StarSpikeTool(QDialog):
                                       vane_width=vane_width,
                                       num_vanes=num_vanes,
                                       rotation=rotation) 
-        psf_r = self._simulate_psf(big_pupil, wavelength_scale=1.1, blur_sigma=blur_sigma)
+        psf_r = self._simulate_psf(big_pupil, wavelength_scale=1.15, blur_sigma=blur_sigma)
         psf_g = self._simulate_psf(big_pupil, wavelength_scale=1.0, blur_sigma=blur_sigma)
-        psf_b = self._simulate_psf(big_pupil, wavelength_scale=0.9, blur_sigma=blur_sigma)
+        psf_b = self._simulate_psf(big_pupil, wavelength_scale=0.85, blur_sigma=blur_sigma)
 
 
         # 6) Multi-thread star overlay
@@ -26236,6 +26250,363 @@ class PixelMathDialog(QDialog):
             return result
         else:
             return result  # Could be scalar or ndarray
+
+class TransformHandle(QGraphicsEllipseItem):
+    def __init__(self, parent_item, scene):
+        super().__init__(-5, -5, 10, 10)
+        self.parent_item = parent_item
+        self.scene = scene
+
+        self.setBrush(QColor("blue"))
+        self.setPen(QPen(Qt.PenStyle.SolidLine))
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setZValue(2)
+
+        self.initial_distance = None
+        self.initial_angle = None
+        self.initial_scale = parent_item.scale()
+
+        self.scene.addItem(self)
+        self.update_position()
+
+    def update_position(self):
+        # Pin to top-right of parent item in scene coordinates
+        corner = self.parent_item.boundingRect().topRight()
+        scene_corner = self.parent_item.mapToScene(corner)
+        self.setPos(scene_corner)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            center = self.parent_item.mapToScene(self.parent_item.boundingRect().center())
+            new_pos = value
+            delta = new_pos - center
+            distance = math.hypot(delta.x(), delta.y())
+
+            if self.initial_distance is None:
+                self.initial_distance = distance
+                self.initial_angle = math.degrees(math.atan2(delta.y(), delta.x()))
+                self.initial_scale = self.parent_item.scale()
+                return value
+
+            # Scale
+            scale_factor = distance / self.initial_distance
+            scale = max(0.05, self.initial_scale * scale_factor)
+            self.parent_item.setScale(scale)
+
+            # Rotation
+            angle = math.degrees(math.atan2(delta.y(), delta.x()))
+            rotation = angle - self.initial_angle
+            self.parent_item.setRotation(rotation)
+
+        return super().itemChange(change, value)
+
+class InsertView(QGraphicsView):
+    def __init__(self, scene, parent_window):
+        super().__init__(scene)
+        self.parent_window = parent_window
+
+    def contextMenuEvent(self, event):
+        scene_pos = self.mapToScene(event.pos())
+        item = self.scene().itemAt(scene_pos, self.transform())
+        if isinstance(item, QGraphicsPixmapItem) and item in self.parent_window.inserts:
+            menu = QMenu(self)
+            positions = {
+                "Top-Left": "top_left",
+                "Top-Center": "top_center",
+                "Top-Right": "top_right",
+                "Middle-Left": "middle_left",
+                "Center": "center",
+                "Middle-Right": "middle_right",
+                "Bottom-Left": "bottom_left",
+                "Bottom-Center": "bottom_center",
+                "Bottom-Right": "bottom_right"
+            }
+            for label, key in positions.items():
+                menu.addAction(label, lambda k=key, i=item: self.parent_window.send_insert_to_position(i, k))
+            menu.exec(event.globalPos())
+        else:
+            super().contextMenuEvent(event)
+
+
+class SignatureInsertWindow(QMainWindow):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)  # Pass parent to super
+        self.image_manager = image_manager
+        self.setWindowTitle("Signature / Insert")
+        self.setWindowIcon(QIcon(signature_icon_path))
+        self.scene = QGraphicsScene(self)
+        self.view = InsertView(self.scene, self)
+        self.inserts = []
+
+        # Sync timer for handle positioning
+        self.sync_timer = QTimer()
+        self.sync_timer.timeout.connect(self.sync_handles)
+        self.sync_timer.start(16)
+
+        # Set up UI
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        self.initUI(central)
+        self.resize(800, 600)
+
+    def initUI(self, parent):
+        layout = QHBoxLayout(parent)
+        controls = QVBoxLayout()
+
+        load_slot_btn = QPushButton("Load Insert from Slot")
+        load_slot_btn.clicked.connect(lambda: self.load_insert_source("slot"))
+        load_file_btn = QPushButton("Load Insert from File")
+        load_file_btn.clicked.connect(lambda: self.load_insert_source("file"))
+
+        rotate_btn = QPushButton("Rotate Selected 90°")
+        rotate_btn.clicked.connect(self.rotate_selected)
+
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scale_slider.setRange(10, 400)
+        self.scale_slider.setValue(100)
+        self.scale_slider.valueChanged.connect(self.scale_selected)
+
+        affix_btn = QPushButton("Affix Inserts")
+        affix_btn.clicked.connect(self.affix_inserts)
+        clear_btn = QPushButton("Clear All Inserts")
+        clear_btn.clicked.connect(self.clear_inserts)
+
+        controls.addWidget(load_slot_btn)
+        controls.addWidget(load_file_btn)
+        controls.addSpacing(10)
+        controls.addWidget(rotate_btn)
+        controls.addWidget(QLabel("Scale Selected (%)"))
+        controls.addWidget(self.scale_slider)
+        controls.addSpacing(10)
+        controls.addWidget(affix_btn)
+        controls.addWidget(clear_btn)
+        controls.addStretch(1)
+
+        container = QWidget()
+        container.setLayout(controls)
+        layout.addWidget(container)
+        layout.addWidget(self.view, stretch=1)
+        parent.setLayout(layout)
+
+        self.update_main_image()
+
+    def contextMenuEvent(self, event):
+        """Show right-click menu on an insert."""
+        item = self.scene.itemAt(self.view.mapToScene(event.pos()), self.view.transform())
+        if isinstance(item, QGraphicsPixmapItem) and item in self.inserts:
+            menu = QMenu(self)
+            positions = {
+                "Top-Left": "top_left",
+                "Top-Center": "top_center",
+                "Top-Right": "top_right",
+                "Middle-Left": "middle_left",
+                "Center": "center",
+                "Middle-Right": "middle_right",
+                "Bottom-Left": "bottom_left",
+                "Bottom-Center": "bottom_center",
+                "Bottom-Right": "bottom_right"
+            }
+            for label, pos_key in positions.items():
+                menu.addAction(label, lambda pk=pos_key, i=item: self.send_insert_to_position(i, pk))
+            menu.exec(event.globalPos())
+
+    def send_insert_to_position(self, item, position_key):
+        """Move insert to a specific location on the base image, respecting signature size."""
+        base_item = next((obj for obj in self.scene.items()
+                        if isinstance(obj, QGraphicsPixmapItem) and obj.zValue() == 0), None)
+        if not base_item:
+            return
+
+        base_rect = base_item.boundingRect()
+        item_rect = item.boundingRect()
+        item_size = item_rect.size()
+
+        # Compute target top-left point inside the base image
+        if position_key == "top_left":
+            target = base_rect.topLeft()
+        elif position_key == "top_center":
+            target = QPointF(base_rect.center().x() - item_size.width() / 2, base_rect.top())
+        elif position_key == "top_right":
+            target = QPointF(base_rect.right() - item_size.width(), base_rect.top())
+        elif position_key == "middle_left":
+            target = QPointF(base_rect.left(), base_rect.center().y() - item_size.height() / 2)
+        elif position_key == "center":
+            target = QPointF(base_rect.center().x() - item_size.width() / 2,
+                            base_rect.center().y() - item_size.height() / 2)
+        elif position_key == "middle_right":
+            target = QPointF(base_rect.right() - item_size.width(),
+                            base_rect.center().y() - item_size.height() / 2)
+        elif position_key == "bottom_left":
+            target = QPointF(base_rect.left(), base_rect.bottom() - item_size.height())
+        elif position_key == "bottom_center":
+            target = QPointF(base_rect.center().x() - item_size.width() / 2,
+                            base_rect.bottom() - item_size.height())
+        elif position_key == "bottom_right":
+            target = QPointF(base_rect.right() - item_size.width(),
+                            base_rect.bottom() - item_size.height())
+        else:
+            return  # Unknown key
+
+        # Convert target to scene coordinates
+        new_scene_pos = base_item.mapToScene(target)
+        item.setPos(new_scene_pos)
+
+
+    def sync_handles(self):
+        for item in self.scene.items():
+            if isinstance(item, TransformHandle):
+                item.update_position()
+
+    def update_main_image(self):
+        self.scene.clear()
+        arr = self.image_manager.image
+        if arr is None:
+            return
+        qimg = self.numpy_to_qimage(arr)
+        pix = QPixmap.fromImage(qimg)
+        item = QGraphicsPixmapItem(pix)
+        item.setZValue(0)
+        self.scene.addItem(item)
+
+    def load_insert_source(self, source):
+        if source == "file":
+            path, _ = QFileDialog.getOpenFileName(self, "Select Insert Image", "", "Images (*.png *.tif *.tiff)")
+        else:
+            slots = [f"Slot {i}" for i in range(self.image_manager.max_slots)]
+            # Get slot names from parent if available
+            if self.parent() and hasattr(self.parent(), "slot_names"):
+                slot_names = self.parent().slot_names
+            else:
+                slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+
+            # Build list of user-facing slot names
+            display_names = [slot_names.get(i, f"Slot {i}") for i in range(self.image_manager.max_slots)]
+
+            choice, ok = QInputDialog.getItem(self, "Select Slot", "Choose slot:", display_names, False)
+            if not ok:
+                return
+
+            # Convert chosen name back to index
+            idx = display_names.index(choice)
+            metadata = self.image_manager._metadata.get(idx, {})
+            path = metadata.get("file_path", None)
+
+        if not path:
+            return
+
+        pixmap = QPixmap(path)
+        item = QGraphicsPixmapItem(pixmap)
+        item.setFlags(
+            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsPixmapItem.GraphicsItemFlag.ItemIsFocusable |
+            QGraphicsPixmapItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        item.setTransformOriginPoint(item.boundingRect().center())
+        item.setZValue(1)
+
+        self.scene.addItem(item)
+        self.inserts.append(item)
+        TransformHandle(item, self.scene)
+
+    def rotate_selected(self):
+        for it in self.inserts:
+            if it.isSelected():
+                it.setRotation(it.rotation() + 90)
+
+    def scale_selected(self, value):
+        factor = value / 100.0
+        for it in self.inserts:
+            if it.isSelected():
+                it.setScale(factor)
+
+    def affix_inserts(self):
+        """Bake inserts into the main image and clear overlays."""
+        if not self.inserts:
+            QMessageBox.information(self, "No Inserts", "There are no inserts to affix.")
+            return
+
+        # 1. Filter items: background + inserts only
+        relevant_items = []
+        for item in self.scene.items():
+            if isinstance(item, QGraphicsPixmapItem) and (item in self.inserts or item.zValue() == 0):
+                relevant_items.append(item)
+
+        # 2. Compute bounding rect of relevant items
+        bounding_rect = QRectF()
+        for item in relevant_items:
+            bounding_rect = bounding_rect.united(item.sceneBoundingRect())
+
+        bounding_rect = bounding_rect.normalized()
+        x = int(bounding_rect.left())
+        y = int(bounding_rect.top())
+        width = int(bounding_rect.right()) - x
+        height = int(bounding_rect.bottom()) - y
+
+        # 3. Temporarily hide non-relevant items
+        hidden_items = []
+        for item in self.scene.items():
+            if item not in relevant_items:
+                item.setVisible(False)
+                hidden_items.append(item)
+
+        # 4. Create target QImage and QPainter
+        img = QImage(width, height, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(img)
+
+        # 5. Render scene contents to QImage
+        self.scene.render(painter,
+                        target=QRectF(0, 0, width, height),
+                        source=QRectF(x, y, width, height))
+        painter.end()
+
+        # 6. Restore hidden items
+        for item in hidden_items:
+            item.setVisible(True)
+
+        # 7. Convert to NumPy and push to ImageManager (trim alpha)
+        arr = self.qimage_to_numpy(img)
+        if arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+
+        slot = self.image_manager.current_slot
+        metadata = self.image_manager._metadata.get(slot, {})
+        self.image_manager.set_image(arr, metadata)
+
+        # 8. Cleanup overlays
+        self.clear_inserts()
+        self.update_main_image()
+
+
+    def clear_inserts(self):
+        for it in self.inserts:
+            self.scene.removeItem(it)
+        self.inserts.clear()
+
+    def numpy_to_qimage(self, arr):
+        arr = np.clip(arr, 0.0, 1.0)
+        arr = (arr * 255).astype(np.uint8)
+        h, w = arr.shape[:2]
+        if arr.ndim == 2:
+            return QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+        elif arr.shape[2] == 3:
+            return QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+        elif arr.shape[2] == 4:
+            return QImage(arr.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
+        raise ValueError(f"Unsupported shape: {arr.shape}")
+
+    def qimage_to_numpy(self, img):
+        img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        w, h = img.width(), img.height()
+        ptr = img.bits()
+        ptr.setsize(h * img.bytesPerLine())
+        arr = np.frombuffer(ptr, np.uint8).reshape((h, img.bytesPerLine()))
+        arr = arr[:, :w * 4].reshape((h, w, 4))
+        return arr.astype(np.float32) / 255.0
 
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
