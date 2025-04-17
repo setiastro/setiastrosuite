@@ -1,9 +1,9 @@
 {
-  "version": "2.14.1",
+  "version": "2.14.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Diffraction Spike Tool.  Simulate diffraction spikes on your stars by passing the stellar flux through a simulated telescope aperture.  Added JWST NIRCam alignment image to create realistic JWST diffraction patterns"
+  "notes": "New Function: Signature and Insert Adder"
 }
