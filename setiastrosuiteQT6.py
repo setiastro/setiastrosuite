@@ -8538,6 +8538,30 @@ class StackingSuiteDialog(QDialog):
             self.reference_frame = file_path
             self.ref_frame_path.setText(os.path.basename(file_path))
 
+    def clear_tree_selection(self, tree, file_dict):
+        """Clears selected items from a simple (non-tuple-keyed) tree like Master Darks or Darks tab."""
+        selected_items = tree.selectedItems()
+        if not selected_items:
+            return
+
+        for item in selected_items:
+            parent = item.parent()
+            if parent is None:
+                # Top-level group item
+                key = item.text(0)
+                if key in file_dict:
+                    del file_dict[key]
+                tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+            else:
+                # Child item
+                key = parent.text(0)
+                filename = item.text(0)
+                if key in file_dict:
+                    file_dict[key] = [f for f in file_dict[key] if os.path.basename(f) != filename]
+                    if not file_dict[key]:
+                        del file_dict[key]
+                parent.removeChild(item)
+
 
     def clear_tree_selection_light(self, tree):
         """Clears the selection in the light tree and updates self.light_files accordingly."""
