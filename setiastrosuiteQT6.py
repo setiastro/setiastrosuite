@@ -227,7 +227,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.2"
+VERSION = "2.14.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -7406,7 +7406,7 @@ class StackingSuiteDialog(QDialog):
         self.manual_flat_overrides = {}
         self.conversion_output_directory = None
         self.reg_files = {}
-
+        self.session_tags = {}  # 🔑 file_path => session_tag (e.g., "Session1", "Blue Flats", etc.)
 
         # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
@@ -8118,6 +8118,8 @@ class StackingSuiteDialog(QDialog):
         self.flat_tree.setColumnCount(3)  # Added 3rd column for Master Dark Used
         self.flat_tree.setHeaderLabels(["Filter & Exposure", "Metadata", "Master Dark Used"])
         self.flat_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.flat_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.flat_tree.customContextMenuRequested.connect(self.flat_tree_context_menu)
         flat_frames_layout.addWidget(self.flat_tree)
 
         # Buttons to Add Flat Files & Directories
@@ -8129,6 +8131,10 @@ class StackingSuiteDialog(QDialog):
         btn_layout.addWidget(self.add_flat_files_btn)
         btn_layout.addWidget(self.add_flat_dir_btn)
         flat_frames_layout.addLayout(btn_layout)
+        # 🔧 Session Tag Hint
+        session_hint_label = QLabel("Right Click to Assign Session Keys if desired")
+        session_hint_label.setStyleSheet("color: #888; font-style: italic; font-size: 11px; margin-left: 4px;")
+        flat_frames_layout.addWidget(session_hint_label)
 
         # Add "Clear Selection" button for Flat Frames
         self.clear_flat_selection_btn = QPushButton("Clear Selection")
@@ -8197,6 +8203,7 @@ class StackingSuiteDialog(QDialog):
         self.master_flat_tree.setColumnCount(2)
         self.master_flat_tree.setHeaderLabels(["Filter", "Master File"])
         self.master_flat_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        
         main_layout.addWidget(self.master_flat_tree)
 
         # Master Flat Selection Button
@@ -8210,6 +8217,15 @@ class StackingSuiteDialog(QDialog):
 
         return tab
 
+    def flat_tree_context_menu(self, position):
+        item = self.flat_tree.itemAt(position)
+        if item:
+            menu = QMenu()
+            set_session_action = menu.addAction("Set Session Tag")
+            action = menu.exec(self.flat_tree.viewport().mapToGlobal(position))
+            if action == set_session_action:
+                self.prompt_set_session(item, "flat")
+
     def create_light_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -8219,6 +8235,7 @@ class StackingSuiteDialog(QDialog):
         self.light_tree.setColumnCount(5)  # Added columns for Master Dark and Flat
         self.light_tree.setHeaderLabels(["Filter & Exposure", "Metadata", "Master Dark", "Master Flat", "Corrections"])
         self.light_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
         layout.addWidget(QLabel("Light Frames"))
         layout.addWidget(self.light_tree)
 
@@ -8231,6 +8248,9 @@ class StackingSuiteDialog(QDialog):
         btn_layout.addWidget(self.add_light_files_btn)
         btn_layout.addWidget(self.add_light_dir_btn)
         layout.addLayout(btn_layout)
+        session_hint_label = QLabel("Right Click to Assign Session Keys if desired")
+        session_hint_label.setStyleSheet("color: #888; font-style: italic; font-size: 11px; margin-left: 4px;")
+        layout.addWidget(session_hint_label)
 
         clear_selection_btn = QPushButton("Remove Selected")
         clear_selection_btn.clicked.connect(lambda: self.clear_tree_selection_light(self.light_tree))
@@ -8252,7 +8272,7 @@ class StackingSuiteDialog(QDialog):
         pedestal_layout.addWidget(self.pedestal_spinbox)
         layout.addLayout(pedestal_layout)        
 
-        # ✅ Add Tooltip to Bias Checkbox
+        # Tooltip for Bias Checkbox
         self.bias_checkbox.setToolTip(
             "CMOS users: Bias Subtraction is not needed.\n"
             "Modern CMOS cameras use Correlated Double Sampling (CDS),\n"
@@ -8274,12 +8294,10 @@ class StackingSuiteDialog(QDialog):
         # --- RIGHT SIDE CONTROLS: Override Dark & Flat ---
         override_layout = QHBoxLayout()
 
-        # Override Dark Frame Button
         self.override_dark_btn = QPushButton("Override Dark Frame")
         self.override_dark_btn.clicked.connect(self.override_selected_master_dark)
         override_layout.addWidget(self.override_dark_btn)
 
-        # Override Flat Frame Button
         self.override_flat_btn = QPushButton("Override Flat Frame")
         self.override_flat_btn.clicked.connect(self.override_selected_master_flat)
         override_layout.addWidget(self.override_flat_btn)
@@ -8309,6 +8327,74 @@ class StackingSuiteDialog(QDialog):
         self.light_tree.customContextMenuRequested.connect(self.light_tree_context_menu)
 
         return tab
+
+
+
+    def prompt_set_session(self, item, frame_type):
+        text, ok = QInputDialog.getText(self, "Set Session Tag", "Enter session name:")
+        if not (ok and text.strip()):
+            return
+
+        session_name = text.strip()
+        is_flat = frame_type.upper() == "FLAT"
+        tree = self.flat_tree if is_flat else self.light_tree
+        target_dict = self.flat_files if is_flat else self.light_files
+
+        selected_items = tree.selectedItems()
+
+        def update_file_session(filename, widget_item):
+            for key in list(target_dict.keys()):
+                if isinstance(key, tuple) and len(key) == 2:
+                    group_key, old_session = key
+                else:
+                    continue  # Skip malformed keys
+
+                files = target_dict.get(key, [])
+                for f in list(files):
+                    if os.path.basename(f) == filename:
+                        if old_session != session_name:
+                            new_key = (group_key, session_name)
+                            if new_key not in target_dict:
+                                target_dict[new_key] = []
+                            target_dict[new_key].append(f)
+                            target_dict[key].remove(f)
+                            if not target_dict[key]:
+                                del target_dict[key]
+
+                        # Update internal session tag
+                        self.session_tags[f] = session_name
+
+                        # Update leaf's metadata column
+                        old_meta = widget_item.text(1)
+                        if "Session:" in old_meta:
+                            new_meta = re.sub(r"Session: [^|]*", f"Session: {session_name}", old_meta)
+                        else:
+                            new_meta = f"{old_meta} | Session: {session_name}"
+                        widget_item.setText(1, new_meta)
+                        return
+
+        def recurse_all_leaf_items(parent_item):
+            for i in range(parent_item.childCount()):
+                child = parent_item.child(i)
+                if child.childCount() == 0:
+                    update_file_session(child.text(0), child)
+                else:
+                    recurse_all_leaf_items(child)
+
+        # Case 1: Multi-leaf selection (e.g. Shift/Ctrl-click)
+        if selected_items and any(i.childCount() == 0 for i in selected_items):
+            for leaf in selected_items:
+                if leaf.childCount() == 0:
+                    update_file_session(leaf.text(0), leaf)
+
+        # Case 2: Right-clicked on a group (e.g. filter+exposure node)
+        elif item and item.childCount() > 0:
+            recurse_all_leaf_items(item)
+
+        # ✅ Reassign matching master flats/darks per leaf
+        self.assign_best_master_files()
+
+
 
 
 
@@ -8462,38 +8548,41 @@ class StackingSuiteDialog(QDialog):
         for item in selected_items:
             parent = item.parent()
             if parent is None:
-                # Top-level filter node selected.
+                # Top-level filter node selected
                 filter_name = item.text(0)
-                # Remove all groups whose keys start with "Filter - "
+                # Remove all composite keys whose group_key starts with filter_name
                 keys_to_remove = [key for key in list(self.light_files.keys())
-                                if key.startswith(f"{filter_name} - ")]
+                                if isinstance(key, tuple) and key[0].startswith(f"{filter_name} - ")]
                 for key in keys_to_remove:
                     del self.light_files[key]
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
             else:
-                # Either a child (exposure node) or a grandchild (file node) is selected.
                 if parent.parent() is None:
-                    # Child node selected: this is an exposure node.
-                    # Its parent is the filter.
+                    # Exposure node selected (child)
                     filter_name = parent.text(0)
                     exposure_text = item.text(0)
                     group_key = f"{filter_name} - {exposure_text}"
-                    if group_key in self.light_files:
-                        del self.light_files[group_key]
+                    keys_to_remove = [key for key in list(self.light_files.keys())
+                                    if isinstance(key, tuple) and key[0] == group_key]
+                    for key in keys_to_remove:
+                        del self.light_files[key]
                     parent.removeChild(item)
                 else:
-                    # Grandchild node selected: this is a file node.
+                    # Grandchild file node selected
                     filter_name = parent.parent().text(0)
                     exposure_text = parent.text(0)
                     group_key = f"{filter_name} - {exposure_text}"
                     filename = item.text(0)
-                    if group_key in self.light_files:
-                        self.light_files[group_key] = [
-                            f for f in self.light_files[group_key]
-                            if os.path.basename(f) != filename
+
+                    keys_to_check = [key for key in list(self.light_files.keys())
+                                    if isinstance(key, tuple) and key[0] == group_key]
+
+                    for key in keys_to_check:
+                        self.light_files[key] = [
+                            f for f in self.light_files[key] if os.path.basename(f) != filename
                         ]
-                        if not self.light_files[group_key]:
-                            del self.light_files[group_key]
+                        if not self.light_files[key]:
+                            del self.light_files[key]
                     parent.removeChild(item)
 
     def clear_tree_selection_flat(self, tree, file_dict):
@@ -8504,31 +8593,36 @@ class StackingSuiteDialog(QDialog):
 
         for item in selected_items:
             parent = item.parent()
+
             if parent:
-                # For items at the grandchild level (file items)
-                # In the flats tab, the structure is:
-                #   Top-level: filter name (e.g., "R")
-                #   Child: exposure (e.g., "0.5s (8288x5644)")
-                #   Grandchild: file item (filename)
+                # Grandchild level (actual file)
                 if parent.parent() is not None:
-                    group_key = f"{parent.parent().text(0)} - {parent.text(0)}"
+                    filter_name = parent.parent().text(0)
+                    exposure_text = parent.text(0)
+                    group_key = f"{filter_name} - {exposure_text}"
                 else:
-                    group_key = parent.text(0)
+                    # Exposure level
+                    filter_name = parent.text(0)
+                    exposure_text = item.text(0)
+                    group_key = f"{filter_name} - {exposure_text}"
+
                 filename = item.text(0)
-                if group_key in file_dict:
-                    file_dict[group_key] = [
-                        f for f in file_dict[group_key]
-                        if os.path.basename(f) != filename
-                    ]
-                    if not file_dict[group_key]:
-                        del file_dict[group_key]
+
+                # Remove from all matching (group_key, session) tuples
+                keys_to_check = [key for key in list(file_dict.keys())
+                                if isinstance(key, tuple) and key[0] == group_key]
+
+                for key in keys_to_check:
+                    file_dict[key] = [f for f in file_dict[key] if os.path.basename(f) != filename]
+                    if not file_dict[key]:
+                        del file_dict[key]
+
                 parent.removeChild(item)
             else:
-                # Top-level item selected (e.g. a filter name)
-                # In flats, the keys are compound: "Filter - Exposure (WxH)"
-                group_text = item.text(0)
-                # Remove all keys starting with "group_text - "
-                keys_to_remove = [key for key in list(file_dict.keys()) if key.startswith(group_text + " - ")]
+                # Top-level (filter group) selected
+                filter_name = item.text(0)
+                keys_to_remove = [key for key in list(file_dict.keys())
+                                if isinstance(key, tuple) and key[0].startswith(f"{filter_name} - ")]
                 for key in keys_to_remove:
                     del file_dict[key]
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
@@ -9002,47 +9096,64 @@ class StackingSuiteDialog(QDialog):
 
             elif expected_type.upper() == "FLAT":
                 filter_name = header.get("FILTER", "Unknown")
-                key = f"{filter_name} - {exposure_val} ({image_size})"
-                if key not in self.flat_files:
-                    self.flat_files[key] = []
-                self.flat_files[key].append(file_path)
+                flat_key = f"{filter_name} - {exposure_val} ({image_size})"
+                session_tag = "Default"  # 🔧 Will be replaced with user-defined value in Step 2
+                composite_key = (flat_key, session_tag)
 
+                if composite_key not in self.flat_files:
+                    self.flat_files[composite_key] = []
+                self.flat_files[composite_key].append(file_path)
+
+
+                # Tree UI update
                 filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
                 if not filter_items:
                     filter_item = QTreeWidgetItem([filter_name])
                     tree.addTopLevelItem(filter_item)
                 else:
                     filter_item = filter_items[0]
+
                 exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
                 exposure_item = next((item for item in exposure_items
                                     if item.text(0) == f"{exposure_val} ({image_size})"), None)
                 if not exposure_item:
                     exposure_item = QTreeWidgetItem([f"{exposure_val} ({image_size})"])
                     filter_item.addChild(exposure_item)
-                metadata = f"Size: {image_size}"
+
+                metadata = f"Size: {image_size} | Session: {session_tag}"
                 exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
 
             elif expected_type.upper() == "LIGHT":
                 filter_name = header.get("FILTER", "Unknown")
-                key = f"{filter_name} - {exposure_val} ({image_size})"
-                if key not in self.light_files:
-                    self.light_files[key] = []
-                self.light_files[key].append(file_path)
+                session_tag = self.session_tags.get(file_path, "Default")  # ⭐️ Step 1: Get session label
 
+                light_key = f"{filter_name} - {exposure_val} ({image_size})"
+                composite_key = (light_key, session_tag)
+
+                if composite_key not in self.light_files:
+                    self.light_files[composite_key] = []
+                self.light_files[composite_key].append(file_path)
+
+                # Update Tree UI
                 filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
                 if not filter_items:
                     filter_item = QTreeWidgetItem([filter_name])
                     tree.addTopLevelItem(filter_item)
                 else:
                     filter_item = filter_items[0]
+
                 exposure_items = [filter_item.child(i) for i in range(filter_item.childCount())]
                 exposure_item = next((item for item in exposure_items
                                     if item.text(0) == f"{exposure_val} ({image_size})"), None)
                 if not exposure_item:
                     exposure_item = QTreeWidgetItem([f"{exposure_val} ({image_size})"])
                     filter_item.addChild(exposure_item)
-                metadata = f"Size: {image_size}"
-                exposure_item.addChild(QTreeWidgetItem([os.path.basename(file_path), metadata]))
+
+                leaf_item = QTreeWidgetItem([os.path.basename(file_path), f"Size: {image_size} | Session: {session_tag}"])
+                exposure_item.addChild(leaf_item)
+                self.session_tags[file_path] = session_tag  # ✅ Store per-file session tag here
+
 
             self.update_status(f"✅ Added {os.path.basename(file_path)} as {expected_type}")
             QApplication.processEvents()
@@ -9080,9 +9191,17 @@ class StackingSuiteDialog(QDialog):
                     self.master_files[key] = file_path  # Store master dark
                     self.master_sizes[file_path] = image_size  # Store size
                 elif file_type.upper() == "FLAT":
-                    key = f"{filter_name} ({image_size})"
-                    self.master_files[key] = file_path  # Store master flat
-                    self.master_sizes[file_path] = image_size  # Store size
+                    # Attempt to extract session name from filename
+                    session_name = "Default"
+                    filename = os.path.basename(file_path)
+                    if filename.lower().startswith("masterflat_"):
+                        parts = filename.split("_")
+                        if len(parts) > 1:
+                            session_name = parts[1]
+
+                    key = f"{filter_name} ({image_size}) [{session_name}]"
+                    self.master_files[key] = file_path
+                    self.master_sizes[file_path] = image_size
 
                 # Extract additional metadata from header.
                 sensor_temp = header.get("CCD-TEMP", "N/A")
@@ -9485,9 +9604,6 @@ class StackingSuiteDialog(QDialog):
 
         print(f"✅ DEBUG: Override Master Dark set to: {new_dark}")
 
-
-
-
     def create_master_flat(self):
         """ Creates master flats using per-frame dark subtraction before stacking. """
 
@@ -9496,254 +9612,173 @@ class StackingSuiteDialog(QDialog):
             return
 
         exposure_tolerance = self.flat_exposure_tolerance_spinbox.value()
-        flat_files_by_group = {}  # ✅ Group by (Exposure, Image Size, Filter)
+        flat_files_by_group = {}  # Group by (Exposure, Image Size, Filter, Session)
 
-        # ✅ Group Flats by Filter, Exposure & Size within Tolerance
-        for filter_exposure, file_list in self.flat_files.items():
+        # Group Flats by Filter, Exposure & Size within Tolerance
+        for (filter_exposure, session), file_list in self.flat_files.items():
             try:
                 filter_name, exposure_size = filter_exposure.split(" - ")
                 exposure_time_str, image_size = exposure_size.split(" (")
-                image_size = image_size.rstrip(")")  # Remove trailing parenthesis
+                image_size = image_size.rstrip(")")
             except ValueError:
                 self.update_status(f"⚠️ ERROR: Could not parse {filter_exposure}")
-                continue  # Skip invalid entries
+                continue
 
-            # Extract only the exposure time
             match = re.match(r"([\d.]+)s?", exposure_time_str)
-            if not match:
-                self.update_status(f"⚠️ WARNING: Could not parse exposure time from {exposure_time_str}; assigning 0s")
-                exposure_time = -10.0
-            else:
-                exposure_time = float(match.group(1))  # Extracted number
+            exposure_time = float(match.group(1)) if match else -10.0
 
             matched_group = None
-            for key in flat_files_by_group.keys():
-                existing_exposure, existing_size, existing_filter = key
+            for key in flat_files_by_group:
+                existing_exposure, existing_size, existing_filter, existing_session = key
                 if (
                     abs(existing_exposure - exposure_time) <= exposure_tolerance
                     and existing_size == image_size
                     and existing_filter == filter_name
+                    and existing_session == session
                 ):
                     matched_group = key
                     break
 
             if matched_group is None:
-                matched_group = (exposure_time, image_size, filter_name)
+                matched_group = (exposure_time, image_size, filter_name, session)
                 flat_files_by_group[matched_group] = []
 
             flat_files_by_group[matched_group].extend(file_list)
 
-        # ✅ Create Master Calibration Directory
+        # Create output folder
         master_dir = os.path.join(self.stacking_directory, "Master_Calibration_Files")
         os.makedirs(master_dir, exist_ok=True)
 
-        # ✅ Stack Each Group
-        for (exposure_time, image_size, filter_name), file_list in flat_files_by_group.items():
+        # Stack each grouped flat set
+        for (exposure_time, image_size, filter_name, session), file_list in flat_files_by_group.items():
             if len(file_list) < 2:
-                self.update_status(f"⚠️ Skipping {exposure_time}s ({image_size}) - Not enough frames to stack.")
-                QApplication.processEvents()
+                self.update_status(f"⚠️ Skipping {exposure_time}s ({image_size}) [{filter_name}] [{session}] - Not enough frames to stack.")
                 continue
 
-            self.update_status(f"🟢 Processing {len(file_list)} flats for {exposure_time}s ({image_size}) exposure...")
-            QApplication.processEvents()
+            self.update_status(f"🟢 Processing {len(file_list)} flats for {exposure_time}s ({image_size}) [{filter_name}] in session '{session}'...")
 
-            # ✅ Extract best-matching Master Dark
-            selected_master_dark = None
-            master_dark_data = None
-
-            # Find the best master dark in the treebox
-            selected_master_dark = None
+            # Load master dark
             best_diff = float("inf")
-            for key, full_path in self.master_files.items():
-                # Expect keys like "0.00s (8288x5644)" or similar.
-                match_exposure = re.match(r"([\d.]+)s", key)
-                if match_exposure:
-                    master_dark_exposure = float(match_exposure.group(1))
-                else:
-                    continue  # Skip if exposure not available
-
-                master_dark_size = self.master_sizes.get(full_path, "Unknown")
-                if master_dark_size == image_size:
-                    diff = abs(master_dark_exposure - exposure_time)
+            selected_master_dark = None
+            for key, path in self.master_files.items():
+                match = re.match(r"([\d.]+)s", key)
+                if not match:
+                    continue
+                dark_exposure = float(match.group(1))
+                dark_size = self.master_sizes.get(path, "Unknown")
+                if dark_size == image_size:
+                    diff = abs(dark_exposure - exposure_time)
                     if diff < best_diff:
                         best_diff = diff
-                        selected_master_dark = full_path
+                        selected_master_dark = path
 
-            self.update_status(f"Direct lookup - Selected Master Dark file: {selected_master_dark}")
-            QApplication.processEvents
-
-            # --- Load Master Dark if assigned ---
-            master_dark_data = None
             if selected_master_dark:
-                master_dark_data, _, bit_depth, is_mono = load_image(selected_master_dark)
-                if master_dark_data is not None:
-                    self.update_status(f"✅ Using Master Dark: {selected_master_dark} (Bit Depth: {bit_depth}, Mono: {is_mono})")
-                    QApplication.processEvents
-                    print(f"✅ Loaded Master Dark with shape: {master_dark_data.shape}, Bit Depth: {bit_depth}, Mono: {is_mono}")
-                else:
-                    self.update_status(f"❌ ERROR: Could not load Master Dark {selected_master_dark}")
-                    master_dark_data = None
+                dark_data, _, _, _ = load_image(selected_master_dark)
             else:
-                self.update_status("DEBUG: No matching Master Dark file found for this flat group.")
+                dark_data = None
+                self.update_status("DEBUG: No matching Master Dark found.")
 
-            # --------------------------------------------------
-            # (B) Identify shape from the first flat
-            # --------------------------------------------------
-            ref_file = file_list[0]
-            ref_data, ref_header, bit_depth, is_mono = load_image(ref_file)
+            # Load reference image
+            ref_data, _, _, _ = load_image(file_list[0])
             if ref_data is None:
-                self.update_status(f"❌ Failed to load reference {os.path.basename(ref_file)}")
+                self.update_status(f"❌ Failed to load reference {os.path.basename(file_list[0])}")
                 continue
 
             height, width = ref_data.shape[:2]
-            channels = 1 if (ref_data.ndim == 2) else 3
-
-            # --------------------------------------------------
-            # (C) Create a memmap for the final stacked master flat
-            # --------------------------------------------------
-            memmap_path = os.path.join(master_dir, f"temp_flat_{exposure_time}_{image_size}_{filter_name}.dat")
-            final_stacked = np.memmap(
-                memmap_path,
-                dtype=np.float32,
-                mode='w+',
-                shape=(height, width, channels)
-            )
-
+            channels = 1 if ref_data.ndim == 2 else 3
+            memmap_path = os.path.join(master_dir, f"temp_flat_{session}_{exposure_time}_{image_size}_{filter_name}.dat")
+            final_stacked = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(height, width, channels))
             num_frames = len(file_list)
 
-            # --------------------------------------------------
-            # (D) For each tile, parallel-load from each flat,
-            #     subtract dark if present, outlier-reject, store
-            # --------------------------------------------------
             for y_start in range(0, height, self.chunk_height):
                 y_end = min(y_start + self.chunk_height, height)
                 tile_h = y_end - y_start
-
                 for x_start in range(0, width, self.chunk_width):
                     x_end = min(x_start + self.chunk_width, width)
                     tile_w = x_end - x_start
-
-                    # tile_stack => (num_frames, tile_h, tile_w, channels)
                     tile_stack = np.zeros((num_frames, tile_h, tile_w, channels), dtype=np.float32)
 
-                    # (D1) Parallel load tile from each flat
-                    num_cores = os.cpu_count() or 4
-                    with ThreadPoolExecutor(max_workers=num_cores) as executor:
-                        future_to_index = {}
-                        for i, fpath in enumerate(file_list):
-                            future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
-                            future_to_index[future] = i
+                    with ThreadPoolExecutor() as executor:
+                        
+                        futures = {
+                            executor.submit(load_fits_tile, f, y_start, y_end, x_start, x_end): idx
+                            for idx, f in enumerate(file_list)
+                        }
 
-                        for future in as_completed(future_to_index):
-                            i = future_to_index[future]
+                        for future in as_completed(futures):
+                            i = futures[future]
                             sub_img = future.result()
                             if sub_img is None:
+                                self.update_status(f"⚠️ Skipping tile {i} due to load failure.")
                                 continue
 
-                            # shape fix
-                            if sub_img.ndim == 2 and channels == 3:
-                                sub_img = np.repeat(sub_img[:, :, np.newaxis], 3, axis=2)
-                            elif sub_img.ndim == 2 and channels == 1:
+                            # Ensure correct shape
+                            if sub_img.ndim == 2:
                                 sub_img = sub_img[:, :, np.newaxis]
-
-                            if sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
+                                if channels == 3:
+                                    sub_img = np.repeat(sub_img, 3, axis=2)
+                            elif sub_img.shape[0] == 3:
                                 sub_img = sub_img.transpose(1, 2, 0)
 
-                            tile_stack[i] = sub_img.astype(np.float32, copy=False)
+                            tile_stack[i] = sub_img
 
-                    # (D2) If we have a Master Dark in memory, subtract the corresponding tile
-                    if master_dark_data is not None:
-                        # Slice out the corresponding tile from the master dark
-                        dark_tile = master_dark_data[y_start:y_end, x_start:x_end]
-                        
-                        # For color images, adjust the shape if needed.
-                        if dark_tile.ndim == 2 and channels == 3:
-                            dark_tile = np.repeat(dark_tile[:, :, np.newaxis], 3, axis=2)
-                        elif dark_tile.ndim == 3 and dark_tile.shape[0] == 3 and channels == 3:
-                            dark_tile = dark_tile.transpose(1, 2, 0)
-                        # For mono images, ensure the dark tile is 3D with a singleton channel dimension.
-                        elif dark_tile.ndim == 2 and channels == 1:
+
+                    if dark_data is not None:
+                        dark_tile = dark_data[y_start:y_end, x_start:x_end]
+                        if dark_tile.ndim == 2:
                             dark_tile = dark_tile[..., np.newaxis]
-
-                        # Now check the shape against the tile dimensions
-                        if dark_tile.shape == (tile_h, tile_w, channels):
-                            # Use the optimized subtraction method
                             if channels == 3:
-                                tile_stack = subtract_dark(tile_stack, dark_tile)
-                            else:
-                                # For mono images, squeeze then subtract and expand back.
-                                tile_stack_mono = tile_stack[..., 0]
-                                tile_stack_mono = subtract_dark(tile_stack_mono, dark_tile.squeeze(-1))
-                                tile_stack = tile_stack_mono[..., np.newaxis]
-                        else:
-                            self.update_status("⚠️ Master Dark shape mismatch for tile. Skipping subtraction.")
+                                dark_tile = np.repeat(dark_tile, 3, axis=2)
+                        elif dark_tile.shape[0] == 3:
+                            dark_tile = dark_tile.transpose(1, 2, 0)
 
+                        if dark_tile.shape == (tile_h, tile_w, channels):
+                            tile_stack = subtract_dark(tile_stack, dark_tile)
 
-                    # (D3) Outlier rejection
                     if channels == 3:
-                        # tile_stack => shape (F,H,W,3)
-                        tile_result = windsorized_sigma_clip_4d(
-                            tile_stack,
-                            lower=self.sigma_low,
-                            upper=self.sigma_high
-                        )
-                        # If the function returns a tuple, extract the first element.
-                        if isinstance(tile_result, tuple):
-                            tile_result = tile_result[0]
+                        tile_result = windsorized_sigma_clip_4d(tile_stack, lower=self.sigma_low, upper=self.sigma_high)[0]
                     else:
-                        # tile_stack => shape (F,H,W) or (F,H,W,1)
-                        tile_stack_3d = tile_stack[..., 0] if tile_stack.ndim == 4 else tile_stack
-                        tile_result_3d = windsorized_sigma_clip_3d(tile_stack_3d, lower=self.sigma_low, upper=self.sigma_high)
-                        # If the function returns a tuple, extract the first element.
-                        if isinstance(tile_result_3d, tuple):
-                            tile_result_3d = tile_result_3d[0]
-                        # Now, ensure the result has shape (H, W, 1)
-                        tile_result = tile_result_3d[..., np.newaxis]
+                        stack_3d = tile_stack[..., 0]
+                        tile_result = windsorized_sigma_clip_3d(stack_3d, lower=self.sigma_low, upper=self.sigma_high)[0]
+                        tile_result = tile_result[..., np.newaxis]
 
-                    # (D4) Store tile_result in final_stacked
                     final_stacked[y_start:y_end, x_start:x_end, :] = tile_result
 
-            # --------------------------------------------------
-            # (E) Convert memmap to normal array, then save
-            # --------------------------------------------------
             master_flat_data = np.array(final_stacked)
             del final_stacked
 
             master_flat_path = os.path.join(
                 master_dir,
-                f"MasterFlat_{int(exposure_time)}s_{image_size}_{filter_name}.fit"
+                f"MasterFlat_{session}_{int(exposure_time)}s_{image_size}_{filter_name}.fit"
             )
 
-            # Build a minimal header
-            master_header = fits.Header()
-            master_header["IMAGETYP"] = "FLAT"
-            master_header["EXPTIME"]  = (exposure_time, "from grouping or user")
-            master_header["FILTER"]   = filter_name
-            master_header["NAXIS"]    = 3 if channels==3 else 2
-            master_header["NAXIS1"]   = master_flat_data.shape[1]
-            master_header["NAXIS2"]   = master_flat_data.shape[0]
-            if channels==3:
-                master_header["NAXIS3"] = 3
+            header = fits.Header()
+            header["IMAGETYP"] = "FLAT"
+            header["EXPTIME"] = (exposure_time, "grouped exposure")
+            header["FILTER"] = filter_name
+            header["NAXIS"] = 3 if channels == 3 else 2
+            header["NAXIS1"] = width
+            header["NAXIS2"] = height
+            if channels == 3:
+                header["NAXIS3"] = 3
 
             save_image(
                 img_array=master_flat_data,
                 filename=master_flat_path,
                 original_format="fit",
                 bit_depth="32-bit floating point",
-                original_header=master_header,
-                is_mono=(channels==1)
+                original_header=header,
+                is_mono=(channels == 1)
             )
 
-            # (F) Update your UI, store references, etc.
-            key = f"{filter_name} ({image_size})"
+            key = f"{filter_name} ({image_size}) [{session}]"
             self.master_files[key] = master_flat_path
             self.master_sizes[master_flat_path] = image_size
             self.add_master_flat_to_tree(filter_name, master_flat_path)
             self.update_status(f"✅ Master Flat saved: {master_flat_path}")
 
-            # Possibly auto-run best matching Master Dark, etc.
-            self.assign_best_master_dark()
-            self.assign_best_master_files()
+        self.assign_best_master_dark()
+        self.assign_best_master_files()
 
 
 
@@ -9806,88 +9841,86 @@ class StackingSuiteDialog(QDialog):
         filter_item.addChild(master_item)
 
     def assign_best_master_files(self):
-        """ Assigns the best matching Master Dark and Master Flat to each Light Frame. """
+        """ Assign best matching Master Dark and Flat to each Light Frame (per leaf). """
         print("\n🔍 DEBUG: Assigning best Master Darks & Flats to Lights...\n")
 
         if not self.master_files:
             print("⚠️ WARNING: No Master Calibration Files available.")
             self.update_status("⚠️ WARNING: No Master Calibration Files available.")
-            return  
-
-        print(f"📂 Loaded Master Files ({len(self.master_files)} total):")
-        for key, value in self.master_files.items():
-            print(f"   📌 {key} -> {value}")
+            return
 
         for i in range(self.light_tree.topLevelItemCount()):
             filter_item = self.light_tree.topLevelItem(i)
-            filter_name = filter_item.text(0)  # Example: "L" or "Ha"
+            filter_name = filter_item.text(0)
 
             for j in range(filter_item.childCount()):
                 exposure_item = filter_item.child(j)
-                exposure_text = exposure_item.text(0)  # Example: "120s (8288x5644)"
+                exposure_text = exposure_item.text(0)
 
-                # Extract exposure time and image size
                 match = re.match(r"([\d.]+)s?", exposure_text)
                 if not match:
                     print(f"⚠️ WARNING: Could not parse exposure time from {exposure_text}")
-                    continue  
+                    continue
 
-                exposure_time = float(match.group(1))  # Normalize exposure time
-                print(f"🟢 Checking Light Frame: {exposure_text} (Parsed: {exposure_time}s)")
+                exposure_time = float(match.group(1))
 
-                # Get image size from metadata
-                if exposure_item.childCount() > 0:
-                    metadata_text = exposure_item.child(0).text(1)  # Metadata column
-                    size_match = re.search(r"Size: (\d+x\d+)", metadata_text)
+                for k in range(exposure_item.childCount()):
+                    leaf_item = exposure_item.child(k)
+                    meta_text = leaf_item.text(1)
+
+                    size_match = re.search(r"Size: (\d+x\d+)", meta_text)
+                    session_match = re.search(r"Session: ([^|]+)", meta_text)
                     image_size = size_match.group(1) if size_match else "Unknown"
-                else:
-                    image_size = "Unknown"
+                    session_name = session_match.group(1).strip() if session_match else "Default"
 
-                print(f"✅ Light Frame Size: {image_size}")
+                    print(f"🧠 Leaf: {leaf_item.text(0)} | Size: {image_size} | Session: {session_name}")
 
-                # 🔍 Find best Master Dark (match exposure & size)
-                best_match = None
-                best_diff = float("inf")
+                    # 🔍 Match Dark
+                    best_dark_match = None
+                    best_dark_diff = float("inf")
 
-                print("🔹 Stored Master Darks:")
-                for stored_key in self.master_files.keys():
-                    if "Dark" in stored_key:
-                        print(f"   🗄️ {stored_key}")
+                    for master_key, master_path in self.master_files.items():
+                        if "Dark" not in master_key:
+                            continue
 
-                for master_dark_exposure, master_dark_path in self.master_files.items():
-                    master_dark_exposure_match = re.match(r"([\d.]+)s?", master_dark_exposure)
-                    if not master_dark_exposure_match:
-                        continue  # Skip if master dark exposure is invalid
+                        dark_exposure_match = re.match(r"([\d.]+)s?", master_key)
+                        if not dark_exposure_match:
+                            continue
 
-                    master_dark_exposure_time = float(master_dark_exposure_match.group(1))
-                    master_dark_size = self.master_sizes.get(master_dark_path, "Unknown")
-                    
-                    # If size is unknown, extract from FITS header
-                    if master_dark_size == "Unknown":
-                        with fits.open(master_dark_path) as hdul:
-                            master_dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
-                            self.master_sizes[master_dark_path] = master_dark_size  # ✅ Store it
+                        dark_exposure_time = float(dark_exposure_match.group(1))
+                        dark_size = self.master_sizes.get(master_path, "Unknown")
 
-                    print(f"   🔎 Comparing with Master Dark: {master_dark_exposure_time}s ({master_dark_size}) vs {exposure_time}s ({image_size})")
+                        if dark_size == "Unknown":
+                            with fits.open(master_path) as hdul:
+                                dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
+                                self.master_sizes[master_path] = dark_size
 
-                    # Match both image size and exposure time
-                    if image_size == master_dark_size:
-                        diff = abs(master_dark_exposure_time - exposure_time)
-                        if diff < best_diff:
-                            best_match = master_dark_path
-                            best_diff = diff
+                        if dark_size == image_size:
+                            diff = abs(dark_exposure_time - exposure_time)
+                            if diff < best_dark_diff:
+                                best_dark_match = master_path
+                                best_dark_diff = diff
 
-                # 🔍 Find best Master Flat (match filter & size)
-                best_flat_match = self.master_files.get(f"{filter_name} ({image_size})", None)
+                    # 🔍 Match Flat
+                    best_flat_match = None
+                    for flat_key, flat_path in self.master_files.items():
+                        if filter_name not in flat_key or f"({image_size})" not in flat_key:
+                            continue
+                        if session_name in flat_key:
+                            best_flat_match = flat_path
+                            break
+                    if not best_flat_match:
+                        fallback_key = f"{filter_name} ({image_size})"
+                        best_flat_match = self.master_files.get(fallback_key)
 
-                # Assign best matches
-                exposure_item.setText(2, os.path.basename(best_match) if best_match else "None")
-                exposure_item.setText(3, os.path.basename(best_flat_match) if best_flat_match else "None")
+                    # 🔄 Assign to leaf
+                    leaf_item.setText(2, os.path.basename(best_dark_match) if best_dark_match else "None")
+                    leaf_item.setText(3, os.path.basename(best_flat_match) if best_flat_match else "None")
 
-                print(f"✅ Final Assignment: Dark -> {os.path.basename(best_match) if best_match else 'None'}, Flat -> {os.path.basename(best_flat_match) if best_flat_match else 'None'}")
+                    print(f"📌 Assigned to {leaf_item.text(0)} -> Dark: {leaf_item.text(2)}, Flat: {leaf_item.text(3)}")
 
         self.light_tree.viewport().update()
-        print("\n✅ DEBUG: Finished assigning best Master Files to Lights.\n")
+        print("\n✅ DEBUG: Finished assigning Master Files per leaf.\n")
 
     def update_light_corrections(self):
         """ Updates the light frame corrections when checkboxes change. """
@@ -9920,18 +9953,14 @@ class StackingSuiteDialog(QDialog):
                 exposure_item.setText(4, ", ".join(corrections))
 
     def light_tree_context_menu(self, pos):
-        """
-        Display a context menu for the light tree.
-        If the clicked item is a group node (has children),
-        offer to override assigned Master Darks/Flats.
-        """
         item = self.light_tree.itemAt(pos)
-        if not item or item.childCount() == 0:
-            return  # Only show menu for group nodes
+        if not item:
+            return
 
         menu = QMenu(self.light_tree)
         override_dark_action = menu.addAction("Override Dark Frame")
         override_flat_action = menu.addAction("Override Flat Frame")
+        set_session_action = menu.addAction("Set Session Tag...")
 
         action = menu.exec(self.light_tree.viewport().mapToGlobal(pos))
 
@@ -9939,6 +9968,45 @@ class StackingSuiteDialog(QDialog):
             self.override_selected_master_dark()
         elif action == override_flat_action:
             self.override_selected_master_flat()
+        elif action == set_session_action:
+            self.prompt_set_session(item, "LIGHT")
+
+
+    def set_session_tag_for_group(self, item):
+        """
+        Prompt the user to assign a session tag to all frames in this group.
+        """
+        session_name, ok = QInputDialog.getText(self, "Set Session Tag", "Enter session label (e.g., Night1, RedFilterSet2):")
+        if not ok or not session_name.strip():
+            return
+
+        session_name = session_name.strip()
+        filter_name = item.text(0)
+
+        for i in range(item.childCount()):
+            exposure_item = item.child(i)
+            exposure_label = exposure_item.text(0)
+
+            # Update metadata text
+            if exposure_item.childCount() > 0:
+                metadata_item = exposure_item.child(0)
+                metadata_text = metadata_item.text(1)
+                metadata_text = re.sub(r"Session: [^|]+", f"Session: {session_name}", metadata_text)
+                if "Session:" not in metadata_text:
+                    metadata_text += f" | Session: {session_name}"
+                metadata_item.setText(1, metadata_text)
+
+            # Update internal session tag mapping
+            composite_key = (f"{filter_name} - {exposure_label}", session_name)
+            original_key = f"{filter_name} - {exposure_label}"
+
+            if original_key in self.light_files:
+                self.light_files[composite_key] = self.light_files.pop(original_key)
+
+                for path in self.light_files[composite_key]:
+                    self.session_tags[path] = session_name
+
+        self.update_status(f"🟢 Assigned session '{session_name}' to group '{filter_name}'")
 
 
     def override_selected_master_dark(self):
@@ -10033,23 +10101,23 @@ class StackingSuiteDialog(QDialog):
         total_files = sum(len(files) for files in self.light_files.values())
         processed_files = 0
 
-        # ✅ Load Master Bias if it exists
         master_bias_path = self.master_files.get("Bias", None)
         master_bias = None
         if master_bias_path:
             with fits.open(master_bias_path) as bias_hdul:
                 master_bias = bias_hdul[0].data.astype(np.float32)
-            self.update_status(f"Using Master Bias: {os.path.basename(master_bias_path)}")  
+            self.update_status(f"Using Master Bias: {os.path.basename(master_bias_path)}")
 
         for i in range(self.light_tree.topLevelItemCount()):
             filter_item = self.light_tree.topLevelItem(i)
+            filter_name = filter_item.text(0)
 
             for j in range(filter_item.childCount()):
                 exposure_item = filter_item.child(j)
                 exposure_text = exposure_item.text(0)
 
-                # Extract corrections (Cosmetic & Pedestal)
-                correction_text = exposure_item.text(4)  
+                # Get default corrections
+                correction_text = exposure_item.text(4)
                 apply_cosmetic = False
                 apply_pedestal = False
                 if correction_text:
@@ -10058,110 +10126,110 @@ class StackingSuiteDialog(QDialog):
                         apply_cosmetic = parts[0].split(":")[-1].strip().lower() == "true"
                         apply_pedestal = parts[1].split(":")[-1].strip().lower() == "true"
 
-                # Determine pedestal value dynamically
-                pedestal_value = self.pedestal_spinbox.value() / 65535 if apply_pedestal else 0  
+                pedestal_value = self.pedestal_spinbox.value() / 65535 if apply_pedestal else 0
 
-                # 🔹 Master Dark: Use override if available
-                master_dark_text = exposure_item.text(2)
-                master_dark_path = self.manual_dark_overrides.get(exposure_text)
-                if not master_dark_path:
-                    for key, path in self.master_files.items():
-                        if os.path.basename(path) == master_dark_text:
-                            master_dark_path = path
-                            break
+                for k in range(exposure_item.childCount()):
+                    leaf = exposure_item.child(k)
+                    filename = leaf.text(0)
+                    meta = leaf.text(1)
 
-                if not master_dark_path:
-                    self.update_status(f"⚠️ No matching Master Dark found for '{master_dark_text}'")
+                    # Get session from metadata
+                    session_name = "Default"
+                    match = re.search(r"Session: ([^|]+)", meta)
+                    if match:
+                        session_name = match.group(1).strip()
 
-                # 🔹 Master Flat: Use override if available
-                master_flat_text = exposure_item.text(3)
-                master_flat_path = self.manual_flat_overrides.get(exposure_text)
-                if not master_flat_path:
-                    for key, path in self.master_files.items():
-                        if os.path.basename(path) == master_flat_text:
-                            master_flat_path = path
-                            break
+                    # Look up the light file from session-specific group
+                    composite_key = (f"{filter_name} - {exposure_text}", session_name)
+                    light_file_list = self.light_files.get(composite_key, [])
+                    light_file = next((f for f in light_file_list if os.path.basename(f) == filename), None)
+                    if not light_file:
+                        continue
 
-                if not master_flat_path:
-                    self.update_status(f"⚠️ No matching Master Flat found for '{master_flat_text}'")
+                    # Determine size from header
+                    header, _ = get_valid_header(light_file)
+                    width = int(header.get("NAXIS1", 0))
+                    height = int(header.get("NAXIS2", 0))
+                    image_size = f"{width}x{height}"
 
-                # Process each light file
-                for light_file in self.light_files.get(f"{filter_item.text(0)} - {exposure_text}", []):
-                    self.update_status(f"Processing: {os.path.basename(light_file)}")  
-                    QApplication.processEvents()  
+                    # Determine Master Dark (manual override or best match)
+                    manual_dark_key = f"{filter_name} - {exposure_text}"
+                    master_dark_path = self.manual_dark_overrides.get(manual_dark_key)
+                    if not master_dark_path:
+                        for key, path in self.master_files.items():
+                            if os.path.basename(path) == exposure_item.text(2):
+                                master_dark_path = path
+                                break
 
-                    # ✅ Use load_image() while preserving the header
+                    # Determine Master Flat (manual override or best session match)
+                    manual_flat_key = f"{filter_name} - {exposure_text}"
+                    master_flat_path = self.manual_flat_overrides.get(manual_flat_key)
+                    if not master_flat_path:
+                        flat_key = f"{filter_name} ({image_size}) [{session_name}]"
+                        master_flat_path = self.master_files.get(flat_key)
+
+                    self.update_status(f"Processing: {os.path.basename(light_file)}")
+                    QApplication.processEvents()
+
                     light_data, hdr, bit_depth, is_mono = load_image(light_file)
-
                     if light_data is None or hdr is None:
                         self.update_status(f"❌ ERROR: Failed to load {os.path.basename(light_file)}")
-                        continue  
+                        continue
 
-                    # ✅ Ensure correct orientation for OSC images
                     if not is_mono and light_data.shape[-1] == 3:
-                        light_data = light_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
+                        light_data = light_data.transpose(2, 0, 1)
 
-                    # 🔹 Subtract Master Bias (if available)
                     if master_bias is not None:
                         if is_mono:
                             light_data -= master_bias
                         else:
-                            light_data -= master_bias[np.newaxis, :, :]  # Ensure correct broadcasting
-                        self.update_status("Bias Subtracted")  
-                        QApplication.processEvents()  
+                            light_data -= master_bias[np.newaxis, :, :]
+                        self.update_status("Bias Subtracted")
+                        QApplication.processEvents()
 
-                    # 🔹 Subtract Master Dark
                     if master_dark_path:
                         dark_data, _, _, dark_is_mono = load_image(master_dark_path)
                         if dark_data is not None:
                             if not dark_is_mono and dark_data.shape[-1] == 3:
-                                dark_data = dark_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
+                                dark_data = dark_data.transpose(2, 0, 1)
                             light_data = subtract_dark_with_pedestal(
                                 light_data[np.newaxis, :, :], dark_data, pedestal_value
-                            )[0]  
-                            self.update_status(f"Dark Subtracted: {os.path.basename(master_dark_path)}")  
-                            QApplication.processEvents()  
+                            )[0]
+                            self.update_status(f"Dark Subtracted: {os.path.basename(master_dark_path)}")
+                            QApplication.processEvents()
 
-                    # 🔹 Apply Flat Division
                     if master_flat_path:
                         flat_data, _, _, flat_is_mono = load_image(master_flat_path)
                         if flat_data is not None:
                             if not flat_is_mono and flat_data.shape[-1] == 3:
-                                flat_data = flat_data.transpose(2, 0, 1)  # Convert (H, W, C) → (C, H, W)
-                            flat_data[flat_data == 0] = 1.0  
-                            light_data = apply_flat_division_numba(light_data, flat_data)  
-                            self.update_status(f"Flat Applied: {os.path.basename(master_flat_path)}")  
-                            QApplication.processEvents()  
+                                flat_data = flat_data.transpose(2, 0, 1)
+                            flat_data[flat_data == 0] = 1.0
+                            light_data = apply_flat_division_numba(light_data, flat_data)
+                            self.update_status(f"Flat Applied: {os.path.basename(master_flat_path)}")
+                            QApplication.processEvents()
 
-                    # 🔹 Apply Cosmetic Correction
                     if apply_cosmetic:
-                        if hdr is not None and hdr.get('BAYERPAT'):
-                            # For Bayer-pattern images, use a specialized function.
+                        if hdr.get("BAYERPAT"):
                             light_data = bulk_cosmetic_correction_bayer(light_data)
-                            self.update_status("Cosmetic Correction Applied for Bayer Pattern")  
-                            QApplication.processEvents()                             
+                            self.update_status("Cosmetic Correction Applied for Bayer Pattern")
                         else:
-                            # For mono or standard color images, use the existing correction.
                             light_data = bulk_cosmetic_correction_numba(light_data)
-                            self.update_status("Cosmetic Correction Applied")  
-                            QApplication.processEvents()  
+                            self.update_status("Cosmetic Correction Applied")
+                        QApplication.processEvents()
 
-                    # ✅ Convert back to (H, W, C) before saving if OSC
                     if not is_mono and light_data.shape[0] == 3:
-                        light_data = light_data.transpose(1, 2, 0)  # Convert back (C, H, W) → (H, W, C)
+                        light_data = light_data.transpose(1, 2, 0)
 
-                    # --- Debug: Report min and max of light_data ---
                     min_val = light_data.min()
                     max_val = light_data.max()
                     self.update_status(f"Before saving: min = {min_val:.4f}, max = {max_val:.4f}")
                     print(f"Before saving: min = {min_val:.4f}, max = {max_val:.4f}")
                     QApplication.processEvents()
 
-                    # 🔹 Save using global `save_image()`
                     calibrated_filename = os.path.join(
                         calibrated_dir, os.path.basename(light_file).replace(".fit", "_c.fit")
                     )
-        
+
                     save_image(
                         img_array=light_data,
                         filename=calibrated_filename,
@@ -10169,15 +10237,14 @@ class StackingSuiteDialog(QDialog):
                         bit_depth=bit_depth,
                         original_header=hdr,
                         is_mono=is_mono
-                    )  
+                    )
 
                     processed_files += 1
+                    self.update_status(f"Saved: {os.path.basename(calibrated_filename)} ({processed_files}/{total_files})")
+                    QApplication.processEvents()
 
-                    self.update_status(f"Saved: {os.path.basename(calibrated_filename)} ({processed_files}/{total_files})")  
-                    QApplication.processEvents()  
-
-        self.update_status("✅ Calibration Complete!")  
-        QApplication.processEvents()  
+        self.update_status("✅ Calibration Complete!")
+        QApplication.processEvents()
         self.populate_calibrated_lights()
 
     def extract_light_files_from_tree(self):
