@@ -26260,9 +26260,17 @@ class TransformHandle(QGraphicsEllipseItem):
         self.setBrush(QColor("blue"))
         self.setPen(QPen(Qt.PenStyle.SolidLine))
         self.setCursor(Qt.CursorShape.SizeAllCursor)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setZValue(2)
+
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsFocusable |
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresParentOpacity |
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+        )
+
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        self.setAcceptHoverEvents(True)
 
         self.initial_distance = None
         self.initial_angle = None
@@ -26272,35 +26280,44 @@ class TransformHandle(QGraphicsEllipseItem):
         self.update_position()
 
     def update_position(self):
-        # Pin to top-right of parent item in scene coordinates
         corner = self.parent_item.boundingRect().topRight()
         scene_corner = self.parent_item.mapToScene(corner)
         self.setPos(scene_corner)
 
-    def itemChange(self, change, value):
-        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
-            center = self.parent_item.mapToScene(self.parent_item.boundingRect().center())
-            new_pos = value
-            delta = new_pos - center
-            distance = math.hypot(delta.x(), delta.y())
+    def mousePressEvent(self, event):
+        center = self.parent_item.mapToScene(self.parent_item.boundingRect().center())
+        handle_scene_pos = self.scenePos()
+        delta = handle_scene_pos - center
+        self.initial_distance = math.hypot(delta.x(), delta.y())
+        self.initial_angle = math.degrees(math.atan2(delta.y(), delta.x()))
+        self.initial_scale = self.parent_item.scale()
+        event.accept()
 
-            if self.initial_distance is None:
-                self.initial_distance = distance
-                self.initial_angle = math.degrees(math.atan2(delta.y(), delta.x()))
-                self.initial_scale = self.parent_item.scale()
-                return value
+    def mouseMoveEvent(self, event):
+        center = self.parent_item.mapToScene(self.parent_item.boundingRect().center())
+        new_pos = self.mapToScene(event.pos())
+        delta = new_pos - center
+        distance = math.hypot(delta.x(), delta.y())
+        angle = math.degrees(math.atan2(delta.y(), delta.x()))
 
-            # Scale
-            scale_factor = distance / self.initial_distance
-            scale = max(0.05, self.initial_scale * scale_factor)
-            self.parent_item.setScale(scale)
+        # Apply scale
+        scale_factor = distance / self.initial_distance if self.initial_distance != 0 else 1.0
+        scale = max(0.05, self.initial_scale * scale_factor)
+        self.parent_item.setScale(scale)
 
-            # Rotation
-            angle = math.degrees(math.atan2(delta.y(), delta.x()))
-            rotation = angle - self.initial_angle
-            self.parent_item.setRotation(rotation)
+        # Apply rotation
+        rotation = angle - self.initial_angle
+        self.parent_item.setRotation(rotation)
 
-        return super().itemChange(change, value)
+        self.update_position()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self.initial_distance = None
+        self.initial_angle = None
+        self.initial_scale = self.parent_item.scale()
+        event.accept()
+
 
 class InsertView(QGraphicsView):
     def __init__(self, scene, parent_window):
@@ -26339,6 +26356,10 @@ class SignatureInsertWindow(QMainWindow):
         self.scene = QGraphicsScene(self)
         self.view = InsertView(self.scene, self)
         self.inserts = []
+        self.bounding_boxes_enabled = True
+        self.bounding_boxes = []
+        self.bounding_box_pen = QPen(QColor("red"), 2, Qt.PenStyle.DashLine)
+
 
         # Sync timer for handle positioning
         self.sync_timer = QTimer()
@@ -26368,6 +26389,30 @@ class SignatureInsertWindow(QMainWindow):
         self.scale_slider.setValue(100)
         self.scale_slider.valueChanged.connect(self.scale_selected)
 
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self.opacity_changed)
+
+        self.draw_box_checkbox = QCheckBox("Draw Bounding Box")
+        self.draw_box_checkbox.setChecked(True)
+        self.draw_box_checkbox.stateChanged.connect(self.toggle_bounding_boxes)
+
+        # Color selector
+        self.box_color_btn = QPushButton("Box Color")
+        self.box_color_btn.clicked.connect(self.pick_box_color)
+
+        # Thickness
+        self.box_thickness_slider = QSlider(Qt.Orientation.Horizontal)
+        self.box_thickness_slider.setRange(1, 10)
+        self.box_thickness_slider.setValue(2)
+        self.box_thickness_slider.valueChanged.connect(self.update_box_pen)
+
+        # Style selector
+        self.box_style_combo = QComboBox()
+        self.box_style_combo.addItems(["Solid", "Dash", "Dot", "DashDot", "DashDotDot"])
+        self.box_style_combo.currentIndexChanged.connect(self.update_box_pen)
+
         affix_btn = QPushButton("Affix Inserts")
         affix_btn.clicked.connect(self.affix_inserts)
         clear_btn = QPushButton("Clear All Inserts")
@@ -26379,7 +26424,19 @@ class SignatureInsertWindow(QMainWindow):
         controls.addWidget(rotate_btn)
         controls.addWidget(QLabel("Scale Selected (%)"))
         controls.addWidget(self.scale_slider)
+        controls.addWidget(QLabel("Transparency (%)"))
+        controls.addWidget(self.opacity_slider)        
         controls.addSpacing(10)
+        controls.addWidget(self.draw_box_checkbox)
+        controls.addWidget(QLabel("Bounding Box Settings"))
+        controls.addWidget(self.box_color_btn)
+        controls.addWidget(QLabel("Box Thickness"))
+        controls.addWidget(self.box_thickness_slider)
+        controls.addWidget(QLabel("Box Style"))
+        controls.addWidget(self.box_style_combo)        
+        controls.addSpacing(10)
+        controls.addStretch(1)
+        controls.addWidget(QLabel("Right-click on an insert to send it a location."))
         controls.addWidget(affix_btn)
         controls.addWidget(clear_btn)
         controls.addStretch(1)
@@ -26507,10 +26564,21 @@ class SignatureInsertWindow(QMainWindow):
         item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         item.setTransformOriginPoint(item.boundingRect().center())
         item.setZValue(1)
+        item.setOpacity(1.0)
+
 
         self.scene.addItem(item)
         self.inserts.append(item)
         TransformHandle(item, self.scene)
+
+        if self.bounding_boxes_enabled:
+            rect = QGraphicsRectItem(item.boundingRect())
+            rect.setParentItem(item)
+            rect.setPen(self.bounding_box_pen)
+            rect.setZValue(item.zValue() + 0.1)
+            self.scene.addItem(rect)
+            self.bounding_boxes.append(rect)
+
 
     def rotate_selected(self):
         for it in self.inserts:
@@ -26522,6 +26590,46 @@ class SignatureInsertWindow(QMainWindow):
         for it in self.inserts:
             if it.isSelected():
                 it.setScale(factor)
+                for box in self.bounding_boxes:
+                    if box.parentItem() == it:
+                        box.setRect(it.boundingRect())
+
+
+
+    def opacity_changed(self, value):
+        """Set opacity of selected inserts from 0% (transparent) to 100% (opaque)."""
+        opacity = value / 100.0
+        for it in self.inserts:
+            if it.isSelected():
+                it.setOpacity(opacity)
+
+    def toggle_bounding_boxes(self, state):
+        self.bounding_boxes_enabled = bool(state)
+        for box in self.bounding_boxes:
+            box.setVisible(self.bounding_boxes_enabled)
+
+    def pick_box_color(self):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.bounding_box_pen.setColor(color)
+            self.update_all_bounding_boxes()
+
+    def update_box_pen(self):
+        style_map = {
+            "Solid": Qt.PenStyle.SolidLine,
+            "Dash": Qt.PenStyle.DashLine,
+            "Dot": Qt.PenStyle.DotLine,
+            "DashDot": Qt.PenStyle.DashDotLine,
+            "DashDotDot": Qt.PenStyle.DashDotDotLine
+        }
+        self.bounding_box_pen.setWidth(self.box_thickness_slider.value())
+        self.bounding_box_pen.setStyle(style_map[self.box_style_combo.currentText()])
+        self.update_all_bounding_boxes()
+
+    def update_all_bounding_boxes(self):
+        for box in self.bounding_boxes:
+            box.setPen(self.bounding_box_pen)
+
 
     def affix_inserts(self):
         """Bake inserts into the main image and clear overlays."""
@@ -26529,11 +26637,25 @@ class SignatureInsertWindow(QMainWindow):
             QMessageBox.information(self, "No Inserts", "There are no inserts to affix.")
             return
 
-        # 1. Filter items: background + inserts only
+        # ✅ Deselect all inserts to avoid selection outlines (but DO NOT hide bounding boxes unless user wants them hidden)
+        for it in self.inserts:
+            it.setSelected(False)
+
+        # Only hide bounding boxes if checkbox is off
+        boxes_to_hide = []
+        if not self.bounding_boxes_enabled:
+            for box in self.bounding_boxes:
+                box.setVisible(False)
+                boxes_to_hide.append(box)  # Remember which were hidden
+
+        # 1. Filter items: background + inserts and bounding boxes
         relevant_items = []
         for item in self.scene.items():
             if isinstance(item, QGraphicsPixmapItem) and (item in self.inserts or item.zValue() == 0):
                 relevant_items.append(item)
+            elif self.bounding_boxes_enabled and isinstance(item, QGraphicsRectItem):
+                relevant_items.append(item)
+
 
         # 2. Compute bounding rect of relevant items
         bounding_rect = QRectF()
@@ -26568,6 +26690,10 @@ class SignatureInsertWindow(QMainWindow):
         for item in hidden_items:
             item.setVisible(True)
 
+        # Restore any bounding boxes that were temporarily hidden
+        for box in boxes_to_hide:
+            box.setVisible(True)
+
         # 7. Convert to NumPy and push to ImageManager (trim alpha)
         arr = self.qimage_to_numpy(img)
         if arr.shape[2] == 4:
@@ -26586,6 +26712,9 @@ class SignatureInsertWindow(QMainWindow):
         for it in self.inserts:
             self.scene.removeItem(it)
         self.inserts.clear()
+        for box in self.bounding_boxes:
+            self.scene.removeItem(box)
+        self.bounding_boxes.clear()
 
     def numpy_to_qimage(self, arr):
         arr = np.clip(arr, 0.0, 1.0)
