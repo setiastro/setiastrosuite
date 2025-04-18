@@ -10852,52 +10852,42 @@ class StackingSuiteDialog(QDialog):
         return rejections
 
     def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
-        """
-        New flow:
-        1. Run normal integration for each group to get an integrated image AND a per-file rejection map.
-        2. Save the integrated image with a properly updated FITS header.
-        3. If drizzle is enabled for the group, run drizzle stacking with that per-file rejection map.
-        """
         self.update_status("🔄 Running normal integration to record rejected pixel positions...")
         QApplication.processEvents()
         group_integration_data = {}
+        summary_lines = []
 
         for group_key, file_list in grouped_files.items():
             self.update_status(f"Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
-            # 1) Normal integration => integrated_image, per_file_rejections, ref_header
             integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
                 group_key, file_list, frame_weights
             )
 
             if integrated_image is None:
-                # Integration failed or no frames
                 continue
 
-            # 2) Construct a final header for the integrated image
-            #    (similar to your chunked stacking approach)
             if ref_header is None:
                 ref_header = fits.Header()
 
             ref_header["IMAGETYP"] = "MASTER STACK"
-            ref_header["BITPIX"]   = -32
-            ref_header["STACKED"]  = (True, "Stacked using normal_integration_with_rejection")
-            ref_header["CREATOR"]  = "SetiAstroSuite"
+            ref_header["BITPIX"] = -32
+            ref_header["STACKED"] = (True, "Stacked using normal_integration_with_rejection")
+            ref_header["CREATOR"] = "SetiAstroSuite"
             ref_header["DATE-OBS"] = datetime.utcnow().isoformat()
 
-            # If mono, set NAXIS=2; if color, set NAXIS=3
             is_mono = (integrated_image.ndim == 2)
             if is_mono:
-                ref_header["NAXIS"]  = 2
+                ref_header["NAXIS"] = 2
                 ref_header["NAXIS1"] = integrated_image.shape[1]
                 ref_header["NAXIS2"] = integrated_image.shape[0]
             else:
-                ref_header["NAXIS"]  = 3
+                ref_header["NAXIS"] = 3
                 ref_header["NAXIS1"] = integrated_image.shape[1]
                 ref_header["NAXIS2"] = integrated_image.shape[0]
                 ref_header["NAXIS3"] = 3
 
-            # 3) Save the integrated image
-            out_path = os.path.join(self.stacking_directory, f"MasterLight_{group_key}.fit")
+            n_frames = len(file_list)
+            out_path = os.path.join(self.stacking_directory, f"MasterLight_{group_key}_{n_frames}stacked.fit")
             save_image(
                 img_array=integrated_image,
                 filename=out_path,
@@ -10906,36 +10896,40 @@ class StackingSuiteDialog(QDialog):
                 original_header=ref_header,
                 is_mono=is_mono
             )
-            self.update_status(f"✅ Saved normal integrated image for group '{group_key}': {out_path}")
+            self.update_status(f"✅ Saved integrated image for '{group_key}' using {n_frames} frame(s): {out_path}")
             QApplication.processEvents()
 
-            # 3.5) (Optional) Serialize the rejection_map to a JSON file for future reference
-            # 3.5) Only save rejection map + integration data if drizzle is enabled
             dconf = drizzle_dict.get(group_key, {})
             if dconf.get("drizzle_enabled", False):
                 sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
                 self.save_rejection_map_sasr(rejection_map, sasr_path)
                 self.update_status(f"✅ Saved rejection map to {sasr_path}")
-
                 group_integration_data[group_key] = {
                     "integrated_image": integrated_image,
-                    "rejection_map": rejection_map
+                    "rejection_map": rejection_map,
+                    "n_frames": n_frames,
+                    "drizzled": True
                 }
             else:
+                group_integration_data[group_key] = {
+                    "integrated_image": integrated_image,
+                    "rejection_map": None,
+                    "n_frames": n_frames,
+                    "drizzled": False
+                }
                 self.update_status(f"ℹ️ Skipping rejection map save for '{group_key}' (drizzle disabled).")
 
-
-        # 5) Drizzle if enabled
         for group_key, file_list in grouped_files.items():
             dconf = drizzle_dict.get(group_key, None)
             if dconf and dconf.get("drizzle_enabled", False):
                 scale_factor = dconf["scale_factor"]
                 drop_shrink = dconf["drop_shrink"]
-                # Retrieve the per-file rejection map from step 4
                 rejections_for_group = group_integration_data[group_key]["rejection_map"]
+                n_frames = group_integration_data[group_key]["n_frames"]
 
-                self.update_status(f"📐 Drizzle for group '{group_key}' at {scale_factor}× (drop={drop_shrink}).")
+                self.update_status(f"📐 Drizzle for '{group_key}' at {scale_factor}× (drop={drop_shrink}) using {n_frames} frame(s).")
                 QApplication.processEvents()
+
                 self.drizzle_stack_one_group(
                     group_key=group_key,
                     file_list=file_list,
@@ -10943,13 +10937,24 @@ class StackingSuiteDialog(QDialog):
                     frame_weights=frame_weights,
                     scale_factor=scale_factor,
                     drop_shrink=drop_shrink,
-                    rejection_map=rejections_for_group  # <--- per-file dictionary
+                    rejection_map=rejections_for_group
                 )
             else:
-                self.update_status(f"✅ Group '{group_key}' not set for drizzle. Already saved the integrated image from normal integration.")
+                self.update_status(f"✅ Group '{group_key}' not set for drizzle. Integrated image already saved.")
                 QApplication.processEvents()
 
+        # 🧾 Summary message box
+        for group_key, info in group_integration_data.items():
+            n_frames = info["n_frames"]
+            drizzled = info["drizzled"]
+            summary_lines.append(f"• {group_key}: {n_frames} stacked{' + drizzle' if drizzled else ''}")
 
+        summary_text = "\n".join(summary_lines)
+        QMessageBox.information(
+            self,
+            "Integration Summary",
+            f"The following groups were successfully integrated:\n\n{summary_text}"
+        )
 
     def save_registered_images(self, success, msg, frame_weights):
         if not success:
@@ -11170,7 +11175,7 @@ class StackingSuiteDialog(QDialog):
                 ref_header["NAXIS2"] = final_array.shape[0]
                 ref_header["NAXIS3"] = 3
 
-            output_filename = f"MasterLight_{group_key}.fit"
+            output_filename = f"MasterLight_{group_key}_{len(aligned_paths)}stacked.fit"
             output_path = os.path.join(self.stacking_directory, output_filename)
             save_image(
                 img_array=final_array,
@@ -11181,7 +11186,8 @@ class StackingSuiteDialog(QDialog):
                 is_mono=is_mono
             )
 
-            self.update_status(f"✅ Group '{group_key}' chunked stacking complete! Saved: {output_path}")
+            self.update_status(f"✅ Group '{group_key}' stacked {len(aligned_paths)} frame(s)! Saved: {output_path}")
+
             print(f"✅ Master Light saved for group '{group_key}': {output_path}")
 
             # Optionally, you might want to store or log 'rejection_coords' (here appended to all_rejection_coords)
@@ -11195,6 +11201,14 @@ class StackingSuiteDialog(QDialog):
 
         # Optionally, you could return the global rejection coordinate list.
         return all_rejection_coords
+
+        QMessageBox.information(
+            self,
+            "Stacking Complete",
+            f"All stacking finished successfully.\n"
+            f"Frames per group:\n" +
+            "\n".join([f"{group_key}: {len(files)} frame(s)" for group_key, files in grouped_files.items()])
+        )
 
 
 
@@ -11500,7 +11514,8 @@ class StackingSuiteDialog(QDialog):
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
         # 8) Save final drizzle image
-        out_filename = f"MasterLight_{group_key}_drizzle.fit"
+        out_filename = f"MasterLight_{group_key}_{len(file_list)}stacked_drizzle.fit"
+
         out_path = os.path.join(self.stacking_directory, out_filename)
         if hdr is None:
             hdr = fits.Header()
@@ -11534,7 +11549,8 @@ class StackingSuiteDialog(QDialog):
             is_mono=is_mono
         )
 
-        self.update_status(f"✅ Drizzle group '{group_key}' done! Saved: {out_path}")
+        self.update_status(f"✅ Drizzle group '{group_key}' done! Stacked {len(file_list)} frame(s). Saved: {out_path}")
+
 
 
     def normal_integration_with_rejection(self, group_key, file_list, frame_weights):
