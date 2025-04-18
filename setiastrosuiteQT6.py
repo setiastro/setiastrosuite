@@ -26635,30 +26635,29 @@ class SignatureInsertWindow(QMainWindow):
         self.scene.addItem(item)
 
     def load_insert_source(self, source):
+        pixmap = None
+
         if source == "file":
-            path, _ = QFileDialog.getOpenFileName(self, "Select Insert Image", "", "Images (*.png *.tif *.tiff)")
-        else:
-            slots = [f"Slot {i}" for i in range(self.image_manager.max_slots)]
-            # Get slot names from parent if available
+            file_path, _ = QFileDialog.getOpenFileName(self, "Select Insert Image", "", "Images (*.png *.tif *.tiff)")
+            if not file_path:
+                return
+            pixmap = QPixmap(file_path)
+
+        elif source == "slot":
             if self.parent() and hasattr(self.parent(), "slot_names"):
                 slot_names = self.parent().slot_names
             else:
                 slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
 
-            # Build list of user-facing slot names
             display_names = [slot_names.get(i, f"Slot {i}") for i in range(self.image_manager.max_slots)]
-
             choice, ok = QInputDialog.getItem(self, "Select Slot", "Choose slot:", display_names, False)
             if not ok:
                 return
 
-            # Convert chosen name back to index
             idx = display_names.index(choice)
             metadata = self.image_manager._metadata.get(idx, {})
             file_path = metadata.get("file_path", None)
 
-
-            # 🧠 Try to use file_path if it exists on disk, else fall back to memory slot
             if file_path and os.path.exists(file_path):
                 pixmap = QPixmap(file_path)
             else:
@@ -26668,6 +26667,11 @@ class SignatureInsertWindow(QMainWindow):
                     return
                 qimg = self.numpy_to_qimage(img_data)
                 pixmap = QPixmap.fromImage(qimg)
+
+        # ✅ Ensure pixmap is valid before continuing
+        if pixmap is None or pixmap.isNull():
+            QMessageBox.warning(self, "Load Failed", "Could not load insert image.")
+            return
 
         item = QGraphicsPixmapItem(pixmap)
         item.setFlags(
@@ -26692,6 +26696,7 @@ class SignatureInsertWindow(QMainWindow):
             rect.setZValue(item.zValue() + 0.1)
             self.scene.addItem(rect)
             self.bounding_boxes.append(rect)
+
 
 
 
