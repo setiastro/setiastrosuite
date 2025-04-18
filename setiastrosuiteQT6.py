@@ -26430,6 +26430,12 @@ class InsertView(QGraphicsView):
     def __init__(self, scene, parent_window):
         super().__init__(scene)
         self.parent_window = parent_window
+        self.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.1
+        self.max_zoom = 10.0
 
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
@@ -26453,6 +26459,29 @@ class InsertView(QGraphicsView):
         else:
             super().contextMenuEvent(event)
 
+    def wheelEvent(self, event):
+        # Support Ctrl+Wheel only
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            zoom_in = event.angleDelta().y() > 0
+            zoom_step = 1.15
+            factor = zoom_step if zoom_in else 1 / zoom_step
+            self.set_zoom(self.zoom_factor * factor)
+        else:
+            super().wheelEvent(event)
+
+    def set_zoom(self, new_zoom):
+        new_zoom = max(self.min_zoom, min(self.max_zoom, new_zoom))
+        self.zoom_factor = new_zoom
+        self.setTransform(QTransform().scale(new_zoom, new_zoom))
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom_factor * 1.15)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom_factor / 1.15)
+
+    def reset_zoom(self):
+        self.set_zoom(1.0)
 
 class SignatureInsertWindow(QMainWindow):
     def __init__(self, image_manager, parent=None):
@@ -26525,6 +26554,19 @@ class SignatureInsertWindow(QMainWindow):
         clear_btn = QPushButton("Clear All Inserts")
         clear_btn.clicked.connect(self.clear_inserts)
 
+        zoom_controls = QHBoxLayout()
+        zoom_in_btn = QPushButton("Zoom In")
+        zoom_out_btn = QPushButton("Zoom Out")
+        zoom_reset_btn = QPushButton("Reset Zoom")
+
+        zoom_in_btn.clicked.connect(self.view.zoom_in)
+        zoom_out_btn.clicked.connect(self.view.zoom_out)
+        zoom_reset_btn.clicked.connect(self.view.reset_zoom)
+
+        zoom_controls.addWidget(zoom_out_btn)
+        zoom_controls.addWidget(zoom_in_btn)
+        zoom_controls.addWidget(zoom_reset_btn)
+
         controls.addWidget(load_slot_btn)
         controls.addWidget(load_file_btn)
         controls.addSpacing(10)
@@ -26547,6 +26589,8 @@ class SignatureInsertWindow(QMainWindow):
         controls.addWidget(affix_btn)
         controls.addWidget(clear_btn)
         controls.addStretch(1)
+        controls.addSpacing(10)
+        controls.addLayout(zoom_controls)
 
         container = QWidget()
         container.setLayout(controls)
@@ -26693,6 +26737,8 @@ class SignatureInsertWindow(QMainWindow):
             rect = QGraphicsRectItem(item.boundingRect())
             rect.setParentItem(item)
             rect.setPen(self.bounding_box_pen)
+            rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             rect.setZValue(item.zValue() + 0.1)
             self.scene.addItem(rect)
             self.bounding_boxes.append(rect)
