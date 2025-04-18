@@ -32,6 +32,12 @@ from scipy.spatial import Delaunay, KDTree
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndi
 
+import matplotlib
+matplotlib.use("QtAgg") 
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.patches import Circle
+from matplotlib.ticker import MaxNLocator
 
 import random
 if sys.stdout is not None:
@@ -39918,10 +39924,7 @@ cached_flux_radii = None
 
 
 def plot_star_color_ratios_comparison(raw_pixels: np.ndarray, after_pixels: np.ndarray):
-    import matplotlib.pyplot as plt
-    import numpy as np
-    from matplotlib.patches import Circle
-    from matplotlib.ticker import MaxNLocator
+
 
     def compute_ratios(pixels):
         rb = pixels[:, 0] / (pixels[:, 2] + 1e-8)
