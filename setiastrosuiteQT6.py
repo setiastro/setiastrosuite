@@ -26655,12 +26655,20 @@ class SignatureInsertWindow(QMainWindow):
             # Convert chosen name back to index
             idx = display_names.index(choice)
             metadata = self.image_manager._metadata.get(idx, {})
-            path = metadata.get("file_path", None)
+            file_path = metadata.get("file_path", None)
 
-        if not path:
-            return
 
-        pixmap = QPixmap(path)
+            # 🧠 Try to use file_path if it exists on disk, else fall back to memory slot
+            if file_path and os.path.exists(file_path):
+                pixmap = QPixmap(file_path)
+            else:
+                img_data = self.image_manager._images.get(idx)
+                if img_data is None:
+                    QMessageBox.warning(self, "Missing Image", f"No image found in slot {idx}.")
+                    return
+                qimg = self.numpy_to_qimage(img_data)
+                pixmap = QPixmap.fromImage(qimg)
+
         item = QGraphicsPixmapItem(pixmap)
         item.setFlags(
             QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable |
@@ -26673,7 +26681,6 @@ class SignatureInsertWindow(QMainWindow):
         item.setZValue(1)
         item.setOpacity(1.0)
 
-
         self.scene.addItem(item)
         self.inserts.append(item)
         TransformHandle(item, self.scene)
@@ -26685,6 +26692,7 @@ class SignatureInsertWindow(QMainWindow):
             rect.setZValue(item.zValue() + 0.1)
             self.scene.addItem(rect)
             self.bounding_boxes.append(rect)
+
 
 
     def rotate_selected(self):
