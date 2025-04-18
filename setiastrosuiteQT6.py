@@ -26440,6 +26440,11 @@ class InsertView(QGraphicsView):
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
         item = self.scene().itemAt(scene_pos, self.transform())
+
+        # If it's a bounding box, get its parent item
+        if isinstance(item, QGraphicsRectItem) and item.parentItem() in self.parent_window.inserts:
+            item = item.parentItem()
+
         if isinstance(item, QGraphicsPixmapItem) and item in self.parent_window.inserts:
             menu = QMenu(self)
             positions = {
@@ -26738,6 +26743,14 @@ class SignatureInsertWindow(QMainWindow):
             rect.setParentItem(item)
             rect.setPen(self.bounding_box_pen)
             rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect.setAcceptDrops(False)
+            rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
+            rect.setAcceptHoverEvents(False)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresParentOpacity, True)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemDoesntPropagateOpacityToChildren, True)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, False)
             rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             rect.setZValue(item.zValue() + 0.1)
             self.scene.addItem(rect)
