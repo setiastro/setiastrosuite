@@ -37959,7 +37959,7 @@ class NBtoRGBstarsTab(QWidget):
                     img_array=self.combined_image,
                     filename=temp_file_path,
                     original_format='tif',
-                    bit_depth=self.bit_depth,
+                    bit_depth=self.bit_depth if self.bit_depth in ["16-bit", "32-bit unsigned", "32-bit floating point"] else "32-bit floating point",
                     original_header=self.original_header,
                     is_mono=self.is_mono
                 )
