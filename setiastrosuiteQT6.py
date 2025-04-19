@@ -233,7 +233,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.3"
+VERSION = "2.14.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -23137,42 +23137,40 @@ class AddStarsDialog(QDialog):
         # Clip the result to [0,1]
         blended = np.clip(blended, 0.0, 1.0)
 
-        # Retrieve the mask for the current slot
-        mask = self.image_manager.mask_manager._masks.get(self.current_slot, None)
+        # ✅ Only apply mask if it is actively applied
+        mask_slot = self.image_manager.mask_manager.get_applied_mask_slot()
+        if mask_slot == self.current_slot:
+            mask = self.image_manager.mask_manager.get_applied_mask()
+            if mask is not None:
+                # Ensure mask has correct dimensions
+                if mask.shape != self.starless_image.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match image dimensions.")
+                    return None
 
-        if mask is not None:
-            # Ensure mask has the same dimensions as images
-            if mask.shape != self.starless_image.shape[:2]:
-                QMessageBox.critical(self, "Error", "Mask dimensions do not match image dimensions.")
-                return None
+                # Normalize mask to [0,1]
+                if mask.dtype != np.float32:
+                    mask = mask.astype('float32') / 255.0
 
-            # Convert mask to float32 and normalize to [0,1]
-            if mask.dtype != np.float32:
-                mask = mask.astype('float32') / 255.0
+                if mask.ndim == 3:
+                    mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
 
-            # If mask has multiple channels, convert to single channel
-            if mask.ndim == 3:
-                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                if self.starless_image.ndim == 3 and mask.ndim == 2:
+                    mask = np.expand_dims(mask, axis=2)
+                    mask = np.repeat(mask, self.starless_image.shape[2], axis=2)
 
-            # Expand mask dimensions to match image channels if necessary
-            if self.starless_image.ndim == 3 and mask.ndim == 2:
-                mask = np.expand_dims(mask, axis=2)
-                mask = np.repeat(mask, self.starless_image.shape[2], axis=2)
+                mask = np.clip(mask, 0.0, 1.0)
 
-            # Ensure mask values are in [0,1]
-            mask = np.clip(mask, 0.0, 1.0)
-
-            # Apply the mask to blend the images
-            final_image = self.starless_image * (1 - mask) + mask * blended
-            final_image = np.clip(final_image, 0.0, 1.0)
-            print("Applied mask to the blended image.")
+                final_image = self.starless_image * (1 - mask) + mask * blended
+                final_image = np.clip(final_image, 0.0, 1.0)
+                print("✅ Applied active mask to the blended image.")
+            else:
+                final_image = blended
+                print("⚠️ No active mask found. Using blended image directly.")
         else:
-            # If no mask is applied, use the blended image as final
             final_image = blended
-            print("No mask applied. Using blended image as final image.")
+            print("ℹ️ Mask slot is not active. Skipping mask application.")
 
         return final_image
-
     def update_preview(self):
         """
         Updates the preview area with the current blended image while maintaining zoom and scroll position.
@@ -45155,7 +45153,7 @@ class MainWindow(QMainWindow):
         
         # OK and Cancel buttons
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value(), marker_style_combo.currentText(), dialog))
+        buttons.accepted.connect(lambda: self.update_settings(max_results_spinbox.value, marker_style_combo.currentText(), dialog))
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         
@@ -45232,20 +45230,31 @@ def calculate_comoving_distance(z):
     return round(DCMR_Gly, 3)  # Round to three decimal places for display
 
 def calculate_orientation(header):
-    """Calculate the orientation angle from the CD matrix if available."""
-    # Extract CD matrix elements
+    """Calculate orientation from CD or PC matrix."""
     cd1_1 = header.get('CD1_1')
     cd1_2 = header.get('CD1_2')
     cd2_1 = header.get('CD2_1')
     cd2_2 = header.get('CD2_2')
 
-    if cd1_1 is not None and cd1_2 is not None and cd2_1 is not None and cd2_2 is not None:
-        # Calculate the orientation angle in degrees and adjust by adding 180 degrees
+    if all(v is not None for v in [cd1_1, cd1_2, cd2_1, cd2_2]):
         orientation = (np.degrees(np.arctan2(cd1_2, cd1_1)) + 180) % 360
         return orientation
-    else:
-        print("CD matrix elements not found in the header.")
-        return None
+
+    # Try PC matrix fallback
+    pc1_1 = header.get('PC1_1')
+    pc1_2 = header.get('PC1_2')
+    cdelt1 = header.get('CDELT1')
+    cdelt2 = header.get('CDELT2')
+
+    if pc1_1 is not None and pc1_2 is not None and cdelt1 is not None and cdelt2 is not None:
+        cd1_1 = pc1_1 * cdelt1
+        cd1_2 = pc1_2 * cdelt1
+        orientation = (np.degrees(np.arctan2(cd1_2, cd1_1)) + 180) % 360
+        return orientation
+
+    print("CD or PC matrix not found in header.")
+    return None
+
 
 
 
