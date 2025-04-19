@@ -1,9 +1,9 @@
 {
-  "version": "2.14.3",
+  "version": "2.14.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.3/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.3/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.3/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.4/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.4/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Added multi-night session support in Stacking Suite.  Fixed a bug when loading inserts or signatures from slots"
+  "notes": "Bug Fixes: Star addition with masks, NB to RGB stars, and WIMI issues."
 }
