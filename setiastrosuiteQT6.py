@@ -233,7 +233,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.4"
+VERSION = "2.14.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -25358,31 +25358,43 @@ class WhiteBalanceDialog(QDialog):
         star_info = QLabel("Star-Based White Balance automatically detects stars to adjust colors.")
         self.star_layout.addWidget(star_info)
 
-        # Sensitivity Slider for Star Detection Threshold (scaled from 1.00 to 5.00)
+        # Sensitivity Slider for Star Detection Threshold (scaled from 1 to 100 sigma)
         sensitivity_group = QGroupBox("Detection Sensitivity")
         sensitivity_layout = QHBoxLayout()
 
+        # Add sensitivity direction labels
+        more_sensitive_label = QLabel("More Sensitive")
+        less_sensitive_label = QLabel("Less Sensitive")
+
         self.sensitivity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.sensitivity_slider.setMinimum(100)   # 1.00
-        self.sensitivity_slider.setMaximum(500)   # 5.00
-        self.sensitivity_slider.setValue(180)       # Default threshold: 1.80
+        self.sensitivity_slider.setMinimum(1)
+        self.sensitivity_slider.setMaximum(100)
+        self.sensitivity_slider.setValue(50)  # Default: 50 sigma
         self.sensitivity_slider.setTickInterval(10)
         self.sensitivity_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.sensitivity_label = QLabel("Threshold: 1.80")
+        self.sensitivity_label = QLabel("Threshold: 50")  # Initial value
 
-        # Connect slider to update label and re-run detection
+        # Create a timer to delay star detection until the user stops adjusting the slider
+        self.sensitivity_timer = QTimer()
+        self.sensitivity_timer.setSingleShot(True)
+        self.sensitivity_timer.setInterval(1000)  # 1 second delay
+        self.sensitivity_timer.timeout.connect(self.detect_and_display_stars)
+
         def update_sensitivity_label(value):
-            float_value = value / 100.0
-            self.sensitivity_label.setText(f"Threshold: {float_value:.2f}")
+            self.sensitivity_label.setText(f"Threshold: {value:.2f}")
+            self.sensitivity_timer.start()  # Restart debounce timer
 
         self.sensitivity_slider.valueChanged.connect(update_sensitivity_label)
-        self.sensitivity_slider.valueChanged.connect(self.detect_and_display_stars)
 
-        sensitivity_layout.addWidget(QLabel("Threshold:"))
+        # Add components to layout
+        sensitivity_layout.addWidget(more_sensitive_label)
         sensitivity_layout.addWidget(self.sensitivity_slider)
+        sensitivity_layout.addWidget(less_sensitive_label)
         sensitivity_layout.addWidget(self.sensitivity_label)
+
         sensitivity_group.setLayout(sensitivity_layout)
         self.star_layout.addWidget(sensitivity_group)
+
 
         # Autostretch Checkbox
         self.autostretch_checkbox = QCheckBox("Autostretch Display")
@@ -25436,13 +25448,13 @@ class WhiteBalanceDialog(QDialog):
             self.star_widget.show()
             self.star_count_label.setText("Detecting stars...")
             # Trigger star detection and display
-            self.detect_and_display_stars()
+            QTimer.singleShot(1000, self.detect_and_display_stars)
 
     def detect_and_display_stars(self):
         try:
             image = self.image_manager.image
             if image is not None:
-                threshold = self.sensitivity_slider.value() / 100.0  # Convert to float
+                threshold = self.sensitivity_slider.value()  # Convert to float
                 autostretch_enabled = self.autostretch_checkbox.isChecked()
 
                 # Apply star-based WB with optional stretch for display
@@ -25495,7 +25507,7 @@ class WhiteBalanceDialog(QDialog):
                     QMessageBox.information(self, "Success", "Auto White Balance applied successfully.")
                     self.accept()
                 elif wb_type == "Star-Based":
-                    threshold = self.sensitivity_slider.value() / 100.0
+                    threshold = self.sensitivity_slider.value()
                     balanced_image, star_count, _, raw_star_colors, after_star_colors = apply_star_based_white_balance(
                         image,
                         threshold,
