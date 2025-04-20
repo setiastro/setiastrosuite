@@ -4616,30 +4616,56 @@ class AstroEditingSuite(QMainWindow):
 
     def open_image(self):
         default_dir = self.settings.value("working_directory", "")
-        """Open an image and load it into the ImageManager."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open Image", default_dir, 
-                                            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.fits.gz *.fit.gz *.fz *.fz *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)")
 
-        if file_path:
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Open Images",
+            default_dir,
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fits *.fit *.fits.gz *.fit.gz *.fz *.xisf *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)"
+        )
+
+        if not file_paths:
+            return
+
+        # Save last folder location
+        self.settings.setValue("working_directory", os.path.dirname(file_paths[0]))
+
+        slot = self.image_manager.current_slot  # Start at current slot
+
+        for file_path in file_paths:
             try:
-                # Load the image into ImageManager
                 image, header, bit_depth, is_mono = load_image(file_path)
-                if image is not None:
-                    print(f"DEBUG: Loaded image max value: {image.max()}")
-                    print(f"DEBUG: Loaded image min value: {image.min()}")
-                    print(f"DEBUG: Loaded image shape: {image.shape}")
-                    print(f"DEBUG: Loaded image dtype: {image.dtype}")
+                if image is None:
+                    raise ValueError("Loaded image is None")
+
+                # Find the next empty or <10x10 slot
+                while slot < self.image_manager.max_slots:
+                    existing_img = self.image_manager._images.get(slot)
+                    if existing_img is None or existing_img.size == 0 or existing_img.shape[0] < 10 or existing_img.shape[1] < 10:
+                        break
+                    slot += 1
+
+                if slot >= self.image_manager.max_slots:
+                    QMessageBox.warning(self, "No Slots Available", "Ran out of image slots.")
+                    break
+
                 metadata = {
                     'file_path': file_path,
                     'original_header': header,
                     'bit_depth': bit_depth,
                     'is_mono': is_mono
                 }
-                self.image_manager.add_image(self.image_manager.current_slot, image, metadata)  # Make sure to specify the slot here
+
+                self.image_manager.add_image(slot, image, metadata)
+                self.image_manager.set_current_slot(slot)
                 self.update_slot_toolbar_highlight()
-                print(f"Image {file_path} loaded successfully.")
+                print(f"Image loaded to slot {slot}: {file_path}")
+                slot += 1
+
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to load image: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to load image: {file_path}\n{e}")
+
+
 
 
     def save_image(self):
@@ -4654,6 +4680,7 @@ class AstroEditingSuite(QMainWindow):
             )
             
             if save_file:
+                self.settings.setValue("working_directory", os.path.dirname(save_file))
                 try:
                     # Determine the user-selected format from the filename
                     _, ext = os.path.splitext(save_file)
