@@ -233,7 +233,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.14.5"
+VERSION = "2.15.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -360,7 +360,7 @@ class AstroEditingSuite(QMainWindow):
         self.setWindowIcon(QIcon(icon_path))
         self.setDockNestingEnabled(True)
         self.current_theme = "dark"  # Default theme
-        self.image_manager = ImageManager(max_slots=10)  # Initialize ImageManager
+        self.image_manager = ImageManager(max_slots=10, parent=self)  # Initialize ImageManager
         self.mask_manager = self.image_manager.mask_manager
         self.image_manager.image_changed.connect(self.update_file_name)
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "Seti Astro" with your actual organization name
@@ -383,6 +383,7 @@ class AstroEditingSuite(QMainWindow):
         self.mask_banner.setVisible(False)  # Hidden by default        
 
         # Initialize UI
+        self.current_theme = self.settings.value("theme", "dark")  # Fallback to dark
         self.initUI()
         self.connect_mask_manager_signals()        
 
@@ -460,11 +461,28 @@ class AstroEditingSuite(QMainWindow):
         light_theme_action = QAction("Light Theme", self)
         dark_theme_action = QAction("Dark Theme", self)
 
+        custom_theme_menu = QMenu("Custom Theme", self)
+        create_custom_action = QAction("Create New", self)
+        apply_custom_action = QAction("Apply Saved", self)
+        reset_custom_action = QAction("Reset", self)
+
+        # Connect all actions
         light_theme_action.triggered.connect(lambda: self.apply_theme("light"))
         dark_theme_action.triggered.connect(lambda: self.apply_theme("dark"))
+        create_custom_action.triggered.connect(self.open_custom_theme_dialog)
+        apply_custom_action.triggered.connect(lambda: self.apply_theme("custom"))
+        reset_custom_action.triggered.connect(self.reset_custom_theme)
 
+        # Add actions to submenu
+        custom_theme_menu.addAction(create_custom_action)
+        custom_theme_menu.addAction(apply_custom_action)
+        custom_theme_menu.addSeparator()
+        custom_theme_menu.addAction(reset_custom_action)
+
+        # Add to top-level menu
         theme_menu.addAction(light_theme_action)
         theme_menu.addAction(dark_theme_action)
+        theme_menu.addMenu(custom_theme_menu)
 
         # --------------------
         # Functions Menu
@@ -866,19 +884,18 @@ class AstroEditingSuite(QMainWindow):
         filebar.addAction(save_as_action)
 
         # Add Undo icon and action
-        undo_icon = QIcon(undoicon_path)  # Replace with the actual path to your Undo icon
-        undo_action_toolbar = QAction(undo_icon, "Undo", self)
-        undo_action_toolbar.setStatusTip("Undo the last action")
-        undo_action_toolbar.triggered.connect(self.undo_image)
-        filebar.addAction(undo_action_toolbar)
+        undo_icon = QIcon(undoicon_path)
+        self.undo_action_toolbar = QAction(undo_icon, "Undo", self)
+        self.undo_action_toolbar.setStatusTip("Undo the last action")
+        self.undo_action_toolbar.triggered.connect(self.undo_image)
+        filebar.addAction(self.undo_action_toolbar)
 
         # Add Redo icon and action
-        redo_icon = QIcon(redoicon_path)  # Replace with the actual path to your Redo icon
-        redo_action_toolbar = QAction(redo_icon, "Redo", self)
-        redo_action_toolbar.setStatusTip("Redo the last undone action")
-        redo_action_toolbar.triggered.connect(self.redo_image)
-        filebar.addAction(redo_action_toolbar)
-
+        redo_icon = QIcon(redoicon_path)
+        self.redo_action_toolbar = QAction(redo_icon, "Redo", self)
+        self.redo_action_toolbar.setStatusTip("Redo the last undone action")
+        self.redo_action_toolbar.triggered.connect(self.redo_image)
+        filebar.addAction(self.redo_action_toolbar)
 
         toolbar = QToolBar("Main Toolbar")
         toolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
@@ -1152,6 +1169,15 @@ class AstroEditingSuite(QMainWindow):
             quicknav_menu.addAction(action)
 
         # --------------------
+        # History Menu
+        # --------------------
+        history_menu = menubar.addMenu("History")
+        view_history_action = QAction("View Undo History", self)
+        view_history_action.setStatusTip("View all previous steps for the current slot")
+        view_history_action.triggered.connect(self.show_history_dialog)
+        history_menu.addAction(view_history_action)
+
+        # --------------------
         # Preferences Menu
         # --------------------
         preferences_menu = menubar.addMenu("Preferences")
@@ -1186,6 +1212,13 @@ class AstroEditingSuite(QMainWindow):
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
 
+    def show_history_dialog(self):
+        slot = self.image_manager.current_slot
+        self.history_dialog = HistoryExplorerDialog(self.image_manager, slot=self.image_manager.current_slot, parent=self)
+        self.history_dialog.show()
+
+
+
     def starspiketool(self):
         dialog = StarSpikeTool(self.image_manager, parent=self)
         dialog.exec()
@@ -1218,7 +1251,7 @@ class AstroEditingSuite(QMainWindow):
             return
 
         # Update the active image using the image manager.
-        self.image_manager.set_image(new_image, metadata)
+        self.image_manager.set_image(new_image, metadata, step_name="Pedestal Removal")
         QMessageBox.information(self, "Pedestal Removal", "Pedestal removal completed.")
 
     def open_signature_insert_window(self):
@@ -2165,15 +2198,8 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + f" | Rescaled by factor {factor}"
 
-            # Push the current state onto the undo stack.
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            # Clear the redo stack since a new action invalidates the redo history.
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-
             # Update the ImageManager with the rescaled image.
-            self.image_manager.set_image(new_image=resized_image, metadata=metadata)
+            self.image_manager.set_image(new_image=resized_image, metadata=metadata, step_name="Rescale Image")
             self.image_manager.image_changed.emit(
                 self.image_manager.current_slot,
                 resized_image,
@@ -2211,18 +2237,9 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + " | Horizontally Flipped"
 
-            # Save the current state to the undo stack
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            print(f"ImageManager: Current state of Slot {self.image_manager.current_slot} pushed to undo stack.")
-
-            # Clear the redo stack as new action invalidates the redo history
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-            print(f"ImageManager: Redo stack for Slot {self.image_manager.current_slot} cleared.")
 
             # Update the ImageManager with the flipped image
-            self.image_manager.set_image(new_image=flipped_image, metadata=metadata)
+            self.image_manager.set_image(new_image=flipped_image, metadata=metadata, step_name="Flip Horizontal")
 
             # Emit the image_changed signal to update the UI
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
@@ -2256,18 +2273,8 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + " | Vertically Flipped"
 
-            # Save the current state to the undo stack
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            print(f"ImageManager: Current state of Slot {self.image_manager.current_slot} pushed to undo stack.")
-
-            # Clear the redo stack as new action invalidates the redo history
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-            print(f"ImageManager: Redo stack for Slot {self.image_manager.current_slot} cleared.")
-
             # Update the ImageManager with the flipped image
-            self.image_manager.set_image(new_image=flipped_image, metadata=metadata)
+            self.image_manager.set_image(new_image=flipped_image, metadata=metadata, step_name="Flip Vertically")
 
             # Emit the image_changed signal to update the UI
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
@@ -2301,18 +2308,8 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + " | Rotated 90° Clockwise"
 
-            # Save the current state to the undo stack
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            print(f"ImageManager: Current state of Slot {self.image_manager.current_slot} pushed to undo stack.")
-
-            # Clear the redo stack as new action invalidates the redo history
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-            print(f"ImageManager: Redo stack for Slot {self.image_manager.current_slot} cleared.")
-
             # Update the ImageManager with the rotated image
-            self.image_manager.set_image(new_image=rotated_image, metadata=metadata)
+            self.image_manager.set_image(new_image=rotated_image, metadata=metadata, step_name="Rotate 90° Clockwise")
 
             # Emit the image_changed signal to update the UI
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
@@ -2346,18 +2343,8 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + " | Rotated 90° Counterclockwise"
 
-            # Save the current state to the undo stack
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            print(f"ImageManager: Current state of Slot {self.image_manager.current_slot} pushed to undo stack.")
-
-            # Clear the redo stack as new action invalidates the redo history
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-            print(f"ImageManager: Redo stack for Slot {self.image_manager.current_slot} cleared.")
-
             # Update the ImageManager with the rotated image
-            self.image_manager.set_image(new_image=rotated_image, metadata=metadata)
+            self.image_manager.set_image(new_image=rotated_image, metadata=metadata, step_name="Rotate Counterclockwise")
 
             # Emit the image_changed signal to update the UI
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
@@ -2396,18 +2383,8 @@ class AstroEditingSuite(QMainWindow):
             metadata = self.image_manager._metadata.get(self.image_manager.current_slot, {}).copy()
             metadata['description'] = metadata.get('description', "") + " | Inverted Image"
 
-            # Save the current state to the undo stack
-            self.image_manager._undo_stacks[self.image_manager.current_slot].append(
-                (current_image.copy(), metadata.copy())
-            )
-            print(f"ImageManager: Current state of Slot {self.image_manager.current_slot} pushed to undo stack.")
-
-            # Clear the redo stack as new action invalidates the redo history
-            self.image_manager._redo_stacks[self.image_manager.current_slot].clear()
-            print(f"ImageManager: Redo stack for Slot {self.image_manager.current_slot} cleared.")
-
             # Update the ImageManager with the inverted image
-            self.image_manager.set_image(new_image=inverted_image, metadata=metadata)
+            self.image_manager.set_image(new_image=inverted_image, metadata=metadata, step_name="Image Inversion")
 
             # Emit the image_changed signal to update the UI
             self.image_manager.image_changed.emit(self.image_manager.current_slot, inverted_image, metadata)
@@ -2470,7 +2447,7 @@ class AstroEditingSuite(QMainWindow):
             current_slot = self.image_manager.current_slot
             metadata = self.image_manager._metadata.get(current_slot, {}).copy()
             metadata['description'] = "Gradient removed"
-            self.image_manager.set_image(new_image=corrected_image, metadata=metadata)
+            self.image_manager.set_image(new_image=corrected_image, metadata=metadata, step_name="Gradient Removal")
 
             # **Save gradient background only if requested**
             if save_to_slot_1:
@@ -2775,24 +2752,19 @@ class AstroEditingSuite(QMainWindow):
 
     def apply_cropped_image(self, cropped_image):
         """Apply the cropped image to the current slot."""
-        # Update the current slot with the cropped image
         current_slot = self.image_manager.current_slot
         metadata = self.image_manager._metadata.get(current_slot, {}).copy()
         metadata['file_path'] = "Cropped Image"
 
-        # Save current state to undo stack
-        self.image_manager._undo_stacks[current_slot].append(
-            (self.image_manager._images[current_slot].copy(), metadata.copy())
+        # Use the proper undo-enabled, step-name-aware method
+        self.image_manager.set_image_with_step_name(
+            cropped_image,
+            metadata,
+            step_name="Crop"
         )
-        print(f"ImageManager: Current state of Slot {current_slot} pushed to undo stack.")
 
-        # Update with the cropped image
-        self.image_manager._images[current_slot] = cropped_image
-        self.image_manager._metadata[current_slot] = metadata
-
-        # Emit signal to update UI
-        self.image_manager.image_changed.emit(current_slot, cropped_image, metadata)
         QMessageBox.information(self, "Success", "Cropped image applied.")
+
 
 
     def rgb_combination(self):
@@ -3135,7 +3107,7 @@ class AstroEditingSuite(QMainWindow):
         # Set the processed image in the image manager
         self.image_manager.set_image(
             processed_image,
-            {'file_path': output_file, 'description': "GraXpert Gradient Removed"}
+            {'file_path': output_file, 'description': "GraXpert Gradient Removed"}, step_name="GraXpert Gradient Removal"
         )
 
         QMessageBox.information(self, "Success", "Gradient removed successfully.")
@@ -3211,7 +3183,7 @@ class AstroEditingSuite(QMainWindow):
         metadata['file_path'] = f"Luminance Recombined (Lum Slot: {luminance_slot}, RGB Slot: {rgb_slot})"
         
         # Update the selected RGB slot with the recombined image
-        self.image_manager.set_image(updated_rgb, metadata)
+        self.image_manager.set_image(updated_rgb, metadata, step_name="Recombine Luminance")
         
         print(f"Recombined image updated in slot {rgb_slot} with luminance from slot {luminance_slot}.")
         
@@ -3588,7 +3560,7 @@ class AstroEditingSuite(QMainWindow):
                 current_metadata['notes'] = [addition_note]
 
             # Assign the blended image and metadata to the current slot
-            self.image_manager.set_image(blended_image, current_metadata)
+            self.image_manager.set_image(blended_image, current_metadata, step_name="Star Addition")
 
             # Emit the image_changed signal with all required arguments
             self.image_manager.image_changed.emit(current_slot, blended_image, current_metadata)
@@ -3883,7 +3855,7 @@ class AstroEditingSuite(QMainWindow):
         dialog.append_text("Updating ImageManager with the starless image.\n")
         self.image_manager.set_image(
             starless_rgb,
-            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="Stars Removed"
         )
         QMessageBox.information(self, "Success", "Starless image updated successfully.")
         print("ImageManager updated with starless image.")
@@ -4143,7 +4115,7 @@ class AstroEditingSuite(QMainWindow):
         dialog.append_text("Updating ImageManager with the starless image.\n")
         self.image_manager.set_image(
             starless_rgb,
-            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="Stars Removed"
         )
         QMessageBox.information(self, "Success", "Starless image updated successfully via CosmicClarityDarkStar.")
         print("ImageManager updated with starless image.")
@@ -4471,10 +4443,12 @@ class AstroEditingSuite(QMainWindow):
             print("Image dimensions not updated.")   
 
     def apply_theme(self, theme):
-        """Apply the selected theme to the application."""
+        """Apply the selected theme to the application and persist it."""
+        self.current_theme = theme
+        self.settings.setValue("theme", theme)
+
         if theme == "light":
-            self.current_theme = "light"
-            light_stylesheet = """
+            light_stylesheet = """ 
             QWidget {
                 background-color: #f0f0f0;
                 color: #000000;
@@ -4517,17 +4491,17 @@ class AstroEditingSuite(QMainWindow):
                 color: #000000;
                 padding: 5px;
                 border: 1px solid #cccccc;
-                border-bottom: none;  /* Avoid double border at bottom */
+                border-bottom: none;
             }
             QTabBar::tab:selected {
-                background: #d0d0d0;  /* Highlight for the active tab */
+                background: #d0d0d0;
                 border-color: #000000;
             }
             QTabBar::tab:hover {
                 background: #c0c0c0;
             }
             QTabBar::tab:!selected {
-                margin-top: 2px;  /* Push unselected tabs down for better clarity */
+                margin-top: 2px;
             }
             QMenu {
                 background-color: #f0f0f0;
@@ -4536,12 +4510,11 @@ class AstroEditingSuite(QMainWindow):
             QMenu::item:selected {
                 background-color: #d0d0d0; 
                 color: #000000;
-            }            
+            }
             """
             self.setStyleSheet(light_stylesheet)
 
         elif theme == "dark":
-            self.current_theme = "dark"
             dark_stylesheet = """
             QWidget {
                 background-color: #2b2b2b;
@@ -4585,34 +4558,177 @@ class AstroEditingSuite(QMainWindow):
                 color: #dcdcdc;
                 padding: 5px;
                 border: 1px solid #5c5c5c;
-                border-bottom: none;  /* Avoid double border at bottom */
+                border-bottom: none;
             }
             QTabBar::tab:selected {
-                background: #4a4a4a;  /* Highlight for the active tab */
+                background: #4a4a4a;
                 border-color: #dcdcdc;
             }
             QTabBar::tab:hover {
                 background: #505050;
             }
             QTabBar::tab:!selected {
-                margin-top: 2px;  /* Push unselected tabs down for better clarity */
+                margin-top: 2px;
             }
             QMenu {
                 background-color: #2b2b2b;
                 color: #dcdcdc;
             }
             QMenu::item:selected {
-                background-color: #3a75c4;  /* Blue background for selected items */
-                color: #ffffff;  /* White text color */
+                background-color: #3a75c4;
+                color: #ffffff;
             }       
             """
             self.setStyleSheet(dark_stylesheet)
 
-        # Update mask banner styling based on theme
+        elif theme == "custom":
+            custom_stylesheet = self.settings.value("custom_stylesheet", "")
+            if custom_stylesheet:
+                self.setStyleSheet(custom_stylesheet)
+            else:
+                print("⚠️ No custom stylesheet found in settings.")
+
+        # Update mask banner styling
         if self.mask_manager.get_applied_mask() is not None:
             self.mask_banner.setStyleSheet("background-color: orange; color: black; font-size: 14px; padding: 5px;")
         else:
             self.mask_banner.setStyleSheet("background-color: transparent; color: #dcdcdc; font-size: 14px; padding: 5px;")
+
+
+    def open_custom_theme_dialog(self):
+        # Ask user for a background color
+        bg_color = QColorDialog.getColor(title="Select Background Color", parent=self)
+        if not bg_color.isValid():
+            return
+
+        # Ask user for a text color
+        text_color = QColorDialog.getColor(title="Select Text Color", parent=self)
+        if not text_color.isValid():
+            return
+
+        # Ask user for a font
+        font, ok = QFontDialog.getFont(self)
+        if not ok:
+            return
+
+        self.current_theme = "custom"
+
+        # Generate a stylesheet using user choices
+        lighter_bg = bg_color.lighter(300)
+        darker_bg = bg_color.darker(120)
+
+        custom_stylesheet = f"""
+        QWidget {{
+            background-color: {bg_color.name()};
+            color: {text_color.name()};
+            font-family: {font.family()};
+            font-size: {font.pointSize()}pt;
+        }}
+
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+            background-color: {bg_color.name()};
+            border: 1px solid {text_color.name()};
+            color: {text_color.name()};
+            padding: 2px;
+        }}
+
+        QLabel {{
+            background-color: {darker_bg.name()};
+            color: {text_color.name()};
+        }}
+
+        QPushButton {{
+            background-color: {lighter_bg.name()};
+            border: 1px solid {text_color.name()};
+            color: {text_color.name()};
+            padding: 5px;
+        }}
+
+        QPushButton:hover {{
+            background-color: {text_color.name()};
+            color: {bg_color.name()};
+        }}
+
+        QScrollBar:vertical, QScrollBar:horizontal {{
+            background: {darker_bg.name()};
+        }}
+
+        QTreeWidget {{
+            background-color: {darker_bg.name()};
+            border: 1px solid {text_color.name()};
+            color: {text_color.name()};
+        }}
+
+        QHeaderView::section {{
+            background-color: {bg_color.name()};
+            color: {text_color.name()};
+            padding: 5px;
+        }}
+
+        QTabWidget::pane {{ 
+            border: 1px solid {text_color.name()}; 
+            background-color: {bg_color.name()};
+        }}
+
+        QTabBar::tab {{
+            background: {lighter_bg.name()};
+            color: {text_color.name()};
+            padding: 5px;
+            border: 1px solid {text_color.name()};
+            border-bottom: none;
+        }}
+
+        QTabBar::tab:selected {{
+            background: {text_color.name()};
+            color: {bg_color.name()};
+            border-color: {text_color.name()};
+        }}
+
+        QTabBar::tab:hover {{
+            background: {text_color.name()};
+            color: {bg_color.name()};
+        }}
+
+        QTabBar::tab:!selected {{
+            margin-top: 2px;
+        }}
+
+        QMenu {{
+            background-color: {bg_color.name()};
+            color: {text_color.name()};
+        }}
+
+        QMenu::item:selected {{
+            background-color: {text_color.name()};
+            color: {bg_color.name()};
+        }}
+        """
+        self.setStyleSheet(custom_stylesheet)
+
+        # Adjust banner style accordingly
+        if self.mask_manager.get_applied_mask() is not None:
+            self.mask_banner.setStyleSheet("background-color: orange; color: black; font-size: 14px; padding: 5px;")
+        else:
+            self.mask_banner.setStyleSheet(f"background-color: transparent; color: {text_color.name()}; font-size: 14px; padding: 5px;")
+
+        self.settings.setValue("custom_stylesheet", custom_stylesheet)
+        self.settings.setValue("theme", "custom")
+        self.current_theme = "custom"            
+
+    def reset_custom_theme(self):
+        confirm = QMessageBox.question(
+            self,
+            "Reset Custom Theme",
+            "Are you sure you want to reset the custom theme to default?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.settings.remove("custom_stylesheet")
+            self.settings.setValue("theme", "dark")
+            self.apply_theme("dark")
+            QMessageBox.information(self, "Custom Theme Reset", "Custom theme has been reset to dark mode.")
+
+
 
     def open_image(self):
         default_dir = self.settings.value("working_directory", "")
@@ -4774,25 +4890,48 @@ class AstroEditingSuite(QMainWindow):
 
         return header
 
-
-
-
-
     def undo_image(self):
-        """Undo the last action."""
         if self.image_manager.can_undo():
-            self.image_manager.undo()
-            print("Undo performed.")
+            step = self.image_manager.undo()
+            self.statusBar.showMessage(f"Undo: {step or 'Unnamed'}", 4000)
+            self.update_undo_redo_action_labels()
         else:
             QMessageBox.information(self, "Undo", "No actions to undo.")
 
     def redo_image(self):
-        """Redo the last undone action."""
         if self.image_manager.can_redo():
-            self.image_manager.redo()
-            print("Redo performed.")
+            step = self.image_manager.redo()
+            self.statusBar.showMessage(f"Redo: {step or 'Unnamed'}", 4000)
+            self.update_undo_redo_action_labels()
         else:
-            QMessageBox.information(self, "Redo", "No actions to redo.")            
+            QMessageBox.information(self, "Redo", "No actions to redo.")      
+
+
+    def update_undo_redo_action_labels(self):
+        slot = self.image_manager.current_slot
+
+        # ---- Undo Label + Tip ----
+        if self.image_manager.can_undo(slot):
+            _, _, step_name = self.image_manager._undo_stacks[slot][-1]
+            self.undo_action_toolbar.setText("Undo")
+            self.undo_action_toolbar.setToolTip(f"Undo {step_name}")
+            self.undo_action_toolbar.setStatusTip(f"Undo: {step_name}")
+        else:
+            self.undo_action_toolbar.setToolTip("Undo (no actions)")
+            self.undo_action_toolbar.setStatusTip("Undo the last action")
+
+        # ---- Redo Label + Tip ----
+        if self.image_manager.can_redo(slot):
+            _, _, step_name = self.image_manager._redo_stacks[slot][-1]
+            self.redo_action_toolbar.setText("Redo")
+            self.redo_action_toolbar.setToolTip(f"Redo {step_name}")
+            self.redo_action_toolbar.setStatusTip(f"Redo: {step_name}")
+        else:
+            self.redo_action_toolbar.setToolTip("Redo (no actions)")
+            self.redo_action_toolbar.setStatusTip("Redo the last undone action")
+
+
+
 
     def closeEvent(self, event):
         """Prompt the user before exiting the application."""
@@ -5324,13 +5463,14 @@ class ImageManager(QObject):
     image_changed = pyqtSignal(int, np.ndarray, dict)
     current_slot_changed = pyqtSignal(int)    
 
-    def __init__(self, max_slots=5):
+    def __init__(self, max_slots=5, parent=None):
         """
         Initializes the ImageManager with a specified number of slots.
         
         :param max_slots: Maximum number of image slots to manage.
         """
         super().__init__()
+        self.parent = parent
         self.max_slots = max_slots
         self._images = {i: None for i in range(max_slots)}
         self._metadata = {i: {} for i in range(max_slots)}
@@ -5406,18 +5546,10 @@ class ImageManager(QObject):
         else:
             print(f"ImageManager: Slot {slot} is out of range. Max slots: {self.max_slots}")
 
-    def set_image(self, new_image, metadata):
-        """
-        Sets a new image and metadata for the current slot, adding the previous state to the undo stack.
-        
-        :param new_image: The new image data (numpy array).
-        :param metadata: A dictionary containing metadata for the new image.
-        """
+    def set_image(self, new_image, metadata, step_name=None):
         slot = self.current_slot
         if self._images[slot] is not None:
-            # Save current state to undo stack
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-            # Clear redo stack since new action invalidates the redo history
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step"))
             self._redo_stacks[slot].clear()
             print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
         else:
@@ -5427,7 +5559,12 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, metadata)
         print(f"ImageManager: Image set for slot {slot} with new metadata.")
 
-    def set_image_for_slot(self, slot, new_image, metadata):
+        # ⬇ Update undo/redo labels
+        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
+            self.parent.update_undo_redo_action_labels()
+
+
+    def set_image_for_slot(self, slot, new_image, metadata, step_name=None):
         """
         Similar to set_image, but allows specifying which slot to update,
         and pushes the previous image to the undo stack.
@@ -5438,7 +5575,7 @@ class ImageManager(QObject):
 
         # If there's an existing image in that slot, push it to undo
         if self._images[slot] is not None:
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
+            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step"))
             self._redo_stacks[slot].clear()
             print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
         else:
@@ -5455,34 +5592,49 @@ class ImageManager(QObject):
         self.image_changed.emit(slot, new_image, metadata)
         print(f"ImageManager: Image set for slot {slot} with new metadata.")
 
+        # Update undo/redo tooltip text if the parent supports it
+        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
+            self.parent.update_undo_redo_action_labels()
+
+
     @property
     def image(self):
-        """
-        Gets the image from the current slot.
-        
-        :return: The image data (numpy array) of the current slot.
-        """
         return self._images[self.current_slot]
 
     @image.setter
     def image(self, new_image):
         """
-        Sets a new image for the current slot, adding the previous state to the undo stack.
+        Default image setter that stores undo as an unnamed step.
+        """
+        self.set_image_with_step_name(new_image, self._metadata[self.current_slot], step_name="Unnamed Step")
+
+    def set_image_with_step_name(self, new_image, metadata, step_name="Unnamed Step"):
+        """
+        Set a new image and metadata for the current slot and push the previous state to the undo stack with a step name.
         
-        :param new_image: The new image data (numpy array).
+        :param new_image: New image (np.ndarray)
+        :param metadata: Metadata dictionary
+        :param step_name: Description of the operation
         """
         slot = self.current_slot
         if self._images[slot] is not None:
-            # Save current state to undo stack
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-            # Clear redo stack since new action invalidates the redo history
+            self._undo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy(), step_name)
+            )
             self._redo_stacks[slot].clear()
-            print(f"ImageManager: Previous image in slot {slot} pushed to undo stack via property setter.")
+            print(f"ImageManager: Previous image in slot {slot} pushed to undo stack (step: {step_name})")
         else:
-            print(f"ImageManager: No existing image in slot {slot} to push to undo stack via property setter.")
+            print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
+
         self._images[slot] = new_image
-        self.image_changed.emit(slot, new_image, self._metadata[slot])
-        print(f"ImageManager: Image set for slot {slot} via property setter.")
+        self._metadata[slot] = metadata
+        self.image_changed.emit(slot, new_image, metadata)
+        print(f"ImageManager: Image set for slot {slot} via set_image_with_step_name.")
+
+        # Update tooltips for undo/redo actions
+        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
+            self.parent.update_undo_redo_action_labels()
+
 
     def get_slot_name(self, slot):
         """
@@ -5557,46 +5709,440 @@ class ImageManager(QObject):
             return False
 
     def undo(self, slot=None):
-        """
-        Undoes the last change in the specified slot, restoring the previous image and metadata.
-        
-        :param slot: (Optional) The slot number to perform undo on. If None, uses current_slot.
-        """
         if slot is None:
             slot = self.current_slot
-        if 0 <= slot < self.max_slots:
-            if self.can_undo(slot):
-                # Save current state to redo stack
-                self._redo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-                # Restore the last state from undo stack
-                self._images[slot], self._metadata[slot] = self._undo_stacks[slot].pop()
-                self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
-                print(f"ImageManager: Undo performed on slot {slot}.")
+
+        if 0 <= slot < self.max_slots and self.can_undo(slot):
+            self._redo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy(), "Redo of Previous Step")
+            )
+
+            popped = self._undo_stacks[slot].pop()
+            if len(popped) == 3:
+                prev_img, prev_meta, step_name = popped
             else:
-                print(f"ImageManager: No actions to undo in slot {slot}.")
+                prev_img, prev_meta = popped
+                step_name = "Unnamed Undo Step"
+
+            self._images[slot] = prev_img
+            self._metadata[slot] = prev_meta
+            self.image_changed.emit(slot, prev_img, prev_meta)
+
+            print(f"ImageManager: Undo performed on slot {slot}: {step_name}")
+            return step_name
         else:
-            print(f"ImageManager: Slot {slot} is out of range. Cannot perform undo.")
+            print(f"ImageManager: Cannot perform undo on slot {slot}.")
+            return None
+
+
 
     def redo(self, slot=None):
-        """
-        Redoes the last undone change in the specified slot, restoring the image and metadata.
-        
-        :param slot: (Optional) The slot number to perform redo on. If None, uses current_slot.
-        """
         if slot is None:
             slot = self.current_slot
-        if 0 <= slot < self.max_slots:
-            if self.can_redo(slot):
-                # Save current state to undo stack
-                self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-                # Restore the last state from redo stack
-                self._images[slot], self._metadata[slot] = self._redo_stacks[slot].pop()
-                self.image_changed.emit(slot, self._images[slot], self._metadata[slot])
-                print(f"ImageManager: Redo performed on slot {slot}.")
+
+        if 0 <= slot < self.max_slots and self.can_redo(slot):
+            self._undo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy(), "Undo of Redone Step")
+            )
+
+            popped = self._redo_stacks[slot].pop()
+            if len(popped) == 3:
+                redo_img, redo_meta, step_name = popped
             else:
-                print(f"ImageManager: No actions to redo in slot {slot}.")
+                redo_img, redo_meta = popped
+                step_name = "Unnamed Redo Step"
+
+            self._images[slot] = redo_img
+            self._metadata[slot] = redo_meta
+            self.image_changed.emit(slot, redo_img, redo_meta)
+
+            print(f"ImageManager: Redo performed on slot {slot}: {step_name}")
+            return step_name
         else:
-            print(f"ImageManager: Slot {slot} is out of range. Cannot perform redo.")
+            print(f"ImageManager: Cannot perform redo on slot {slot}.")
+            return None
+
+    def get_history_image(self, slot: int, index: int):
+        """
+        Get a specific image from the undo stack (not applied, just for preview).
+        :param slot: Slot number.
+        :param index: Index from the bottom (0 = oldest).
+        """
+        if 0 <= slot < self.max_slots:
+            stack = self._undo_stacks[slot]
+            if 0 <= index < len(stack):
+                img, meta, _ = stack[index] if len(stack[index]) == 3 else (*stack[index], "Unnamed")
+                return img.copy(), meta.copy()
+        return None, None
+
+class HistoryExplorerDialog(QDialog):
+    def __init__(self, image_manager, slot, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"History Explorer - Slot {slot}")
+        self.image_manager = image_manager
+        self.slot = slot
+
+        self.setMinimumSize(600, 400)
+        layout = QVBoxLayout(self)
+
+        self.history_list = QListWidget()
+        undo_stack = self.image_manager._undo_stacks.get(slot, [])
+        self.history_images = []
+
+        # Step history based on undo_stack
+        for i in range(len(undo_stack)):
+            img, meta = undo_stack[i][:2]
+
+            # Step name is derived from the *next* entry in the stack
+            if i == 0:
+                label = "1. Original Image"
+            else:
+                if len(undo_stack[i - 1]) == 3:
+                    label = f"{i + 1}. {undo_stack[i - 1][2]}"
+                else:
+                    label = f"{i + 1}. Unnamed"
+
+            self.history_list.addItem(label)
+            self.history_images.append((img, meta))
+
+        # Add the current image as the final step
+        current_img = image_manager._images.get(slot)
+        current_meta = image_manager._metadata.get(slot, {})
+        final_step_name = (
+            undo_stack[-1][2] if len(undo_stack) > 0 and len(undo_stack[-1]) == 3 else "Current Image"
+        )
+        self.history_list.addItem(f"{len(undo_stack)+1}. {final_step_name} (Current)")
+        self.history_images.append((current_img, current_meta))
+
+        # Connect interaction
+        self.history_list.itemDoubleClicked.connect(self.preview_selected_history_step)
+        layout.addWidget(self.history_list)
+
+        # Close button
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        layout.addWidget(self.close_button)
+
+    def preview_selected_history_step(self, item):
+        row = self.history_list.row(item)
+
+        if 0 <= row < len(self.history_images):
+            img, meta = self.history_images[row]
+            if img is not None:
+                preview = HistoryImagePreview(img, meta, self.slot, image_manager=self.image_manager)
+                preview.setWindowTitle(item.text())
+                preview.show()
+                return
+
+        QMessageBox.warning(self, "Preview Failed", "Could not retrieve image for this step.")
+
+class HistoryImagePreview(QWidget):
+    def __init__(self, image_data, metadata, slot, image_manager=None, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.setWindowTitle("History Preview")
+        self.image_data = image_data
+        self.image_manager = image_manager
+        self.metadata = metadata
+        self.slot = slot
+        self.parent_ref = parent
+        self.zoom_factor = 1.0
+        self.is_autostretched = False
+        self.stretched_image_data = None
+        self._panning = False
+        self._pan_start = QPointF()
+        
+
+        # QLabel setup
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # Zoom controls
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(1, 400)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+
+        zoom_in = QPushButton("Zoom In")
+        zoom_in.clicked.connect(lambda: self.adjust_zoom(10))
+        zoom_out = QPushButton("Zoom Out")
+        zoom_out.clicked.connect(lambda: self.adjust_zoom(-10))
+        fit = QPushButton("Fit to Preview")
+        fit.clicked.connect(self.fit_to_preview)
+
+        self.autostretch_button = QPushButton("AutoStretch")
+        self.autostretch_button.clicked.connect(self.apply_autostretch)
+
+        compare_btn = QPushButton("Compare to Current")
+        compare_btn.clicked.connect(self.launch_comparison_slider)
+
+        # Restore Button
+        restore_btn = QPushButton("Restore This Version")
+        restore_btn.clicked.connect(self.restore_version)
+
+        # Layout
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(zoom_out)
+        zoom_layout.addWidget(self.zoom_slider)
+        zoom_layout.addWidget(zoom_in)
+        zoom_layout.addWidget(fit)
+        zoom_layout.addWidget(self.autostretch_button)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.addWidget(self.scroll_area)
+        main_layout.addLayout(zoom_layout)
+        main_layout.addWidget(compare_btn)
+        main_layout.addWidget(restore_btn)
+        self.setLayout(main_layout)
+
+        self.update_image_display()
+
+    def eventFilter(self, source, event):
+        if source == self.scroll_area.viewport():
+            if (event.type() == QEvent.Type.Wheel and
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                # Ctrl + wheel for zooming
+                step = 1.25 if event.angleDelta().y() > 0 else 0.8
+                new_zoom = self.zoom_factor * step
+                self.zoom_slider.setValue(
+                    max(1, min(400, int(new_zoom * 100)))
+                )
+                event.accept()
+                return True
+
+            if event.type() == QEvent.Type.MouseButtonPress and \
+                    event.button() == Qt.MouseButton.LeftButton:
+                # Start panning
+                self._panning = True
+                self._pan_start = event.position()
+                self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return True
+
+            if event.type() == QEvent.Type.MouseMove and self._panning:
+                # Pan scrollbars
+                delta = event.position() - self._pan_start
+                hbar = self.scroll_area.horizontalScrollBar()
+                vbar = self.scroll_area.verticalScrollBar()
+                hbar.setValue(hbar.value() - int(delta.x()))
+                vbar.setValue(vbar.value() - int(delta.y()))
+                self._pan_start = event.position()
+                event.accept()
+                return True
+
+            if event.type() == QEvent.Type.MouseButtonRelease and \
+                    event.button() == Qt.MouseButton.LeftButton:
+                # End panning
+                self._panning = False
+                self.scroll_area.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                event.accept()
+                return True
+
+        return super().eventFilter(source, event)
+
+
+    def launch_comparison_slider(self):
+        """Open the before/after slider in its own pop‑up."""
+        current_img = self.image_manager.image
+        if current_img is None:
+            QMessageBox.warning(self, "Unavailable",
+                                "No current image available.")
+            return
+
+        slider_window = QWidget(self, Qt.WindowType.Window)
+        slider_window.setWindowTitle("Compare with Current")
+        slider_window.resize(900, 700)
+
+        win_layout = QVBoxLayout(slider_window)
+
+        # ---- the slider widget itself ----
+        self.slider_widget = ComparisonSlider(self.image_data,
+                                            current_img,
+                                            slider_window)
+        win_layout.addWidget(self.slider_widget)
+
+        # ---- control‑bar (zoom + autostretch) ----
+        ctrl_bar = QHBoxLayout()
+
+        zoom_in_btn  = QPushButton("Zoom In")
+        zoom_in_btn.clicked.connect(self.slider_widget.zoom_in)
+        ctrl_bar.addWidget(zoom_in_btn)
+
+        zoom_out_btn = QPushButton("Zoom Out")
+        zoom_out_btn.clicked.connect(self.slider_widget.zoom_out)
+        ctrl_bar.addWidget(zoom_out_btn)
+
+        stretch_btn  = QPushButton("Toggle AutoStretch")
+        stretch_btn.clicked.connect(self.slider_widget.toggle_autostretch)
+        ctrl_bar.addWidget(stretch_btn)
+
+        # (optional) add more buttons later – e.g. blink‑mode toggle
+        # blink_btn = QPushButton("Toggle Blink")
+        # blink_btn.clicked.connect(self.slider_widget.toggle_blink_mode)
+        # ctrl_bar.addWidget(blink_btn)
+
+        # push the buttons to the left and leave the rest empty
+        ctrl_bar.addStretch(1)
+
+        win_layout.addLayout(ctrl_bar)
+
+        slider_window.show()
+
+
+    def restore_version(self):
+        """Push this image into the active slot via image manager."""
+        if self.image_manager:
+            self.image_manager.set_image(
+                self.image_data.copy(),
+                self.metadata.copy(),
+                step_name="Restored from History"
+            )
+            self.close()
+        else:
+            QMessageBox.critical(self, "Error", "Parent does not have an image manager.")
+
+    def stretch_image(self, image):
+        target_median = 0.25
+        if image.ndim == 2:
+            return stretch_mono_image(image, target_median)
+        elif image.ndim == 3:
+            return stretch_color_image(image, target_median, linked=False)
+        return image
+
+    def apply_autostretch(self):
+        self.is_autostretched = not self.is_autostretched
+        if self.is_autostretched:
+            self.stretched_image_data = self.stretch_image(self.image_data)
+        self.update_image_display()
+
+    def update_image_display(self):
+        display_image = self.stretched_image_data if self.is_autostretched else self.image_data
+        display_image = np.clip(display_image * 255, 0, 255).astype(np.uint8)
+
+        if display_image.ndim == 2:
+            h, w = display_image.shape
+            qimg = QImage(display_image.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            h, w, _ = display_image.shape
+            qimg = QImage(display_image.data, w, h, w * 3, QImage.Format.Format_RGB888)
+
+        pixmap = QPixmap.fromImage(qimg)
+        scaled = pixmap.scaled(
+            pixmap.size() * self.zoom_factor,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
+
+    def on_zoom_changed(self, value):
+        self.zoom_factor = value / 100.0
+        self.update_image_display()
+
+    def adjust_zoom(self, delta):
+        self.zoom_slider.setValue(max(1, min(400, self.zoom_slider.value() + delta)))
+
+    def fit_to_preview(self):
+        if self.image_label.pixmap() is None:
+            return
+        available = self.scroll_area.viewport().size()
+        pixmap = self.image_label.pixmap()
+        if pixmap:
+            factor = min(available.width() / pixmap.width(), available.height() / pixmap.height())
+            self.zoom_factor = factor
+            self.zoom_slider.setValue(int(factor * 100))
+            self.update_image_display()
+
+class ComparisonSlider(QWidget):
+    def __init__(self, before_image: np.ndarray, after_image: np.ndarray, parent=None):
+        super().__init__(parent)
+        self.before_image = before_image
+        self.after_image = after_image
+        self.slider_position = 0.5
+        self.zoom_factor = 1.0
+        self.autostretch = False
+        self.setMouseTracking(True)
+        self.setMinimumSize(400, 300)
+
+    def set_zoom_factor(self, zoom):
+        self.zoom_factor = max(0.1, min(zoom, 5.0))  # Clamp zoom
+        self.update()
+
+    def zoom_in(self):
+        self.set_zoom_factor(self.zoom_factor * 1.25)
+
+    def zoom_out(self):
+        self.set_zoom_factor(self.zoom_factor / 1.25)
+
+    def toggle_autostretch(self):
+        self.autostretch = not self.autostretch
+        self.update()
+
+    def paintEvent(self, _ev):
+        painter   = QPainter(self)
+        W, H      = self.width(), self.height()
+
+        before_q  = self.prepare_image(self.before_image)
+        after_q   = self.prepare_image(self.after_image)
+
+        # centre the zoomed image inside the widget
+        ox = (W - before_q.width())  // 2
+        oy = (H - before_q.height()) // 2
+
+        divider_x = int(W * self.slider_position)
+
+        # ---- LEFT half : BEFORE ------------------------------------
+        painter.save()
+        painter.setClipRect(0, 0, divider_x, H)
+        painter.drawImage(ox, oy, before_q)
+        painter.restore()
+
+        # ---- RIGHT half : AFTER ------------------------------------
+        painter.save()
+        painter.setClipRect(divider_x, 0, W - divider_x, H)
+        painter.drawImage(ox, oy, after_q)
+        painter.restore()
+
+        # ---- Divider line ------------------------------------------
+        painter.setPen(Qt.GlobalColor.red)
+        painter.drawLine(divider_x, 0, divider_x, H)
+
+    def mousePressEvent(self, event):
+        self.update_slider(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self.update_slider(event.position().x())
+
+    def update_slider(self, x):
+        self.slider_position = min(max(x / self.width(), 0.0), 1.0)
+        self.update()
+
+    def prepare_image(self, image):
+        if self.autostretch:
+            image = self.stretch_image(image)
+
+        image = np.clip(image * 255, 0, 255).astype(np.uint8)
+
+        if image.ndim == 2:
+            h, w = image.shape
+            qimg = QImage(image.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            h, w, _ = image.shape
+            qimg = QImage(image.data, w, h, w * 3, QImage.Format.Format_RGB888)
+
+        # Apply zoom and scale to widget size
+        target_size = QSize(int(self.width() * self.zoom_factor), int(self.height() * self.zoom_factor))
+        return qimg.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+    def stretch_image(self, image):
+        p = np.percentile(image, 99.5)
+        return np.clip(image / p, 0, 1)
+
+
 
 class MaskManager(QObject):
     """
@@ -14195,7 +14741,7 @@ class MosaicMasterDialog(QDialog):
         if final_img.ndim == 2:
             final_img = np.stack([final_img, final_img, final_img], axis=-1)
 
-        self.image_manager.set_image(final_img, metadata=meta)
+        self.image_manager.set_image(final_img, metadata=meta, step_name="Mosaic Creation   ")
         print("✅ Mosaic pushed successfully.")
 
     def stretch_image(self, image):
@@ -15419,7 +15965,7 @@ class StellarAlignmentDialog(QDialog):
         if self.aligned_image is None:
             QMessageBox.warning(self, "Error", "No aligned image available. Run alignment first.")
             return
-        self.image_manager.set_image(new_image=self.aligned_image, metadata={"description": "Stellar aligned image"})
+        self.image_manager.set_image(new_image=self.aligned_image, metadata={"description": "Stellar aligned image"}, step_name="Stellar Alignment")
         self.image_manager.image_changed.emit(self.image_manager.current_slot, self.aligned_image, {"description": "Stellar aligned image"})
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
@@ -19568,7 +20114,7 @@ class WaveScaleHDRDialog(QDialog):
             output_image = self.preview_image.copy()
 
             # Update the main ImageManager
-            self.image_manager.set_image(output_image, {"description": "WaveScale HDR"})
+            self.image_manager.set_image(output_image, {"description": "WaveScale HDR"}, step_name="WaveScale HDR")
             QMessageBox.information(self, "Success", "WaveScale HDR applied.")
             self.accept()
 
@@ -20649,7 +21195,7 @@ class BlemishBlasterDialog(QDialog):
                 print("Initialized blemish removal note in metadata.")
 
             # Push the updated image and metadata to the ImageManager
-            self.image_manager.set_image(self.image.copy(), metadata=existing_metadata)
+            self.image_manager.set_image(self.image.copy(), metadata=existing_metadata, step_name="blemish_blaster")
             self.blemish_removed.emit(self.image_manager.image)
 
             # Clear the undo and redo stacks as changes are now applied
@@ -22802,7 +23348,7 @@ class RGBCombinationDialog(QDialog):
             self.rgb_image = rgb_image  # Store the combined image.
     
             # Use ImageManager.set_image to set the image in the active slot.
-            self.image_manager.set_image(new_image=self.rgb_image, metadata={"description": "RGB Combined Image"})
+            self.image_manager.set_image(new_image=self.rgb_image, metadata={"description": "RGB Combined Image"}, step_name="RGB Combination")
     
             self.accept()  # Close the dialog with success.
             print("RGB Combination successful.")
@@ -23581,7 +24127,7 @@ class StarSpikePreviewWindow(QDialog):
 
         # If you have set_image_for_slot(...):
         if hasattr(self.image_manager, "set_image_for_slot"):
-            self.image_manager.set_image_for_slot(slot_idx, self.preview_image, new_metadata)
+            self.image_manager.set_image_for_slot(slot_idx, self.preview_image, new_metadata, step_name="Star Spike Tool")
         else:
             # fallback to add_image(...) if you want
             self.image_manager.add_image(slot_idx, self.preview_image, new_metadata)
@@ -24028,7 +24574,7 @@ class StarSpikeTool(QDialog):
         }
 
         # 3) Save the final image to the chosen slot
-        self.image_manager.set_image_for_slot(slot_idx, self.final_image, new_metadata)
+        self.image_manager.set_image_for_slot(slot_idx, self.final_image, new_metadata, step_name="Star Spike Tool")
 
         QMessageBox.information(self, "Saved", f"Spiked image saved to slot {slot_idx}.")
         self.close()
@@ -24441,7 +24987,7 @@ class BackgroundNeutralizationDialog(QDialog):
         # Update the image in the ImageManager
         self.image_manager.set_image(
             adjusted_image,
-            metadata=self.image_manager._metadata[self.image_manager.current_slot]
+            metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="Background Neutralization"
         )
 
         # Inform the user
@@ -24552,13 +25098,13 @@ class RemoveGreenDialog(QDialog):
                     # Update the ImageManager's current image with the combined image
                     self.image_manager.set_image(
                         combined_image,
-                        metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                        metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="Remove Green"
                     )
                 else:
                     # No mask applied; update with the processed image directly
                     self.image_manager.set_image(
                         new_image,
-                        metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                        metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="Remove Green"
                     )
 
                 # Inform the user of the successful operation
@@ -24895,13 +25441,13 @@ class CLAHEDialog(QDialog):
                 # Update the ImageManager's current image with the combined image
                 self.image_manager.set_image(
                     combined_image,
-                    metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                    metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="CLAHE"
                 )
             else:
                 # No mask applied; update with the CLAHE-processed image directly
                 self.image_manager.set_image(
                     clahe_image,
-                    metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                    metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="CLAHE"
                 )
 
             # Inform the user of the successful operation
@@ -25270,13 +25816,13 @@ class MorphologyDialog(QDialog):
                 # Update the ImageManager's current image with the combined image
                 self.image_manager.set_image(
                     combined_image,
-                    metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                    metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="morphology"
                 )
             else:
                 # No mask applied; update with the morphed image directly
                 self.image_manager.set_image(
                     morphed_image,
-                    metadata=self.image_manager._metadata[self.image_manager.current_slot]
+                    metadata=self.image_manager._metadata[self.image_manager.current_slot], step_name="morphology"
                 )
 
             # Inform the user of the successful operation
@@ -25519,17 +26065,17 @@ class WhiteBalanceDialog(QDialog):
                     g_gain = self.g_slider.value() / 100.0
                     b_gain = self.b_slider.value() / 100.0
                     balanced_image = apply_standard_white_balance(image, r_gain, g_gain, b_gain)
-                    self.image_manager.update_image(
-                        updated_image=balanced_image,
-                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    self.image_manager.set_image(
+                        balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="white_balance"
                     )
                     QMessageBox.information(self, "Success", "Manual White Balance applied successfully.")
                     self.accept()
                 elif wb_type == "Auto":
                     balanced_image = apply_auto_white_balance(image)
-                    self.image_manager.update_image(
-                        updated_image=balanced_image,
-                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    self.image_manager.set_image(
+                        balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="white_balance"
                     )
                     QMessageBox.information(self, "Success", "Auto White Balance applied successfully.")
                     self.accept()
@@ -25546,9 +26092,9 @@ class WhiteBalanceDialog(QDialog):
                     # Show the technical scatter plot after applying WB
                     plot_star_color_ratios_comparison(raw_star_colors, after_star_colors)
 
-                    self.image_manager.update_image(
-                        updated_image=balanced_image,
-                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {})
+                    self.image_manager.set_image(
+                        balanced_image,
+                        metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="white_balance"
                     )
 
                     QMessageBox.information(self, "Success", f"Star-Based White Balance applied successfully.\nDetected {star_count} stars.")
@@ -26254,7 +26800,7 @@ class PixelMathDialog(QDialog):
                     new_img = new_img * mask + original * (1 - mask)
                     new_img = np.clip(new_img, 0.0, 1.0)
 
-                self.image_manager.set_image(new_img, metadata)
+                self.image_manager.set_image(new_img, metadata, step_name="Pixel Math")
 
                 QMessageBox.information(self, "Pixel Math", "Pixel math operation applied successfully.")
                 self.accept()
@@ -26338,7 +26884,7 @@ class PixelMathDialog(QDialog):
                     combined = combined * mask + original * (1 - mask)
                     combined = np.clip(combined, 0.0, 1.0)
 
-                self.image_manager.set_image(combined, metadata)
+                self.image_manager.set_image(combined, metadata, step_name="Pixel Math")
 
 
                 QMessageBox.information(self, "Pixel Math", 
@@ -26923,7 +27469,7 @@ class SignatureInsertWindow(QMainWindow):
 
         slot = self.image_manager.current_slot
         metadata = self.image_manager._metadata.get(slot, {})
-        self.image_manager.set_image(arr, metadata)
+        self.image_manager.set_image(arr, metadata, step_name="Signature Adder")
 
         # 8. Cleanup overlays
         self.clear_inserts()
@@ -29950,7 +30496,7 @@ class CosmicClarityTab(QWidget):
             # Use ImageManager's set_image method to manage undo/redo stack
             if self.image_manager:
                 try:
-                    self.image_manager.set_image(processed_image, metadata)
+                    self.image_manager.set_image(processed_image, metadata, step_name="Cosmic Clarity")
                     print("CosmicClarityTab: Processed image stored in ImageManager with undo/redo support.")
                 except Exception as e:
                     # Handle potential errors during the update
@@ -32139,7 +32685,7 @@ class StatisticalStretchTab(QWidget):
         # Update ImageManager with the new processed image
         if self.image_manager:
             try:
-                self.image_manager.update_image(updated_image=self.preview_image, metadata=metadata)
+                self.image_manager.set_image(self.preview_image, metadata=metadata, step_name="Statistical Stretch")
                 print("StarStretchTab: Processed image stored in ImageManager.")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -32319,7 +32865,7 @@ class StatisticalStretchTab(QWidget):
         # Update ImageManager with the new processed image
         if self.image_manager:
             try:
-                self.image_manager.set_image(self.stretched_image, metadata=metadata)
+                self.image_manager.set_image(self.stretched_image, metadata=metadata, step_name="Statistical Stretch")
                 print("StatisticalStretchTab: Processed image stored in ImageManager.")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -32825,7 +33371,7 @@ class StarStretchTab(QWidget):
                     'bit_depth': 'Unknown',  # You can update this if needed
                     'is_mono': self.is_mono
                 }
-                self.image_manager.set_image( self.image, metadata)
+                self.image_manager.set_image( self.image, metadata, step_name="StarStretch" )
                 print(f"Image {self.filename} pushed to ImageManager.")
 
                 # Update the display with the loaded image (before applying any stretch)
@@ -32877,7 +33423,7 @@ class StarStretchTab(QWidget):
         # Update ImageManager with the new processed image
         if self.image_manager:
             try:
-                self.image_manager.set_image(self.preview_image, metadata=metadata)
+                self.image_manager.set_image(self.preview_image, metadata=metadata, step_name="StarStretch")
                 print("StarStretchTab: Processed image stored in ImageManager.")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -33713,13 +34259,13 @@ class FullCurvesTab(QWidget):
                 'bit_depth': self.bit_depth,
                 'is_mono': self.is_mono
             }
-            self.image_manager.image = self.original_image.copy()  # Update the image directly
-            self.image_manager.image_changed.emit(
-                self.image_manager.current_slot,
-                self.image_manager.image,
-                metadata
+            self.image_manager.set_image_with_step_name(
+                self.original_image.copy(),
+                metadata,
+                step_name="Curves Adjustment"
             )
-            print("FullCurvesTab: Image updated in ImageManager.")
+            print("FullCurvesTab: Image updated in ImageManager with step name.")
+
 
     def pushUndo(self, image_state):
         """Push the current image state onto the undo stack."""
@@ -35922,7 +36468,7 @@ class CombinedPreviewWindow(QWidget):
         }
 
         # Push the combined image to slot 0
-        self.image_manager.set_image(self.combined_image, metadata)
+        self.image_manager.set_image(self.combined_image, metadata, step_name="Frequency Separation")
         QMessageBox.information(self, "Changes Applied", "The combined image has been pushed to slot 0 for processing.")
 
         # Close the preview window (optional)
@@ -38851,7 +39397,7 @@ class HaloBGonTab(QWidget):
                         'bit_depth': 'Unknown',  # Update if available
                         'is_mono': self.is_mono
                     }
-                    self.image_manager.update_image(updated_image=self.image, metadata=metadata)
+                    self.image_manager.set_image(self.image, metadata, step_name="load_stars_only")
                     print(f"HaloBGonTab: Loaded image stored in ImageManager.")
                 
                 self.generatePreview()  # Generate preview after loading
@@ -38941,7 +39487,7 @@ class HaloBGonTab(QWidget):
         if self.image_manager:
             try:
                 # Set the new image and metadata using the ImageManager
-                self.image_manager.set_image(blended_image, metadata)
+                self.image_manager.set_image(blended_image, metadata, step_name="halo_reduction")
                 print("HaloBGonTab: Processed and masked image stored in ImageManager (undoable).")
             except Exception as e:
                 print(f"Error updating ImageManager: {e}")
@@ -39677,7 +40223,7 @@ class ContinuumSubtractTab(QWidget):
                     'is_mono': self.is_mono,
                     'source': 'Continuum Subtraction'
                 }
-                self.image_manager.update_image(self.combined_image, metadata, slot=0)
+                self.image_manager.set_image(self.combined_image, metadata, step_name="Continuum Subtraction")
 
                 print("ContinuumSubtractTab: Image pushed to ImageManager.")
         else:
