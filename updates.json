@@ -1,9 +1,9 @@
 {
-  "version": "2.14.5",
+  "version": "2.15.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.5/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.14.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Updated Stellar Based White Balancing and you can now open multiple images at once."
+  "notes": "Complete overhaul of undo redo and created a history explorer and comparison"
 }
