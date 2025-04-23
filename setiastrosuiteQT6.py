@@ -233,7 +233,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.0"
+VERSION = "2.15.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3921,28 +3921,16 @@ class AstroEditingSuite(QMainWindow):
         print("Image is loaded. Proceeding with star removal using CosmicClarityDarkStar.")
 
         # Prompt the user for Dark Star parameters:
-        disable_gpu_item, ok1 = QInputDialog.getItem(
-            self, "GPU Acceleration", "Disable GPU acceleration?", ["No", "Yes"], 0, False
-        )
-        if not ok1:
-            print("User cancelled GPU acceleration selection.")
+        # Show parameter dialog
+        config_dialog = DarkStarConfigDialog(self)
+        if not config_dialog.exec():
+            print("User cancelled Dark Star settings dialog.")
             return
-        disable_gpu = (disable_gpu_item == "Yes")
-
-        mode, ok2 = QInputDialog.getItem(
-            self, "Star Removal Mode", "Select star removal mode:", ["additive", "unscreen"], 1, False
-        )
-        if not ok2:
-            print("User cancelled star removal mode selection.")
-            return
-
-        show_stars_item, ok3 = QInputDialog.getItem(
-            self, "Show Extracted Stars", "Output an additional image with only the extracted stars?", ["No", "Yes"], 0, False
-        )
-        if not ok3:
-            print("User cancelled extracted stars selection.")
-            return
-        show_extracted_stars = (show_stars_item == "Yes")
+        params = config_dialog.get_values()
+        disable_gpu = params["disable_gpu"]
+        mode = params["mode"]
+        show_extracted_stars = params["show_extracted_stars"]
+        stride_value = params["stride"]
 
         # Set up input/output folders (which Dark Star will use automatically)
         input_dir = os.path.join(cosmic_clarity_folder, "input")
@@ -3951,16 +3939,14 @@ class AstroEditingSuite(QMainWindow):
         os.makedirs(output_dir, exist_ok=True)
 
         # Save the current image in the input folder as a 32-bit TIFF.
-        # (Assumes self.image_manager.image is already float32 in [0,1].)
         base_filename = "imagetoremovestars.tif"
         self.input_image_path = os.path.join(input_dir, base_filename)
-        # Save directly as 32-bit float; no scaling or color conversion required.
         print(f"Saving input image as 32-bit float TIFF to {self.input_image_path} ...")
         save_image(
-            self.image_manager.image,          # the NumPy array
-            self.input_image_path,             # the output path
-            original_format="tif",             # we want a TIFF
-            bit_depth="32-bit floating point",                      # 32-bit floating point
+            self.image_manager.image,
+            self.input_image_path,
+            original_format="tif",
+            bit_depth="32-bit floating point",
             original_header=None,
             is_mono=False,
             image_meta=None,
@@ -3975,33 +3961,33 @@ class AstroEditingSuite(QMainWindow):
         args_list.extend(["--star_removal_mode", mode])
         if show_extracted_stars:
             args_list.append("--show_extracted_stars")
+        args_list.extend(["--stride", str(stride_value)])
 
-        # Build final command.
+        # Final command to launch Dark Star
         command = [darkstar_exe_path] + args_list
         print(f"CosmicClarityDarkStar command: {' '.join(command)}")
 
-        # Ensure the Dark Star executable has execute permissions on macOS/Linux.
+        # Ensure executable permissions if needed
         if current_os in ["Darwin", "Linux"]:
             if not os.access(darkstar_exe_path, os.X_OK):
-                print(f"DarkStar executable not executable. Setting execute permissions for {darkstar_exe_path}")
+                print(f"Setting execute permissions for: {darkstar_exe_path}")
                 try:
                     os.chmod(darkstar_exe_path, 0o755)
-                    print("Execute permissions set.")
                 except Exception as e:
                     QMessageBox.critical(self, "Permission Error",
                                         f"Failed to set execute permissions for DarkStar executable: {e}")
-                    print(f"Failed to set execute permissions for {darkstar_exe_path}: {e}")
+                    print(f"Permission error: {e}")
                     return
             else:
-                print("DarkStar executable already has execute permissions.")
+                print("Executable permission already set.")
         else:
-            print("No need to set execute permissions for Windows.")
+            print("Windows platform — execute permission check skipped.")
 
-        # Initialize and show a progress dialog (reuse StarNetDialog)
+        # Show progress dialog
         darkstar_dialog = StarNetDialog()
         darkstar_dialog.show()
 
-        # Initialize DarkStarThread (reusing StarNetThread for thread management)
+        # Run Dark Star in background thread
         self.darkstar_thread = StarNetThread(command, output_dir)
         self.darkstar_thread.stdout_signal.connect(darkstar_dialog.append_text)
         self.darkstar_thread.stderr_signal.connect(darkstar_dialog.append_text)
@@ -4010,6 +3996,7 @@ class AstroEditingSuite(QMainWindow):
         )
         darkstar_dialog.cancel_button.clicked.connect(self.darkstar_thread.stop)
         self.darkstar_thread.start()
+
 
 
     def on_darkstar_finished(self, return_code, dialog, output_dir):
@@ -23433,6 +23420,54 @@ class StarNetDialog(QDialog):
 
     def cancel_process(self):
         self.reject()  # Close the dialog
+
+class DarkStarConfigDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Dark Star Parameters")
+        layout = QVBoxLayout(self)
+
+        # Disable GPU
+        self.gpu_combo = QComboBox()
+        self.gpu_combo.addItems(["No", "Yes"])
+        layout.addWidget(QLabel("Disable GPU Acceleration?"))
+        layout.addWidget(self.gpu_combo)
+
+        # Mode
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["unscreen", "additive"])
+        layout.addWidget(QLabel("Star Removal Mode"))
+        layout.addWidget(self.mode_combo)
+
+        # Show extracted stars
+        self.show_stars_combo = QComboBox()
+        self.show_stars_combo.addItems(["No", "Yes"])
+        layout.addWidget(QLabel("Show Extracted Stars?"))
+        layout.addWidget(self.show_stars_combo)
+
+        # Stride
+        self.stride_combo = QComboBox()
+        self.stride_combo.addItems(["32", "64", "128", "256", "512", "1024", "2048"])
+        self.stride_combo.setCurrentText("512")
+        layout.addWidget(QLabel("Stride (power of 2):"))
+        layout.addWidget(self.stride_combo)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self):
+        return {
+            "disable_gpu": self.gpu_combo.currentText() == "Yes",
+            "mode": self.mode_combo.currentText(),
+            "show_extracted_stars": self.show_stars_combo.currentText() == "Yes",
+            "stride": int(self.stride_combo.currentText())
+        }
+
 
 class AddStarsDialog(QDialog):
     """
