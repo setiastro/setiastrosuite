@@ -3680,21 +3680,21 @@ class AstroEditingSuite(QMainWindow):
 
         # Prepare the command based on the OS
         if current_os == "Windows":
-            stride = 256
+            chunk_size = 256
             command = [
                 self.starnet_exe_path,
                 self.input_image_path,
                 self.output_image_path,
-                str(stride)
+                str(chunk_size)
             ]
             print("Preparing command for Windows.")
         elif current_os == "Linux":
-            stride = 256
+            chunk_size = 256
             command = [
                 self.starnet_exe_path,
                 self.input_image_path,
                 self.output_image_path,
-                str(stride)
+                str(chunk_size)
             ]
             print("Preparing command for Linux.")
         elif current_os == "Darwin":
@@ -3932,7 +3932,7 @@ class AstroEditingSuite(QMainWindow):
         disable_gpu = params["disable_gpu"]
         mode = params["mode"]
         show_extracted_stars = params["show_extracted_stars"]
-        stride_value = params["stride"]
+        chunk_size_value = params["chunk_size"]
 
         # Set up input/output folders (which Dark Star will use automatically)
         input_dir = os.path.join(cosmic_clarity_folder, "input")
@@ -3963,7 +3963,7 @@ class AstroEditingSuite(QMainWindow):
         args_list.extend(["--star_removal_mode", mode])
         if show_extracted_stars:
             args_list.append("--show_extracted_stars")
-        args_list.extend(["--stride", str(stride_value)])
+        args_list.extend(["--chunk_size", str(chunk_size_value)])
 
         # Final command to launch Dark Star
         command = [darkstar_exe_path] + args_list
@@ -6305,7 +6305,7 @@ class MaskSlotPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.strides[0],
+                mask_8bit.chunk_sizes[0],
                 QImage.Format.Format_RGB888
             )
         else:
@@ -6314,7 +6314,7 @@ class MaskSlotPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.strides[0],
+                mask_8bit.chunk_sizes[0],
                 QImage.Format.Format_Grayscale8
             )
         return QPixmap.fromImage(q_image)
@@ -6762,7 +6762,7 @@ class MaskCreationDialog(QDialog):
             mask_8bit.data,
             mask_8bit.shape[1],
             mask_8bit.shape[0],
-            mask_8bit.strides[0],
+            mask_8bit.chunk_sizes[0],
             QImage.Format_Grayscale8
         )
         mask_pixmap = QPixmap.fromImage(q_image)
@@ -7115,7 +7115,7 @@ class MaskPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.strides[0],
+                mask_8bit.chunk_sizes[0],
                 QImage.Format.Format_RGB888
             )
         else:
@@ -7124,7 +7124,7 @@ class MaskPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.strides[0],
+                mask_8bit.chunk_sizes[0],
                 QImage.Format.Format_Grayscale8
             )
         return QPixmap.fromImage(q_image)
@@ -21751,10 +21751,10 @@ class GradientRemovalDialog(QDialog):
         # Convert to QImage
         if display_image.ndim == 2:
             q_img = QImage(display_image.data, scaled_width, scaled_height,
-                           display_image.strides[0], QImage.Format.Format_Grayscale8)
+                           display_image.chunk_sizes[0], QImage.Format.Format_Grayscale8)
         else:
             q_img = QImage(display_image.data, scaled_width, scaled_height,
-                           display_image.strides[0], QImage.Format.Format_RGB888)
+                           display_image.chunk_sizes[0], QImage.Format.Format_RGB888)
 
         # Set up QGraphicsScene and QGraphicsView for consistent coordinate mapping
         self.scene = QGraphicsScene(self)
@@ -21877,7 +21877,7 @@ class GradientRemovalDialog(QDialog):
                 display_image.data,
                 scaled_width,
                 scaled_height,
-                display_image.strides[0],
+                display_image.chunk_sizes[0],
                 QImage.Format.Format_Grayscale8,
             )
         else:
@@ -21885,7 +21885,7 @@ class GradientRemovalDialog(QDialog):
                 display_image.data,
                 scaled_width,
                 scaled_height,
-                display_image.strides[0],
+                display_image.chunk_sizes[0],
                 QImage.Format.Format_RGB888,
             )
 
@@ -23448,11 +23448,11 @@ class DarkStarConfigDialog(QDialog):
         layout.addWidget(self.show_stars_combo)
 
         # Stride
-        self.stride_combo = QComboBox()
-        self.stride_combo.addItems(["32", "64", "128", "256", "512", "1024", "2048"])
-        self.stride_combo.setCurrentText("512")
+        self.chunk_size_combo = QComboBox()
+        self.chunk_size_combo.addItems(["32", "64", "128", "256", "512", "1024", "2048"])
+        self.chunk_size_combo.setCurrentText("512")
         layout.addWidget(QLabel("Stride (power of 2):"))
-        layout.addWidget(self.stride_combo)
+        layout.addWidget(self.chunk_size_combo)
 
         # Buttons
         buttons = QDialogButtonBox(
@@ -23467,7 +23467,7 @@ class DarkStarConfigDialog(QDialog):
             "disable_gpu": self.gpu_combo.currentText() == "Yes",
             "mode": self.mode_combo.currentText(),
             "show_extracted_stars": self.show_stars_combo.currentText() == "Yes",
-            "stride": int(self.stride_combo.currentText())
+            "chunk_size": int(self.chunk_size_combo.currentText())
         }
 
 
@@ -23832,7 +23832,7 @@ class AddStarsDialog(QDialog):
                 image_8bit.data,
                 image_8bit.shape[1],
                 image_8bit.shape[0],
-                image_8bit.strides[0],
+                image_8bit.chunk_sizes[0],
                 QImage.Format.Format_Grayscale8
             )
         elif image_8bit.ndim == 3:
@@ -23842,7 +23842,7 @@ class AddStarsDialog(QDialog):
                     image_8bit.data,
                     image_8bit.shape[1],
                     image_8bit.shape[0],
-                    image_8bit.strides[0],
+                    image_8bit.chunk_sizes[0],
                     QImage.Format.Format_RGB888
                 )
             elif image_8bit.shape[2] == 4:
@@ -23851,7 +23851,7 @@ class AddStarsDialog(QDialog):
                     image_8bit.data,
                     image_8bit.shape[1],
                     image_8bit.shape[0],
-                    image_8bit.strides[0],
+                    image_8bit.chunk_sizes[0],
                     QImage.Format.Format_RGBA8888
                 )
             else:
