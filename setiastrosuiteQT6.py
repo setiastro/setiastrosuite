@@ -43307,6 +43307,12 @@ class MainWindow(QMainWindow):
         self.save_collage_button.clicked.connect(self.save_collage_of_objects)
         save_buttons_layout.addWidget(self.save_collage_button)
 
+        # New 3D View Button
+        self.show_3d_view_button = QPushButton("3D Distance Model")
+        self.show_3d_view_button.clicked.connect(self.show_3d_model_view)
+        save_buttons_layout.addWidget(self.show_3d_view_button)
+
+
         right_panel.addLayout(save_buttons_layout)        
 
         # Connect scroll events to update the green box in the mini preview
@@ -43955,6 +43961,148 @@ class MainWindow(QMainWindow):
         self.main_preview.circle_radius = original_circle_radius
         self.main_preview.draw_query_results()  # Redraw the scene with the circle
 
+    def show_3d_model_view(self):
+        import plotly.graph_objects as go
+        from scipy.ndimage import zoom
+        import numpy as np
+        import math
+        from PyQt6.QtWidgets import QInputDialog
+
+        if not self.results or self.image_data is None:
+            QMessageBox.warning(self, "Data Error", "No image or results available.")
+            return
+
+        if self.wcs is None:
+            QMessageBox.warning(self, "WCS Missing", "WCS data is required to generate the 3D plot.")
+            return
+
+        # Prompt user to choose rendering mode
+        choice, ok = QInputDialog.getItem(
+            self, "Image Plane Style",
+            "Choose how to display the image plane:",
+            ["Smooth Grayscale Image Plane", "Mesh RGB Scatter Plane"],
+            0, False
+        )
+        if not ok:
+            return
+
+        img = self.image_data
+        if img.ndim == 2:
+            img = np.stack([img] * 3, axis=-1)
+
+        # Normalize and downsample
+        img_norm = np.clip((img - img.min()) / (np.ptp(img) + 1e-5), 0, 1)
+        max_res = 200
+        scale_factor = min(max_res / img.shape[0], max_res / img.shape[1], 1.0)
+        img_ds = np.stack([zoom(img_norm[..., i], scale_factor, order=1) for i in range(3)], axis=-1)
+        h_ds, w_ds, _ = img_ds.shape
+
+        # World coords for X/Y axes using WCS
+        full_h, full_w = img.shape[:2]
+        x_vals = np.linspace(0, full_w, w_ds)
+        y_vals = np.linspace(0, full_h, h_ds)
+        X_pix, Y_pix = np.meshgrid(x_vals, y_vals)
+        RA, DEC = self.wcs.pixel_to_world_values(X_pix, full_h - Y_pix)
+
+        Z = np.zeros_like(X_pix)
+
+        if "Grayscale" in choice:
+            grayscale = np.mean(img_ds, axis=2)
+            surface = go.Surface(
+                x=RA,
+                y=DEC,
+                z=Z,
+                surfacecolor=grayscale,
+                colorscale="gray",
+                showscale=False,
+                opacity=1.0
+            )
+            image_layer = surface
+        else:
+            rgb_flat = (img_ds * 255).astype(np.uint8).reshape(-1, 3)
+            color_hex = ['rgb({},{},{})'.format(r, g, b) for r, g, b in rgb_flat]
+            image_layer = go.Scatter3d(
+                x=RA.flatten(),
+                y=DEC.flatten(),
+                z=Z.flatten(),
+                mode='markers',
+                marker=dict(size=2, color=color_hex),
+                hoverinfo='skip',
+                showlegend=False
+            )
+
+        # 3D stars/galaxies
+        scatter_x, scatter_y, scatter_z, scatter_labels, lines = [], [], [], [], []
+
+        for obj in self.results:
+            try:
+                ra = float(obj.get("ra"))
+                dec = float(obj.get("dec"))
+                dist_gly = float(obj.get("comoving_distance"))
+                dist_ly = dist_gly * 1e9
+                zshift = float(obj.get("redshift"))
+                if dist_ly <= 0:
+                    continue
+
+                x, y = self.wcs.world_to_pixel_values(ra, dec)
+                y = full_h - y
+                if not (0 <= x < full_w and 0 <= y < full_h):
+                    continue
+
+                z = math.log10(dist_ly)
+
+                # Convert to RA/Dec again to align with image base
+                ra_obj, dec_obj = self.wcs.pixel_to_world_values(x, y)
+
+                lines.append(go.Scatter3d(
+                    x=[ra_obj, ra_obj], y=[dec_obj, dec_obj], z=[0, z],
+                    mode="lines",
+                    line=dict(color='gray', width=1),
+                    showlegend=False,
+                    hoverinfo='skip'
+                ))
+
+                scatter_x.append(ra_obj)
+                scatter_y.append(dec_obj)
+                scatter_z.append(z)
+
+                label = (
+                    f"<b>{obj['name']}</b><br>"
+                    f"RA: {ra:.6f}<br>"
+                    f"Dec: {dec:.6f}<br>"
+                    f"Distance: {dist_ly:.2e} ly<br>"
+                    f"z = {zshift:.5f}"
+                )
+                scatter_labels.append(label)
+
+            except Exception as e:
+                print(f"Skipping object due to error: {e}")
+
+        scatter = go.Scatter3d(
+            x=scatter_x,
+            y=scatter_y,
+            z=scatter_z,
+            mode='markers',
+            marker=dict(size=4, color='red'),
+            hovertext=scatter_labels,
+            hoverinfo='text',
+            name='Objects'
+        )
+
+        fig = go.Figure(data=[image_layer, scatter] + lines)
+        fig.update_layout(
+            title='3D Distance Model',
+            scene=dict(
+                xaxis_title='RA (deg)',
+                yaxis_title='Dec (deg)',
+                zaxis_title='log10(Distance in ly)',
+                yaxis=dict(autorange='reversed'),
+                aspectmode="manual",
+                aspectratio=dict(x=1, y=1, z=0.5)
+            ),
+            margin=dict(l=0, r=0, b=0, t=40)
+        )
+        fig.show()
 
     def get_selected_object_types(self):
         """Return a list of selected object types from the tree widget."""
@@ -45847,7 +45995,7 @@ def calculate_comoving_distance(z):
     DCMR = (1 - az) * DCMR / n
     DCMR_Gly = (c / H0) * DCMR * Mpc_to_Gly
 
-    return round(DCMR_Gly, 3)  # Round to three decimal places for display
+    return round(DCMR_Gly, 6)  # Round to three decimal places for display
 
 def calculate_orientation(header):
     """Calculate orientation from CD or PC matrix."""
