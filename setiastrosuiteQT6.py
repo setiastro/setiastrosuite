@@ -6305,7 +6305,7 @@ class MaskSlotPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.chunk_sizes[0],
+                mask_8bit.strides[0],
                 QImage.Format.Format_RGB888
             )
         else:
@@ -6314,7 +6314,7 @@ class MaskSlotPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.chunk_sizes[0],
+                mask_8bit.strides[0],
                 QImage.Format.Format_Grayscale8
             )
         return QPixmap.fromImage(q_image)
@@ -6762,7 +6762,7 @@ class MaskCreationDialog(QDialog):
             mask_8bit.data,
             mask_8bit.shape[1],
             mask_8bit.shape[0],
-            mask_8bit.chunk_sizes[0],
+            mask_8bit.strides[0],
             QImage.Format_Grayscale8
         )
         mask_pixmap = QPixmap.fromImage(q_image)
@@ -7115,7 +7115,7 @@ class MaskPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.chunk_sizes[0],
+                mask_8bit.strides[0],
                 QImage.Format.Format_RGB888
             )
         else:
@@ -7124,7 +7124,7 @@ class MaskPreviewDialog(QDialog):
                 mask_8bit.data,
                 mask_8bit.shape[1],
                 mask_8bit.shape[0],
-                mask_8bit.chunk_sizes[0],
+                mask_8bit.strides[0],
                 QImage.Format.Format_Grayscale8
             )
         return QPixmap.fromImage(q_image)
@@ -21751,10 +21751,10 @@ class GradientRemovalDialog(QDialog):
         # Convert to QImage
         if display_image.ndim == 2:
             q_img = QImage(display_image.data, scaled_width, scaled_height,
-                           display_image.chunk_sizes[0], QImage.Format.Format_Grayscale8)
+                           display_image.strides[0], QImage.Format.Format_Grayscale8)
         else:
             q_img = QImage(display_image.data, scaled_width, scaled_height,
-                           display_image.chunk_sizes[0], QImage.Format.Format_RGB888)
+                           display_image.strides[0], QImage.Format.Format_RGB888)
 
         # Set up QGraphicsScene and QGraphicsView for consistent coordinate mapping
         self.scene = QGraphicsScene(self)
@@ -21877,7 +21877,7 @@ class GradientRemovalDialog(QDialog):
                 display_image.data,
                 scaled_width,
                 scaled_height,
-                display_image.chunk_sizes[0],
+                display_image.strides[0],
                 QImage.Format.Format_Grayscale8,
             )
         else:
@@ -21885,7 +21885,7 @@ class GradientRemovalDialog(QDialog):
                 display_image.data,
                 scaled_width,
                 scaled_height,
-                display_image.chunk_sizes[0],
+                display_image.strides[0],
                 QImage.Format.Format_RGB888,
             )
 
@@ -23832,7 +23832,7 @@ class AddStarsDialog(QDialog):
                 image_8bit.data,
                 image_8bit.shape[1],
                 image_8bit.shape[0],
-                image_8bit.chunk_sizes[0],
+                image_8bit.strides[0],
                 QImage.Format.Format_Grayscale8
             )
         elif image_8bit.ndim == 3:
@@ -23842,7 +23842,7 @@ class AddStarsDialog(QDialog):
                     image_8bit.data,
                     image_8bit.shape[1],
                     image_8bit.shape[0],
-                    image_8bit.chunk_sizes[0],
+                    image_8bit.strides[0],
                     QImage.Format.Format_RGB888
                 )
             elif image_8bit.shape[2] == 4:
@@ -23851,7 +23851,7 @@ class AddStarsDialog(QDialog):
                     image_8bit.data,
                     image_8bit.shape[1],
                     image_8bit.shape[0],
-                    image_8bit.chunk_sizes[0],
+                    image_8bit.strides[0],
                     QImage.Format.Format_RGBA8888
                 )
             else:
