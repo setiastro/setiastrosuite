@@ -31,6 +31,8 @@ import re
 from scipy.spatial import Delaunay, KDTree
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndi
+import plotly.graph_objects as go
+from scipy.ndimage import zoom
 
 import matplotlib
 matplotlib.use("QtAgg") 
@@ -43962,12 +43964,6 @@ class MainWindow(QMainWindow):
         self.main_preview.draw_query_results()  # Redraw the scene with the circle
 
     def show_3d_model_view(self):
-        import plotly.graph_objects as go
-        from scipy.ndimage import zoom
-        import numpy as np
-        import math
-        from PyQt6.QtWidgets import QInputDialog
-
         if not self.results or self.image_data is None:
             QMessageBox.warning(self, "Data Error", "No image or results available.")
             return
