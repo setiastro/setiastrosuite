@@ -1,9 +1,9 @@
 {
-  "version": "2.15.1",
+  "version": "2.15.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Full Redownload of Cosmic Clarity needed.  Dark Star AIv1.1 huge improvement in star removal.  Whats in my Image 3d plotting"
+  "notes": "Show Stars defaulted in Dark Star.  Color Mesh Resolution option in 3D Plot in WIMI"
 }
