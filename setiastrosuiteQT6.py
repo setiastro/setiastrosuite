@@ -235,7 +235,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.1"
+VERSION = "2.15.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -23443,7 +23443,7 @@ class DarkStarConfigDialog(QDialog):
 
         # Show extracted stars
         self.show_stars_combo = QComboBox()
-        self.show_stars_combo.addItems(["No", "Yes"])
+        self.show_stars_combo.addItems(["Yes", "No"])
         layout.addWidget(QLabel("Show Extracted Stars?"))
         layout.addWidget(self.show_stars_combo)
 
@@ -43988,7 +43988,25 @@ class MainWindow(QMainWindow):
 
         # Normalize and downsample
         img_norm = np.clip((img - img.min()) / (np.ptp(img) + 1e-5), 0, 1)
-        max_res = 200
+
+
+
+        # 3) Determine max_res
+        if choice == "Mesh RGB Scatter Plane":
+            max_res, ok2 = QInputDialog.getInt(
+                self, "Scatter Resolution",
+                "Enter maximum resolution (pixels) for scatter:",
+                500,    # default
+                50,     # min
+                2000,   # max
+                50      # step
+            )
+            if not ok2:
+                return
+        else:
+            max_res = 200
+
+
         scale_factor = min(max_res / img.shape[0], max_res / img.shape[1], 1.0)
         img_ds = np.stack([zoom(img_norm[..., i], scale_factor, order=1) for i in range(3)], axis=-1)
         h_ds, w_ds, _ = img_ds.shape
