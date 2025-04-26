@@ -1,9 +1,9 @@
 {
-  "version": "2.15.2",
+  "version": "2.15.3",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.2/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.3/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.3/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.3/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Show Stars defaulted in Dark Star.  Color Mesh Resolution option in 3D Plot in WIMI"
+  "notes": "Added options to the 3D Plot in WIMI and ability to offline save the 3d plot.  STacking suite bug fixes"
 }
