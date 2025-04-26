@@ -235,7 +235,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.2"
+VERSION = "2.15.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9555,6 +9555,7 @@ class StackingSuiteDialog(QDialog):
 
         self.update_override_dark_combo()
         self.assign_best_master_dark()
+        self.assign_best_master_files()
         print("DEBUG: Loaded Master Darks and updated assignments.")
 
 
@@ -9996,6 +9997,7 @@ class StackingSuiteDialog(QDialog):
             # (G) Add to tree, status, etc.
             self.add_master_dark_to_tree(f"{exposure_time}s ({image_size})", master_dark_path)
             self.update_status(f"✅ Master Dark saved: {master_dark_path}")
+            self.assign_best_master_files()
 
         # Finally, assign best master dark, etc.
         self.assign_best_master_dark()
@@ -10472,23 +10474,22 @@ class StackingSuiteDialog(QDialog):
                     best_dark_diff = float("inf")
 
                     for master_key, master_path in self.master_files.items():
-                        if "Dark" not in master_key:
+                        # ✅ Only consider keys that start with an exposure (i.e. darks)
+                        dark_match = re.match(r"^([\d.]+)s\b", master_key)
+                        if not dark_match:
                             continue
+                        master_dark_exposure_time = float(dark_match.group(1))
 
-                        dark_exposure_match = re.match(r"([\d.]+)s?", master_key)
-                        if not dark_exposure_match:
-                            continue
-
-                        dark_exposure_time = float(dark_exposure_match.group(1))
-                        dark_size = self.master_sizes.get(master_path, "Unknown")
-
-                        if dark_size == "Unknown":
+                        # Ensure we know the dark’s size
+                        master_dark_size = self.master_sizes.get(master_path, "Unknown")
+                        if master_dark_size == "Unknown":
                             with fits.open(master_path) as hdul:
-                                dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
-                                self.master_sizes[master_path] = dark_size
+                                master_dark_size = f"{hdul[0].data.shape[1]}x{hdul[0].data.shape[0]}"
+                                self.master_sizes[master_path] = master_dark_size
 
-                        if dark_size == image_size:
-                            diff = abs(dark_exposure_time - exposure_time)
+                        # Only compare if sizes match
+                        if master_dark_size == image_size:
+                            diff = abs(master_dark_exposure_time - exposure_time)
                             if diff < best_dark_diff:
                                 best_dark_match = master_path
                                 best_dark_diff = diff
@@ -43078,6 +43079,90 @@ class CustomGraphicsView(QGraphicsView):
                 text_east.setDefaultTextColor(Qt.GlobalColor.blue)
                 self.parent.main_scene.addItem(text_east)        
 
+class ThreeDSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("3D Model Settings")
+        layout = QVBoxLayout(self)
+
+        # Image Plane Style
+        layout.addWidget(QLabel("Image Plane Style:"))
+        self.plane_style_cb = QComboBox()
+        self.plane_style_cb.addItems([
+            "Mesh RGB Scatter Plane",
+            "Smooth Grayscale Image Plane"
+        ])
+        layout.addWidget(self.plane_style_cb)
+
+        # Resolution
+        res_layout = QHBoxLayout()
+        res_layout.addWidget(QLabel("Resolution:"))
+        self.res_spin = QSpinBox()
+        self.res_spin.setRange(50, 2000)
+        self.res_spin.setSingleStep(50)
+        self.res_spin.setValue(500)
+        res_layout.addWidget(self.res_spin)
+        layout.addLayout(res_layout)
+
+        # Z-Axis Range Options
+        layout.addWidget(QLabel("Z-Axis Range:"))
+        self.zaxis_cb = QComboBox()
+        self.zaxis_cb.addItems(["Default", "Min-Max", "Custom"])
+        layout.addWidget(self.zaxis_cb)
+
+        # Custom min/max inputs (hidden unless “Custom”)
+        self.custom_widget = QWidget()
+        custom_layout = QHBoxLayout(self.custom_widget)
+        custom_layout.addWidget(QLabel("Min:"))
+        self.zmin_spin = QDoubleSpinBox()
+        self.zmin_spin.setRange(-1e6, 1e6)
+        self.zmin_spin.setValue(0.0)
+        custom_layout.addWidget(self.zmin_spin)
+        custom_layout.addWidget(QLabel("Max:"))
+        self.zmax_spin = QDoubleSpinBox()
+        self.zmax_spin.setRange(-1e6, 1e6)
+        self.zmax_spin.setValue(10.0)
+        custom_layout.addWidget(self.zmax_spin)
+        layout.addWidget(self.custom_widget)
+        self.custom_widget.setVisible(False)
+        self.zaxis_cb.currentIndexChanged.connect(
+            lambda idx: self.custom_widget.setVisible(idx == 2)
+        )
+
+        # Object Color
+        layout.addWidget(QLabel("Object Color:"))
+        self.color_cb = QComboBox()
+        self.color_cb.addItems(["Image-Based", "Solid (Red)"])
+        layout.addWidget(self.color_cb)
+
+        # Z-Axis Height control
+        layout.addWidget(QLabel("Z-Axis Height (aspect ratio z):"))
+        self.zheight_spin = QDoubleSpinBox()
+        self.zheight_spin.setRange(0.1, 10.0)
+        self.zheight_spin.setSingleStep(0.1)
+        self.zheight_spin.setValue(0.5)
+        layout.addWidget(self.zheight_spin)
+
+        # OK / Cancel
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def getSettings(self):
+        if self.exec() == QDialog.DialogCode.Accepted:
+            return {
+                "plane_style": self.plane_style_cb.currentText(),
+                "resolution": self.res_spin.value(),
+                "z_option": self.zaxis_cb.currentText(),
+                "z_min": self.zmin_spin.value(),
+                "z_max": self.zmax_spin.value(),
+                "object_color": self.color_cb.currentText(),
+                "z_height": self.zheight_spin.value()
+            }
+        return None
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -43964,159 +44049,196 @@ class MainWindow(QMainWindow):
         self.main_preview.draw_query_results()  # Redraw the scene with the circle
 
     def show_3d_model_view(self):
+        # ——— 0) Sanity checks —————————————
         if not self.results or self.image_data is None:
             QMessageBox.warning(self, "Data Error", "No image or results available.")
             return
-
         if self.wcs is None:
             QMessageBox.warning(self, "WCS Missing", "WCS data is required to generate the 3D plot.")
             return
 
-        # Prompt user to choose rendering mode
-        choice, ok = QInputDialog.getItem(
-            self, "Image Plane Style",
-            "Choose how to display the image plane:",
-            ["Smooth Grayscale Image Plane", "Mesh RGB Scatter Plane"],
-            0, False
-        )
-        if not ok:
+        # ——— 1) Settings dialog ————————————
+        settings = ThreeDSettingsDialog(self).getSettings()
+        if not settings:
             return
+        plane_style = settings["plane_style"]
+        max_res     = settings["resolution"]
+        z_option    = settings["z_option"]
+        z_min       = settings["z_min"]
+        z_max       = settings["z_max"]
+        obj_color   = settings["object_color"]
+        z_height = settings["z_height"]
 
+        # ——— 2) Normalize the full‐res image ————
         img = self.image_data
         if img.ndim == 2:
-            img = np.stack([img] * 3, axis=-1)
+            img = np.stack([img, img, img], axis=-1)
+        img_norm = np.clip((img - img.min())/(np.ptp(img) + 1e-8), 0, 1)
 
-        # Normalize and downsample
-        img_norm = np.clip((img - img.min()) / (np.ptp(img) + 1e-5), 0, 1)
-
-
-
-        # 3) Determine max_res
-        if choice == "Mesh RGB Scatter Plane":
-            max_res, ok2 = QInputDialog.getInt(
-                self, "Scatter Resolution",
-                "Enter maximum resolution (pixels) for scatter:",
-                500,    # default
-                50,     # min
-                2000,   # max
-                50      # step
-            )
-            if not ok2:
-                return
-        else:
-            max_res = 200
-
-
-        scale_factor = min(max_res / img.shape[0], max_res / img.shape[1], 1.0)
-        img_ds = np.stack([zoom(img_norm[..., i], scale_factor, order=1) for i in range(3)], axis=-1)
+        # ——— 3) Downsample for the image‐plane ——
+        full_h, full_w = img.shape[:2]
+        scale = min(max_res/full_h, max_res/full_w, 1.0)
+        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1)
+                        for i in range(3)], axis=-1)
         h_ds, w_ds, _ = img_ds.shape
 
-        # World coords for X/Y axes using WCS
-        full_h, full_w = img.shape[:2]
-        x_vals = np.linspace(0, full_w, w_ds)
-        y_vals = np.linspace(0, full_h, h_ds)
+        # ——— 4) Build pixel→world grid ———————
+        x_vals = np.linspace(0, full_w-1, w_ds)
+        y_vals = np.linspace(0, full_h-1, h_ds)
         X_pix, Y_pix = np.meshgrid(x_vals, y_vals)
-        RA, DEC = self.wcs.pixel_to_world_values(X_pix, full_h - Y_pix)
+        RA, DEC = self.wcs.pixel_to_world_values(X_pix, Y_pix)
 
-        Z = np.zeros_like(X_pix)
-
-        if "Grayscale" in choice:
-            grayscale = np.mean(img_ds, axis=2)
-            surface = go.Surface(
-                x=RA,
-                y=DEC,
-                z=Z,
-                surfacecolor=grayscale,
-                colorscale="gray",
-                showscale=False,
-                opacity=1.0
-            )
-            image_layer = surface
-        else:
-            rgb_flat = (img_ds * 255).astype(np.uint8).reshape(-1, 3)
-            color_hex = ['rgb({},{},{})'.format(r, g, b) for r, g, b in rgb_flat]
-            image_layer = go.Scatter3d(
-                x=RA.flatten(),
-                y=DEC.flatten(),
-                z=Z.flatten(),
-                mode='markers',
-                marker=dict(size=2, color=color_hex),
-                hoverinfo='skip',
-                showlegend=False
-            )
-
-        # 3D stars/galaxies
-        scatter_x, scatter_y, scatter_z, scatter_labels, lines = [], [], [], [], []
-
+        # ——— 5) Gather each object’s coords & lines —
+        pix_xs, pix_ys = [], []
+        world_xs, world_ys, zs_raw, labels, lines = [], [], [], [], []
         for obj in self.results:
             try:
-                ra = float(obj.get("ra"))
-                dec = float(obj.get("dec"))
-                dist_gly = float(obj.get("comoving_distance"))
-                dist_ly = dist_gly * 1e9
-                zshift = float(obj.get("redshift"))
-                if dist_ly <= 0:
+                ra  = float(obj["ra"])
+                dec = float(obj["dec"])
+                d_gy = float(obj["comoving_distance"])
+                d_ly = d_gy * 1e9
+                if d_ly <= 0:
                     continue
 
-                x, y = self.wcs.world_to_pixel_values(ra, dec)
-                y = full_h - y
-                if not (0 <= x < full_w and 0 <= y < full_h):
+                # pixel coords (no Y-flip!)
+                px, py = self.wcs.world_to_pixel_values(ra, dec)
+                if not (0 <= px < full_w and 0 <= py < full_h):
                     continue
 
-                z = math.log10(dist_ly)
+                z = math.log10(d_ly)
+                pix_xs.append(px)
+                pix_ys.append(py)
 
-                # Convert to RA/Dec again to align with image base
-                ra_obj, dec_obj = self.wcs.pixel_to_world_values(x, y)
+                # world coords (should equal ra,dec)
+                ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
+                world_xs.append(ra0)
+                world_ys.append(dec0)
+                zs_raw.append(z)
 
-                lines.append(go.Scatter3d(
-                    x=[ra_obj, ra_obj], y=[dec_obj, dec_obj], z=[0, z],
-                    mode="lines",
-                    line=dict(color='gray', width=1),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
-
-                scatter_x.append(ra_obj)
-                scatter_y.append(dec_obj)
-                scatter_z.append(z)
-
-                label = (
+                labels.append(
                     f"<b>{obj['name']}</b><br>"
                     f"RA: {ra:.6f}<br>"
                     f"Dec: {dec:.6f}<br>"
-                    f"Distance: {dist_ly:.2e} ly<br>"
-                    f"z = {zshift:.5f}"
+                    f"Distance: {d_ly:.2e} ly"
                 )
-                scatter_labels.append(label)
 
+                # connector line from plane (Z=0) up to z
+                lines.append(go.Scatter3d(
+                    x=[ra0, ra0],
+                    y=[dec0, dec0],
+                    z=[0, z],
+                    mode="lines",
+                    line=dict(color="gray", width=1),
+                    hoverinfo="skip",
+                    showlegend=False
+                ))
             except Exception as e:
                 print(f"Skipping object due to error: {e}")
+                continue
 
+        # ——— 6) Shift Z’s & compute plane_z ————
+        zs = np.array(zs_raw)
+        if z_option == "Min-Max":
+            z0 = zs.min()
+            zs = zs - z0
+            plane_z = z0
+            z_range = [z0, zs.max() + z0]
+        elif z_option == "Custom":
+            plane_z = z_min
+            zs = zs - z_min
+            z_range = [z_min, z_max]
+        else:  # Default
+            plane_z = 0
+            z_range = None
+
+        # ——— 7) Build the image plane at plane_z —
+        if plane_style == "Smooth Grayscale Image Plane":
+            Z_plane = np.full_like(RA, plane_z)
+            image_layer = go.Surface(
+                x=RA, y=DEC, z=Z_plane,
+                surfacecolor=np.mean(img_ds, axis=2),
+                colorscale="gray", showscale=False
+            )
+        else:
+            flat_rgb = (img_ds*255).astype(int).reshape(-1, 3)
+            color_hex = [f"rgb({r},{g},{b})" for r,g,b in flat_rgb]
+            image_layer = go.Scatter3d(
+                x=RA.flatten(), y=DEC.flatten(),
+                z=[plane_z]*RA.size,
+                mode="markers",
+                marker=dict(size=1, color=color_hex, opacity=0.8),
+                showlegend=False, hoverinfo="skip"
+            )
+
+        # ——— 8) Color each object by 11×11 patch average ——
+        H, W = img_norm.shape[:2]
+        patch_r = 5
+        if obj_color == "Image-Based":
+            obj_cols = []
+            for px, py in zip(pix_xs, pix_ys):
+                cx, cy = int(px), int(py)
+                x0 = max(0, cx-patch_r); x1 = min(W, cx+patch_r+1)
+                y0 = max(0, cy-patch_r); y1 = min(H, cy+patch_r+1)
+                patch = img_norm[y0:y1, x0:x1]  # note img[y,x]
+                if patch.size:
+                    mean_rgb = patch.reshape(-1,3).mean(axis=0)
+                else:
+                    mean_rgb = np.zeros(3)
+                r,g,b = (mean_rgb*255).astype(int)
+                obj_cols.append(f"rgb({r},{g},{b})")
+        else:
+            obj_cols = "red"
+
+        # ——— 9) Scatter objects at plane_z+zs ———————
         scatter = go.Scatter3d(
-            x=scatter_x,
-            y=scatter_y,
-            z=scatter_z,
-            mode='markers',
-            marker=dict(size=4, color='red'),
-            hovertext=scatter_labels,
-            hoverinfo='text',
-            name='Objects'
+            x=world_xs,
+            y=world_ys,
+            z=plane_z + zs,
+            mode="markers",
+            marker=dict(size=4, color=obj_cols),
+            hovertext=labels,
+            hoverinfo="text",
+            name="Objects"
         )
 
-        fig = go.Figure(data=[image_layer, scatter] + lines)
+        # ——— 10) Compose & show ——————————————
+        fig = go.Figure(data=[image_layer] + lines + [scatter])
+        scene = dict(
+            xaxis_title="RA (deg)",
+            yaxis_title="Dec (deg)",
+            zaxis_title="log10(Distance in ly)",
+            yaxis=dict(autorange="reversed"),
+            aspectmode="manual",
+            aspectratio=dict(x=1, y=1, z=z_height)
+        )
+        if z_range:
+            scene["zaxis"] = dict(range=z_range)
+
         fig.update_layout(
-            title='3D Distance Model',
-            scene=dict(
-                xaxis_title='RA (deg)',
-                yaxis_title='Dec (deg)',
-                zaxis_title='log10(Distance in ly)',
-                yaxis=dict(autorange='reversed'),
-                aspectmode="manual",
-                aspectratio=dict(x=1, y=1, z=0.5)
-            ),
+            title="3D Distance Model",
+            scene=scene,
             margin=dict(l=0, r=0, b=0, t=40)
         )
+        default_path = os.path.expanduser("~/3d_distance_model.html")
+        # 11) Ask the user where to save the interactive HTML
+        fn, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save 3D Plot As",
+            default_path,                        # default directory + filename
+            "HTML Files (*.html)"
+        )
+        if fn:
+            if not fn.lower().endswith(".html"):
+                fn += ".html"
+            fig.write_html(
+                fn,
+                include_plotlyjs="cdn",
+                full_html=True
+            )
+
+        # 12) Then still show it immediately if you like
         fig.show()
+
 
     def get_selected_object_types(self):
         """Return a list of selected object types from the tree widget."""
