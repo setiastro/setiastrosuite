@@ -1,8 +1,9 @@
+import sys
+
 # Standard library imports
 import pickle
 import os
 import tempfile
-import sys
 import time
 import json
 import logging
@@ -235,7 +236,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.3"
+VERSION = "2.15.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1226,35 +1227,52 @@ class AstroEditingSuite(QMainWindow):
         dialog.exec()
 
     def remove_pedestal(self):
-        """
-        Remove the pedestal from the active image by subtracting the minimum value.
-        For a monochrome image, subtract the overall minimum.
-        For an RGB image, subtract the minimum value from each channel separately.
-        Uses the ImageManager to retrieve and update the active image.
-        """
-        # Retrieve the active image and its metadata from the image manager.
-        image, metadata = self.image_manager.get_current_image_and_metadata()
-        if image is None:
-            QMessageBox.warning(self, "Pedestal Removal", "No active image found for pedestal removal.")
-            return
+        # 1) Prompt the user
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Pedestal Removal")
+        dlg.setText("Apply pedestal removal to:")
+        btn_current = dlg.addButton(
+            "Current Slot", QMessageBox.ButtonRole.YesRole
+        )
+        btn_all     = dlg.addButton(
+            "All Slots",    QMessageBox.ButtonRole.NoRole
+        )
+        dlg.addButton(QMessageBox.StandardButton.Cancel)
+        dlg.exec()
 
-        # Perform pedestal removal.
-        if image.ndim == 2:
-            # Monochrome image: subtract overall minimum.
-            new_image = image - np.min(image)
-        elif image.ndim == 3:
-            # RGB or RGBA image: subtract the minimum value from each channel.
-            new_image = np.empty_like(image)
-            channels = image.shape[2]
-            for ch in range(channels):
-                new_image[:, :, ch] = image[:, :, ch] - np.min(image[:, :, ch])
+        # 2) Pick slots based on exactly which button got clicked
+        if dlg.clickedButton() is btn_current:
+            slots = [ self.image_manager.current_slot ]
+        elif dlg.clickedButton() is btn_all:
+            slots = list(range(self.image_manager.max_slots))
         else:
-            QMessageBox.warning(self, "Pedestal Removal", "Unsupported image format for pedestal removal.")
-            return
+            return  # canceled
 
-        # Update the active image using the image manager.
-        self.image_manager.set_image(new_image, metadata, step_name="Pedestal Removal")
-        QMessageBox.information(self, "Pedestal Removal", "Pedestal removal completed.")
+        # 3) Do the pedestal subtraction on each slot you chose
+        for slot in slots:
+            img = self.image_manager._images.get(slot)
+            meta = self.image_manager._metadata.get(slot, {})
+            if img is None:
+                continue
+
+            if img.ndim == 2:
+                new_img = img - img.min()
+            else:
+                new_img = np.empty_like(img)
+                for ch in range(img.shape[2]):
+                    new_img[..., ch] = img[..., ch] - img[..., ch].min()
+
+            # 4) Use set_image_for_slot so each slot gets its own undo entry
+            self.image_manager.set_image_for_slot(
+                slot,
+                new_img,
+                meta,
+                step_name="Pedestal Removal"
+            )
+
+        # 5) Let them know
+        QMessageBox.information(self, "Pedestal Removal", "Done!")
+
 
     def open_signature_insert_window(self):
         self.signature_insert_window = SignatureInsertWindow(self.image_manager, parent=self)
@@ -7975,6 +7993,7 @@ class StackingSuiteDialog(QDialog):
         self.conversion_output_directory = None
         self.reg_files = {}
         self.session_tags = {}  # 🔑 file_path => session_tag (e.g., "Session1", "Blue Flats", etc.)
+        self.deleted_calibrated_files = []
 
         # QSettings for your app
         self.settings = QSettings("Seti Astro", "Seti Astro Suite")
@@ -8723,6 +8742,8 @@ class StackingSuiteDialog(QDialog):
         exposure_tolerance_layout.addWidget(exposure_tolerance_label)
         exposure_tolerance_layout.addWidget(self.flat_exposure_tolerance_spinbox)
         right_controls_layout.addLayout(exposure_tolerance_layout)
+        self.flat_exposure_tolerance_spinbox.valueChanged.connect(self.rebuild_flat_tree)
+
 
         # Auto-Select Master Dark
         self.auto_select_dark_checkbox = QCheckBox("Auto-Select Closest Master Dark")
@@ -8782,7 +8803,6 @@ class StackingSuiteDialog(QDialog):
         self.clear_master_flat_selection_btn = QPushButton("Clear Selection")
         self.clear_master_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_flat_tree))
         main_layout.addWidget(self.clear_master_flat_selection_btn)
-
         return tab
 
     def flat_tree_context_menu(self, position):
@@ -8963,9 +8983,6 @@ class StackingSuiteDialog(QDialog):
         self.assign_best_master_files()
 
 
-
-
-
     def create_image_registration_tab(self):
         """
         Creates an Image Registration tab that mimics how the Light tab handles
@@ -8996,8 +9013,19 @@ class StackingSuiteDialog(QDialog):
         layout.addWidget(QLabel("Calibrated Light Frames"))
         layout.addWidget(self.reg_tree)
 
+        tol_layout = QHBoxLayout()
+        tol_layout.addWidget(QLabel("Exposure Tolerance (sec):"))
+        self.exposure_tolerance_spin = QSpinBox()
+        self.exposure_tolerance_spin.setRange(0, 900)
+        self.exposure_tolerance_spin.setValue(0)
+        self.exposure_tolerance_spin.setSingleStep(5)
+        tol_layout.addWidget(self.exposure_tolerance_spin)
+        layout.addLayout(tol_layout)
+        self.exposure_tolerance_spin.valueChanged.connect(lambda _: self.populate_calibrated_lights())
+
         # Populate the tree from your calibrated folder
         self.populate_calibrated_lights()
+
 
         # ─────────────────────────────────────────
         # 2) Buttons for Managing Files
@@ -9227,16 +9255,30 @@ class StackingSuiteDialog(QDialog):
 
         for item in selected_items:
             parent = item.parent()
+
             if parent is None:
-                # Top-level group (e.g. "Filter - Exposure - Size")
+                # Top-level group
                 group_key = item.text(0)
+
+                # ✅ Delete all calibrated files inside this group
+                full_file_paths = item.data(0, Qt.ItemDataRole.UserRole)
+                if full_file_paths:
+                    for full_path in full_file_paths:
+                        if not hasattr(self, "deleted_calibrated_files"):
+                            self.deleted_calibrated_files = []
+                        if full_path not in self.deleted_calibrated_files:
+                            self.deleted_calibrated_files.append(full_path)
+
                 if group_key in self.reg_files:
                     del self.reg_files[group_key]
+
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
+
             else:
-                # Individual file item under a group
+                # Child file under a group
                 group_key = parent.text(0)
                 filename = item.text(0)
+
                 if group_key in self.reg_files:
                     self.reg_files[group_key] = [
                         f for f in self.reg_files[group_key]
@@ -9244,18 +9286,129 @@ class StackingSuiteDialog(QDialog):
                     ]
                     if not self.reg_files[group_key]:
                         del self.reg_files[group_key]
+
+                # ✅ Delete calibrated child file
+                full_file_paths = parent.data(0, Qt.ItemDataRole.UserRole)
+                if full_file_paths:
+                    for full_path in full_file_paths:
+                        if os.path.basename(full_path) == filename:
+                            if not hasattr(self, "deleted_calibrated_files"):
+                                self.deleted_calibrated_files = []
+                            if full_path not in self.deleted_calibrated_files:
+                                self.deleted_calibrated_files.append(full_path)
+
                 parent.removeChild(item)
 
+    def rebuild_flat_tree(self):
+        """Regroup flat frames in the flat_tree based on the exposure tolerance."""
+        self.flat_tree.clear()
+
+        if not self.flat_files:
+            return
+
+        tolerance = self.flat_exposure_tolerance_spinbox.value()
+
+        # Flatten all flats into a list
+        all_flats = []
+        for (filter_exp_size, session_tag), files in self.flat_files.items():
+            for file in files:
+                all_flats.append((filter_exp_size, session_tag, file))
+
+        # Group the flats
+        grouped = {}
+
+        for (filter_exp_size, session_tag, file_path) in all_flats:
+            try:
+                header = fits.getheader(file_path, ext=0)
+                filter_name = header.get("FILTER", "Unknown")
+                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+                width = header.get("NAXIS1", 0)
+                height = header.get("NAXIS2", 0)
+                image_size = f"{width}x{height}" if width and height else "Unknown"
+                exposure = float(exposure)
+
+                found_group = None
+                for group_key in grouped.keys():
+                    g_filter, g_min_exp, g_max_exp, g_size = group_key
+                    if (
+                        filter_name == g_filter and
+                        image_size == g_size and
+                        g_min_exp - tolerance <= exposure <= g_max_exp + tolerance
+                    ):
+                        found_group = group_key
+                        break
+
+                if found_group:
+                    grouped[found_group].append((file_path, exposure))
+                else:
+                    new_key = (filter_name, exposure, exposure, image_size)
+                    grouped[new_key] = [(file_path, exposure)]
+
+            except Exception as e:
+                print(f"⚠️ Failed reading {file_path}: {e}")
+
+        # Now create the tree
+        for (filter_name, min_exp, max_exp, image_size), files in grouped.items():
+            top_item = QTreeWidgetItem()
+            expmin = np.floor(min_exp)
+            tolerance = self.flat_exposure_tolerance_spinbox.value()
+
+            if len(files) > 1:
+                exposure_str = f"{expmin:.1f}s–{(expmin + tolerance):.1f}s"
+            else:
+                exposure_str = f"{min_exp:.1f}s"
+
+            top_item.setText(0, f"{filter_name} - {exposure_str} ({image_size})")
+            top_item.setText(1, f"{len(files)} files")
+            top_item.setText(2, "Auto-Selected Dark" if self.auto_select_dark_checkbox.isChecked() else "None")
+
+            self.flat_tree.addTopLevelItem(top_item)
+
+            for file_path, _ in files:
+                session_tag = self.session_tags.get(file_path, "Default")
+                leaf_item = QTreeWidgetItem([
+                    os.path.basename(file_path),
+                    f"Size: {image_size} | Session: {session_tag}"
+                ])
+                top_item.addChild(leaf_item)
+
+
+    def exposures_within_tolerance(self, exp1, exp2, tolerance):
+        try:
+            return abs(float(exp1) - float(exp2)) <= tolerance
+            
+        except Exception:
+            return False
+
+    def parse_group_key(self, group_key):
+        """
+        Parses a group key string like 'Luminance - 90s (3000x2000)'
+        into filter_name, exposure (float), and image_size (str).
+        """
+        try:
+            parts = group_key.split(' - ')
+            filter_name = parts[0]
+            exp_size_part = parts[1] if len(parts) > 1 else ""
+
+            # Separate exposure and size correctly
+            if '(' in exp_size_part and ')' in exp_size_part:
+                exposure_str, size_part = exp_size_part.split('(', 1)
+                exposure = exposure_str.replace('s', '').strip()
+                size = size_part.strip(') ').strip()
+            else:
+                exposure = exp_size_part.replace('s', '').strip()
+                size = "Unknown"
+
+            
+            return filter_name, float(exposure), size
+
+        except Exception as e:
+            
+            return "Unknown", 0.0, "Unknown"
 
 
 
     def populate_calibrated_lights(self, manual_addition=False):
-        """
-        Populates the tree with 3 columns:
-        0: "Filter - Exposure - Size"
-        1: "Metadata"
-        2: "Drizzle" (e.g. "Drizzle: False" or "Drizzle: True, Scale: 2x, Drop: 0.65")
-        """
         if manual_addition:
             return
 
@@ -9263,35 +9416,38 @@ class StackingSuiteDialog(QDialog):
         self.reg_tree.setColumnCount(3)
         self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
 
+        # ✅ Allow user to manually resize columns
+        header = self.reg_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+
         # Preserve manually added files
         existing_manual_files = self.light_files.copy()
         self.light_files = {}
 
-        # Ensure stacking directory is set
-        if not self.stacking_directory:
-            # 1) Prompt user to pick a directory
-            self.select_stacking_directory()
+        # 1) Gather files
+        calibrated_folder_files = []
+        if self.stacking_directory:
+            calibrated_folder = os.path.join(self.stacking_directory, "Calibrated")
+            if os.path.exists(calibrated_folder):
+                all_cal_files = [
+                    os.path.join(calibrated_folder, f)
+                    for f in os.listdir(calibrated_folder)
+                    if f.lower().endswith((".fits", ".fit"))
+                ]
+                calibrated_folder_files = [
+                    f for f in all_cal_files if f not in getattr(self, "deleted_calibrated_files", [])
+                ]
 
-            # 2) If user still didn't choose one, show warning and return
-            if not self.stacking_directory:
-                QMessageBox.warning(self, "Error", "Output directory is not set.")
-                return
-
-        calibrated_folder = os.path.join(self.stacking_directory, "Calibrated")
-        if not os.path.exists(calibrated_folder):
+        manual_files = getattr(self, "manual_light_files", [])
+        all_files = calibrated_folder_files + manual_files
+        if not all_files:
             return
 
-        fits_files = [
-            f for f in os.listdir(calibrated_folder)
-            if f.lower().endswith((".fits", ".fit"))
-        ]
-        if not fits_files:
-            return
-
-        # Group files by filter/exposure/dimensions
+        # 2) Group files
         grouped_files = {}
-        for filename in fits_files:
-            file_path = os.path.join(calibrated_folder, filename)
+        for file_path in all_files:
             try:
                 with fits.open(file_path) as hdul:
                     hdr = hdul[0].header
@@ -9304,39 +9460,77 @@ class StackingSuiteDialog(QDialog):
                     else:
                         image_size = "Unknown"
 
-                    group_key = f"{filter_name} - {exposure}s ({image_size})"
-                    if group_key not in grouped_files:
-                        grouped_files[group_key] = []
-                    grouped_files[group_key].append(file_path)
+                    # Try to find a matching group
+                    found_group = None
+                    for group_key in grouped_files.keys():
+                        g_filter, g_exposure, g_size = self.parse_group_key(group_key)
+                        if (
+                            filter_name == g_filter and
+                            image_size == g_size and
+                            self.exposures_within_tolerance(exposure, g_exposure, self.exposure_tolerance_spin.value())
+                        ):
+                            found_group = group_key
+                            break
+
+                    if found_group:
+                        grouped_files[found_group].append((file_path, float(exposure)))
+                    else:
+                        new_group_key = f"{filter_name} - {exposure}s ({image_size})"
+                        grouped_files[new_group_key] = [(file_path, float(exposure))]
 
             except Exception as e:
-                self.update_status(f"⚠️ Skipped {filename}: {e}")
+                print(f"⚠️ Skipped {os.path.basename(file_path)}: {e}")
 
-        # Populate the tree with top-level items
-        for group_key, file_list in grouped_files.items():
+        # 3) Populate the tree
+        for group_key, file_tuples in grouped_files.items():
+            file_list = [f for f, _ in file_tuples]
+            exposures = [e for _, e in file_tuples]
+
             top_item = QTreeWidgetItem()
             top_item.setText(0, group_key)
-            top_item.setText(1, f"{len(file_list)} files")
-            # By default, Drizzle is off -> just show "Drizzle: False"
-            top_item.setText(2, "Drizzle: False")
 
-            # Store file_list in UserRole
+            # 🛠 Smart metadata text
+            if len(exposures) > 1:
+                tol = self.exposure_tolerance_spin.value()
+                min_exp = min(exposures)
+                max_exp = max(exposures)
+
+                # Expand the range to reflect tolerance
+                min_exp_display = max(0, min_exp - tol)
+                max_exp_display = max_exp + tol
+
+                metadata_text = f"{len(file_list)} files, {min_exp_display:.0f}s–{max_exp_display:.0f}s"
+            else:
+                metadata_text = f"{len(file_list)} file"
+
+            top_item.setText(1, metadata_text)
+            top_item.setText(2, "Drizzle: False")
             top_item.setData(0, Qt.ItemDataRole.UserRole, file_list)
             self.reg_tree.addTopLevelItem(top_item)
 
-            # Child items for each file
-            for fp in file_list:
+            for fp, _ in file_tuples:
+                try:
+                    with fits.open(fp) as hdul:
+                        data = hdul[0].data
+                        if data is not None:
+                            height, width = data.shape[-2:]
+                            size_text = f"{width}x{height}"
+                        else:
+                            size_text = "Unknown"
+                except Exception:
+                    size_text = "Unknown"
+
                 child = QTreeWidgetItem([
                     os.path.basename(fp),
-                    f"Size: {image_size}"
+                    f"Size: {size_text}"
                 ])
                 top_item.addChild(child)
+
             top_item.setExpanded(True)
 
-        # Update self.light_files
-        self.light_files.update(grouped_files)
+        # 4) Update internal storage
+        self.light_files.update({k: [fp for fp, _ in v] for k, v in grouped_files.items()})
 
-        # Restore any manually added files
         for gkey, flist in existing_manual_files.items():
             if gkey not in self.light_files:
                 self.light_files[gkey] = flist
@@ -9454,64 +9648,19 @@ class StackingSuiteDialog(QDialog):
 
         self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
 
-        # ✅ Only clear tree if no manual files exist yet
-        if not self.light_files:
-            self.reg_tree.clear()
+        # ✅ First make sure manual_light_files exists
+        if not hasattr(self, "manual_light_files"):
+            self.manual_light_files = []
 
-        for file in files:
-            filename = os.path.basename(file)
+        # ✅ Add selected files to manual_light_files
+        self.manual_light_files.extend(files)
 
-            # ✅ Extract metadata (filter, exposure, size)
-            try:
-                header = fits.getheader(file, ext=0)  # Read only the primary header
-                filter_name = header.get("FILTER", "Unknown")
-                exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
+        print(f"✅ Added {len(files)} manual light frames.")
+        self.update_status(f"✅ Added {len(files)} manual light frames.")
 
-                # Retrieve image size from NAXIS keywords
-                naxis = header.get("NAXIS", 0)
-                if naxis >= 2:
-                    width = header.get("NAXIS1", 0)
-                    height = header.get("NAXIS2", 0)
-                else:
-                    width, height = 0, 0
+        # ✅ Re-populate tree (this will rebuild everything properly)
+        self.populate_calibrated_lights()
 
-                if width > 0 and height > 0:
-                    image_size = f"{width}x{height}"
-                else:
-                    image_size = "Unknown"
-
-                group_key = f"{filter_name} - {exposure}s ({image_size})"
-
-            except Exception:
-                group_key = "Unknown - Unknown"
-
-
-            # ✅ Ensure group exists in tree
-            existing_groups = {self.reg_tree.topLevelItem(i).text(0) for i in range(self.reg_tree.topLevelItemCount())}
-            if group_key not in existing_groups:
-                group_item = QTreeWidgetItem([group_key, f"{len(files)} files"])
-                self.reg_tree.addTopLevelItem(group_item)
-            else:
-                for i in range(self.reg_tree.topLevelItemCount()):
-                    if self.reg_tree.topLevelItem(i).text(0) == group_key:
-                        group_item = self.reg_tree.topLevelItem(i)
-                        break
-
-            # ✅ Add file to tree
-            file_item = QTreeWidgetItem([file, "Loaded"])
-            print(f"✅ Added {file} light frame.")
-            self.update_status(f"✅ Added {file} light frame.")
-            QApplication.processEvents()
-            group_item.addChild(file_item)
-
-            # ✅ Ensure it's stored for processing
-            if group_key not in self.light_files:
-                self.light_files[group_key] = []
-            self.light_files[group_key].append(file)
-
-        print(f"✅ Added {len(files)} light frames.")
-        self.update_status(f"✅ Added {len(files)} light frames.")
-        QApplication.processEvents()
 
 
 
@@ -9530,19 +9679,48 @@ class StackingSuiteDialog(QDialog):
         self.add_directory(self.dark_tree, "Select Dark Directory", "DARK")
 
     def add_flat_files(self):
-        self.add_files(self.flat_tree, "Select Flat Files", "FLAT")
-        self.assign_best_master_dark()  # Assign best dark after adding flats
+        self.prompt_session_before_adding("FLAT")
+
 
     def add_flat_directory(self):
-        self.add_directory(self.flat_tree, "Select Flat Directory", "FLAT")
-        self.assign_best_master_dark()  # Assign best dark after adding flats
+        self.prompt_session_before_adding("FLAT", directory_mode=True)
+
 
     
     def add_light_files(self):
-        self.add_files(self.light_tree, "Select Light Files", "LIGHT")
+        self.prompt_session_before_adding("LIGHT")
+
     
     def add_light_directory(self):
-        self.add_directory(self.light_tree, "Select Light Directory", "LIGHT")
+        self.prompt_session_before_adding("LIGHT", directory_mode=True)
+
+
+    def prompt_session_before_adding(self, frame_type, directory_mode=False):
+        # 🔥 Prompt user first
+        text, ok = QInputDialog.getText(self, "Set Session Tag", "Enter session name:", text="Default")
+        if not (ok and text.strip()):
+            return
+
+        session_name = text.strip()
+
+        # 🔥 Set it globally before adding
+        self.current_session_tag = session_name
+
+        # 🔥 Then add files or directory
+        if frame_type.upper() == "FLAT":
+            if directory_mode:
+                self.add_directory(self.flat_tree, "Select Flat Directory", "FLAT")
+            else:
+                self.add_files(self.flat_tree, "Select Flat Files", "FLAT")
+            self.assign_best_master_dark()
+            self.rebuild_flat_tree()
+
+        elif frame_type.upper() == "LIGHT":
+            if directory_mode:
+                self.add_directory(self.light_tree, "Select Light Directory", "LIGHT")
+            else:
+                self.add_files(self.light_tree, "Select Light Files", "LIGHT")
+            self.assign_best_master_files()
 
     def load_master_dark(self):
         """ Loads a Master Dark and updates the UI. """
@@ -9690,13 +9868,15 @@ class StackingSuiteDialog(QDialog):
             elif expected_type.upper() == "FLAT":
                 filter_name = header.get("FILTER", "Unknown")
                 flat_key = f"{filter_name} - {exposure_val} ({image_size})"
-                session_tag = "Default"  # 🔧 Will be replaced with user-defined value in Step 2
+                session_tag = getattr(self, "current_session_tag", "Default")
                 composite_key = (flat_key, session_tag)
 
                 if composite_key not in self.flat_files:
                     self.flat_files[composite_key] = []
                 self.flat_files[composite_key].append(file_path)
 
+                # ✅ Also store session tag internally
+                self.session_tags[file_path] = session_tag
 
                 # Tree UI update
                 filter_items = tree.findItems(filter_name, Qt.MatchFlag.MatchExactly, 0)
@@ -9719,7 +9899,7 @@ class StackingSuiteDialog(QDialog):
 
             elif expected_type.upper() == "LIGHT":
                 filter_name = header.get("FILTER", "Unknown")
-                session_tag = self.session_tags.get(file_path, "Default")  # ⭐️ Step 1: Get session label
+                session_tag = getattr(self, "current_session_tag", "Default")  # ⭐️ Step 1: Get session label
 
                 light_key = f"{filter_name} - {exposure_val} ({image_size})"
                 composite_key = (light_key, session_tag)
@@ -27314,41 +27494,39 @@ class SignatureInsertWindow(QMainWindow):
         pixmap = None
 
         if source == "file":
-            file_path, _ = QFileDialog.getOpenFileName(self, "Select Insert Image", "", "Images (*.png *.tif *.tiff)")
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Select Insert Image", "", "Images (*.png *.tif *.tiff)"
+            )
             if not file_path:
                 return
             pixmap = QPixmap(file_path)
 
         elif source == "slot":
+            # Ask which slot...
             if self.parent() and hasattr(self.parent(), "slot_names"):
                 slot_names = self.parent().slot_names
             else:
                 slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
-
-            display_names = [slot_names.get(i, f"Slot {i}") for i in range(self.image_manager.max_slots)]
-            choice, ok = QInputDialog.getItem(self, "Select Slot", "Choose slot:", display_names, False)
+            display = [slot_names[i] for i in range(self.image_manager.max_slots)]
+            choice, ok = QInputDialog.getItem(self, "Select Slot", "Choose slot:", display, False)
             if not ok:
                 return
+            idx = display.index(choice)
 
-            idx = display_names.index(choice)
-            metadata = self.image_manager._metadata.get(idx, {})
-            file_path = metadata.get("file_path", None)
+            # --- ALWAYS use the in-memory image array for slots ---
+            img_data = self.image_manager._images.get(idx)
+            if img_data is None:
+                QMessageBox.warning(self, "Missing Image", f"No image data in slot {idx}.")
+                return
+            qimg = self.numpy_to_qimage(img_data)
+            pixmap = QPixmap.fromImage(qimg)
 
-            if file_path and os.path.exists(file_path):
-                pixmap = QPixmap(file_path)
-            else:
-                img_data = self.image_manager._images.get(idx)
-                if img_data is None:
-                    QMessageBox.warning(self, "Missing Image", f"No image found in slot {idx}.")
-                    return
-                qimg = self.numpy_to_qimage(img_data)
-                pixmap = QPixmap.fromImage(qimg)
-
-        # ✅ Ensure pixmap is valid before continuing
+        # If we still don't have a valid pixmap, warn and bail
         if pixmap is None or pixmap.isNull():
             QMessageBox.warning(self, "Load Failed", "Could not load insert image.")
             return
 
+        # Otherwise add it exactly as before...
         item = QGraphicsPixmapItem(pixmap)
         item.setFlags(
             QGraphicsPixmapItem.GraphicsItemFlag.ItemIsMovable |
@@ -27371,19 +27549,11 @@ class SignatureInsertWindow(QMainWindow):
             rect.setPen(self.bounding_box_pen)
             rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             rect.setAcceptDrops(False)
-            rect.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
-            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
-            rect.setAcceptHoverEvents(False)
             rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresParentOpacity, True)
             rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemDoesntPropagateOpacityToChildren, True)
-            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, False)
-            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             rect.setZValue(item.zValue() + 0.1)
             self.scene.addItem(rect)
             self.bounding_boxes.append(rect)
-
-
 
 
     def rotate_selected(self):
@@ -27523,16 +27693,34 @@ class SignatureInsertWindow(QMainWindow):
         self.bounding_boxes.clear()
 
     def numpy_to_qimage(self, arr):
+        # 1) Normalize & convert to uint8 0–255
         arr = np.clip(arr, 0.0, 1.0)
-        arr = (arr * 255).astype(np.uint8)
-        h, w = arr.shape[:2]
-        if arr.ndim == 2:
-            return QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
-        elif arr.shape[2] == 3:
-            return QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
-        elif arr.shape[2] == 4:
-            return QImage(arr.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
-        raise ValueError(f"Unsupported shape: {arr.shape}")
+        arr_uint8 = (arr * 255).astype(np.uint8)
+
+        # 2) Force a contiguous buffer
+        arr_c = np.ascontiguousarray(arr_uint8)
+        h, w = arr_c.shape[:2]
+
+        # 3) Pick the right QImage format & compute bytesPerLine
+        if arr_c.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            channels = 1
+        elif arr_c.shape[2] == 3:
+            fmt = QImage.Format.Format_RGB888
+            channels = 3
+        elif arr_c.shape[2] == 4:
+            fmt = QImage.Format.Format_RGBA8888
+            channels = 4
+        else:
+            raise ValueError(f"Unsupported array shape: {arr_c.shape}")
+
+        bytes_per_line = w * channels
+
+        # 4) Grab a real bytes buffer
+        buf = arr_c.tobytes()
+
+        # 5) Build and return the QImage
+        return QImage(buf, w, h, bytes_per_line, fmt).copy()
 
     def qimage_to_numpy(self, img):
         img = img.convertToFormat(QImage.Format.Format_RGBA8888)
@@ -43104,36 +43292,64 @@ class ThreeDSettingsDialog(QDialog):
         res_layout.addWidget(self.res_spin)
         layout.addLayout(res_layout)
 
-        # Z-Axis Range Options
+        # Z-Axis Range Options (Min-Max/Custom as before)
         layout.addWidget(QLabel("Z-Axis Range:"))
         self.zaxis_cb = QComboBox()
         self.zaxis_cb.addItems(["Default", "Min-Max", "Custom"])
         layout.addWidget(self.zaxis_cb)
 
-        # Custom min/max inputs (hidden unless “Custom”)
         self.custom_widget = QWidget()
-        custom_layout = QHBoxLayout(self.custom_widget)
-        custom_layout.addWidget(QLabel("Min:"))
+        cl = QHBoxLayout(self.custom_widget)
+        cl.addWidget(QLabel("Min:"))
         self.zmin_spin = QDoubleSpinBox()
         self.zmin_spin.setRange(-1e6, 1e6)
         self.zmin_spin.setValue(0.0)
-        custom_layout.addWidget(self.zmin_spin)
-        custom_layout.addWidget(QLabel("Max:"))
+        cl.addWidget(self.zmin_spin)
+        cl.addWidget(QLabel("Max:"))
         self.zmax_spin = QDoubleSpinBox()
         self.zmax_spin.setRange(-1e6, 1e6)
         self.zmax_spin.setValue(10.0)
-        custom_layout.addWidget(self.zmax_spin)
+        cl.addWidget(self.zmax_spin)
         layout.addWidget(self.custom_widget)
         self.custom_widget.setVisible(False)
         self.zaxis_cb.currentIndexChanged.connect(
-            lambda idx: self.custom_widget.setVisible(idx == 2)
+            lambda idx: self.custom_widget.setVisible(self.zaxis_cb.currentText() == "Custom")
+        )
+
+        # Z-Axis Scale: Log vs Linear
+        layout.addWidget(QLabel("Z-Axis Scale:"))
+        self.zscale_cb = QComboBox()
+        self.zscale_cb.addItems(["Logarithmic", "Linear"])
+        layout.addWidget(self.zscale_cb)
+
+        # Linear max input
+        self.linear_widget = QWidget()
+        ll = QHBoxLayout(self.linear_widget)
+        ll.addWidget(QLabel("Linear Z-Max:"))
+        self.linear_max_spin = QDoubleSpinBox()
+        self.linear_max_spin.setRange(0.1, 1e12)
+        self.linear_max_spin.setValue(1e4)
+        ll.addWidget(self.linear_max_spin)
+        layout.addWidget(self.linear_widget)
+        self.linear_widget.setVisible(False)
+        self.zscale_cb.currentIndexChanged.connect(
+            lambda idx: self.linear_widget.setVisible(self.zscale_cb.currentText() == "Linear")
         )
 
         # Object Color
         layout.addWidget(QLabel("Object Color:"))
         self.color_cb = QComboBox()
-        self.color_cb.addItems(["Image-Based", "Solid (Red)"])
+        self.color_cb.addItems(["Image-Based", "Solid (Red)", "Solid (Custom)"])
         layout.addWidget(self.color_cb)
+
+        self.color_btn = QPushButton("Choose Color…")
+        self.custom_color = QColor(255, 0, 0)
+        self.color_btn.setVisible(False)
+        layout.addWidget(self.color_btn)
+        self.color_btn.clicked.connect(self._choose_color)
+        self.color_cb.currentIndexChanged.connect(
+            lambda idx: self.color_btn.setVisible(self.color_cb.currentText() == "Solid (Custom)")
+        )
 
         # Z-Axis Height control
         layout.addWidget(QLabel("Z-Axis Height (aspect ratio z):"))
@@ -43143,6 +43359,11 @@ class ThreeDSettingsDialog(QDialog):
         self.zheight_spin.setValue(0.5)
         layout.addWidget(self.zheight_spin)
 
+        # ─── Show Connector Lines ─────────────────────────────
+        self.lines_cb = QCheckBox("Show Connector Lines")
+        self.lines_cb.setChecked(True)
+        layout.addWidget(self.lines_cb)
+
         # OK / Cancel
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                 QDialogButtonBox.StandardButton.Cancel)
@@ -43150,19 +43371,27 @@ class ThreeDSettingsDialog(QDialog):
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
 
+    def _choose_color(self):
+        col = QColorDialog.getColor(self.custom_color, self, "Select Object Color")
+        if col.isValid():
+            self.custom_color = col
+
     def getSettings(self):
         if self.exec() == QDialog.DialogCode.Accepted:
             return {
                 "plane_style": self.plane_style_cb.currentText(),
                 "resolution": self.res_spin.value(),
-                "z_option": self.zaxis_cb.currentText(),
-                "z_min": self.zmin_spin.value(),
-                "z_max": self.zmax_spin.value(),
+                "z_option":   self.zaxis_cb.currentText(),
+                "z_min":      self.zmin_spin.value(),
+                "z_max":      self.zmax_spin.value(),
+                "z_scale":    self.zscale_cb.currentText(),
+                "linear_max": self.linear_max_spin.value(),
                 "object_color": self.color_cb.currentText(),
-                "z_height": self.zheight_spin.value()
+                "custom_color": self.custom_color,      # QColor
+                "z_height":   self.zheight_spin.value(),
+                "show_lines": self.lines_cb.isChecked(),
             }
         return None
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -44049,7 +44278,21 @@ class MainWindow(QMainWindow):
         self.main_preview.draw_query_results()  # Redraw the scene with the circle
 
     def show_3d_model_view(self):
-        # ——— 0) Sanity checks —————————————
+        # ─── engineering notation helper ──────────────────────────────
+        def eng_notation(x):
+            if x == 0:
+                return "0"
+            exp = int(math.floor(math.log10(abs(x)) / 3) * 3)
+            val = x / (10 ** exp)
+            prefixes = {
+                -12: "p", -9: "n", -6: "µ", -3: "m",
+                0: "",  3: "k",  6: "M",  9: "G",
+                12: "T", 15: "P"
+            }
+            prefix = prefixes.get(exp, f"e{exp}")
+            return f"{val:.2f}{prefix}"
+
+        # 0) Sanity checks
         if not self.results or self.image_data is None:
             QMessageBox.warning(self, "Data Error", "No image or results available.")
             return
@@ -44057,7 +44300,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "WCS Missing", "WCS data is required to generate the 3D plot.")
             return
 
-        # ——— 1) Settings dialog ————————————
+        # 1) Get settings
         settings = ThreeDSettingsDialog(self).getSettings()
         if not settings:
             return
@@ -44066,134 +44309,169 @@ class MainWindow(QMainWindow):
         z_option    = settings["z_option"]
         z_min       = settings["z_min"]
         z_max       = settings["z_max"]
+        z_scale     = settings["z_scale"]
+        linear_max  = settings["linear_max"]
         obj_color   = settings["object_color"]
-        z_height = settings["z_height"]
+        custom_col  = settings["custom_color"]
+        z_height    = settings["z_height"]
 
-        # ——— 2) Normalize the full‐res image ————
+        # 2) Normalize full-res image
         img = self.image_data
         if img.ndim == 2:
-            img = np.stack([img, img, img], axis=-1)
-        img_norm = np.clip((img - img.min())/(np.ptp(img) + 1e-8), 0, 1)
+            img = np.stack([img]*3, axis=-1)
+        img_norm = np.clip((img - img.min())/(np.ptp(img)+1e-8), 0, 1)
 
-        # ——— 3) Downsample for the image‐plane ——
+        # 3) Downsample for plane
         full_h, full_w = img.shape[:2]
         scale = min(max_res/full_h, max_res/full_w, 1.0)
-        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1)
-                        for i in range(3)], axis=-1)
+        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1) for i in range(3)], axis=-1)
         h_ds, w_ds, _ = img_ds.shape
 
-        # ——— 4) Build pixel→world grid ———————
-        x_vals = np.linspace(0, full_w-1, w_ds)
-        y_vals = np.linspace(0, full_h-1, h_ds)
-        X_pix, Y_pix = np.meshgrid(x_vals, y_vals)
-        RA, DEC = self.wcs.pixel_to_world_values(X_pix, Y_pix)
+        # 4) Build world coords for plane
+        xs = np.linspace(0, full_w-1, w_ds)
+        ys = np.linspace(0, full_h-1, h_ds)
+        Xp, Yp = np.meshgrid(xs, ys)
+        RA, DEC = self.wcs.pixel_to_world_values(Xp, Yp)
 
-        # ——— 5) Gather each object’s coords & lines —
-        pix_xs, pix_ys = [], []
-        world_xs, world_ys, zs_raw, labels, lines = [], [], [], [], []
+        # 5) Gather objects
+        pix_xs, pix_ys, world_xs, world_ys, zs_raw, labels, lines = [],[],[],[],[],[],[]
         for obj in self.results:
             try:
-                ra  = float(obj["ra"])
-                dec = float(obj["dec"])
+                ra   = float(obj["ra"])
+                dec  = float(obj["dec"])
                 d_gy = float(obj["comoving_distance"])
                 d_ly = d_gy * 1e9
+                zshift = float(obj.get("redshift", 0.0))
                 if d_ly <= 0:
                     continue
 
-                # pixel coords (no Y-flip!)
                 px, py = self.wcs.world_to_pixel_values(ra, dec)
                 if not (0 <= px < full_w and 0 <= py < full_h):
                     continue
 
-                z = math.log10(d_ly)
+                # choose z-value
+                if z_scale == "Logarithmic":
+                    z = math.log10(d_ly)
+                else:
+                    z = d_ly
+
                 pix_xs.append(px)
                 pix_ys.append(py)
-
-                # world coords (should equal ra,dec)
                 ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
                 world_xs.append(ra0)
                 world_ys.append(dec0)
                 zs_raw.append(z)
 
+                # hover label with eng notation + redshift
                 labels.append(
                     f"<b>{obj['name']}</b><br>"
                     f"RA: {ra:.6f}<br>"
                     f"Dec: {dec:.6f}<br>"
-                    f"Distance: {d_ly:.2e} ly"
+                    f"Distance: {eng_notation(d_ly)} ly<br>"
+                    f"redshift = {zshift:.5f}"
                 )
 
-                # connector line from plane (Z=0) up to z
+                # connector line
                 lines.append(go.Scatter3d(
-                    x=[ra0, ra0],
-                    y=[dec0, dec0],
-                    z=[0, z],
+                    x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
+                    mode="lines", line=dict(color="gray", width=1),
+                    hoverinfo="skip", showlegend=False
+                ))
+            except Exception:
+                continue
+
+        if not zs_raw:
+            QMessageBox.warning(self, "No Objects", "No valid distance objects to plot.")
+            return
+
+        zs = np.array(zs_raw)
+
+        # 6) Compute plane_z and z_range
+        if z_option == "Min-Max":
+            plane_z = zs.min()
+            z_range = (zs.min(), zs.max())
+        elif z_option == "Custom":
+            plane_z = z_min
+            z_range = (z_min, z_max)
+        else:
+            plane_z = 0
+            z_range = None
+
+        if z_scale == "Linear" and z_option == "Default":
+            z_range = (0, linear_max)
+
+        # 7) Build plane (tiling with 1px squares, canvas forced to max_res)
+        show_lines = settings["show_lines"]
+        lines = []
+        if show_lines:
+            for x0, y0, z0 in zip(world_xs, world_ys, zs):
+                lines.append(go.Scatter3d(
+                    x=[x0, x0],
+                    y=[y0, y0],
+                    z=[plane_z, z0],
                     mode="lines",
                     line=dict(color="gray", width=1),
                     hoverinfo="skip",
                     showlegend=False
                 ))
-            except Exception as e:
-                print(f"Skipping object due to error: {e}")
-                continue
 
-        # ——— 6) Shift Z’s & compute plane_z ————
-        zs = np.array(zs_raw)
-        if z_option == "Min-Max":
-            z0 = zs.min()
-            zs = zs - z0
-            plane_z = z0
-            z_range = [z0, zs.max() + z0]
-        elif z_option == "Custom":
-            plane_z = z_min
-            zs = zs - z_min
-            z_range = [z_min, z_max]
-        else:  # Default
-            plane_z = 0
-            z_range = None
-
-        # ——— 7) Build the image plane at plane_z —
-        if plane_style == "Smooth Grayscale Image Plane":
-            Z_plane = np.full_like(RA, plane_z)
-            image_layer = go.Surface(
-                x=RA, y=DEC, z=Z_plane,
+        if "Grayscale" in plane_style:
+            Zp = np.full_like(RA, plane_z)
+            plane = go.Surface(
+                x=RA, y=DEC, z=Zp,
                 surfacecolor=np.mean(img_ds, axis=2),
-                colorscale="gray", showscale=False
+                colorscale="gray",
+                showscale=False,
+                opacity=1.0,
+                contours={"x": {"show": False},
+                        "y": {"show": False},
+                        "z": {"show": False}}
             )
         else:
-            flat_rgb = (img_ds*255).astype(int).reshape(-1, 3)
-            color_hex = [f"rgb({r},{g},{b})" for r,g,b in flat_rgb]
-            image_layer = go.Scatter3d(
-                x=RA.flatten(), y=DEC.flatten(),
-                z=[plane_z]*RA.size,
+            flat = (img_ds * 255).astype(int).reshape(-1, 3)
+            cols = [f"rgb({r},{g},{b})" for r, g, b in flat]
+            plane = go.Scatter3d(
+                x=RA.flatten(),
+                y=DEC.flatten(),
+                z=[plane_z] * RA.size,
                 mode="markers",
-                marker=dict(size=1, color=color_hex, opacity=0.8),
-                showlegend=False, hoverinfo="skip"
+                marker=dict(
+                    symbol="square",  # tile-friendly shape
+                    size=2,           # 1px squares
+                    line=dict(width=0),
+                    color=cols,
+                    opacity=1.0
+                ),
+                hoverinfo="skip",
+                showlegend=False
             )
 
-        # ——— 8) Color each object by 11×11 patch average ——
+        # 8) Object colors (unchanged from your working code)
         H, W = img_norm.shape[:2]
-        patch_r = 5
         if obj_color == "Image-Based":
             obj_cols = []
+            pr = 5
             for px, py in zip(pix_xs, pix_ys):
                 cx, cy = int(px), int(py)
-                x0 = max(0, cx-patch_r); x1 = min(W, cx+patch_r+1)
-                y0 = max(0, cy-patch_r); y1 = min(H, cy+patch_r+1)
-                patch = img_norm[y0:y1, x0:x1]  # note img[y,x]
+                x0, x1 = max(0, cx - pr), min(W, cx + pr + 1)
+                y0, y1 = max(0, cy - pr), min(H, cy + pr + 1)
+                patch = img_norm[y0:y1, x0:x1]
                 if patch.size:
-                    mean_rgb = patch.reshape(-1,3).mean(axis=0)
+                    mr, mg, mb = (patch.reshape(-1, 3).mean(axis=0) * 255).astype(int)
                 else:
-                    mean_rgb = np.zeros(3)
-                r,g,b = (mean_rgb*255).astype(int)
-                obj_cols.append(f"rgb({r},{g},{b})")
+                    mr, mg, mb = 0, 0, 0
+                obj_cols.append(f"rgb({mr},{mg},{mb})")
+        elif obj_color == "Solid (Custom)":
+            q = custom_col
+            obj_cols = [f"rgb({q.red()},{q.green()},{q.blue()})"] * len(zs)
         else:
-            obj_cols = "red"
+            obj_cols = ["red"] * len(zs)
 
-        # ——— 9) Scatter objects at plane_z+zs ———————
+        # 9) Scatter the objects using obj_cols
         scatter = go.Scatter3d(
             x=world_xs,
             y=world_ys,
-            z=plane_z + zs,
+            z=zs,
             mode="markers",
             marker=dict(size=4, color=obj_cols),
             hovertext=labels,
@@ -44201,44 +44479,40 @@ class MainWindow(QMainWindow):
             name="Objects"
         )
 
-        # ——— 10) Compose & show ——————————————
-        fig = go.Figure(data=[image_layer] + lines + [scatter])
-        scene = dict(
-            xaxis_title="RA (deg)",
-            yaxis_title="Dec (deg)",
-            zaxis_title="log10(Distance in ly)",
-            yaxis=dict(autorange="reversed"),
-            aspectmode="manual",
-            aspectratio=dict(x=1, y=1, z=z_height)
-        )
-        if z_range:
-            scene["zaxis"] = dict(range=z_range)
-
+        # … now build your figure …
+        fig = go.Figure(data=[plane] + lines + [scatter])
         fig.update_layout(
+            
             title="3D Distance Model",
-            scene=scene,
-            margin=dict(l=0, r=0, b=0, t=40)
+            autosize=True,
+            scene={
+                "xaxis_title": "RA (deg)",
+                "yaxis_title": "Dec (deg)",
+                "yaxis": {"autorange": "reversed"},
+                "aspectmode": "manual",
+                "aspectratio": {"x": 1, "y": 1, "z": z_height},
+                "zaxis": {
+                    **({"range": list(z_range)} if z_range else {}),
+                    "title": ("log10(Distance in ly)" 
+                            if z_scale == "Logarithmic" else "Distance (ly)"),
+                    "tickformat": "~s"
+                }
+            },
+            margin={"l": 0, "r": 0, "b": 0, "t": 40}
         )
-        default_path = os.path.expanduser("~/3d_distance_model.html")
-        # 11) Ask the user where to save the interactive HTML
+
+        # 10) Save as HTML
+        default = os.path.expanduser("~/3d_distance_model.html")
         fn, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save 3D Plot As",
-            default_path,                        # default directory + filename
-            "HTML Files (*.html)"
+            self, "Save 3D Plot As", default, "HTML Files (*.html)"
         )
         if fn:
             if not fn.lower().endswith(".html"):
                 fn += ".html"
-            fig.write_html(
-                fn,
-                include_plotlyjs="cdn",
-                full_html=True
-            )
+            fig.write_html(fn, include_plotlyjs="cdn", full_html=True)
 
-        # 12) Then still show it immediately if you like
-        fig.show()
-
+        # 11) Show interactively
+        fig.show(config={'responsive': True})
 
     def get_selected_object_types(self):
         """Return a list of selected object types from the tree widget."""
@@ -44884,14 +45158,10 @@ class MainWindow(QMainWindow):
         solved_header = self.plate_solve_image()  # This method should try to solve via ASTAP and return a header (or None).
         if solved_header is not None:
             self.status_label.setText("ASTAP plate solve succeeded.")
-            try:
-                # Update self.header with the solved header data.
-                self.header.update(solved_header)
-                # Reinitialize the WCS from the new header.
-                self.wcs = WCS(self.header, naxis=2, relax=True)
-                QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
-            except Exception as e:
-                QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from ASTAP solution: {e}")
+            # instead of manually doing header.update + WCS(...)
+            self.apply_wcs_header(solved_header)
+            QMessageBox.information(self, "Plate Solve", 
+                                    "ASTAP plate solve succeeded. WCS, orientation, and pixscale updated.")
             return
 
         # --- If ASTAP plate solve failed, fall back to blind solve via Astrometry.net ---
@@ -45335,25 +45605,42 @@ class MainWindow(QMainWindow):
 
 
     def apply_wcs_header(self, wcs_header):
-        """Apply WCS header to create a WCS object and set orientation."""
-        self.wcs = WCS(wcs_header)  # Initialize WCS with header directly
-        
-        # Set orientation based on WCS data if available
-        if 'CROTA2' in wcs_header:
-            self.orientation = wcs_header['CROTA2']
-        else:
-            # Use calculate_orientation if CROTA2 is not present
-            self.orientation = calculate_orientation(wcs_header)
-            if self.orientation is None:
-                print("Orientation: CD matrix elements not found in WCS header.")
+        """
+        Apply a solved WCS header.  Sets self.wcs, self.pixscale (arcsec/pix),
+        self.orientation, and updates the orientation label.
+        """
+        # 1) Initialize the WCS object
+        self.wcs = WCS(wcs_header, naxis=2, relax=True)
 
-        # Update orientation label
+        # 2) Derive pixel scale (arcsec/pixel)
+        if 'CDELT1' in wcs_header:
+            # CDELT1 is degrees/pixel
+            self.pixscale = abs(float(wcs_header['CDELT1'])) * 3600.0
+        elif 'CD1_1' in wcs_header and 'CD2_2' in wcs_header:
+            # approximate from CD matrix determinant
+            det = (wcs_header['CD1_1'] * wcs_header['CD2_2']
+                - wcs_header['CD1_2'] * wcs_header['CD2_1'])
+            pixscale_deg = math.sqrt(abs(det))
+            self.pixscale = pixscale_deg * 3600.0
+        else:
+            self.pixscale = None
+            print("Warning: could not derive pixscale from header.")
+
+        # 3) Extract orientation (CROTA2 if present)
+        if 'CROTA2' in wcs_header:
+            self.orientation = float(wcs_header['CROTA2'])
+        else:
+            # fallback to your custom function
+            self.orientation = calculate_orientation(wcs_header)
+
+        # 4) Update the GUI label
         if self.orientation is not None:
             self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
         else:
             self.orientation_label.setText("Orientation: N/A")
 
-        print("WCS applied successfully from header data.")
+        print(f" -> pixscale = {self.pixscale} arcsec/pixel")
+        print(f" -> orientation = {self.orientation}°")
 
 
     def calculate_pixel_from_ra_dec(self, ra, dec):
