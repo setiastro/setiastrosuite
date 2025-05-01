@@ -1,4 +1,5 @@
 import sys
+import urllib
 
 # Standard library imports
 import pickle
@@ -117,7 +118,8 @@ from matplotlib.patches import Circle
 #################################
 # PyQt6 Imports
 #################################
-
+from collections import defaultdict
+import fnmatch
 # ----- QtWidgets -----
 from PyQt6.QtWidgets import (
     QApplication,
@@ -179,7 +181,8 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QSplashScreen,
-    QProgressDialog
+    QProgressDialog, 
+    QDockWidget
 )
 
 # ----- QtGui -----
@@ -226,7 +229,8 @@ from PyQt6.QtCore import (
     QObject,
     QSettings,
     QRunnable,
-    QThreadPool
+    QThreadPool,
+    QSignalBlocker
 )
 
 
@@ -236,7 +240,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.4"
+VERSION = "2.15.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1223,7 +1227,7 @@ class AstroEditingSuite(QMainWindow):
 
 
     def starspiketool(self):
-        dialog = StarSpikeTool(self.image_manager, parent=self)
+        dialog = StarSpikeTool(self.image_manager, self.mask_manager, parent=self)
         dialog.exec()
 
     def remove_pedestal(self):
@@ -2919,66 +2923,59 @@ class AstroEditingSuite(QMainWindow):
             print(f"Error during RGB Extract: {e}")
 
     def extract_luminance(self):
-        """Extracts the luminance from the active image and stores it in a user-selected slot."""
-        # Use the active image as the source.
+        # Rec.709 linear luma weights
+        _LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        """Extracts linear Y' luminance from the active RGB image and stores it in a user-selected slot."""
+        # 1) Source checks
         if self.image_manager.image is None:
             QMessageBox.warning(self, "No Image", "Please load an image before extracting luminance.")
             return
-
         current_image = self.image_manager.image
         if current_image.ndim != 3 or current_image.shape[2] != 3:
             QMessageBox.warning(self, "Invalid Image", "Luminance extraction requires an RGB image.")
             return
 
-        # Ensure the image is clipped to [0,1]
-        current_image = np.clip(current_image, 0.0, 1.0)
+        # 2) Clip to [0,1] (you said you’re already 0–1, but just in case)
+        img = np.clip(current_image, 0.0, 1.0).astype(np.float32)
 
-        # Convert the RGB image to Lab and extract L* (luminance)
-        lab_image = self.rgb_to_lab(current_image)
-        luminance = lab_image[..., 0] / 100.0  # Normalize L* to [0, 1]
+        # 3) Compute Y' = 0.2126 R + 0.7152 G + 0.0722 B
+        luminance = img[..., 0]*_LUMA_WEIGHTS[0] + \
+                    img[..., 1]*_LUMA_WEIGHTS[1] + \
+                    img[..., 2]*_LUMA_WEIGHTS[2]
 
-        # Build a list of available slots (0 to max_slots-1) with display names
-        max_slots = self.image_manager.max_slots if hasattr(self.image_manager, "max_slots") else 10
+        # 4) Build slot list & names
+        max_slots = getattr(self.image_manager, "max_slots", 10)
         slots = list(range(max_slots))
-        # Use parent's slot_names dictionary if available; otherwise, use default names.
         if hasattr(self, "slot_names"):
             display_names = [self.slot_names.get(i, f"Slot {i+1}") for i in slots]
         else:
             display_names = [f"Slot {i+1}" for i in slots]
 
-        # Prompt user to select target slot for the luminance image.
+        # 5) Ask user which slot to store luminance
         item, ok = QInputDialog.getItem(
-            self,
-            "Select Target Slot",
+            self, "Select Target Slot",
             "Select the slot to store the luminance image:",
-            display_names,
-            editable=False
+            display_names, editable=False
         )
         if not ok:
             QMessageBox.information(self, "Operation Cancelled", "Luminance extraction was cancelled.")
             return
-        # Determine the target slot number based on the selected item.
         target_slot = display_names.index(item)
 
-        # Store the original RGB image in the active slot (or leave it as is)
-        # For this example, we leave the original image in the active slot.
-
-        # Store the luminance image in the selected target slot.
+        # 6) Store luminance
         luminance_metadata = {
             'file_path': "Luminance Extracted",
             'is_mono': True,
             'bit_depth': "32-bit floating point",
         }
-        self.image_manager._images[target_slot] = luminance
+        self.image_manager._images[target_slot]   = luminance
         self.image_manager._metadata[target_slot] = luminance_metadata
         print(f"Luminance image updated in slot {target_slot}.")
         self.image_manager.image_changed.emit(target_slot, luminance, luminance_metadata)
 
-        # Update the slot name if you maintain one.
+        # 7) Update UI names/actions
         if hasattr(self, "slot_names"):
             self.slot_names[target_slot] = "Luminance"
-
-        # Optionally, update any UI elements (such as slot actions or menubar names)
         if hasattr(self, 'slot_actions') and target_slot in self.slot_actions:
             self.slot_actions[target_slot].setText("Luminance")
             self.slot_actions[target_slot].setStatusTip("Open preview for Luminance")
@@ -2987,8 +2984,64 @@ class AstroEditingSuite(QMainWindow):
             self.menubar_slot_actions[target_slot].setStatusTip("Open preview for Luminance")
         self.menuBar().update()
 
-        # Open a preview for the luminance image in the chosen slot.
+        # 8) Open preview
         self.open_preview_window(slot=target_slot)
+
+
+    def recombine_luminance(self):
+        # Rec.709 linear luma weights
+        _LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        """Recombines linear Y' luminance with an RGB image by preserving chroma ratios."""
+        # 1) Select slots
+        max_slots = getattr(self.image_manager, "max_slots", 10)
+        available_slots = list(range(max_slots))
+        dialog = RecombineDialog(available_slots, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            QMessageBox.information(self, "Operation Cancelled", "Recombination operation was cancelled.")
+            return
+        luminance_slot, rgb_slot = dialog.getSelections()
+
+        # 2) Retrieve data
+        Y = self.image_manager._images[luminance_slot]
+        RGB = self.image_manager._images[rgb_slot]
+
+        # 3) Validate inputs
+        if RGB is None or RGB.ndim != 3 or RGB.shape[2] != 3:
+            QMessageBox.warning(self, "Invalid Image",
+                                f"Slot {rgb_slot} must contain an RGB image for recombination.")
+            return
+        if Y is None or Y.ndim < 2:
+            QMessageBox.warning(self, "Invalid Luminance Image",
+                                f"Slot {luminance_slot} must contain a 2D luminance image.")
+            return
+        # if 3-channel luminance, take first channel
+        if Y.ndim == 3 and Y.shape[2] > 1:
+            QMessageBox.information(
+                self, "Multiple Channels Detected",
+                f"Luminance image in slot {luminance_slot} has multiple channels. Only the first channel will be used."
+            )
+            Y = Y[..., 0]
+
+        # 4) Prepare arrays
+        Y = np.clip(Y, 0.0, 1.0).astype(np.float32)
+        rgb = np.clip(RGB, 0.0, 1.0).astype(np.float32)
+
+        # 5) Compute original luma for chroma ratios
+        orig_Y = rgb[...,0]*_LUMA_WEIGHTS[0] + \
+                rgb[...,1]*_LUMA_WEIGHTS[1] + \
+                rgb[...,2]*_LUMA_WEIGHTS[2]
+        eps = 1e-6
+        chroma = rgb / (orig_Y[..., None] + eps)
+
+        # 6) Rebuild RGB = chroma × new Y'
+        new_rgb = chroma * Y[..., None]
+        new_rgb = np.clip(new_rgb, 0.0, 1.0)
+
+        # 7) Push back into manager
+        metadata = self.image_manager._metadata[rgb_slot].copy()
+        metadata['file_path'] = f"Luminance Recombined (Lum Slot: {luminance_slot}, RGB Slot: {rgb_slot})"
+        self.image_manager.set_image(new_rgb, metadata, step_name="Recombine Luminance")
+        print(f"Recombined image updated in slot {rgb_slot} with luminance from slot {luminance_slot}.")
 
     def remove_gradient_with_graxpert(self):
         """Integrate GraXpert for gradient removal."""
@@ -3131,82 +3184,6 @@ class AstroEditingSuite(QMainWindow):
         )
 
         QMessageBox.information(self, "Success", "Gradient removed successfully.")
-
-    def recombine_luminance(self):
-        """Recombines luminance from a selected slot with the RGB image from another selected slot."""
-        
-        # Define the available slot range
-        available_slots = list(range(9))  # Slots 0-4
-        
-        # Initialize and display the custom dialog
-        dialog = RecombineDialog(available_slots, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            QMessageBox.information(self, "Operation Cancelled", "Recombination operation was cancelled.")
-            return
-        
-        # Retrieve selections
-        luminance_slot, rgb_slot = dialog.getSelections()
-        
-        # Retrieve the images from the selected slots
-        luminance = self.image_manager._images[luminance_slot]
-        original_rgb = self.image_manager._images[rgb_slot]
-        
-        # Validate the RGB image
-        if original_rgb is None:
-            QMessageBox.warning(self, "No Image", f"Slot {rgb_slot} does not contain an RGB image for recombination.")
-            return
-        if original_rgb.ndim != 3 or original_rgb.shape[2] != 3:
-            QMessageBox.warning(self, "Invalid Image", f"Slot {rgb_slot} must contain an RGB image for recombination.")
-            return
-        
-        # Validate the luminance image
-        if luminance is None:
-            QMessageBox.warning(self, "No Luminance", f"Slot {luminance_slot} does not contain a luminance image for recombination.")
-            return
-        if luminance.ndim < 2:
-            QMessageBox.warning(self, "Invalid Luminance Image", f"Slot {luminance_slot} must contain a 2D luminance image.")
-            return
-        
-        # If luminance has more than one channel, use only the first channel
-        if luminance.ndim == 3 and luminance.shape[2] > 1:
-            QMessageBox.information(
-                self,
-                "Multiple Channels Detected",
-                f"Luminance image in slot {luminance_slot} has multiple channels. Only the first channel will be used."
-            )
-            luminance = luminance[:, :, 0]
-        elif luminance.ndim > 3:
-            QMessageBox.warning(
-                self,
-                "Invalid Luminance Image",
-                f"Luminance image in slot {luminance_slot} has unsupported number of dimensions."
-            )
-            return
-        
-        # Clip luminance to [0, 1] to ensure valid data
-        luminance = np.clip(luminance, 0.0, 1.0)
-        
-        # Convert the RGB image to Lab color space
-        lab_image = self.rgb_to_lab(original_rgb)
-        
-        # Replace the L* channel with the luminance
-        lab_image[..., 0] = luminance * 100.0  # L* is scaled to [0, 100] in Lab
-        
-        # Convert the modified Lab image back to RGB color space
-        updated_rgb = self.lab_to_rgb(lab_image)
-        
-        # Clip to [0, 1] to ensure valid RGB values
-        updated_rgb = np.clip(updated_rgb, 0.0, 1.0)
-        
-        # Retrieve metadata from the RGB slot and update it
-        metadata = self.image_manager._metadata[rgb_slot].copy()
-        metadata['file_path'] = f"Luminance Recombined (Lum Slot: {luminance_slot}, RGB Slot: {rgb_slot})"
-        
-        # Update the selected RGB slot with the recombined image
-        self.image_manager.set_image(updated_rgb, metadata, step_name="Recombine Luminance")
-        
-        print(f"Recombined image updated in slot {rgb_slot} with luminance from slot {luminance_slot}.")
-        
 
 
     def rgb_to_lab(self, rgb_image):
@@ -6546,7 +6523,7 @@ class MaskCreationDialog(QDialog):
         mask_type_label = QLabel("Select Mask Type:")
         self.mask_type_dropdown = QComboBox()
         self.mask_type_dropdown.addItems([
-            "Binary", "Lightness", "Chrominance",
+            "Binary", "Lightness", "Chrominance", "Star Mask",
             "Color: Red", "Color: Orange", "Color: Yellow",
             "Color: Green", "Color: Cyan", "Color: Blue",
             "Color: Magenta"
@@ -6806,6 +6783,17 @@ class MaskCreationDialog(QDialog):
         elif self.mask_type == "Chrominance":
             chrominance_mask = self.generate_chrominance_mask()
             mask[exclusion_mask] = chrominance_mask[exclusion_mask]
+        elif self.mask_type == "Star Mask":
+            # Build a star‐based mask
+            # 1) Detect *all* stars over the full image
+            full_star_mask = self.create_star_mask(self.image, None)
+
+            # 2) Turn your drawn polygons into an *inclusion* mask
+            inclusion_mask = exclusion_mask
+
+            # 3) Only keep stars falling inside the polygons:
+            mask[:] = 0.0
+            mask[inclusion_mask] = full_star_mask[inclusion_mask]           
         elif self.mask_type.startswith("Color:"):
             color = self.mask_type.split(":")[1].strip()
             color_mask = self.generate_color_mask(color)
@@ -6970,6 +6958,51 @@ class MaskCreationDialog(QDialog):
         else:
             QMessageBox.warning(self, "Invalid Image", "Chrominance mask requires a color image.")
             return np.zeros(self.image.shape[:2], dtype=np.float32)
+
+    def create_star_mask(self, image, exclusion_mask=None):
+        import sep
+
+        # 1) Build a grayscale detection image
+        if image.ndim == 3:
+            data = (0.2126*image[...,0] + 0.7152*image[...,1] + 0.0722*image[...,2]).astype(np.float32)
+        else:
+            data = image.astype(np.float32)
+
+        # 2) Background subtraction
+        bkg = sep.Background(data)
+        data_sub = data - bkg.back()
+
+        # 3) Extract objects
+        objects = sep.extract(data_sub, thresh=self.blur_amount or 3.0, err=bkg.globalrms)
+
+        h, w = image.shape[:2]
+        star_mask = np.zeros((h, w), dtype=np.float32)
+
+        # define a maximum “true star” radius in pixels
+        MAX_RADIUS = 10
+
+        for obj in objects:
+            x, y = int(obj['x']), int(obj['y'])
+            # use 1.5× the half‐light radius as your mask radius
+            raw_radius = max(obj['a'], obj['b']) * 1.5
+            radius = int(raw_radius)
+
+            # skip anything that’s too big to be a star
+            if radius > MAX_RADIUS:
+                continue
+
+            # if we have an exclusion_mask, only accept stars inside it
+            if exclusion_mask is not None and not exclusion_mask[y, x]:
+                continue
+
+            # draw a filled circle
+            cv2.circle(star_mask,
+                    center=(x, y),
+                    radius=radius,
+                    color=1.0,
+                    thickness=-1)
+
+        return star_mask
 
 
     def show_mask_preview(self, mask):
@@ -11099,11 +11132,17 @@ class StackingSuiteDialog(QDialog):
         """
         self.update_status("🔄 Image Registration Started...")
 
-        # 1) Extract files from tree
-        self.extract_light_files_from_tree()
+        # ── 0) if the user added files “by hand”, use them
+        if hasattr(self, "manual_light_files") and self.manual_light_files:
+            # treat all manual files as one group
+            self.light_files = {"Manual": list(self.manual_light_files)}
+        else:
+            # extract from the tree as before
+            self.extract_light_files_from_tree()
+
+        # ── 1) bail if still nothing
         if not self.light_files:
-            self.update_status("⚠️ No light frames found!")
-            return
+            self.update
 
         # Flatten to get all files
         all_files = [f for file_list in self.light_files.values() for f in file_list]
@@ -13019,10 +13058,17 @@ class MosaicSettingsDialog(QDialog):
                                             step=1)
         layout.addRow("Polynomial Degree:", self.polyDegreeSpin)
 
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
 
     def accept(self):
         # Save the values to QSettings
-        self.settings.setValue("mosaic/num_stars", self.starCountSpin.value())
+        self.settings.setValue("mosaic/num_stars", self.starCountSpin.value)
         self.settings.setValue("mosaic/translation_max_tolerance", self.transTolSpin.value())
         self.settings.setValue("mosaic/scale_min_tolerance", self.scaleMinSpin.value())
         self.settings.setValue("mosaic/scale_max_tolerance", self.scaleMaxSpin.value())
@@ -13030,6 +13076,7 @@ class MosaicSettingsDialog(QDialog):
         self.settings.setValue("mosaic/skew_max_tolerance", self.skewMaxSpin.value())
         self.settings.setValue("mosaic/star_fwhm", self.fwhmSpin.value())
         self.settings.setValue("mosaic/star_sigma", self.sigmaSpin.value())
+        self.settings.setValue("mosaic/poly_degree", self.polyDegreeSpin.value)
         super().accept()
 
 
@@ -16157,7 +16204,7 @@ class RegistrationWorkerSignals(QObject):
 class StarRegistrationWorker(QRunnable):
     def __init__(self, file_path, original_file, current_transform,
                  ref_stars, ref_triangles, output_directory, 
-                 use_triangle=False, use_astroalign=False, reference_image=None):
+                 use_triangle=False, use_astroalign=False, reference_image=None, downsample_factor: int = 2):
         super().__init__()
         # file_path is used for naming only; always load the raw image from original_file.
         self.file_path = file_path  
@@ -16169,52 +16216,61 @@ class StarRegistrationWorker(QRunnable):
         self.use_triangle = use_triangle
         self.use_astroalign = use_astroalign
         self.reference_image = reference_image  # 2D reference image
+        self.downsample_factor = downsample_factor
         self.signals = RegistrationWorkerSignals()
 
     def run(self):
         try:
-            # Load the raw image using the persistent key.
+            # 1) Load the raw image
             raw_img, img_header, img_bit_depth, img_is_mono = load_image(self.original_file)
             if raw_img is None:
                 self.signals.error.emit(f"Could not load {self.original_file}")
                 return
 
-            # Apply current cumulative transform to get the candidate image.
+            # 2) Apply current cumulative transform to get the candidate image
             candidate_img = StarRegistrationThread.apply_affine_transform_static(raw_img, self.current_transform)
             if candidate_img is None:
                 self.signals.error.emit(f"Failed to apply current transform to {self.original_file}")
                 return
 
-            # Prepare candidate for alignment: convert to 2D if needed.
+            # 3) Flatten to 2D if needed
             if candidate_img.ndim == 3:
                 img_for_alignment = np.mean(candidate_img, axis=2)
             else:
                 img_for_alignment = candidate_img
 
+            # 4) Clean up any NaNs/infs
             if np.isnan(img_for_alignment).any() or np.isinf(img_for_alignment).any():
                 img_for_alignment = np.nan_to_num(img_for_alignment, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # Compute delta transform T_delta aligning candidate_img to the reference.
+            # 5) Downsample both reference & target
+            f = getattr(self, "downsample_factor", 1)
+            h, w = img_for_alignment.shape[:2]
+            if f > 1:
+                small = lambda im: cv2.resize(im, (w // f, h // f), interpolation=cv2.INTER_AREA)
+                use_ref = small(self.reference_image)
+                use_img = small(img_for_alignment)
+            else:
+                use_ref, use_img = self.reference_image, img_for_alignment
+
+            # 6) Try astroalign *on the downsampled images* first
             transform = None
-            if self.use_astroalign and (self.reference_image is not None) and (self.reference_image.ndim == 2):
-                transform = self.compute_affine_transform_astroalign(img_for_alignment, self.reference_image)
+            if self.use_astroalign and use_ref is not None and use_ref.ndim == 2:
+                transform = self.compute_affine_transform_astroalign(use_img, use_ref)
                 if transform is not None:
-                    self.signals.progress.emit(
-                        f"Astroalign computed delta transform for {os.path.basename(self.file_path)}"
-                    )
+                    self.signals.progress.emit(f"Astroalign computed delta transform for {os.path.basename(self.file_path)}")
                 else:
-                    self.signals.progress.emit(
-                        f"Astroalign failed for {os.path.basename(self.file_path)}"
-                    )
+                    self.signals.progress.emit(f"Astroalign failed for {os.path.basename(self.file_path)}")
+
+            # 7) If astroalign didn’t work, fall back to DAO/RANSAC on the downsampled
             if transform is None:
                 self.signals.progress.emit(f"✨ Detecting stars in {os.path.basename(self.file_path)}")
-                img_stars = StarRegistrationThread.detect_grid_stars_static(img_for_alignment)
+                img_stars = StarRegistrationThread.detect_grid_stars_static(use_img)
                 if len(img_stars) < 9:
                     self.signals.error.emit(f"Not enough stars in {self.original_file}")
                     return
-                self.signals.progress.emit(
-                    f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}"
-                )
+                self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+
                 if self.use_triangle:
                     transform = StarRegistrationThread.compute_affine_transform_triangle_then_ransac(
                         img_stars, self.ref_stars, self.ref_triangles
@@ -16223,35 +16279,37 @@ class StarRegistrationWorker(QRunnable):
                     transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
                         img_stars, self.ref_stars, self.ref_triangles
                     )
+
                 if transform is None:
                     self.signals.error.emit(f"Alignment failed for {self.original_file}")
                     return
-                self.signals.progress.emit(
-                    f"Computed delta transform for {os.path.basename(self.file_path)}"
-                )
+                self.signals.progress.emit(f"Computed delta transform for {os.path.basename(self.file_path)}")
 
-            # Compute the new cumulative transform: T_total = T_delta @ current_transform.
-            new_transform = np.array(transform, dtype=np.float64).reshape(2, 3)
+            # 8) Upscale the small-image translation back to full resolution
+            transform = np.array(transform, dtype=np.float64).reshape(2, 3)
+            if f > 1:
+                transform[0, 2] *= f
+                transform[1, 2] *= f
+
+            # 9) Build the cumulative full-res transform
             current_transform = np.array(self.current_transform, dtype=np.float64).reshape(2, 3)
-            new_3x3 = np.vstack([new_transform, [0, 0, 1]])
-            current_3x3 = np.vstack([current_transform, [0, 0, 1]])
-            T_total = new_3x3 @ current_3x3  # This is 3x3.
-            T_total = T_total[0:2, :]  # Ensure shape is (2,3).
+            new_3x3 = np.vstack([transform, [0, 0, 1]])
+            curr_3x3 = np.vstack([current_transform, [0, 0, 1]])
+            T_total = (new_3x3 @ curr_3x3)[:2, :]
 
-            # Emit the delta transform so the parent can update the cumulative transform.
+            # 10) Emit the delta so parent updates its record
             self.signals.result_transform.emit(self.original_file, transform)
 
-            # Apply the cumulative transform T_total to the raw image to generate the final aligned image.
+            # 11) Apply the full-resolution cumulative transform
             aligned_image = StarRegistrationThread.apply_affine_transform_static(raw_img, T_total)
             if aligned_image is None:
                 self.signals.error.emit(f"Transform application failed for {self.original_file}")
                 return
-
             if np.isnan(aligned_image).any() or np.isinf(aligned_image).any():
                 self.signals.error.emit(f"Aligned image for {self.original_file} contains NaNs/Infs")
                 return
 
-            # Build the output filename.
+            # 12) Save the final aligned frame
             base = os.path.basename(self.file_path)
             name, ext = os.path.splitext(base)
             if not (name.endswith("_r") or name.endswith("_n_r")):
@@ -16430,7 +16488,8 @@ class StarRegistrationThread(QThread):
                 output_directory=self.output_directory,
                 use_triangle=(pass_index >= 5),
                 use_astroalign=use_astroalign,
-                reference_image=self.reference_image_2d
+                reference_image=self.reference_image_2d,
+                downsample_factor=2
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
@@ -24431,10 +24490,11 @@ class StarSpikeTool(QDialog):
     - Generates star spikes with multi-threading.
     - Optionally overwrites the same slot in image_manager.
     """
-    def __init__(self, image_manager, parent=None):
+    def __init__(self, image_manager, mask_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Star Spike Tool")
         self.image_manager = image_manager
+        self.mask_manager  = mask_manager
         self.final_image = None
 
         # Set default advanced parameters.
@@ -24752,7 +24812,31 @@ class StarSpikeTool(QDialog):
         else:
             final = self._midtones_m(spiked_lin, 0.05)
 
-        self.final_image = final
+        # ─── 9) If there’s an active mask, blend final with original ───────────
+        applied_mask = self.mask_manager.get_applied_mask()
+        if applied_mask is not None:
+            # 1) Check dimensions
+            h, w = self._image_data.shape[:2]
+            if applied_mask.shape[:2] != (h, w):
+                QMessageBox.critical(self, "Error", "Mask dimensions do not match the image.")
+                return
+
+            # 2) Normalize mask to float [0,1]
+            if applied_mask.dtype not in (np.float32, np.float64):
+                applied_mask = applied_mask.astype(np.float32) / 255.0
+            applied_mask = np.clip(applied_mask, 0.0, 1.0)
+
+            # 3) Expand 2D mask to 3 channels if needed
+            if final.ndim == 3 and applied_mask.ndim == 2:
+                mask_3c = applied_mask[..., None]
+            else:
+                mask_3c = applied_mask
+
+            # 4) Blend: keep original where mask==1, use spiked final where mask==0
+            blended = final * (mask_3c) + self._image_data * (1.0 - mask_3c)
+            final = np.clip(blended, 0.0, 1.0)
+
+        self.final_image = final   
         self.save_button.setEnabled(True)
         self.progress_bar.setValue(100)
         self.status_label.setText("Star spike generation completed.")
@@ -42181,6 +42265,248 @@ otype_long_name_lookup = {
     "QSO": "Quasar"
 }
 
+from PyQt6.QtGui import QColor
+
+# ────────────────────────────────────────────────
+# 1a) Map each SIMBAD otype → one of our high-level categories
+# ────────────────────────────────────────────────
+OTYPE_TO_CATEGORY = {
+    # Transient & Explosive Events
+    "ev":   "Transient & Explosive",
+    "rB":   "Transient & Explosive",
+    "gB":   "Transient & Explosive",
+    "GWE":  "Transient & Explosive",
+    "SN*":  "Transient & Explosive",
+    "SN?":  "Transient & Explosive",
+    "SR?":  "Transient & Explosive",
+    "SNR":  "Transient & Explosive",
+    "Lev":  "Transient & Explosive",
+
+    # High-Energy / X-ray / γ-ray
+    "X":    "High-Energy / X-ray / γ-ray",
+    "UX?":  "High-Energy / X-ray / γ-ray",
+    "ULX":  "High-Energy / X-ray / γ-ray",
+    "gam":  "High-Energy / X-ray / γ-ray",
+    "grv":  "High-Energy / X-ray / γ-ray",
+    "Psr":  "High-Energy / X-ray / γ-ray",
+    "N*?":  "High-Energy / X-ray / γ-ray",
+    "BH?":  "High-Energy / X-ray / γ-ray",
+
+    # Radio & sub-millimetric
+    "Rad":  "Radio & Sub-mm",
+    "mR":   "Radio & Sub-mm",
+    "cm":   "Radio & Sub-mm",
+    "mm":   "Radio & Sub-mm",
+    "smm":  "Radio & Sub-mm",
+    "HI":   "Radio & Sub-mm",
+    "Mas":  "Radio & Sub-mm",
+
+    # IR / Optical / UV / Blue
+    "IR":   "IR / Optical / UV",
+    "FIR":  "IR / Optical / UV",
+    "MIR":  "IR / Optical / UV",
+    "NIR":  "IR / Optical / UV",
+    "UV":   "IR / Optical / UV",
+    "blu":  "IR / Optical / UV",
+
+    # Gravitational Lensing & Microlensing
+    "Lev":  "Gravitational Lensing",
+    "LS?":  "Gravitational Lensing",
+    "Le?":  "Gravitational Lensing",
+    "LI?":  "Gravitational Lensing",
+    "gLe":  "Gravitational Lensing",
+    "gLS":  "Gravitational Lensing",
+
+    # Stars & Stellar Objects
+    "*":    "Stars & Stellar",
+    "V*":   "Stars & Stellar",
+    "Pe*":  "Stars & Stellar",
+    "HB*":  "Stars & Stellar",
+    "Y*O":  "Stars & Stellar",
+    "Ae*":  "Stars & Stellar",
+    "Em*":  "Stars & Stellar",
+    "Be*":  "Stars & Stellar",
+    "BS*":  "Stars & Stellar",
+    "RG*":  "Stars & Stellar",
+    "AB*":  "Stars & Stellar",
+    "C*":   "Stars & Stellar",
+    "S*":   "Stars & Stellar",
+    "sg*":  "Stars & Stellar",
+    "s*r":  "Stars & Stellar",
+    "s*y":  "Stars & Stellar",
+    "s*b":  "Stars & Stellar",
+    "HS*":  "Stars & Stellar",
+    "pA*":  "Stars & Stellar",
+    "WD*":  "Stars & Stellar",
+    "LM*":  "Stars & Stellar",
+    "BD*":  "Stars & Stellar",
+    "N*":   "Stars & Stellar",
+    "OH*":  "Stars & Stellar",
+    "TT*":  "Stars & Stellar",
+    "WR*":  "Stars & Stellar",
+    "PM*":  "Stars & Stellar",
+    "HV*":  "Stars & Stellar",
+    "C?*":  "Stars & Stellar",
+    "Pec?": "Stars & Stellar",
+    "Y*?":  "Stars & Stellar",
+    "TT?":  "Stars & Stellar",
+    "C*?":  "Stars & Stellar",
+    "S*?":  "Stars & Stellar",
+    "OH?":  "Stars & Stellar",
+    "WR?":  "Stars & Stellar",
+    "Be?":  "Stars & Stellar",
+    "Ae?":  "Stars & Stellar",
+    "HB?":  "Stars & Stellar",
+    "RB?":  "Stars & Stellar",
+    "sg?":  "Stars & Stellar",
+    "s?r":  "Stars & Stellar",
+    "s?y":  "Stars & Stellar",
+    "s?b":  "Stars & Stellar",
+    "pA?":  "Stars & Stellar",
+    "BS?":  "Stars & Stellar",
+    "HS?":  "Stars & Stellar",
+    "WD?":  "Stars & Stellar",    
+
+    # Binaries & Multiples / Variables
+    "**":   "Binaries & Variables",
+    "EB*":  "Binaries & Variables",
+    "Al*":  "Binaries & Variables",
+    "bL*":  "Binaries & Variables",
+    "WU*":  "Binaries & Variables",
+    "SB*":  "Binaries & Variables",
+    "El*":  "Binaries & Variables",
+    "Sy*":  "Binaries & Variables",
+    "CV*":  "Binaries & Variables",
+    "DQ*":  "Binaries & Variables",
+    "AM*":  "Binaries & Variables",
+    "NL*":  "Binaries & Variables",
+    "No*":  "Binaries & Variables",
+    "DN*":  "Binaries & Variables",
+    "XB*":  "Binaries & Variables",
+    "LXB":  "Binaries & Variables",
+    "HXB":  "Binaries & Variables",
+    "Pl?":  "Binaries & Variables",
+    "Ce?":  "Binaries & Variables",
+    "Ce*":  "Binaries & Variables",
+    "cC*":  "Binaries & Variables",
+    "**?":  "Binaries & Variables",
+    "EB?":  "Binaries & Variables",
+    "Sy?":  "Binaries & Variables",
+    "CV?":  "Binaries & Variables",
+    "No?":  "Binaries & Variables",
+    "XB?":  "Binaries & Variables",
+    "LX?":  "Binaries & Variables",
+    "HX?":  "Binaries & Variables",
+    "RR?":  "Binaries & Variables",
+    "WV?":  "Binaries & Variables",
+    "LP?":  "Binaries & Variables",
+    "Mi?":  "Binaries & Variables",
+    "Ce?":  "Binaries & Variables",
+    "cC*":  "Binaries & Variables",
+    "Pl?":  "Binaries & Variables",    
+
+    # Clusters & Associations
+    "Cl*":  "Clusters & Associations",
+    "GlC":  "Clusters & Associations",
+    "OpC":  "Clusters & Associations",
+    "As*":  "Clusters & Associations",
+    "St*":  "Clusters & Associations",
+    "MGr":  "Clusters & Associations",
+    "C?*":  "Clusters & Associations",
+    "Gl?":  "Clusters & Associations",    
+
+    # Nebulae & Interstellar Matter
+    "PN":   "Nebulae & ISM",
+    "PN?":  "Nebulae & ISM",
+    "EmO":  "Nebulae & ISM",
+    "GNe":  "Nebulae & ISM",
+    "DNe":  "Nebulae & ISM",
+    "RNe":  "Nebulae & ISM",
+    "MoC":  "Nebulae & ISM",
+    "Cld":  "Nebulae & ISM",
+    "bub":  "Nebulae & ISM",
+    "Cld":  "Nebulae & ISM",
+    "Cld":  "Nebulae & ISM",
+    "sh":   "Nebulae & ISM",
+    "SFR":  "Nebulae & ISM",
+    "HVC":  "Nebulae & ISM",
+    "CGb":  "Nebulae & ISM",
+    "PoC":  "Nebulae & ISM",
+    "glb":  "Nebulae & ISM",
+    "cor":  "Nebulae & ISM",
+    "out":  "Nebulae & ISM",
+    "HH":   "Nebulae & ISM",
+    "HII":  "Nebulae & ISM",
+    "ISM":  "Nebulae & ISM",
+    "of?":  "Nebulae & ISM",    
+
+    # Galaxies & Active Nuclei
+    "G":    "Galaxies & AGN",
+    "PoG":  "Galaxies & AGN",
+    "EmG":  "Galaxies & AGN",
+    "SBG":  "Galaxies & AGN",
+    "LSB":  "Galaxies & AGN",
+    "AGN":  "Galaxies & AGN",
+    "LIN":  "Galaxies & AGN",
+    "SyG":  "Galaxies & AGN",
+    "Sy1":  "Galaxies & AGN",
+    "Sy2":  "Galaxies & AGN",
+    "Bla":  "Galaxies & AGN",
+    "BLL":  "Galaxies & AGN",
+    "OVV":  "Galaxies & AGN",
+    "QSO":  "Galaxies & AGN",
+    "Q?":   "Galaxies & AGN",
+    "AG?":  "Galaxies & AGN",
+    "G?":   "Galaxies & AGN",
+    "IG":   "Galaxies & AGN",
+    "GiC":  "Galaxies & AGN",
+    "BiC":  "Galaxies & AGN",
+    "GiP":  "Galaxies & AGN",
+    "rG":   "Galaxies & AGN",
+    "H2G":  "Galaxies & AGN",
+    "Bz?":  "Galaxies & AGN",
+    "BL?":  "Galaxies & AGN",    
+
+
+    # Large-Scale Structure: clusters, superclusters, voids
+    "ClG":  "Large-Scale Structure",
+    "GrG":  "Large-Scale Structure",
+    "CGG":  "Large-Scale Structure",
+    "PaG":  "Large-Scale Structure",
+    "SCG":  "Large-Scale Structure",
+    "SC?":  "Large-Scale Structure",
+    "C?G":  "Large-Scale Structure",
+    "Gr?":  "Large-Scale Structure",
+    "vid":  "Large-Scale Structure",
+    "GiG":  "Large-Scale Structure",
+
+    # Regions, Clouds & Artefacts
+    "reg":  "Regions & Clouds",
+    "mul":  "Regions & Clouds",
+
+    # Errors & Artefacts / Unknown
+    "err":  "Errors & Artefacts",
+    "..?":  "Errors & Artefacts",  
+}
+
+# ────────────────────────────────────────────────
+# 1b) Assign each category a distinct QColor
+# ────────────────────────────────────────────────
+CATEGORY_TO_COLOR = {
+    "Transient & Explosive":        QColor(255,   0,   0),  # red
+    "High-Energy / X-ray / γ-ray":  QColor(255, 165,   0),  # orange
+    "Radio & Sub-mm":               QColor(128,   0, 128),  # purple
+    "IR / Optical / UV":            QColor(  0, 128,   0),  # green
+    "Gravitational Lensing":        QColor(218, 112, 214),  # orchid
+    "Stars & Stellar":              QColor(  0,   0, 255),  # blue
+    "Binaries & Variables":         QColor(255, 255,   0),  # yellow
+    "Clusters & Associations":      QColor(165,  42,  42),  # brown
+    "Nebulae & ISM":                QColor(  0, 128, 128),  # teal
+    "Galaxies & AGN":               QColor(255,   0, 255),  # magenta
+    "Large-Scale Structure":        QColor( 200,  200,  200),  # dark gray
+    "Regions & Clouds":             QColor( 95, 158, 160),  # cadet blue
+    "Errors & Artefacts":           QColor(128, 128, 128),  # gray
+}
 
 # Configure Simbad to include the necessary fields, including redshift
 try:
@@ -43005,7 +43331,8 @@ class CustomGraphicsView(QGraphicsView):
                 x, y = self.parent.calculate_pixel_from_ra_dec(ra, dec)
                 if x is not None and y is not None:
                     # Determine color: green if selected, red otherwise
-                    pen_color = QColor(0, 255, 0) if obj == self.selected_object else QColor(255, 0, 0)
+                    base_color = obj["color"]
+                    pen_color  = QColor(0,255,0) if obj is self.selected_object else base_color
                     pen = QPen(pen_color, 2)
 
                     if self.parent.marker_style == "Circle":
@@ -43126,8 +43453,18 @@ class CustomGraphicsView(QGraphicsView):
                         
 
     def set_query_results(self, results):
-        """Set the query results and redraw."""
-        self.parent.results = results  # Store results as dictionaries
+        """Store results, assign each object a category & color, then redraw."""
+        self.parent.results = results
+
+        for obj in self.parent.results:
+            # use the same key you populated in MainWindow.query_simbad
+            short_type = obj.get("short_type", "")
+            category   = OTYPE_TO_CATEGORY.get(short_type, "Errors & Artefacts")
+            obj["category"] = category
+
+            # lookup the QColor for that category (fallback to white)
+            obj["color"]    = CATEGORY_TO_COLOR.get(category, QColor(255,255,255))
+
         self.draw_query_results()
 
     def get_object_at_position(self, pos):
@@ -43336,6 +43673,10 @@ class ThreeDSettingsDialog(QDialog):
             lambda idx: self.linear_widget.setVisible(self.zscale_cb.currentText() == "Linear")
         )
 
+        self.reverse_cb = QCheckBox("Reverse Z-Axis")
+        self.reverse_cb.setChecked(False)
+        layout.addWidget(self.reverse_cb)
+
         # Object Color
         layout.addWidget(QLabel("Object Color:"))
         self.color_cb = QComboBox()
@@ -43390,8 +43731,58 @@ class ThreeDSettingsDialog(QDialog):
                 "custom_color": self.custom_color,      # QColor
                 "z_height":   self.zheight_spin.value(),
                 "show_lines": self.lines_cb.isChecked(),
+                "reverse_z":   self.reverse_cb.isChecked(),
             }
         return None
+
+class LegendDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Object Type Legend")
+        self.swatches = {}
+        layout = QVBoxLayout(self)
+
+        # Build one row per category
+        for category, color in CATEGORY_TO_COLOR.items():
+            row = QHBoxLayout()
+
+            # color swatch
+            swatch = QLabel()
+            swatch.setFixedSize(16, 16)
+            swatch.setStyleSheet(f"background-color: {color.name()}; border:1px solid #000;")
+            row.addWidget(swatch)
+            self.swatches[category] = swatch
+
+            # category name
+            row.addWidget(QLabel(category))
+
+            # edit‐color button
+            btn = QPushButton("Edit…")
+            btn.clicked.connect(lambda _, cat=category: self.change_color(cat))
+            row.addWidget(btn)
+
+            row.addStretch()
+            layout.addLayout(row)
+
+        # OK / Cancel buttons
+        btn_row = QHBoxLayout()
+        ok = QPushButton("OK")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(ok)
+        btn_row.addWidget(cancel)
+        layout.addLayout(btn_row)
+
+    def change_color(self, category):
+        """Open a QColorDialog, update the swatch and CATEGORY_TO_COLOR."""
+        initial = CATEGORY_TO_COLOR[category]
+        c = QColorDialog.getColor(initial, self, f"Select color for {category}")
+        if c.isValid():
+            CATEGORY_TO_COLOR[category] = c
+            sw = self.swatches[category]
+            sw.setStyleSheet(f"background-color: {c.name()}; border:1px solid #000;")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -43474,6 +43865,9 @@ class MainWindow(QMainWindow):
         left_panel.addWidget(self.query_button)
         self.query_button.clicked.connect(lambda: self.query_simbad(self.get_defined_radius()))
 
+        self.legend_button = QPushButton("Legend")
+        self.legend_button.clicked.connect(self.show_legend)
+        left_panel.addWidget(self.legend_button)
 
         # Create a horizontal layout for the show names checkbox and clear results button
         show_clear_layout = QHBoxLayout()
@@ -43765,23 +44159,22 @@ class MainWindow(QMainWindow):
         # Buttons for toggling selections
         toggle_buttons_layout = QHBoxLayout()
 
-        # Toggle All Button
+        # Toggle All
         self.toggle_all_button = QPushButton("Toggle All")
         self.toggle_all_button.clicked.connect(self.toggle_all_items)
         toggle_buttons_layout.addWidget(self.toggle_all_button)
 
-        # Toggle Stars Button
-        self.toggle_stars_button = QPushButton("Toggle Stars")
-        self.toggle_stars_button.clicked.connect(self.toggle_star_items)
-        toggle_buttons_layout.addWidget(self.toggle_stars_button)
+        # Save Custom List
+        self.save_list_button = QPushButton("Save List…")
+        self.save_list_button.clicked.connect(self.save_custom_list)
+        toggle_buttons_layout.addWidget(self.save_list_button)
 
-        # Toggle Galaxies Button
-        self.toggle_galaxies_button = QPushButton("Toggle Galaxies")
-        self.toggle_galaxies_button.clicked.connect(self.toggle_galaxy_items)
-        toggle_buttons_layout.addWidget(self.toggle_galaxies_button)
+        # Load Custom List
+        self.load_list_button = QPushButton("Load List…")
+        self.load_list_button.clicked.connect(self.load_custom_list)
+        toggle_buttons_layout.addWidget(self.load_list_button)
 
-        # Add toggle buttons to the advanced search layout
-        self.advanced_search_panel.addLayout(toggle_buttons_layout)    
+        self.advanced_search_panel.addLayout(toggle_buttons_layout)   
 
         # Add Simbad Search buttons below the toggle buttons
         search_button_layout = QHBoxLayout()
@@ -43838,7 +44231,93 @@ class MainWindow(QMainWindow):
         self.wcs = None  # Initialize WCS to None
         # Initialize selected color and font with default values
         self.selected_color = QColor(Qt.GlobalColor.red)  # Default annotation color
-        self.selected_font = QFont("Arial", 12)  # Default font for text annotations        
+        self.selected_font = QFont("Arial", 12)  # Default font for text annotations   
+        self.populate_object_tree()     
+        self._legend_dock = QDockWidget("Object Type Legend", self)
+        legend = LegendDialog(self)
+        legend.setModal(False)
+    
+
+    def show_legend(self):
+        # keep a persistent reference so it doesn't get garbage-collected
+        if not hasattr(self, "_legend_dialog"):
+            self._legend_dialog = LegendDialog(self)
+            self._legend_dialog.setModal(False)
+        self._legend_dialog.show()
+        self._legend_dialog.raise_()
+        self._legend_dialog.activateWindow()
+
+
+
+
+    def populate_object_tree(self):
+        self.object_tree.blockSignals(True)
+        self.object_tree.clear()
+
+        # 1) Build reverse map: category → list of short codes
+        cat_to_types = defaultdict(list)
+
+        # Pre-sort patterns so more specific (longer) come first
+        patterns = list(OTYPE_TO_CATEGORY.items())
+        patterns.sort(key=lambda x: len(x[0]), reverse=True)
+
+        for code, longname in otype_long_name_lookup.items():
+            # first try exact
+            cat = OTYPE_TO_CATEGORY.get(code)
+            if cat is None:
+                # then try wildcard patterns (but skip the lone "*" pattern)
+                for pat, candidate_cat in patterns:
+                    if any(c in pat for c in "*?") and pat != "*" and fnmatch.fnmatch(code, pat):
+                        cat = candidate_cat
+                        break
+            if cat is None:
+                cat = "Errors & Artefacts"
+            cat_to_types[cat].append(code)
+
+        # 2) Populate tree
+        for category, codes in cat_to_types.items():
+            color  = CATEGORY_TO_COLOR.get(category, QColor(200,200,200))
+            parent = QTreeWidgetItem(self.object_tree, [category, ""])
+            parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            parent.setCheckState(0, Qt.CheckState.Checked)
+            parent.setForeground(0, QBrush(color))
+            parent.setFirstColumnSpanned(True)
+
+            for code in sorted(codes):
+                desc  = otype_long_name_lookup[code]
+                child = QTreeWidgetItem(parent, [code, desc])
+                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                child.setCheckState(0, Qt.CheckState.Checked)
+                pix = QPixmap(12,12)
+                pix.fill(color)
+                child.setIcon(0, QIcon(pix))
+
+        self.object_tree.blockSignals(False)
+
+        # wire up a very simple parent→children handler (no partial logic)
+        try:
+            self.object_tree.itemChanged.disconnect(self.on_object_tree_item_changed)
+        except TypeError:
+            pass
+        self.object_tree.itemChanged.connect(self.on_object_tree_item_changed)
+
+
+    def get_selected_object_types(self) -> list:
+        """
+        Return all the otype codes (children) whose checkboxes are checked.
+        """
+        checked = []
+        root = self.object_tree.invisibleRootItem()
+        # iterate over each category
+        for i in range(root.childCount()):
+            category_item = root.child(i)
+            # iterate over that category's children
+            for j in range(category_item.childCount()):
+                child = category_item.child(j)
+                if child.checkState(0) == Qt.CheckState.Checked:
+                    checked.append(child.text(0))
+        return checked
+
 
     def update_object_count(self):
         count = self.results_tree.topLevelItemCount()
@@ -44104,7 +44583,7 @@ class MainWindow(QMainWindow):
         if save_full_image:
             # Save the entire main image with annotations
             pixmap = QPixmap(self.main_image.size())
-            pixmap.fill(Qt.GlobalColor.Transparent)
+            pixmap.fill(Qt.GlobalColor.transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter)  # Render the entire scene without the search circle
         else:
@@ -44112,7 +44591,7 @@ class MainWindow(QMainWindow):
             rect = self.main_preview.viewport().rect()
             scene_rect = self.main_preview.mapToScene(rect).boundingRect()
             pixmap = QPixmap(int(scene_rect.width()), int(scene_rect.height()))
-            pixmap.fill(Qt.GlobalColor.Transparent)
+            pixmap.fill(Qt.GlobalColor.transparent)
             painter = QPainter(pixmap)
             self.main_scene.render(painter, QRectF(0, 0, pixmap.width(), pixmap.height()), scene_rect)
 
@@ -44278,7 +44757,7 @@ class MainWindow(QMainWindow):
         self.main_preview.draw_query_results()  # Redraw the scene with the circle
 
     def show_3d_model_view(self):
-        # ─── engineering notation helper ──────────────────────────────
+        # ─── 0) Engineering‐notation helper ────────────────────────────
         def eng_notation(x):
             if x == 0:
                 return "0"
@@ -44289,10 +44768,9 @@ class MainWindow(QMainWindow):
                 0: "",  3: "k",  6: "M",  9: "G",
                 12: "T", 15: "P"
             }
-            prefix = prefixes.get(exp, f"e{exp}")
-            return f"{val:.2f}{prefix}"
+            return f"{val:.2f}{prefixes.get(exp, f'e{exp}')}"
 
-        # 0) Sanity checks
+        # ─── 1) Sanity checks ─────────────────────────────────────────
         if not self.results or self.image_data is None:
             QMessageBox.warning(self, "Data Error", "No image or results available.")
             return
@@ -44300,47 +44778,61 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "WCS Missing", "WCS data is required to generate the 3D plot.")
             return
 
-        # 1) Get settings
+        # ─── 2) Get user settings ────────────────────────────────────
         settings = ThreeDSettingsDialog(self).getSettings()
         if not settings:
             return
-        plane_style = settings["plane_style"]
-        max_res     = settings["resolution"]
-        z_option    = settings["z_option"]
-        z_min       = settings["z_min"]
-        z_max       = settings["z_max"]
-        z_scale     = settings["z_scale"]
-        linear_max  = settings["linear_max"]
-        obj_color   = settings["object_color"]
-        custom_col  = settings["custom_color"]
-        z_height    = settings["z_height"]
+        (plane_style, max_res, z_option, z_min, z_max,
+        z_scale, linear_max, obj_color, custom_col,
+        z_height, show_lines, reverse_z) = (
+            settings[k] for k in (
+                "plane_style","resolution","z_option","z_min","z_max",
+                "z_scale","linear_max","object_color","custom_color",
+                "z_height","show_lines","reverse_z"
+            )
+        )
 
-        # 2) Normalize full-res image
+        # ─── 3) Normalize & downsample image ──────────────────────────
         img = self.image_data
         if img.ndim == 2:
             img = np.stack([img]*3, axis=-1)
         img_norm = np.clip((img - img.min())/(np.ptp(img)+1e-8), 0, 1)
-
-        # 3) Downsample for plane
         full_h, full_w = img.shape[:2]
         scale = min(max_res/full_h, max_res/full_w, 1.0)
-        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1) for i in range(3)], axis=-1)
+        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1)
+                        for i in range(3)], axis=-1)
         h_ds, w_ds, _ = img_ds.shape
 
-        # 4) Build world coords for plane
+        # ─── 4) Build plane coordinates ───────────────────────────────
         xs = np.linspace(0, full_w-1, w_ds)
         ys = np.linspace(0, full_h-1, h_ds)
         Xp, Yp = np.meshgrid(xs, ys)
         RA, DEC = self.wcs.pixel_to_world_values(Xp, Yp)
 
-        # 5) Gather objects
-        pix_xs, pix_ys, world_xs, world_ys, zs_raw, labels, lines = [],[],[],[],[],[],[]
+        # ─── 5) Gather objects & build labels/URLs ────────────────────
+        pix_xs, pix_ys = [], []
+        world_xs, world_ys, zs_raw = [], [], []
+        labels, names, urls, lines = [], [], [], []
         for obj in self.results:
             try:
-                ra   = float(obj["ra"])
-                dec  = float(obj["dec"])
-                d_gy = float(obj["comoving_distance"])
-                d_ly = d_gy * 1e9
+                name   = obj["name"]
+                ra     = float(obj["ra"])
+                dec    = float(obj["dec"])
+                #d_gy   = float(obj["comoving_distance"])
+                #d_ly   = d_gy * 1e9
+                # ——— Try the old SIMBAD numeric path first ———
+                try:
+                    d_gy = float(obj["comoving_distance"])
+                    d_ly = d_gy * 1e9
+                except (ValueError, TypeError):
+                    # Fallback: Vizier gives a string like "12345.678 Ly" or "0.1234 GLy"
+                    raw_cd = str(obj["comoving_distance"]).strip()
+                    if raw_cd.endswith("GLy"):
+                        d_ly = float(raw_cd[:-3].strip()) * 1e9
+                    elif raw_cd.endswith("Ly"):
+                        d_ly = float(raw_cd[:-2].strip())
+                    else:
+                        d_ly = float(raw_cd)                
                 zshift = float(obj.get("redshift", 0.0))
                 if d_ly <= 0:
                     continue
@@ -44349,179 +44841,169 @@ class MainWindow(QMainWindow):
                 if not (0 <= px < full_w and 0 <= py < full_h):
                     continue
 
-                # choose z-value
-                if z_scale == "Logarithmic":
-                    z = math.log10(d_ly)
-                else:
-                    z = d_ly
+                z = math.log10(d_ly) if z_scale == "Logarithmic" else d_ly
+                ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
 
                 pix_xs.append(px)
                 pix_ys.append(py)
-                ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
                 world_xs.append(ra0)
                 world_ys.append(dec0)
                 zs_raw.append(z)
+                names.append(name)
 
-                # hover label with eng notation + redshift
                 labels.append(
-                    f"<b>{obj['name']}</b><br>"
+                    f"<b>{name}</b><br>"
                     f"RA: {ra:.6f}<br>"
                     f"Dec: {dec:.6f}<br>"
                     f"Distance: {eng_notation(d_ly)} ly<br>"
-                    f"redshift = {zshift:.5f}"
+                    f"Redshift: {zshift:.5f}"
                 )
 
-                # connector line
-                lines.append(go.Scatter3d(
-                    x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
-                    mode="lines", line=dict(color="gray", width=1),
-                    hoverinfo="skip", showlegend=False
-                ))
+                enc = urllib.parse.quote(name)
+                urls.append(
+                    f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
+                    f"Ident={enc}&submit=SIMBAD+search"
+                )
+
+                if show_lines:
+                    lines.append(go.Scatter3d(
+                        x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
+                        mode="lines",
+                        line=dict(color="gray", width=1),
+                        hoverinfo="skip",
+                        showlegend=False
+                    ))
             except Exception:
                 continue
 
         if not zs_raw:
             QMessageBox.warning(self, "No Objects", "No valid distance objects to plot.")
             return
-
         zs = np.array(zs_raw)
 
-        # 6) Compute plane_z and z_range
-        if z_option == "Min-Max":
-            plane_z = zs.min()
-            z_range = (zs.min(), zs.max())
-        elif z_option == "Custom":
-            plane_z = z_min
-            z_range = (z_min, z_max)
+        # ─── 6) Determine plane_z & z_range ──────────────────────────
+        if z_option=="Min-Max":
+            plane_z = zs.min(); z_range=(zs.min(), zs.max())
+        elif z_option=="Custom":
+            plane_z = z_min;   z_range=(z_min, z_max)
         else:
-            plane_z = 0
-            z_range = None
+            plane_z=0; z_range=None
+        if z_scale=="Linear" and z_option=="Default":
+            z_range=(0, linear_max)
 
-        if z_scale == "Linear" and z_option == "Default":
-            z_range = (0, linear_max)
-
-        # 7) Build plane (tiling with 1px squares, canvas forced to max_res)
-        show_lines = settings["show_lines"]
-        lines = []
-        if show_lines:
-            for x0, y0, z0 in zip(world_xs, world_ys, zs):
-                lines.append(go.Scatter3d(
-                    x=[x0, x0],
-                    y=[y0, y0],
-                    z=[plane_z, z0],
-                    mode="lines",
-                    line=dict(color="gray", width=1),
-                    hoverinfo="skip",
-                    showlegend=False
-                ))
-
+        # ─── 7) Build image‐plane layer ──────────────────────────────
         if "Grayscale" in plane_style:
             Zp = np.full_like(RA, plane_z)
             plane = go.Surface(
                 x=RA, y=DEC, z=Zp,
-                surfacecolor=np.mean(img_ds, axis=2),
-                colorscale="gray",
-                showscale=False,
-                opacity=1.0,
-                contours={"x": {"show": False},
-                        "y": {"show": False},
-                        "z": {"show": False}}
+                surfacecolor=np.mean(img_ds,axis=2),
+                colorscale="gray", showscale=False, opacity=1.0,
+                contours={"x":{"show":False},"y":{"show":False},"z":{"show":False}}
             )
         else:
-            flat = (img_ds * 255).astype(int).reshape(-1, 3)
-            cols = [f"rgb({r},{g},{b})" for r, g, b in flat]
+            flat = (img_ds*255).astype(int).reshape(-1,3)
+            cols = [f"rgb({r},{g},{b})" for r,g,b in flat]
             plane = go.Scatter3d(
-                x=RA.flatten(),
-                y=DEC.flatten(),
-                z=[plane_z] * RA.size,
-                mode="markers",
-                marker=dict(
-                    symbol="square",  # tile-friendly shape
-                    size=2,           # 1px squares
-                    line=dict(width=0),
-                    color=cols,
-                    opacity=1.0
-                ),
-                hoverinfo="skip",
-                showlegend=False
+                x=RA.flatten(), y=DEC.flatten(), z=[plane_z]*RA.size,
+                mode="markers", marker=dict(symbol="square",size=2,
+                                        line=dict(width=0),
+                                        color=cols, opacity=1.0),
+                hoverinfo="skip", showlegend=False
             )
 
-        # 8) Object colors (unchanged from your working code)
+        # 8) Object colors
         H, W = img_norm.shape[:2]
         if obj_color == "Image-Based":
             obj_cols = []
-            pr = 5
+            patch_r = 5
             for px, py in zip(pix_xs, pix_ys):
                 cx, cy = int(px), int(py)
-                x0, x1 = max(0, cx - pr), min(W, cx + pr + 1)
-                y0, y1 = max(0, cy - pr), min(H, cy + pr + 1)
-                patch = img_norm[y0:y1, x0:x1]
+                x0, x1 = max(0, cx - patch_r), min(W, cx + patch_r + 1)
+                y0, y1 = max(0, cy - patch_r), min(H, cy + patch_r + 1)
+                patch = img_norm[y0:y1, x0:x1]  # note: img_norm[y, x]
                 if patch.size:
                     mr, mg, mb = (patch.reshape(-1, 3).mean(axis=0) * 255).astype(int)
                 else:
                     mr, mg, mb = 0, 0, 0
                 obj_cols.append(f"rgb({mr},{mg},{mb})")
         elif obj_color == "Solid (Custom)":
-            q = custom_col
-            obj_cols = [f"rgb({q.red()},{q.green()},{q.blue()})"] * len(zs)
+            c = custom_col
+            obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})"] * len(zs)
         else:
             obj_cols = ["red"] * len(zs)
 
-        # 9) Scatter the objects using obj_cols
+        # ─── 9) Scatter objects (attach URLs) ────────────────────────
         scatter = go.Scatter3d(
-            x=world_xs,
-            y=world_ys,
-            z=zs,
-            mode="markers",
-            marker=dict(size=4, color=obj_cols),
-            hovertext=labels,
-            hoverinfo="text",
-            name="Objects"
+            x=world_xs, y=world_ys, z=zs,
+            mode="markers", marker=dict(size=4,color=obj_cols),
+            hovertext=labels, hoverinfo="text",
+            customdata=urls, name="Objects"
         )
 
-        # … now build your figure …
+        # ─── 10) Compose figure ───────────────────────────────────────
         fig = go.Figure(data=[plane] + lines + [scatter])
-        fig.update_layout(
-            
-            title="3D Distance Model",
-            autosize=True,
-            scene={
-                "xaxis_title": "RA (deg)",
-                "yaxis_title": "Dec (deg)",
-                "yaxis": {"autorange": "reversed"},
-                "aspectmode": "manual",
-                "aspectratio": {"x": 1, "y": 1, "z": z_height},
-                "zaxis": {
-                    **({"range": list(z_range)} if z_range else {}),
-                    "title": ("log10(Distance in ly)" 
-                            if z_scale == "Logarithmic" else "Distance (ly)"),
-                    "tickformat": "~s"
-                }
-            },
-            margin={"l": 0, "r": 0, "b": 0, "t": 40}
+        scene = dict(
+            xaxis_title="RA (deg)",
+            yaxis_title="Dec (deg)",
+            yaxis=dict(autorange="reversed"),
+            aspectmode="manual", aspectratio=dict(x=1,y=1,z=z_height),
+            zaxis={}
+        )
+        if z_range:     scene["zaxis"]["range"]     = list(z_range)
+        if reverse_z:   scene["zaxis"]["autorange"] = "reversed"
+        scene["zaxis"]["title"]      = (
+            "log10(Distance in ly)" if z_scale=="Logarithmic"
+            else "Distance (ly)"
+        )
+        scene["zaxis"]["tickformat"] = "~s"
+        fig.update_layout(title="3D Distance Model",
+                        autosize=True, scene=scene,
+                        margin=dict(l=0,r=0,b=0,t=40))
+
+        # ─── 11) Build & inject HTML ─────────────────────────────────
+        html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+
+        # static sidebar list of SIMBAD links
+        items = "".join(
+            f'<li><a href="{u}" target="_blank">{n}</a></li>'
+            for n,u in zip(names, urls)
+        )
+        sidebar = (
+            '<div style="padding:10px;font-family:sans-serif;'
+            'margin-top:20px;border-top:1px solid #ccc;">'
+            '<h3>Objects</h3><ul>' + items + '</ul></div>'
         )
 
-        # 10) Save as HTML
+        # lightweight “on-click” opener (no relayout!)
+        js = """
+    <script>
+    var gd = document.getElementsByClassName('plotly-graph-div')[0];
+    gd.on('plotly_click', function(e){
+        var url = e.points[0].customdata;
+        if(url) window.open(url,'_blank');
+    });
+    </script>
+    """
+        html = html.replace("</body>", sidebar + js + "</body>")
+
+        # Save As…
         default = os.path.expanduser("~/3d_distance_model.html")
-        fn, _ = QFileDialog.getSaveFileName(
-            self, "Save 3D Plot As", default, "HTML Files (*.html)"
-        )
+        fn,_ = QFileDialog.getSaveFileName(self,"Save 3D Plot As",
+                                        default,"HTML Files (*.html)")
         if fn:
             if not fn.lower().endswith(".html"):
                 fn += ".html"
-            fig.write_html(fn, include_plotlyjs="cdn", full_html=True)
+            with open(fn,"w",encoding="utf-8") as f:
+                f.write(html)
 
-        # 11) Show interactively
-        fig.show(config={'responsive': True})
+        # immediate preview
+        tmp = tempfile.NamedTemporaryFile(delete=False,
+                                        suffix=".html", mode="w",
+                                        encoding="utf-8")
+        tmp.write(html); tmp.close()
+        webbrowser.open("file://" + tmp.name)
 
-    def get_selected_object_types(self):
-        """Return a list of selected object types from the tree widget."""
-        selected_types = []
-        for i in range(self.object_tree.topLevelItemCount()):
-            item = self.object_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                selected_types.append(item.text(0))  # Add the object type
-        return selected_types
+
     
     def search_defined_region(self):
         """Perform a Simbad search for the defined region and filter by selected object types."""
@@ -44561,53 +45043,120 @@ class MainWindow(QMainWindow):
         self.query_simbad(radius_deg, max_results=100000)
 
 
+    def _iterate_leaf_items(self):
+        """Yield every otype (child) under every category parent."""
+        root = self.object_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            parent = root.child(i)
+            for j in range(parent.childCount()):
+                yield parent.child(j)
 
 
-    def toggle_advanced_search(self):
-        """Toggle visibility of the advanced search panel."""
-        self.advanced_search_panel.setVisible(not self.advanced_search_panel.isVisible())
+    def _update_parent_states(self):
+        """Parents become checked if any child is checked, else unchecked."""
+        root = self.object_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            parent = root.child(i)
+            # if any child checked → parent checked, else unchecked
+            any_checked = any(
+                parent.child(j).checkState(0) == Qt.CheckState.Checked
+                for j in range(parent.childCount())
+            )
+            parent.setCheckState(0, Qt.CheckState.Checked if any_checked else Qt.CheckState.Unchecked)
+
+
+    def on_object_tree_item_changed(self, item, column):
+        # parent toggled → mirror to all children
+        if item.childCount() > 0:
+            state = item.checkState(0)
+            blocker = QSignalBlocker(self.object_tree)
+            for i in range(item.childCount()):
+                item.child(i).setCheckState(0, state)
+            blocker.unblock()
+        # child toggled → recompute only its parent
+        else:
+            parent = item.parent()
+            if not parent:
+                return
+            # parent checked if any child is
+            any_checked = any(
+                parent.child(i).checkState(0) == Qt.CheckState.Checked
+                for i in range(parent.childCount())
+            )
+            blocker = QSignalBlocker(self.object_tree)
+            parent.setCheckState(0, Qt.CheckState.Checked if any_checked else Qt.CheckState.Unchecked)
+            blocker.unblock()
+
 
     def toggle_all_items(self):
-        """Toggle selection for all items in the object tree."""
-        # Check if all items are currently selected
-        all_checked = all(
-            self.object_tree.topLevelItem(i).checkState(0) == Qt.CheckState.Checked
-            for i in range(self.object_tree.topLevelItemCount())
+        """Check/uncheck all otype leaf items."""
+        leaves      = list(self._iterate_leaf_items())
+        all_checked = all(li.checkState(0) == Qt.CheckState.Checked for li in leaves)
+        new_state   = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+
+        blocker = QSignalBlocker(self.object_tree)
+        for li in leaves:
+            li.setCheckState(0, new_state)
+        blocker.unblock()
+
+        self._update_parent_states()
+
+
+    def save_custom_list(self):
+        """
+        Serializes the currently checked otypes to a .json file.
+        """
+        types = self.get_selected_object_types()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Custom Type List",
+            "",
+            "JSON Files (*.json)"
         )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            with open(path, "w") as f:
+                json.dump(types, f, indent=2)
+            self.status_label.setText(f"👍 Saved list to {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", str(e))
 
-        # Determine the new state: Uncheck if all are checked, otherwise check all
-        new_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
 
-        # Apply the new state to all items
-        for i in range(self.object_tree.topLevelItemCount()):
-            item = self.object_tree.topLevelItem(i)
-            item.setCheckState(0, new_state)
+    def load_custom_list(self):
+        """
+        Reads a .json of otype codes and re-checks only those.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Custom Type List",
+            "",
+            "JSON Files (*.json)"
+        )
+        if not path:
+            return
 
+        try:
+            with open(path, "r") as f:
+                types = set(json.load(f))
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+            return
 
-    def toggle_star_items(self):
-        """Toggle selection for items related to stars."""
-        star_keywords = ["star", "Eclipsing binary of W UMa type", "Spectroscopic binary",
-                         "Variable of RS CVn type", "Mira candidate", "Long Period Variable candidate",
-                         "Hot subdwarf", "Eclipsing Binary Candidate", "Eclipsing binary", 
-                         "Cataclysmic Binary Candidate", "Possible Cepheid", "White Dwarf", 
-                         "White Dwarf Candidate"]
-        for i in range(self.object_tree.topLevelItemCount()):
-            item = self.object_tree.topLevelItem(i)
-            description = item.text(1).lower()
-            object_type = item.text(0)
-            if any(keyword.lower() in description for keyword in star_keywords) or "*" in object_type:
-                new_state = Qt.CheckState.Checked if item.checkState(0) == Qt.CheckState.Unchecked else Qt.CheckState.Unchecked
-                item.setCheckState(0, new_state)
+        # block signals so we don't recurse
+        blocker = QSignalBlocker(self.object_tree)
+        for li in self._iterate_leaf_items():
+            li.setCheckState(
+                0,
+                Qt.CheckState.Checked if li.text(0) in types else Qt.CheckState.Unchecked
+            )
+        blocker.unblock()
 
-    def toggle_galaxy_items(self):
-        """Toggle selection for items related to galaxies."""
-        for i in range(self.object_tree.topLevelItemCount()):
-            item = self.object_tree.topLevelItem(i)
-            description = item.text(1).lower()
-            if "galaxy" in description or "galaxies" in description:
-                new_state = Qt.CheckState.Checked if item.checkState(0) == Qt.CheckState.Unchecked else Qt.CheckState.Unchecked
-                item.setCheckState(0, new_state)
-
+        # now update parents
+        self._update_parent_states()
+        self.status_label.setText(f"📂 Loaded list from {os.path.basename(path)}")
 
     def toggle_advanced_search(self):
         """Toggle the visibility of the advanced search panel."""
@@ -46099,129 +46648,203 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Query Failed", f"Both TAP and fallback queries failed: {str(fallback_error)}")
 
     def perform_deep_vizier_search(self):
-        """Perform a Vizier catalog search and parse results based on catalog-specific fields, with duplicate handling."""
+        CATALOG_NAMES = {
+            "J/ApJS/199/26":    "2MRS",
+            "VII/259/6dfgs":    "6dF Galaxy Survey",
+            "V/147/sdss12":     "SDSS DR12",
+            "VII/250/2dfgrs":   "2dFGRS",
+            "J/MNRAS/474/3875": "GAMA DR3",
+            "VII/291/gladep":   "GLADE+",
+            "VII/237":          "HyperLEDA",
+            "VII/221/psc":      "IRAS PSCz",
+            "II/246":           "2MASS PSC",
+            "I/350/gaiaedr3":   "Gaia EDR3",
+            "I/322A":           "UCAC4",
+            "V/154":            "Pan-STARRS 1",
+        }        
+        """Perform a Vizier catalog search and parse results, querying redshift surveys first."""
         if not self.circle_center or self.circle_radius <= 0:
-            QMessageBox.warning(self, "No Search Area", "Please define a search circle by Shift-clicking and dragging.")
+            QMessageBox.warning(self, "No Search Area",
+                                "Please define a search circle by Shift-clicking and dragging.")
             return
 
-        # Convert the center coordinates to RA/Dec
-        ra_center, dec_center = self.calculate_ra_dec_from_pixel(self.circle_center.x(), self.circle_center.y())
+        # Convert center to RA/Dec
+        ra_center, dec_center = self.calculate_ra_dec_from_pixel(
+            self.circle_center.x(), self.circle_center.y()
+        )
         if ra_center is None or dec_center is None:
-            QMessageBox.warning(self, "Invalid Coordinates", "Could not determine the RA/Dec of the circle center.")
+            QMessageBox.warning(self, "Invalid Coordinates",
+                                "Could not determine the RA/Dec of the circle center.")
             return
 
-        # Convert radius from arcseconds to arcminutes
         radius_arcmin = float((self.circle_radius * self.pixscale) / 60.0)
 
-        # List of Vizier catalogs
-        catalog_ids = ["II/246", "I/350/gaiaedr3", "V/147/sdss12", "I/322A", "V/154"]
+        # Query true-redshift surveys first
+        catalog_ids = [
+            # 1) Major spectroscopic redshift surveys
+            "J/ApJS/199/26",     # 2MASS Redshift Survey (2MRS)
+            "VII/259/6dfgs",     # 6dF Galaxy Survey
+            "V/147/sdss12",      # SDSS DR12 spectroscopic
+            "VII/250/2dfgrs",    # 2dF Galaxy Redshift Survey (2dFGRS)
+            "J/MNRAS/474/3875",  # GAMA DR3
+
+            # 2) Meta-catalogs & composites
+            "VII/291/gladep",    # GLADE+
+            "VII/237",           # HyperLEDA
+            "VII/221/psc",       # IRAS PSCz
+
+            # 3) Photometric & astrometric surveys
+            "II/246",            # 2MASS PSC
+            "I/350/gaiaedr3",    # Gaia EDR3
+            "I/322A",            # UCAC4
+            "V/154"              # Pan-STARRS 1
+        ]
+
 
         coord = SkyCoord(ra_center, dec_center, unit="deg")
-        all_results = []  # Collect all results for display in the main preview
-        unique_entries = {}  # Dictionary to track unique entries by (RA, Dec) tuple
+        unique_entries = {}
 
         try:
             for catalog_id in catalog_ids:
-                # Query each catalog
-                result = Vizier.query_region(coord, radius=radius_arcmin * u.arcmin, catalog=catalog_id)
-                if result:
-                    catalog_results = result[0]
-                    for row in catalog_results:
-                        # Map data to the columns in your tree view structure
+                result = Vizier.query_region(
+                    coord, radius=radius_arcmin * u.arcmin, catalog=catalog_id
+                )
+                if not result:
+                    continue
 
-                        # RA and Dec
-                        ra = str(row.get("RAJ2000", row.get("RA_ICRS", "")))
-                        dec = str(row.get("DEJ2000", row.get("DE_ICRS", "")))
-                        if not ra or not dec:
-                            
-                            continue  # Skip this entry if RA or Dec is empty
+                for row in result[0]:
+                    # RA / Dec
+                    ra = row.get("RAJ2000", row.get("RA_ICRS", None))
+                    dec = row.get("DEJ2000", row.get("DE_ICRS", None))
+                    if ra is None or dec is None:
+                        continue
+                    ra_str, dec_str = str(ra), str(dec)
+                    key = (ra_str, dec_str)
 
-                        # Create a unique key based on RA and Dec to track duplicates
-                        unique_key = (ra, dec)
+                    # Name & types
+                    name       = str(row.get("_2MASS", "") or row.get("Source", "") or row.get("SDSS12", ""))
+                    type_short = CATALOG_NAMES.get(catalog_id, catalog_id)
+                    long_type  = str(row.get("SpType", "N/A"))
+                    diameter   = catalog_id
 
-                        # Name (different columns based on catalog)
-                        name = str(
-                            row.get("_2MASS", "")
-                            or row.get("Source", "")
-                            or row.get("SDSS12", "")
-                            or row.get("UCAC4", "")
-                            or row.get("SDSS16", "")
-                        )
-
-                        # Diameter - store catalog ID as the diameter field to help with tracking
-                        diameter = catalog_id
-
-                        # Type (e.g., otype)
-                        type_short = str(row.get("otype", "N/A"))
-
-                        # Long Type (e.g., SpType)
-                        long_type = str(row.get("SpType", "N/A"))
-
-                        # Redshift or Parallax (zph for redshift or Plx for parallax)
-                        redshift = row.get("zph", row.get("Plx", ""))
-                        if redshift:
-                            if "Plx" in row.colnames:
-                                redshift = f"{redshift} (Parallax in mas)"
-                                # Calculate the distance in light-years from parallax
-                                try:
-                                    parallax_value = float(row["Plx"])
-                                    comoving_distance = f"{1000 / parallax_value * 3.2615637769:.2f} Ly"
-                                except (ValueError, ZeroDivisionError):
-                                    comoving_distance = "N/A"  # Handle invalid parallax values
-                            else:
-                                redshift = str(redshift)
-                                # Calculate comoving distance for redshift if it's from zph
-                                if "zph" in row.colnames and isinstance(row["zph"], (float, int)):
-                                    comoving_distance = str(calculate_comoving_distance(float(row["zph"])))
-                        else:
-                            redshift = "N/A"
+                    # ——— robust redshift/parallax parsing ———
+                    if "cz" in row.colnames:
+                        raw = row["cz"]
+                        try:
+                            cz = float(raw)
+                            zval = cz / 299792.458
+                            redshift = f"{zval:.6f}"
+                            comoving_distance = f"{calculate_comoving_distance(zval):.5f} GLy"
+                        except Exception:
+                            redshift = str(raw)
                             comoving_distance = "N/A"
 
-                        # Handle duplicates: prioritize V/147/sdss12 over V/154 and only add unique entries
-                        if unique_key not in unique_entries:
-                            unique_entries[unique_key] = {
-                                'ra': ra,
-                                'dec': dec,
-                                'name': name,
-                                'diameter': diameter,
-                                'short_type': type_short,
-                                'long_type': long_type,
-                                'redshift': redshift,
-                                'comoving_distance': comoving_distance,
-                                'source' : "Vizier"
-                            }
-                        else:
-                            # Check if we should replace the existing entry
-                            existing_entry = unique_entries[unique_key]
-                            if (existing_entry['diameter'] == "V/154" and diameter == "V/147/sdss12"):
-                                unique_entries[unique_key] = {
-                                    'ra': ra,
-                                    'dec': dec,
-                                    'name': name,
-                                    'diameter': diameter,
-                                    'short_type': type_short,
-                                    'long_type': long_type,
-                                    'redshift': redshift,
-                                    'comoving_distance': comoving_distance,
-                                    'source' : "Vizier"
-                                }
+                    elif "z" in row.colnames:
+                        raw = row["z"]
+                        try:
+                            zval = float(raw)
+                            if np.isnan(zval):
+                                raise ValueError
+                            redshift = f"{zval:.6f}"
+                            comoving_distance = f"{calculate_comoving_distance(zval):.5f} GLy"
+                        except Exception:
+                            redshift = str(raw)
+                            comoving_distance = "N/A"
 
-            # Convert unique entries to the main preview display
-            for entry in unique_entries.values():
+                    elif "zhelio" in row.colnames:
+                        raw = row["zhelio"]
+                        try:
+                            zval = float(raw)
+                            if np.isnan(zval):
+                                raise ValueError
+                            redshift = f"{zval:.6f}"
+                            comoving_distance = f"{calculate_comoving_distance(zval):.5f} GLy"
+                        except Exception:
+                            redshift = str(raw)
+                            comoving_distance = "N/A"
+
+                    elif "zcmb" in row.colnames:
+                        raw = row["zcmb"]
+                        try:
+                            zval = float(raw)
+                            if np.isnan(zval):
+                                raise ValueError
+                            redshift = f"{zval:.6f}"
+                            comoving_distance = f"{calculate_comoving_distance(zval):.5f} GLy"
+                        except Exception:
+                            redshift = str(raw)
+                            comoving_distance = "N/A"
+
+                    elif "zph" in row.colnames:
+                        raw = row["zph"]
+                        try:
+                            zval = float(raw)
+                            if np.isnan(zval):
+                                raise ValueError
+                            redshift = f"{zval:.6f}"
+                            comoving_distance = f"{calculate_comoving_distance(zval):.5f} GLy"
+                        except Exception:
+                            redshift = str(raw)
+                            comoving_distance = "N/A"
+
+                    elif "Plx" in row.colnames:
+                        raw = row["Plx"]
+                        try:
+                            pv = abs(float(raw))
+                            redshift = f"{pv:.3f} (Parallax mas)"
+                            comoving_distance = f"{1000/pv * 3.2615637769:.5f} Ly"
+                        except Exception:
+                            redshift = str(raw)
+                            comoving_distance = "N/A"
+
+                    else:
+                        redshift = "N/A"
+                        comoving_distance = "N/A"
+                    # ——— end parsing block ———
+
+                    # Duplicate handling: first entry wins, SDSS overrides Pan-STARRS
+                    if key not in unique_entries:
+                        unique_entries[key] = {
+                            "ra": ra_str,
+                            "dec": dec_str,
+                            "name": name,
+                            "diameter": diameter,
+                            "short_type": type_short,
+                            "long_type": long_type,
+                            "redshift": redshift,
+                            "comoving_distance": comoving_distance
+                        }
+                    else:
+                        existing = unique_entries[key]["diameter"]
+                        if existing == "V/154" and diameter == "V/147/sdss12":
+                            unique_entries[key].update({
+                                "name": name,
+                                "diameter": diameter,
+                                "short_type": type_short,
+                                "long_type": long_type,
+                                "redshift": redshift,
+                                "comoving_distance": comoving_distance
+                            })
+
+            # Populate tree & preview
+            all_results = []
+            for e in unique_entries.values():
                 item = QTreeWidgetItem([
-                    entry['ra'], entry['dec'], entry['name'], entry['diameter'], entry['short_type'], entry['long_type'],
-                    entry['redshift'], entry['comoving_distance']
+                    e["ra"], e["dec"], e["name"], e["diameter"],
+                    e["short_type"], e["long_type"],
+                    e["redshift"], e["comoving_distance"]
                 ])
                 self.results_tree.addTopLevelItem(item)
-                all_results.append(entry)
+                all_results.append(e)
 
-            # Update the main preview with the query results
             self.main_preview.set_query_results(all_results)
-            self.query_results = all_results  # Keep a reference to results in MainWindow
+            self.query_results = all_results
             self.update_object_count()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Vizier Search Failed", f"Failed to query Vizier: {str(e)}")
+
+        except Exception as err:
+            QMessageBox.critical(self, "Vizier Search Failed", f"Failed to query Vizier: {err}")
+
+
 
     def perform_mast_search(self):
         """Perform a MAST cone search in the user-defined region using astroquery."""
