@@ -29049,9 +29049,8 @@ class MetricsPanel(QWidget):
                 sig = np.sqrt(cat['a'] * cat['b'])
                 metrics[0][i] = np.nanmedian(2.3548 * sig)              # FWHM
                 metrics[1][i] = np.nanmedian(1 - (cat['b']/cat['a']))   # Ecc
-                metrics[2][i] = g_b                                     # BG
                 metrics[3][i] = len(cat)          # Star Count
-
+            metrics[2][i] = entry.get('orig_background', np.nan)
             progress.setValue(i+1)
         self.metrics_data = metrics
         progress.close()
@@ -29472,6 +29471,14 @@ class BlinkTab(QWidget):
             if is_mono:
                 image = self.debayer_image(image, file_path, header)
 
+            # ─── 3) Compute pre-stretch background ───────────────────
+            # Work in float32, mono
+            data = np.asarray(image, dtype=np.float32, order='C')
+            if data.ndim == 3:
+                data = data.mean(axis=2)
+            bkg = sep.Background(data)
+            global_back = bkg.globalback
+
             # Stretch the image now while loading it
             target_median = 0.25
             if image.ndim == 2:  # Mono image
@@ -29486,7 +29493,8 @@ class BlinkTab(QWidget):
                 'header': header,
                 'bit_depth': bit_depth,
                 'is_mono': is_mono,
-                'flagged': False
+                'flagged': False,
+                'orig_background': global_back
             })
 
             # Safely extract filter and exposure time from FITS header if available
