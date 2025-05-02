@@ -120,6 +120,7 @@ from matplotlib.patches import Circle
 #################################
 from collections import defaultdict
 import fnmatch
+import pyqtgraph as pg
 # ----- QtWidgets -----
 from PyQt6.QtWidgets import (
     QApplication,
@@ -240,7 +241,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.5"
+VERSION = "2.15.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -3759,123 +3760,136 @@ class AstroEditingSuite(QMainWindow):
             dialog.close()
             return
 
-        print(f"Starless image found at {output_image_path}. Loading image...")
         dialog.append_text(f"Starless image found at {output_image_path}. Loading image...\n")
-
         starless_bgr = cv2.imread(output_image_path, cv2.IMREAD_UNCHANGED)
         if starless_bgr is None:
             QMessageBox.critical(self, "StarNet Error", "Failed to load starless image.")
-            print(f"Failed to load starless image from {output_image_path}.")
             dialog.close()
             return
 
-        print("Starless image loaded successfully.")
         dialog.append_text("Starless image loaded successfully.\n")
         starless_rgb = cv2.cvtColor(starless_bgr, cv2.COLOR_BGR2RGB).astype('float32') / 65535.0
 
-        # Check and apply unstretch if necessary
+        # Unstretch if needed
         if getattr(self, 'image_was_stretched', False):
-            print("Unstretching the starless image...")
+            dialog.append_text("Unstretching the starless image...\n")
             starless_rgb = self.unstretch_image(starless_rgb)
-            print("Starless image unstretched successfully.")
             dialog.append_text("Starless image unstretched successfully.\n")
         else:
-            print("Image was not stretched. Proceeding without unstretching.")
             dialog.append_text("Image was not stretched. Proceeding without unstretching.\n")
 
-        # Convert image_manager.image to 3-channel if needed
+        # Ensure 3-channel
         if starless_rgb.ndim == 2 or (starless_rgb.ndim == 3 and starless_rgb.shape[2] == 1):
-            print("Converting single-channel original image to 3-channel RGB...")
-            starless_rgb = np.stack([starless_rgb] * 3, axis=-1)
-        else:
-            starless_rgb = starless_rgb
+            starless_rgb = np.stack([starless_rgb]*3, axis=-1)
 
-        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
-            print("Converting single-channel original image to 3-channel RGB...")
-            original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
+        orig = self.image_manager.image
+        if orig.ndim == 2 or (orig.ndim == 3 and orig.shape[2] == 1):
+            original_rgb = np.stack([orig]*3, axis=-1)
         else:
-            original_image_rgb = self.image_manager.image            
+            original_rgb = orig
 
-        # Step 9: Generate Stars Only Image
-        print("Generating stars-only image...")
+        # Step 9: Generate Stars-Only image
         dialog.append_text("Generating stars-only image...\n")
         with np.errstate(divide='ignore', invalid='ignore'):
-            stars_only = (original_image_rgb - starless_rgb) / (1.0 - starless_rgb)
+            stars_only = (original_rgb - starless_rgb) / (1.0 - starless_rgb)
             stars_only = np.nan_to_num(stars_only, nan=0.0, posinf=0.0, neginf=0.0)
         stars_only = np.clip(stars_only, 0.0, 1.0)
-        print("Stars-only image generated.")
         dialog.append_text("Stars-only image generated.\n")
 
-        # Step 10: Push Stars Only Image to the next available slot
+        # ─── Apply mask to Stars-Only ─────────────────────────────────────
+        mask_slot = self.image_manager.mask_manager.get_applied_mask_slot()
+        if mask_slot == self.image_manager.current_slot:
+            mask = self.image_manager.mask_manager.get_applied_mask()
+            if mask is not None:
+                h, w = stars_only.shape[:2]
+                if mask.shape == (h, w):
+                    if mask.dtype != np.float32:
+                        mask = mask.astype('float32')/255.0
+                    if mask.ndim == 3:
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    mask3 = mask[:, :, None]
+                    mask3 = np.repeat(mask3, 3, axis=2)
+                    mask3 = np.clip(mask3, 0.0, 1.0)
+                    stars_only = stars_only * mask3
+                    dialog.append_text("✅ Applied active mask to the stars-only image.\n")
+                else:
+                    dialog.append_text("⚠️ Stars-only mask size mismatch; skipping mask on stars-only.\n")
+        else:
+            dialog.append_text("ℹ️ No active mask for stars-only; skipping.\n")
+
+        # Step 10: Push Stars-Only to next slot
         available_slot = None
         for slot in range(self.image_manager.max_slots):
-            image_data = self.image_manager._images.get(slot)
-            if image_data is None:
+            img = self.image_manager._images.get(slot)
+            if img is None or (isinstance(img, np.ndarray) and img.shape[:2] <= (10,10)):
                 available_slot = slot
                 break
-            elif isinstance(image_data, np.ndarray):
-                if image_data.ndim == 2:
-                    h, w = image_data.shape
-                elif image_data.ndim == 3:
-                    h, w = image_data.shape[:2]
-                else:
-                    continue
 
-                if h <= 10 and w <= 10:
-                    available_slot = slot
-                    break
-
-        if available_slot is None:
-            QMessageBox.warning(self, "Slot Error", "No available slot found for Stars Only image.")
-            print("No available slot found for Stars Only image.")
-            dialog.append_text("No available slot found for Stars Only image.\n")
-        else:
-            metadata = {'slot_name': 'Stars_Only'}
-            self.image_manager.update_image(stars_only, metadata=metadata, slot=available_slot)
+        if available_slot is not None:
+            meta = {'slot_name': 'Stars_Only'}
+            self.image_manager.update_image(stars_only, metadata=meta, slot=available_slot)
             self.image_manager._metadata[available_slot]['slot_name'] = "Stars_Only"
             self.slot_names[available_slot] = "Stars_Only"
             if available_slot in self.slot_actions:
                 self.slot_actions[available_slot].setText("Stars_Only")
-                self.slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
             if available_slot in self.preview_windows:
                 self.preview_windows[available_slot].setWindowTitle("Preview - Stars_Only")
             if hasattr(self, 'menubar_slot_actions') and available_slot in self.menubar_slot_actions:
                 self.menubar_slot_actions[available_slot].setText("Stars_Only")
-                self.menubar_slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
             self.menuBar().update()
             self.open_preview_window(slot=available_slot)
-            print(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.")
-            dialog.append_text(f"Stars Only image pushed to slot {available_slot} as 'Stars_Only'.\n")
-                
-        # Step 11: Update ImageManager with Starless Image
-        print("Updating ImageManager with the starless image.")
-        dialog.append_text("Updating ImageManager with the starless image.\n")
+            dialog.append_text(f"Stars-only image pushed to slot {available_slot}.\n")
+        else:
+            dialog.append_text("⚠️ No available slot for stars-only image.\n")
+
+        # ─── Mask-blend Starless and update ─────────────────────────────────
+        dialog.append_text("Preparing to update ImageManager with starless (mask-blend)...\n")
+        mask_slot = self.image_manager.mask_manager.get_applied_mask_slot()
+        if mask_slot == self.image_manager.current_slot:
+            mask = self.image_manager.mask_manager.get_applied_mask()
+            if mask is not None:
+                h, w = starless_rgb.shape[:2]
+                if mask.shape == (h, w):
+                    if mask.dtype != np.float32:
+                        mask = mask.astype('float32')/255.0
+                    if mask.ndim == 3:
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    mask3 = mask[:, :, None]
+                    mask3 = np.repeat(mask3, 3, axis=2)
+                    mask3 = np.clip(mask3, 0.0, 1.0)
+                    final_starless = starless_rgb * mask3 + original_rgb * (1.0 - mask3)
+                    dialog.append_text("✅ Applied active mask to the starless image.\n")
+                else:
+                    dialog.append_text("⚠️ Starless mask size mismatch; skipping mask on starless.\n")
+                    final_starless = starless_rgb
+            else:
+                dialog.append_text("⚠️ No active mask found; using raw starless.\n")
+                final_starless = starless_rgb
+        else:
+            dialog.append_text("ℹ️ Mask not active; using raw starless.\n")
+            final_starless = starless_rgb
+
+        # Step 11: Update ImageManager with starless
         self.image_manager.set_image(
-            starless_rgb,
-            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="Stars Removed"
+            final_starless,
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}),
+            step_name="Stars Removed"
         )
         QMessageBox.information(self, "Success", "Starless image updated successfully.")
-        print("ImageManager updated with starless image.")
         dialog.append_text("ImageManager updated with starless image.\n")
 
-        # Optional: Clean up temporary files
+        # Cleanup
         try:
-            print("Cleaning up temporary files...")
-            dialog.append_text("Cleaning up temporary files...\n")
             if os.path.exists(self.input_image_path):
                 os.remove(self.input_image_path)
-                print(f"Deleted temporary input image at {self.input_image_path}.")
-                dialog.append_text(f"Deleted temporary input image at {self.input_image_path}.\n")
             if os.path.exists(self.output_image_path):
                 os.remove(self.output_image_path)
-                print(f"Deleted temporary output image at {self.output_image_path}.")
-                dialog.append_text(f"Deleted temporary output image at {self.output_image_path}.\n")
         except Exception as e:
-            QMessageBox.warning(self, "Cleanup Warning", f"Failed to delete temporary files:\n{e}")
-            print(f"Failed to delete temporary files: {e}")
-            dialog.append_text(f"Failed to delete temporary files: {e}\n")
+            dialog.append_text(f"Cleanup error: {e}\n")
 
         dialog.close()
+
+
 
 
     def remove_stars_darkstar(self):
@@ -4006,127 +4020,142 @@ class AstroEditingSuite(QMainWindow):
         if return_code != 0:
             QMessageBox.critical(self, "CosmicClarityDarkStar Error",
                                 f"CosmicClarityDarkStar failed with return code {return_code}.")
-            print(f"CosmicClarityDarkStar failed with return code {return_code}.")
             dialog.close()
             return
 
-        # Load the starless image.
-        starless_output_filename = "imagetoremovestars_starless.tif"
-        starless_output_path = os.path.join(output_dir, starless_output_filename)
-        if not os.path.exists(starless_output_path):
+        # ─── Load starless ───────────────────────────────────────────
+        starless_path = os.path.join(output_dir, "imagetoremovestars_starless.tif")
+        if not os.path.exists(starless_path):
             QMessageBox.critical(self, "CosmicClarityDarkStar Error", "Starless image was not created.")
-            print(f"Starless image was not created at {starless_output_path}.")
             dialog.close()
             return
 
-        print(f"Starless image found at {starless_output_path}. Loading image...")
-        dialog.append_text(f"Starless image found at {starless_output_path}. Loading image...\n")
-        starless = cv2.imread(starless_output_path, cv2.IMREAD_UNCHANGED)
+        dialog.append_text(f"Loading starless image from {starless_path}...\n")
+        starless = cv2.imread(starless_path, cv2.IMREAD_UNCHANGED)
         if starless is None:
             QMessageBox.critical(self, "CosmicClarityDarkStar Error", "Failed to load starless image.")
-            print(f"Failed to load starless image from {starless_output_path}.")
             dialog.close()
             return
 
-        print("Starless image loaded successfully.")
         dialog.append_text("Starless image loaded successfully.\n")
-        # Assume output image is stored as float32 in [0,1]
         starless_rgb = cv2.cvtColor(starless, cv2.COLOR_BGR2RGB).astype('float32')
 
-        # Prepare original image for stars-only calculation.
-        if self.image_manager.image.ndim == 2 or (self.image_manager.image.ndim == 3 and self.image_manager.image.shape[2] == 1):
-            print("Converting single-channel original image to 3-channel RGB...")
-            original_image_rgb = np.stack([self.image_manager.image] * 3, axis=-1)
-        else:
-            original_image_rgb = self.image_manager.image
+        # Ensure 3-channel
+        if starless_rgb.ndim == 2 or (starless_rgb.ndim == 3 and starless_rgb.shape[2] == 1):
+            starless_rgb = np.stack([starless_rgb]*3, axis=-1)
 
-        # Attempt to load stars-only image if generated.
-        stars_only_filename = "imagetoremovestars_stars_only.tif"
-        stars_only_path = os.path.join(output_dir, stars_only_filename)
-        if os.path.exists(stars_only_path):
-            print(f"Stars-only image found at {stars_only_path}. Loading image...")
-            dialog.append_text(f"Stars-only image found at {stars_only_path}. Loading image...\n")
-            stars_only = cv2.imread(stars_only_path, cv2.IMREAD_UNCHANGED)
+        orig = self.image_manager.image
+        if orig.ndim == 2 or (orig.ndim == 3 and orig.shape[2] == 1):
+            original_rgb = np.stack([orig]*3, axis=-1)
+        else:
+            original_rgb = orig
+
+        # ─── Load & mask-push stars-only ─────────────────────────────
+        stars_path = os.path.join(output_dir, "imagetoremovestars_stars_only.tif")
+        if os.path.exists(stars_path):
+            dialog.append_text(f"Loading stars-only image from {stars_path}...\n")
+            stars_only = cv2.imread(stars_path, cv2.IMREAD_UNCHANGED)
             if stars_only is not None:
                 stars_only_rgb = cv2.cvtColor(stars_only, cv2.COLOR_BGR2RGB).astype('float32')
-                # Push the stars-only image into the next available slot.
+
+                # Apply active mask to stars-only if present
+                mask_slot = self.image_manager.mask_manager.get_applied_mask_slot()
+                if mask_slot == self.image_manager.current_slot:
+                    mask = self.image_manager.mask_manager.get_applied_mask()
+                    if mask is not None:
+                        h, w = stars_only_rgb.shape[:2]
+                        if mask.shape == (h, w):
+                            if mask.dtype != np.float32:
+                                mask = mask.astype('float32') / 255.0
+                            if mask.ndim == 3:
+                                mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                            m3 = mask[:, :, None]
+                            m3 = np.repeat(m3, 3, axis=2)
+                            stars_only_rgb *= np.clip(m3, 0.0, 1.0)
+                            dialog.append_text("✅ Applied active mask to stars-only image.\n")
+                        else:
+                            dialog.append_text("⚠️ Stars-only mask size mismatch; skipping mask.\n")
+                    else:
+                        dialog.append_text("⚠️ No active mask for stars-only; skipping.\n")
+                else:
+                    dialog.append_text("ℹ️ Mask not active for stars-only; skipping.\n")
+
+                # push into next free slot
                 available_slot = None
                 for slot in range(self.image_manager.max_slots):
-                    image_data = self.image_manager._images.get(slot)
-                    if image_data is None:
+                    img = self.image_manager._images.get(slot)
+                    if img is None or (isinstance(img, np.ndarray) and img.shape[:2] <= (10,10)):
                         available_slot = slot
                         break
-                    elif isinstance(image_data, np.ndarray):
-                        if image_data.ndim == 2:
-                            h, w = image_data.shape
-                        elif image_data.ndim == 3:
-                            h, w = image_data.shape[:2]
-                        else:
-                            continue
-                        if h <= 10 and w <= 10:
-                            available_slot = slot
-                            break
                 if available_slot is not None:
-                    metadata = {'slot_name': 'Stars_Only'}
-                    self.image_manager.update_image(stars_only_rgb, metadata=metadata, slot=available_slot)
+                    meta = {'slot_name': 'Stars_Only'}
+                    self.image_manager.update_image(stars_only_rgb, metadata=meta, slot=available_slot)
                     self.image_manager._metadata[available_slot]['slot_name'] = "Stars_Only"
                     self.slot_names[available_slot] = "Stars_Only"
                     if available_slot in self.slot_actions:
                         self.slot_actions[available_slot].setText("Stars_Only")
-                        self.slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
                     if available_slot in self.preview_windows:
                         self.preview_windows[available_slot].setWindowTitle("Preview - Stars_Only")
                     if hasattr(self, 'menubar_slot_actions') and available_slot in self.menubar_slot_actions:
                         self.menubar_slot_actions[available_slot].setText("Stars_Only")
-                        self.menubar_slot_actions[available_slot].setStatusTip("Open preview for Stars_Only")
                     self.menuBar().update()
                     self.open_preview_window(slot=available_slot)
-                    print(f"Stars-only image pushed to slot {available_slot} as 'Stars_Only'.")
-                    dialog.append_text(f"Stars-only image pushed to slot {available_slot} as 'Stars_Only'.\n")
+                    dialog.append_text(f"Stars-only image pushed to slot {available_slot}.\n")
                 else:
-                    QMessageBox.warning(self, "Slot Error", "No available slot found for Stars Only image.")
-                    print("No available slot found for Stars Only image.")
-                    dialog.append_text("No available slot found for Stars Only image.\n")
+                    dialog.append_text("⚠️ No available slot for stars-only image.\n")
             else:
-                print("Failed to load stars-only image.")
                 dialog.append_text("Failed to load stars-only image.\n")
         else:
-            print("Stars-only image not generated.")
-            dialog.append_text("Stars-only image not generated.\n")
+            dialog.append_text("No stars-only image generated.\n")
 
-        # Update ImageManager with the starless image.
-        print("Updating ImageManager with the starless image.")
-        dialog.append_text("Updating ImageManager with the starless image.\n")
+        # ─── Mask-blend starless & update ──────────────────────────────
+        dialog.append_text("Mask-blending starless image before update...\n")
+        mask_slot = self.image_manager.mask_manager.get_applied_mask_slot()
+        if mask_slot == self.image_manager.current_slot:
+            mask = self.image_manager.mask_manager.get_applied_mask()
+            if mask is not None:
+                h, w = starless_rgb.shape[:2]
+                if mask.shape == (h, w):
+                    if mask.dtype != np.float32:
+                        mask = mask.astype('float32') / 255.0
+                    if mask.ndim == 3:
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    m3 = mask[:, :, None]
+                    m3 = np.repeat(m3, 3, axis=2)
+                    final_starless = starless_rgb * m3 + original_rgb * (1.0 - m3)
+                    dialog.append_text("✅ Applied active mask to starless image.\n")
+                else:
+                    dialog.append_text("⚠️ Starless mask size mismatch; skipping mask.\n")
+                    final_starless = starless_rgb
+            else:
+                dialog.append_text("⚠️ No active mask found; using raw starless.\n")
+                final_starless = starless_rgb
+        else:
+            dialog.append_text("ℹ️ Mask not active; using raw starless.\n")
+            final_starless = starless_rgb
+
+        # ─── Final update ───────────────────────────────────────────────
         self.image_manager.set_image(
-            starless_rgb,
-            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}), step_name="Stars Removed"
+            final_starless,
+            metadata=self.image_manager._metadata.get(self.image_manager.current_slot, {}),
+            step_name="Stars Removed"
         )
-        QMessageBox.information(self, "Success", "Starless image updated successfully via CosmicClarityDarkStar.")
-        print("ImageManager updated with starless image.")
+        QMessageBox.information(self, "Success",
+                                "Starless image updated successfully via CosmicClarityDarkStar.")
         dialog.append_text("ImageManager updated with starless image.\n")
 
-        # Clean up temporary files.
+        # ─── Cleanup ───────────────────────────────────────────────────
         try:
-            print("Cleaning up temporary files...")
-            dialog.append_text("Cleaning up temporary files...\n")
-            if os.path.exists(self.input_image_path):
-                os.remove(self.input_image_path)
-                print(f"Deleted temporary input image at {self.input_image_path}.")
-                dialog.append_text(f"Deleted temporary input image at {self.input_image_path}.\n")
-            if os.path.exists(starless_output_path):
-                os.remove(starless_output_path)
-                print(f"Deleted temporary starless image at {starless_output_path}.")
-                dialog.append_text(f"Deleted temporary starless image at {starless_output_path}.\n")
-            if os.path.exists(stars_only_path):
-                os.remove(stars_only_path)
-                print(f"Deleted temporary stars-only image at {stars_only_path}.")
-                dialog.append_text(f"Deleted temporary stars-only image at {stars_only_path}.\n")
+            for p in (self.input_image_path, starless_path, stars_path):
+                if os.path.exists(p):
+                    os.remove(p)
+            dialog.append_text("Temporary files cleaned up.\n")
         except Exception as e:
-            QMessageBox.warning(self, "Cleanup Warning", f"Failed to delete temporary files:\n{e}")
-            print(f"Failed to delete temporary files: {e}")
-            dialog.append_text(f"Failed to delete temporary files: {e}\n")
+            dialog.append_text(f"Cleanup error: {e}\n")
 
         dialog.close()
+
+
 
     
     def stretch_image(self, image):
@@ -28948,6 +28977,134 @@ class BatchProcessDialog(QDialog):
         self.status_label.setText(message)
         QApplication.processEvents()  # Ensures UI updates immediately
 
+
+class MetricsPanel(QWidget):
+    """2×2 grid with clickable dots and draggable thresholds."""
+    # emits (metric_index, frame_index) when user clicks a dot
+    pointClicked = pyqtSignal(int, int)
+    # emits (metric_index, new_threshold) when user drags a cutoff line
+    thresholdChanged = pyqtSignal(int, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        grid = QGridLayout()
+        layout.addLayout(grid)
+        self._threshold_initialized = [False]*4
+        self.metrics_data = None
+        self.plots = []
+        self.scats = []
+        self.lines = []  # horizontal threshold lines
+        titles = ["FWHM (px)", "Eccentricity", "Background", "Star Count"]
+        for idx, title in enumerate(titles):
+            pw = pg.PlotWidget()
+            pw.setTitle(title)
+            pw.showGrid(x=True, y=True, alpha=0.3)
+            pw.getPlotItem().getViewBox().setBackgroundColor(
+                self.palette().color(self.backgroundRole())
+            )
+
+            # prepare a ScatterPlotItem for the dots
+            scat = pg.ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(100,100,255,200), size=8)
+            scat.sigClicked.connect(lambda plot, pts, m=idx: self._on_point_click(m, pts))
+            pw.addItem(scat)
+
+            # add a draggable horizontal line for threshold
+            line = pg.InfiniteLine(pos=0, angle=0, movable=True, pen=pg.mkPen('r', width=2))
+            line.sigPositionChangeFinished.connect(lambda ln, m=idx: self._on_line_move(m, ln))
+            pw.addItem(line)
+
+            grid.addWidget(pw, idx//2, idx%2)
+            self.plots.append(pw)
+            self.scats.append(scat)
+            self.lines.append(line)
+
+    def plot(self, loaded_images):
+        n = len(loaded_images)
+        x = np.arange(n)
+        metrics = [np.full(n, np.nan) for _ in range(4)]
+        flags   = [entry.get('flagged', False) for entry in loaded_images]
+
+        # create & show the progress dialog
+        progress = QProgressDialog("Computing frame metrics…", "Cancel", 0, n, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        # compute metrics, updating the dialog each loop
+        for i, entry in enumerate(loaded_images):
+            # allow user to cancel
+            if progress.wasCanceled():
+                break
+
+            data = np.asarray(entry['image_data'], dtype=np.float32, order='C')
+
+            if data.ndim == 3:
+                data = data.mean(axis=2)
+            bkg = sep.Background(data)
+            back, g_b, g_r = bkg.back(), bkg.globalback, bkg.globalrms
+
+            cat = sep.extract(data - back, 3 * g_r)
+            if len(cat):
+                sig = np.sqrt(cat['a'] * cat['b'])
+                metrics[0][i] = np.nanmedian(2.3548 * sig)              # FWHM
+                metrics[1][i] = np.nanmedian(1 - (cat['b']/cat['a']))   # Ecc
+                metrics[2][i] = g_b                                     # BG
+                metrics[3][i] = len(cat)          # Star Count
+
+            progress.setValue(i+1)
+        self.metrics_data = metrics
+        progress.close()
+
+        # now update each subplot—this is identical to before, but using brush-red for flagged:
+        for m, (pw, scat, line) in enumerate(zip(self.plots, self.scats, self.lines)):
+            y = metrics[m]
+            brushes = [
+                pg.mkBrush(255,0,0,200) if flags[i] else pg.mkBrush(100,100,255,200)
+                for i in range(n)
+            ]
+            scat.setData(x=x, y=y, brush=brushes, pen=pg.mkPen(None), size=8)
+
+            if not self._threshold_initialized[m]:
+                mx = np.nanmax(y); mn = np.nanmin(y)
+                span = (mx-mn) if mx!=mn else 1.0
+                line.setPos((mx+0.05*span) if m<3 else 0)
+                self._threshold_initialized[m] = True
+
+    def _refresh_scatter_colors(self, flagged_list):
+        """Re-color your dots without re-computing SEP."""
+        n = len(flagged_list)
+        brushes = [
+            pg.mkBrush(255,0,0,200) if flagged_list[i] else pg.mkBrush(100,100,255,200)
+            for i in range(n)
+        ]
+        for scat in self.scats:
+            x, y = scat.getData()[:2]
+            scat.setData(x=x, y=y, brush=brushes)
+
+    def _on_point_click(self, metric_idx, points):
+        """Emit the *frame* index of the clicked dot."""
+        for pt in points:
+            fi = int(round(pt.pos().x()))
+            self.pointClicked.emit(metric_idx, fi)
+
+    def _on_line_move(self, metric_idx, line):
+        """Emit new threshold value."""
+        val = line.value()
+        self.thresholdChanged.emit(metric_idx, val)
+
+class MetricsWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)  # set the Window flag at construction
+        self.setWindowTitle("Frame Metrics")
+        self.resize(800, 600)
+        layout = QVBoxLayout(self)
+        self.metrics_panel = MetricsPanel(self)
+        layout.addWidget(self.metrics_panel)
+
+    def update_metrics(self, loaded_images):
+        self.metrics_panel.plot(loaded_images)
+
 class BlinkTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -28956,15 +29113,18 @@ class BlinkTab(QWidget):
         self.loaded_images = []  # Store the image objects (as numpy arrays)
         self.image_labels = []  # Store corresponding file names for the TreeWidget
         self.image_manager = image_manager  # Reference to ImageManager
+        self.metrics_window: MetricsWindow | None = None
         self.zoom_level = 0.5  # Default zoom level
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
+        self.thresholds = [None, None, None, None]
 
         self.initUI()
         self.init_shortcuts()
 
     def initUI(self):
         main_layout = QHBoxLayout(self)
+
 
         # Create a QSplitter to allow resizing between left and right panels
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -29006,10 +29166,11 @@ class BlinkTab(QWidget):
 
         left_layout.addLayout(button_layout)
 
-        # "Clear Images" Button
-        self.clearButton = QPushButton('Clear Images', self)
-        self.clearButton.clicked.connect(self.clearImages)
-        left_layout.addWidget(self.clearButton)
+        self.metrics_button = QPushButton("Show Metrics", self)
+        self.metrics_button.clicked.connect(self.show_metrics)
+        left_layout.addWidget(self.metrics_button)
+
+
 
         # Playback controls (left arrow, play, pause, right arrow)
         playback_controls_layout = QHBoxLayout()
@@ -29056,6 +29217,11 @@ class BlinkTab(QWidget):
                 }
             """)
         left_layout.addWidget(self.fileTree)
+
+        # "Clear Images" Button
+        self.clearButton = QPushButton('Clear Images', self)
+        self.clearButton.clicked.connect(self.clearImages)
+        left_layout.addWidget(self.clearButton)
 
         # Add progress bar
         self.progress_bar = QProgressBar(self)
@@ -29131,6 +29297,96 @@ class BlinkTab(QWidget):
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def show_metrics(self):
+        if self.metrics_window is None:
+            self.metrics_window = MetricsWindow()
+            mp = self.metrics_window.metrics_panel
+            mp.pointClicked.connect(self.on_metrics_point)
+            mp.thresholdChanged.connect(self.on_threshold_change)
+        self.metrics_window.update_metrics(self.loaded_images)
+        self.metrics_window.show()
+        self.metrics_window.raise_()
+
+    def on_metrics_point(self, metric_idx, frame_idx):
+        """Flag/unflag the image corresponding to the clicked dot."""
+        item = self.get_tree_item_for_index(frame_idx)
+        if not item:
+            print(f"Could not find tree item for frame {frame_idx}")
+            return
+
+        # flip the flag and update the tree icon
+        self._toggle_flag_on_item(item)
+
+        # now recolor the dots in the metrics panel
+        flags = [entry['flagged'] for entry in self.loaded_images]
+        self.metrics_window.metrics_panel._refresh_scatter_colors(flags)
+
+    def on_threshold_change(self, metric_idx, threshold):
+        """Flag frames by comparing against the cached metrics array (big OR across all metrics)."""
+        panel = self.metrics_window.metrics_panel
+        if panel.metrics_data is None:
+            return
+
+        # update this one metric’s threshold
+        self.thresholds[metric_idx] = threshold
+
+        # for each frame, OR across all four metrics
+        for i, entry in enumerate(self.loaded_images):
+            flagged = False
+            # for each metric m, get its cached array & threshold
+            for m, thr in enumerate(self.thresholds):
+                if thr is None:
+                    continue
+                val = panel.metrics_data[m][i]
+                if np.isnan(val):
+                    continue
+                # m<3: flag if val > thr; m==3 (S/N): flag if val < thr
+                if (m < 3 and val > thr) or (m == 3 and val < thr):
+                    flagged = True
+                    break
+
+            entry['flagged'] = flagged
+
+            # update the tree item
+            item = self.get_tree_item_for_index(i)
+            if item:
+                RED = Qt.GlobalColor.red
+                normal = self.fileTree.palette().color(QPalette.ColorRole.WindowText)
+                name = item.text(0).lstrip("⚠️ ")
+                if flagged:
+                    item.setText(0, f"⚠️ {name}")
+                    item.setForeground(0, QBrush(RED))
+                else:
+                    item.setText(0, name)
+                    item.setForeground(0, QBrush(normal))
+
+        # recolor all the dots in the metrics window
+        flags = [e['flagged'] for e in self.loaded_images]
+        panel._refresh_scatter_colors(flags)
+
+
+    def get_tree_item_for_index(self, idx):
+        target = os.path.basename(self.image_paths[idx])
+        for item in self.get_all_leaf_items():
+            if item.text(0).lstrip("⚠️ ") == target:
+                return item
+        return None
+
+    def compute_metric(self, metric_idx, entry):
+        """Recompute a single metric for one image. You can cache as needed."""
+        data = np.asarray(entry['image_data'], dtype=np.float32, order='C')
+        if data.ndim==3:
+            data = data.mean(axis=2)
+        bkg = sep.Background(data)
+        back, gr, rr = bkg.back(), bkg.globalback, bkg.globalrms
+        cat = sep.extract(data-back, 3*rr)
+        if len(cat)==0: return np.nan
+        sig = np.sqrt(cat['a']*cat['b'])
+        if metric_idx==0:   return np.nanmedian(2.3548*sig)
+        if metric_idx==1:   return np.nanmedian(1 - (cat['b']/cat['a']))
+        if metric_idx==2:   return gr
+        if metric_idx==3:   return np.nanmedian(cat['flux']/rr)
+
     def init_shortcuts(self):
         """Initialize keyboard shortcuts."""
         # Create a shortcut for the "F" key to flag images
@@ -29183,6 +29439,8 @@ class BlinkTab(QWidget):
             self.current_pixmap = None
             self.progress_bar.setValue(0)
             self.loading_label.setText("Loading images...")
+        if self.metrics_window is not None:
+            self.metrics_window.update_metrics([])
 
     def loadImages(self, file_paths):
         """Load images from the provided file paths and update the tree view."""
@@ -29246,6 +29504,8 @@ class BlinkTab(QWidget):
             progress = int((index + 1) / total_files * 100)
             self.progress_bar.setValue(progress)
             QApplication.processEvents()  # Ensure the UI updates in real-time
+        if self.metrics_window is not None:
+            self.metrics_window.update_metrics(self.loaded_images)
 
         print(f"Loaded {len(self.loaded_images)} images into memory.")
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
@@ -29313,43 +29573,38 @@ class BlinkTab(QWidget):
                 return child
         return None
 
-    def flag_current_image(self):
-        """Flag or unflag the currently selected image as bad."""
-        current_item = self.fileTree.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "No Selection", "No image is currently selected to flag.")
+
+    def _toggle_flag_on_item(self, item: QTreeWidgetItem):
+        """Toggle the flagged state on this tree item and its loaded_images entry."""
+        file_name = item.text(0).lstrip("⚠️ ")
+        # find the matching image entry
+        file_path = next((p for p in self.image_paths if os.path.basename(p) == file_name), None)
+        if file_path is None:
             return
 
-        # Remove any existing flag icon before processing
-        file_name = current_item.text(0).lstrip("⚠️ ")
+        idx = self.image_paths.index(file_path)
+        entry = self.loaded_images[idx]
+        entry['flagged'] = not entry['flagged']
 
-        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+        # update the tree view
+        RED = Qt.GlobalColor.red
+        palette = self.fileTree.palette()
+        normal_color = palette.color(QPalette.ColorRole.WindowText)
 
-        if file_path:
-            index = self.image_paths.index(file_path)
-            image_entry = self.loaded_images[index]
+        if entry['flagged']:
+            item.setText(0, f"⚠️ {file_name}")
+            item.setForeground(0, QBrush(RED))
+        else:
+            item.setText(0, file_name)
+            item.setForeground(0, QBrush(normal_color))
 
-            # Toggle the flagged state
-            image_entry['flagged'] = not image_entry['flagged']
-            RED = Qt.GlobalColor.red
-
-            # Fetch the current text color from the palette
-            palette = self.fileTree.palette()
-            current_text_color = palette.color(QPalette.ColorRole.WindowText)
-
-            # Update the tree view to reflect the flag
-            if image_entry['flagged']:
-                # Add a flag icon and change text color to red
-                current_item.setText(0, f"⚠️ {file_name}")  # Prefix with a warning icon
-                current_item.setForeground(0, QBrush(RED))
-            else:
-                # Remove the flag icon and reset text color based on the current theme
-                current_item.setText(0, file_name)
-                current_item.setForeground(0, QBrush(current_text_color))
-
-            # Optional: Provide feedback to the user
-            status = "flagged as bad" if image_entry['flagged'] else "unflagged"
-            print(f"Image '{file_name}' has been {status}.")
+    def flag_current_image(self):
+        """Called by the F-key: toggle flag on the currently selected item."""
+        item = self.fileTree.currentItem()
+        if not item:
+            QMessageBox.warning(self, "No Selection", "No image is currently selected to flag.")
+            return
+        self._toggle_flag_on_item(item)
 
 
     def on_current_item_changed(self, current, previous):
@@ -29626,25 +29881,21 @@ class BlinkTab(QWidget):
         """Handle click on a file name in the tree to preview the image."""
         self.fileTree.setFocus()
 
-        file_name = item.text(0)
-        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+        # strip out any leading "⚠️ "
+        file_name = item.text(0).lstrip("⚠️ ").strip()
+        file_path = next((path for path in self.image_paths
+                          if os.path.basename(path) == file_name), None)
 
-        if file_path:
-            # Get the index of the clicked image
-            index = self.image_paths.index(file_path)
+        if not file_path:
+            return   # nothing to show
 
-            # Retrieve the corresponding image data and header from the loaded images
-            stretched_image = self.loaded_images[index]['image_data']
+        index = self.image_paths.index(file_path)
+        stretched_image = self.loaded_images[index]['image_data']
 
-            # Convert to QImage and display
-            qimage = self.convert_to_qimage(stretched_image)
-            pixmap = QPixmap.fromImage(qimage)
-
-            # Store the pixmap for zooming
-            self.current_pixmap = pixmap
-
-            # Apply zoom level
-            self.apply_zoom()
+        qimage = self.convert_to_qimage(stretched_image)
+        pixmap = QPixmap.fromImage(qimage)
+        self.current_pixmap = pixmap
+        self.apply_zoom()
 
     def apply_zoom(self):
         """Apply the current zoom level to the pixmap and update the display."""
@@ -43680,7 +43931,7 @@ class ThreeDSettingsDialog(QDialog):
         # Object Color
         layout.addWidget(QLabel("Object Color:"))
         self.color_cb = QComboBox()
-        self.color_cb.addItems(["Image-Based", "Solid (Red)", "Solid (Custom)"])
+        self.color_cb.addItems(["Image-Based", "Legend Color", "Solid (Custom)"])
         layout.addWidget(self.color_cb)
 
         self.color_btn = QPushButton("Choose Color…")
@@ -44813,26 +45064,24 @@ class MainWindow(QMainWindow):
         pix_xs, pix_ys = [], []
         world_xs, world_ys, zs_raw = [], [], []
         labels, names, urls, lines = [], [], [], []
+        legend_qcolors = []
         for obj in self.results:
             try:
                 name   = obj["name"]
                 ra     = float(obj["ra"])
                 dec    = float(obj["dec"])
-                #d_gy   = float(obj["comoving_distance"])
-                #d_ly   = d_gy * 1e9
-                # ——— Try the old SIMBAD numeric path first ———
+                # try SIMBAD comoving_distance in Gpc etc.
                 try:
                     d_gy = float(obj["comoving_distance"])
                     d_ly = d_gy * 1e9
                 except (ValueError, TypeError):
-                    # Fallback: Vizier gives a string like "12345.678 Ly" or "0.1234 GLy"
                     raw_cd = str(obj["comoving_distance"]).strip()
                     if raw_cd.endswith("GLy"):
                         d_ly = float(raw_cd[:-3].strip()) * 1e9
                     elif raw_cd.endswith("Ly"):
                         d_ly = float(raw_cd[:-2].strip())
                     else:
-                        d_ly = float(raw_cd)                
+                        d_ly = float(raw_cd)
                 zshift = float(obj.get("redshift", 0.0))
                 if d_ly <= 0:
                     continue
@@ -44864,7 +45113,8 @@ class MainWindow(QMainWindow):
                     f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
                     f"Ident={enc}&submit=SIMBAD+search"
                 )
-
+                qcol = obj.get("color", QColor(128,128,128))
+                legend_qcolors.append(qcol)
                 if show_lines:
                     lines.append(go.Scatter3d(
                         x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
@@ -44881,13 +45131,19 @@ class MainWindow(QMainWindow):
             return
         zs = np.array(zs_raw)
 
+        # ─── build legend_cols (one per object) from your 2D‐view mapping ───
+        legend_cols = [
+            obj.get("plot_color", "gray")
+            for obj in self.results
+        ]
+
         # ─── 6) Determine plane_z & z_range ──────────────────────────
         if z_option=="Min-Max":
-            plane_z = zs.min(); z_range=(zs.min(), zs.max())
+            plane_z = zs.min();   z_range=(zs.min(), zs.max())
         elif z_option=="Custom":
-            plane_z = z_min;   z_range=(z_min, z_max)
+            plane_z = z_min;     z_range=(z_min, z_max)
         else:
-            plane_z=0; z_range=None
+            plane_z=0;            z_range=None
         if z_scale=="Linear" and z_option=="Default":
             z_range=(0, linear_max)
 
@@ -44898,20 +45154,21 @@ class MainWindow(QMainWindow):
                 x=RA, y=DEC, z=Zp,
                 surfacecolor=np.mean(img_ds,axis=2),
                 colorscale="gray", showscale=False, opacity=1.0,
-                contours={"x":{"show":False},"y":{"show":False},"z":{"show":False}}
+                contours={"x": {"show":False},"y": {"show":False},"z": {"show":False}}
             )
         else:
             flat = (img_ds*255).astype(int).reshape(-1,3)
             cols = [f"rgb({r},{g},{b})" for r,g,b in flat]
             plane = go.Scatter3d(
                 x=RA.flatten(), y=DEC.flatten(), z=[plane_z]*RA.size,
-                mode="markers", marker=dict(symbol="square",size=2,
-                                        line=dict(width=0),
-                                        color=cols, opacity=1.0),
+                mode="markers", marker=dict(
+                    symbol="square", size=2, line=dict(width=0),
+                    color=cols, opacity=1.0
+                ),
                 hoverinfo="skip", showlegend=False
             )
 
-        # 8) Object colors
+        # ─── 8) Object colors ────────────────────────────────────────
         H, W = img_norm.shape[:2]
         if obj_color == "Image-Based":
             obj_cols = []
@@ -44920,22 +45177,32 @@ class MainWindow(QMainWindow):
                 cx, cy = int(px), int(py)
                 x0, x1 = max(0, cx - patch_r), min(W, cx + patch_r + 1)
                 y0, y1 = max(0, cy - patch_r), min(H, cy + patch_r + 1)
-                patch = img_norm[y0:y1, x0:x1]  # note: img_norm[y, x]
+                patch = img_norm[y0:y1, x0:x1]
                 if patch.size:
-                    mr, mg, mb = (patch.reshape(-1, 3).mean(axis=0) * 255).astype(int)
+                    mr, mg, mb = (patch.reshape(-1,3).mean(axis=0)*255).astype(int)
                 else:
-                    mr, mg, mb = 0, 0, 0
+                    mr = mg = mb = 0
                 obj_cols.append(f"rgb({mr},{mg},{mb})")
+
+        elif obj_color == "Legend Color":
+            # convert each collected QColor to a Plotly rgb(...) string
+            obj_cols = [
+                f"rgb({qc.red()},{qc.green()},{qc.blue()})"
+                for qc in legend_qcolors
+            ]
+
         elif obj_color == "Solid (Custom)":
             c = custom_col
             obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})"] * len(zs)
-        else:
+
+        else:  # Solid (Red)
             obj_cols = ["red"] * len(zs)
 
         # ─── 9) Scatter objects (attach URLs) ────────────────────────
         scatter = go.Scatter3d(
             x=world_xs, y=world_ys, z=zs,
-            mode="markers", marker=dict(size=4,color=obj_cols),
+            mode="markers",
+            marker=dict(size=4, color=obj_cols),
             hovertext=labels, hoverinfo="text",
             customdata=urls, name="Objects"
         )
@@ -44949,21 +45216,23 @@ class MainWindow(QMainWindow):
             aspectmode="manual", aspectratio=dict(x=1,y=1,z=z_height),
             zaxis={}
         )
-        if z_range:     scene["zaxis"]["range"]     = list(z_range)
-        if reverse_z:   scene["zaxis"]["autorange"] = "reversed"
-        scene["zaxis"]["title"]      = (
+        if z_range:
+            scene["zaxis"]["range"] = list(z_range)
+        if reverse_z:
+            scene["zaxis"]["autorange"] = "reversed"
+        scene["zaxis"]["title"] = (
             "log10(Distance in ly)" if z_scale=="Logarithmic"
             else "Distance (ly)"
         )
         scene["zaxis"]["tickformat"] = "~s"
-        fig.update_layout(title="3D Distance Model",
-                        autosize=True, scene=scene,
-                        margin=dict(l=0,r=0,b=0,t=40))
+        fig.update_layout(
+            title="3D Distance Model",
+            autosize=True, scene=scene,
+            margin=dict(l=0,r=0,b=0,t=40)
+        )
 
         # ─── 11) Build & inject HTML ─────────────────────────────────
         html = fig.to_html(include_plotlyjs="cdn", full_html=True)
-
-        # static sidebar list of SIMBAD links
         items = "".join(
             f'<li><a href="{u}" target="_blank">{n}</a></li>'
             for n,u in zip(names, urls)
@@ -44973,20 +45242,18 @@ class MainWindow(QMainWindow):
             'margin-top:20px;border-top:1px solid #ccc;">'
             '<h3>Objects</h3><ul>' + items + '</ul></div>'
         )
-
-        # lightweight “on-click” opener (no relayout!)
         js = """
-    <script>
-    var gd = document.getElementsByClassName('plotly-graph-div')[0];
-    gd.on('plotly_click', function(e){
-        var url = e.points[0].customdata;
-        if(url) window.open(url,'_blank');
-    });
-    </script>
-    """
+        <script>
+        var gd = document.getElementsByClassName('plotly-graph-div')[0];
+        gd.on('plotly_click', function(e){
+            var url = e.points[0].customdata;
+            if(url) window.open(url,'_blank');
+        });
+        </script>
+        """
         html = html.replace("</body>", sidebar + js + "</body>")
 
-        # Save As…
+        # Save & preview
         default = os.path.expanduser("~/3d_distance_model.html")
         fn,_ = QFileDialog.getSaveFileName(self,"Save 3D Plot As",
                                         default,"HTML Files (*.html)")
@@ -44996,12 +45263,10 @@ class MainWindow(QMainWindow):
             with open(fn,"w",encoding="utf-8") as f:
                 f.write(html)
 
-        # immediate preview
-        tmp = tempfile.NamedTemporaryFile(delete=False,
-                                        suffix=".html", mode="w",
-                                        encoding="utf-8")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8")
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
+
 
 
     
