@@ -121,6 +121,7 @@ from matplotlib.patches import Circle
 from collections import defaultdict
 import fnmatch
 import pyqtgraph as pg
+import psutil
 # ----- QtWidgets -----
 from PyQt6.QtWidgets import (
     QApplication,
@@ -241,7 +242,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.6"
+VERSION = "2.15.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -28980,9 +28981,7 @@ class BatchProcessDialog(QDialog):
 
 class MetricsPanel(QWidget):
     """2×2 grid with clickable dots and draggable thresholds."""
-    # emits (metric_index, frame_index) when user clicks a dot
     pointClicked = pyqtSignal(int, int)
-    # emits (metric_index, new_threshold) when user drags a cutoff line
     thresholdChanged = pyqtSignal(int, float)
 
     def __init__(self, parent=None):
@@ -28990,11 +28989,14 @@ class MetricsPanel(QWidget):
         layout = QVBoxLayout(self)
         grid = QGridLayout()
         layout.addLayout(grid)
+
+        # caching slots
+        self._orig_images = None       # last list passed
+        self.metrics_data = None       # list of 4 numpy arrays
+        self.flags = None              # list of bools
         self._threshold_initialized = [False]*4
-        self.metrics_data = None
-        self.plots = []
-        self.scats = []
-        self.lines = []  # horizontal threshold lines
+
+        self.plots, self.scats, self.lines = [], [], []
         titles = ["FWHM (px)", "Eccentricity", "Background", "Star Count"]
         for idx, title in enumerate(titles):
             pw = pg.PlotWidget()
@@ -29004,14 +29006,16 @@ class MetricsPanel(QWidget):
                 self.palette().color(self.backgroundRole())
             )
 
-            # prepare a ScatterPlotItem for the dots
-            scat = pg.ScatterPlotItem(pen=pg.mkPen(None), brush=pg.mkBrush(100,100,255,200), size=8)
+            scat = pg.ScatterPlotItem(pen=pg.mkPen(None),
+                                      brush=pg.mkBrush(100,100,255,200),
+                                      size=8)
             scat.sigClicked.connect(lambda plot, pts, m=idx: self._on_point_click(m, pts))
             pw.addItem(scat)
 
-            # add a draggable horizontal line for threshold
-            line = pg.InfiniteLine(pos=0, angle=0, movable=True, pen=pg.mkPen('r', width=2))
-            line.sigPositionChangeFinished.connect(lambda ln, m=idx: self._on_line_move(m, ln))
+            line = pg.InfiniteLine(pos=0, angle=0, movable=True,
+                                   pen=pg.mkPen('r', width=2))
+            line.sigPositionChangeFinished.connect(
+                lambda ln, m=idx: self._on_line_move(m, ln))
             pw.addItem(line)
 
             grid.addWidget(pw, idx//2, idx%2)
@@ -29019,90 +29023,219 @@ class MetricsPanel(QWidget):
             self.scats.append(scat)
             self.lines.append(line)
 
-    def plot(self, loaded_images):
+    def compute_all_metrics(self, loaded_images):
+        """Run SEP over the full list exactly once and cache results."""
         n = len(loaded_images)
-        x = np.arange(n)
-        metrics = [np.full(n, np.nan) for _ in range(4)]
-        flags   = [entry.get('flagged', False) for entry in loaded_images]
+        m0 = np.full(n, np.nan)
+        m1 = np.full(n, np.nan)
+        m2 = np.full(n, np.nan)
+        m3 = np.full(n, np.nan)
+        flags = [e.get('flagged', False) for e in loaded_images]
 
-        # create & show the progress dialog
-        progress = QProgressDialog("Computing frame metrics…", "Cancel", 0, n, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.show()
+        prog = QProgressDialog("Computing frame metrics…", "Cancel", 0, n, self)
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(0)
+        prog.show()
 
-        # compute metrics, updating the dialog each loop
         for i, entry in enumerate(loaded_images):
-            # allow user to cancel
-            if progress.wasCanceled():
+            if prog.wasCanceled():
                 break
 
-            data = np.asarray(entry['image_data'], dtype=np.float32, order='C')
-
+            data = np.asarray(entry['image_data'], dtype=np.float32)
             if data.ndim == 3:
                 data = data.mean(axis=2)
-            bkg = sep.Background(data)
-            back, g_b, g_r = bkg.back(), bkg.globalback, bkg.globalrms
 
-            cat = sep.extract(data - back, 3 * g_r)
+            bkg = sep.Background(data)
+            back, gb, gr = bkg.back(), bkg.globalback, bkg.globalrms
+
+            cat = sep.extract(data - back, 3*gr)
             if len(cat):
                 sig = np.sqrt(cat['a'] * cat['b'])
-                metrics[0][i] = np.nanmedian(2.3548 * sig)              # FWHM
-                metrics[1][i] = np.nanmedian(1 - (cat['b']/cat['a']))   # Ecc
-                metrics[3][i] = len(cat)          # Star Count
-            metrics[2][i] = entry.get('orig_background', np.nan)
-            progress.setValue(i+1)
-        self.metrics_data = metrics
-        progress.close()
+                m0[i] = np.nanmedian(2.3548 * sig)
+                m1[i] = np.nanmedian(1 - (cat['b']/cat['a']))
+                m3[i] = len(cat)
+            m2[i] = entry.get('orig_background', np.nan)
 
-        # now update each subplot—this is identical to before, but using brush-red for flagged:
+            prog.setValue(i+1)
+        prog.close()
+
+        self._orig_images = loaded_images
+        self.metrics_data  = [m0, m1, m2, m3]
+        self.flags         = flags
+        self._threshold_initialized = [False]*4  # reset line init
+
+    def plot(self, loaded_images, indices=None):
+        """
+        Plot metrics for loaded_images.
+        If indices is given (list/array of ints), only those frames are shown.
+        """
+        # empty clear
+        if not loaded_images:
+            self.metrics_data = None
+            for pw, scat, line in zip(self.plots, self.scats, self.lines):
+                scat.setData(x=[], y=[])
+                line.setPos(0)
+                pw.getPlotItem().getViewBox().update()
+                pw.repaint()
+            return
+
+        # compute & cache on first call or new image list
+        if self._orig_images is not loaded_images or self.metrics_data is None:
+            self.compute_all_metrics(loaded_images)
+
+        # default to all indices
+        if indices is None:
+            indices = np.arange(len(loaded_images), dtype=int)
+
+        # store for later recoloring
+        self._cur_indices = np.array(indices, dtype=int)
+
+        x = np.arange(len(indices))
+
         for m, (pw, scat, line) in enumerate(zip(self.plots, self.scats, self.lines)):
-            y = metrics[m]
+            arr = self.metrics_data[m]
+            y   = arr[indices]
+
             brushes = [
-                pg.mkBrush(255,0,0,200) if flags[i] else pg.mkBrush(100,100,255,200)
-                for i in range(n)
+                pg.mkBrush(255,0,0,200) if self.flags[idx] else pg.mkBrush(100,100,255,200)
+                for idx in indices
             ]
             scat.setData(x=x, y=y, brush=brushes, pen=pg.mkPen(None), size=8)
 
+            # initialize threshold line once
             if not self._threshold_initialized[m]:
-                mx = np.nanmax(y); mn = np.nanmin(y)
-                span = (mx-mn) if mx!=mn else 1.0
+                mx, mn = np.nanmax(y), np.nanmin(y)
+                span   = mx-mn if mx!=mn else 1.0
                 line.setPos((mx+0.05*span) if m<3 else 0)
                 self._threshold_initialized[m] = True
 
-    def _refresh_scatter_colors(self, flagged_list):
-        """Re-color your dots without re-computing SEP."""
-        n = len(flagged_list)
-        brushes = [
-            pg.mkBrush(255,0,0,200) if flagged_list[i] else pg.mkBrush(100,100,255,200)
-            for i in range(n)
-        ]
+    def _refresh_scatter_colors(self):
+        """Re-color your dots without re-computing SEP, even in subset mode."""
+        # For each scatter, its x‐values are local positions into self._cur_indices,
+        # so we must map them back to the original-frame index before pulling flags.
         for scat in self.scats:
             x, y = scat.getData()[:2]
+            brushes = []
+            for xi in x:
+                li = int(xi)                    # local index in this subset
+                gi = self._cur_indices[li]     # global frame index
+                if self.flags[gi]:
+                    brushes.append(pg.mkBrush(255,0,0,200))
+                else:
+                    brushes.append(pg.mkBrush(100,100,255,200))
             scat.setData(x=x, y=y, brush=brushes)
 
     def _on_point_click(self, metric_idx, points):
-        """Emit the *frame* index of the clicked dot."""
         for pt in points:
             fi = int(round(pt.pos().x()))
             self.pointClicked.emit(metric_idx, fi)
 
     def _on_line_move(self, metric_idx, line):
-        """Emit new threshold value."""
-        val = line.value()
-        self.thresholdChanged.emit(metric_idx, val)
+        self.thresholdChanged.emit(metric_idx, line.value())
+
 
 class MetricsWindow(QWidget):
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)  # set the Window flag at construction
+        super().__init__(parent, Qt.WindowType.Window)
+        self._thresholds_per_group: dict[str, list[float|None]] = {}
         self.setWindowTitle("Frame Metrics")
         self.resize(800, 600)
-        layout = QVBoxLayout(self)
-        self.metrics_panel = MetricsPanel(self)
-        layout.addWidget(self.metrics_panel)
 
-    def update_metrics(self, loaded_images):
-        self.metrics_panel.plot(loaded_images)
+        vbox = QVBoxLayout(self)
+
+        # ─── group selector ─────────────
+        self.group_combo = QComboBox(self)
+        self.group_combo.addItem("All")
+        self.group_combo.currentTextChanged.connect(self._on_group_change)
+        vbox.addWidget(self.group_combo)
+
+        # ─── the 2×2 panel ─────────────
+        self.metrics_panel = MetricsPanel(self)
+        vbox.addWidget(self.metrics_panel)
+
+        # internal storage of the full list
+        self._all_images: list[dict] = []
+        self._current_indices: list[int] | None = None
+
+        # connect panel’s thresholdChanged to our handler
+        self.metrics_panel.thresholdChanged.connect(self._on_panel_threshold_change)
+
+    def set_images(self, loaded_images: list[dict]):
+        """Initialize with a brand-new set of images."""
+        self._all_images = loaded_images
+
+        # rebuild the combo-list of FILTER groups
+        self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        self.group_combo.addItem("All")
+        seen = set()
+        for entry in loaded_images:
+            filt = entry.get('header', {}).get('FILTER', 'Unknown')
+            if filt not in seen:
+                seen.add(filt)
+                self.group_combo.addItem(filt)
+        self.group_combo.blockSignals(False)
+
+        # reset & seed per-group thresholds
+        self._thresholds_per_group.clear()
+        self._thresholds_per_group["All"] = [None]*4
+        for entry in loaded_images:
+            filt = entry.get('header', {}).get('FILTER', 'Unknown')
+            if filt not in self._thresholds_per_group:
+                self._thresholds_per_group[filt] = [None]*4
+
+        # compute & cache all metrics once
+        self.metrics_panel.compute_all_metrics(self._all_images)
+
+        # show “All” by default
+        self._current_indices = None
+        self._apply_thresholds("All")
+        self.metrics_panel.plot(self._all_images, indices=None)
+
+    def _on_group_change(self, name: str):
+        """Re-plot for the selected FILTER group."""
+        if name == "All":
+            self._current_indices = None
+        else:
+            # collect indices matching this filter
+            self._current_indices = [
+                i for i, e in enumerate(self._all_images)
+                if e.get('header', {}).get('FILTER', 'Unknown') == name
+            ]
+
+        # apply saved thresholds for this group
+        self._apply_thresholds(name)
+        # re-draw
+        self.metrics_panel.plot(self._all_images, indices=self._current_indices)
+
+    def _on_panel_threshold_change(self, metric_idx: int, new_val: float):
+        """User just dragged a threshold line."""
+        grp = self.group_combo.currentText()
+        # save it for this group
+        self._thresholds_per_group[grp][metric_idx] = new_val
+
+        # (if you also want immediate re-flagging in the tree, keep your BlinkTab logic hooked here)
+
+    def _apply_thresholds(self, group_name: str):
+        """Restore the four InfiniteLine positions for a given group."""
+        saved = self._thresholds_per_group.get(group_name, [None]*4)
+        for idx, line in enumerate(self.metrics_panel.lines):
+            if saved[idx] is not None:
+                line.setPos(saved[idx])
+            # if saved[idx] is None, we leave it so that
+            # the panel’s own auto-init can run on next plot()
+
+    def update_metrics(self, loaded_images: list[dict]):
+        """
+        Called whenever BlinkTab.loadImages or clearImages fires.
+        If it's a new list, re-init; otherwise just re-plot current group.
+        """
+        if loaded_images is not self._all_images:
+            self.set_images(loaded_images)
+        else:
+            # same list, just redraw current selection
+            self._on_group_change(self.group_combo.currentText())
+
 
 class BlinkTab(QWidget):
     def __init__(self, image_manager=None):
@@ -29116,7 +29249,7 @@ class BlinkTab(QWidget):
         self.zoom_level = 0.5  # Default zoom level
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
-        self.thresholds = [None, None, None, None]
+        self.thresholds_by_group: dict[str, list[float|None]] = {}
 
         self.initUI()
         self.init_shortcuts()
@@ -29302,7 +29435,11 @@ class BlinkTab(QWidget):
             mp = self.metrics_window.metrics_panel
             mp.pointClicked.connect(self.on_metrics_point)
             mp.thresholdChanged.connect(self.on_threshold_change)
-        self.metrics_window.update_metrics(self.loaded_images)
+
+        # ← here ←
+        self.metrics_window.set_images(self.loaded_images)
+        panel = self.metrics_window.metrics_panel
+        self.thresholds_by_group["All"] = [ line.value() for line in panel.lines ]
         self.metrics_window.show()
         self.metrics_window.raise_()
 
@@ -29321,32 +29458,42 @@ class BlinkTab(QWidget):
         self.metrics_window.metrics_panel._refresh_scatter_colors(flags)
 
     def on_threshold_change(self, metric_idx, threshold):
-        """Flag frames by comparing against the cached metrics array (big OR across all metrics)."""
         panel = self.metrics_window.metrics_panel
         if panel.metrics_data is None:
             return
 
-        # update this one metric’s threshold
-        self.thresholds[metric_idx] = threshold
+        # figure out which FILTER group we're in
+        group = self.metrics_window.group_combo.currentText()
+        # ensure we have a 4-slot list for this group
+        thr_list = self.thresholds_by_group.setdefault(group, [None]*4)
+        # store the new threshold for this metric
+        thr_list[metric_idx] = threshold
 
-        # for each frame, OR across all four metrics
-        for i, entry in enumerate(self.loaded_images):
+        # build the list of indices to re-evaluate
+        if group == "All":
+            indices = range(len(self.loaded_images))
+        else:
+            indices = [
+                i for i, e in enumerate(self.loaded_images)
+                if e.get('header', {}).get('FILTER','Unknown') == group
+            ]
+
+        # re‐flag only those frames in this group, OR across all 4 metrics
+        for i in indices:
+            entry = self.loaded_images[i]
             flagged = False
-            # for each metric m, get its cached array & threshold
-            for m, thr in enumerate(self.thresholds):
+            for m, thr in enumerate(thr_list):
                 if thr is None:
                     continue
                 val = panel.metrics_data[m][i]
                 if np.isnan(val):
                     continue
-                # m<3: flag if val > thr; m==3 (S/N): flag if val < thr
                 if (m < 3 and val > thr) or (m == 3 and val < thr):
                     flagged = True
                     break
-
             entry['flagged'] = flagged
 
-            # update the tree item
+            # update the tree icon
             item = self.get_tree_item_for_index(i)
             if item:
                 RED = Qt.GlobalColor.red
@@ -29359,9 +29506,10 @@ class BlinkTab(QWidget):
                     item.setText(0, name)
                     item.setForeground(0, QBrush(normal))
 
-        # recolor all the dots in the metrics window
-        flags = [e['flagged'] for e in self.loaded_images]
-        panel._refresh_scatter_colors(flags)
+        # now push the *entire* up-to-date flagged list into the panel
+        panel.flags = [e['flagged'] for e in self.loaded_images]
+        panel._refresh_scatter_colors()
+
 
 
     def get_tree_item_for_index(self, idx):
@@ -29372,19 +29520,37 @@ class BlinkTab(QWidget):
         return None
 
     def compute_metric(self, metric_idx, entry):
-        """Recompute a single metric for one image. You can cache as needed."""
-        data = np.asarray(entry['image_data'], dtype=np.float32, order='C')
-        if data.ndim==3:
+        """Recompute a single metric for one image.  Use cached orig_background for metric 2."""
+        # metric 2 is the pre-stretch background we already computed
+        if metric_idx == 2:
+            return entry.get('orig_background', np.nan)
+
+        # otherwise rebuild a float32 [0..1] array from whatever dtype we stored
+        img = entry['image_data']
+        if img.dtype == np.uint8:
+            data = img.astype(np.float32)/255.0
+        elif img.dtype == np.uint16:
+            data = img.astype(np.float32)/65535.0
+        else:
+            data = np.asarray(img, dtype=np.float32)
+        if data.ndim == 3:
             data = data.mean(axis=2)
+
+        # run SEP for the other metrics
         bkg = sep.Background(data)
         back, gr, rr = bkg.back(), bkg.globalback, bkg.globalrms
-        cat = sep.extract(data-back, 3*rr)
-        if len(cat)==0: return np.nan
+        cat = sep.extract(data - back, 3*rr)
+        if len(cat)==0:
+            return np.nan
+
         sig = np.sqrt(cat['a']*cat['b'])
-        if metric_idx==0:   return np.nanmedian(2.3548*sig)
-        if metric_idx==1:   return np.nanmedian(1 - (cat['b']/cat['a']))
-        if metric_idx==2:   return gr
-        if metric_idx==3:   return np.nanmedian(cat['flux']/rr)
+        if metric_idx == 0:
+            return np.nanmedian(2.3548*sig)
+        elif metric_idx == 1:
+            return np.nanmedian(1 - (cat['b']/cat['a']))
+        else:  # metric_idx == 3 (star count)
+            return len(cat)
+
 
     def init_shortcuts(self):
         """Initialize keyboard shortcuts."""
@@ -29438,10 +29604,44 @@ class BlinkTab(QWidget):
             self.current_pixmap = None
             self.progress_bar.setValue(0)
             self.loading_label.setText("Loading images...")
+
+            # (legacy) if you still have this, you can delete it:
+            # self.thresholds = [None, None, None, None]
+
+            # also reset the metrics panel (if it’s open)
+            if self.metrics_window is not None:
+                mp = self.metrics_window.metrics_panel
+                # clear out old data & reset flags / thresholds
+                mp.metrics_data = None
+                mp._threshold_initialized = [False]*4
+                for scat in mp.scats:
+                    scat.clear()
+                for line in mp.lines:
+                    line.setPos(0)
+
+                # clear per‐group threshold storage
+                self.metrics_window._thresholds_per_group.clear()
+
+        # finally, tell the MetricsWindow to fully re‐init with no images
         if self.metrics_window is not None:
             self.metrics_window.update_metrics([])
 
+
     def loadImages(self, file_paths):
+        mem = psutil.virtual_memory()
+        total_gb     = mem.total     / (1024**3)
+        available_gb = mem.available / (1024**3)
+
+        if available_gb <= 16:
+            target_dtype = np.uint8        # ~1 byte/pixel
+        elif available_gb <= 32:
+            target_dtype = np.uint16       # ~2 bytes/pixel
+        else:
+            target_dtype = np.float32      # ~4 bytes/pixel     
+
+        # ── DEBUG PRINT ────────────────────────────────────────────────────
+        print(f"[DEBUG] RAM: total={total_gb:.1f} GiB, available={available_gb:.1f} GiB → using {target_dtype}")
+        # ─────────────────────────────────────────────────────────────────── 
         """Load images from the provided file paths and update the tree view."""
         if not file_paths:
             return
@@ -29486,10 +29686,20 @@ class BlinkTab(QWidget):
             else:  # Color image
                 stretched_image = stretch_color_image(image, target_median, linked=False)
 
+            # ─── now down-cast into target_dtype ────────────────────────────
+            stretched = np.clip(stretched_image, 0.0, 1.0)
+            if target_dtype is np.uint8:
+                stored = (stretched * np.iinfo(np.uint8).max).astype(np.uint8)
+            elif target_dtype is np.uint16:
+                stored = (stretched * np.iinfo(np.uint16).max).astype(np.uint16)
+            else:
+                stored = stretched.astype(np.float32)
+            # ────────────────────────────────────────────────────────────────
+            
             # Append the stretched image data
             self.loaded_images.append({
                 'file_path': file_path,
-                'image_data': stretched_image,
+                'image_data': stored,
                 'header': header,
                 'bit_depth': bit_depth,
                 'is_mono': is_mono,
@@ -29513,7 +29723,7 @@ class BlinkTab(QWidget):
             self.progress_bar.setValue(progress)
             QApplication.processEvents()  # Ensure the UI updates in real-time
         if self.metrics_window is not None:
-            self.metrics_window.update_metrics(self.loaded_images)
+            self.metrics_window.set_metrics(self.loaded_images)
 
         print(f"Loaded {len(self.loaded_images)} images into memory.")
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
@@ -30361,16 +30571,25 @@ class BlinkTab(QWidget):
 
     def convert_to_qimage(self, img_array):
         """Convert numpy image array to QImage."""
-        img_array = (img_array * 255).astype(np.uint8)  # Ensure image is in uint8
-        h, w = img_array.shape[:2]
+        # 1) Bring everything into a uint8 (0–255) array
+        if img_array.dtype == np.uint8:
+            arr8 = img_array
+        elif img_array.dtype == np.uint16:
+            # downscale 16-bit → 8-bit
+            arr8 = (img_array.astype(np.float32) / 65535.0 * 255.0).clip(0,255).astype(np.uint8)
+        else:
+            # assume float in [0..1]
+            arr8 = (img_array.clip(0.0, 1.0) * 255.0).astype(np.uint8)
 
-        # Convert the image data to a byte buffer
-        img_data = img_array.tobytes()  # This converts the image to a byte buffer
+        h, w = arr8.shape[:2]
+        buffer = arr8.tobytes()
 
-        if img_array.ndim == 3:  # RGB Image
-            return QImage(img_data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        else:  # Grayscale Image
-            return QImage(img_data, w, h, w, QImage.Format.Format_Grayscale8)
+        if arr8.ndim == 3:
+            # RGB
+            return QImage(buffer, w, h, 3*w, QImage.Format.Format_RGB888)
+        else:
+            # grayscale
+            return QImage(buffer, w, h, w, QImage.Format.Format_Grayscale8)
 
 
 
