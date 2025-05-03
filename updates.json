@@ -1,9 +1,9 @@
 {
-  "version": "2.15.6",
+  "version": "2.15.7",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.6/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.6/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.6/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.7/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.7/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.7/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Subframe Selector in Blink, Legend Colors in 3D plot in WIMI, starremoval acknowledges when a mask is active"
+  "notes": "Subframe Selector in Blink has filter dropdown, Bug Fix, and lower memory usage"
 }
