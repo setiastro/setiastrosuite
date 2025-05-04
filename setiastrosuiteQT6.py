@@ -242,7 +242,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.8"
+VERSION = "2.15.9"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -29028,6 +29028,8 @@ class MetricsPanel(QWidget):
         """
         Worker: run SEP on one image entry.
         Returns (idx, fwhm, ecc, orig_back, star_count).
+        If SEP overflows its internal pixel buffer, we catch it and
+        return sentinel “bad” values so the frame will be flagged.
         """
         idx, entry = i_entry
         import numpy as np, sep
@@ -29043,33 +29045,39 @@ class MetricsPanel(QWidget):
         if data.ndim == 3:
             data = data.mean(axis=2)
 
-        # SEP detection parameters
-        thresh   = 7.0        # σ threshold
-        min_area = 16         # require 4×4 blob
-        err      = sep.Background(data).globalrms
+        # detection parameters
+        thresh   = 7.0    # σ threshold
+        min_area = 16     # at least a 4×4 blob
 
-        bkg = sep.Background(data)
-        back, gb, gr = bkg.back(), bkg.globalback, bkg.globalrms
+        try:
+            bkg = sep.Background(data)
+            back, gb, gr = bkg.back(), bkg.globalback, bkg.globalrms
 
-        cat = sep.extract(
-            data - back,
-            thresh,
-            err=gr,
-            minarea=min_area,
-            clean=True,
-            deblend_nthresh=32
-        )
+            cat = sep.extract(
+                data - back,
+                thresh,
+                err=gr,
+                minarea=min_area,
+                clean=True,
+                deblend_nthresh=32
+            )
 
-        if len(cat):
-            sig      = np.sqrt(cat['a'] * cat['b'])
-            fwhm     = np.nanmedian(2.3548 * sig)
-            ecc      = np.nanmedian(1 - (cat['b'] / cat['a']))
-            star_cnt = len(cat)
-        else:
-            fwhm, ecc, star_cnt = np.nan, np.nan, 0
+            if len(cat) > 0:
+                sig      = np.sqrt(cat['a'] * cat['b'])
+                fwhm     = np.nanmedian(2.3548 * sig)
+                ecc      = np.nanmedian(1 - (cat['b'] / cat['a']))
+                star_cnt = len(cat)
+            else:
+                fwhm, ecc, star_cnt = np.nan, np.nan, 0
+
+        except Exception as e:
+            # catch SEP overflow (or any other) and mark as “bad” frame
+            # you can even check `if "internal pixel buffer full" in str(e):`
+            fwhm, ecc, star_cnt = 10.0, 0.5, 0
 
         orig_back = entry.get('orig_background', np.nan)
         return idx, fwhm, ecc, orig_back, star_cnt
+
 
     def compute_all_metrics(self, loaded_images):
         # ─── HEADS-UP DIALOG ───────────────────────────────────────────
@@ -29510,18 +29518,17 @@ class BlinkTab(QWidget):
         self.metrics_window.raise_()
 
     def on_metrics_point(self, metric_idx, frame_idx):
-        """Flag/unflag the image corresponding to the clicked dot."""
+        # Toggle the flagged state on the image…
         item = self.get_tree_item_for_index(frame_idx)
         if not item:
-            print(f"Could not find tree item for frame {frame_idx}")
             return
-
-        # flip the flag and update the tree icon
         self._toggle_flag_on_item(item)
 
-        # now recolor the dots in the metrics panel
-        flags = [entry['flagged'] for entry in self.loaded_images]
-        self.metrics_window.metrics_panel._refresh_scatter_colors(flags)
+        # Now update the panel’s flags and refresh
+        panel = self.metrics_window.metrics_panel
+        panel.flags = [entry['flagged'] for entry in self.loaded_images]
+        panel._refresh_scatter_colors()
+
 
     def on_threshold_change(self, metric_idx, threshold):
         panel = self.metrics_window.metrics_panel
