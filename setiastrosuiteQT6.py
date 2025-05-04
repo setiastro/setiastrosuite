@@ -60,7 +60,7 @@ import gzip
 import traceback
 import sep
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 from astropy.wcs.utils import skycoord_to_pixel
 from astropy.coordinates import SkyCoord
@@ -242,7 +242,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.7"
+VERSION = "2.15.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -29023,46 +29023,112 @@ class MetricsPanel(QWidget):
             self.scats.append(scat)
             self.lines.append(line)
 
+    @staticmethod
+    def _compute_one(i_entry):
+        """
+        Worker: run SEP on one image entry.
+        Returns (idx, fwhm, ecc, orig_back, star_count).
+        """
+        idx, entry = i_entry
+        import numpy as np, sep
+
+        # rebuild normalized mono data
+        img = entry['image_data']
+        if img.dtype == np.uint8:
+            data = img.astype(np.float32) / 255.0
+        elif img.dtype == np.uint16:
+            data = img.astype(np.float32) / 65535.0
+        else:
+            data = np.asarray(img, dtype=np.float32)
+        if data.ndim == 3:
+            data = data.mean(axis=2)
+
+        # SEP detection parameters
+        thresh   = 7.0        # σ threshold
+        min_area = 16         # require 4×4 blob
+        err      = sep.Background(data).globalrms
+
+        bkg = sep.Background(data)
+        back, gb, gr = bkg.back(), bkg.globalback, bkg.globalrms
+
+        cat = sep.extract(
+            data - back,
+            thresh,
+            err=gr,
+            minarea=min_area,
+            clean=True,
+            deblend_nthresh=32
+        )
+
+        if len(cat):
+            sig      = np.sqrt(cat['a'] * cat['b'])
+            fwhm     = np.nanmedian(2.3548 * sig)
+            ecc      = np.nanmedian(1 - (cat['b'] / cat['a']))
+            star_cnt = len(cat)
+        else:
+            fwhm, ecc, star_cnt = np.nan, np.nan, 0
+
+        orig_back = entry.get('orig_background', np.nan)
+        return idx, fwhm, ecc, orig_back, star_cnt
+
     def compute_all_metrics(self, loaded_images):
-        """Run SEP over the full list exactly once and cache results."""
+        # ─── HEADS-UP DIALOG ───────────────────────────────────────────
+        settings = QSettings()
+        # default to True (i.e. show warning) if the key isn't there yet
+        show = settings.value("metrics/showWarning", True, type=bool)
+        if show:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Heads-up")
+            msg.setText(
+                "This is going to use ALL your CPU cores and the UI may lock up until it finishes.\n\n"
+                "Continue?"
+            )
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes |
+                                QMessageBox.StandardButton.No)
+            cb = QCheckBox("Don't show again", msg)
+            msg.setCheckBox(cb)
+            answer = msg.exec()
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            if cb.isChecked():
+                settings.setValue("metrics/showWarning", False)  
+        """Run SEP over the full list in parallel using threads and cache results."""
         n = len(loaded_images)
+        # pre-allocate result arrays
         m0 = np.full(n, np.nan)
         m1 = np.full(n, np.nan)
         m2 = np.full(n, np.nan)
         m3 = np.full(n, np.nan)
         flags = [e.get('flagged', False) for e in loaded_images]
 
+        # set up a cancelable progress dialog
         prog = QProgressDialog("Computing frame metrics…", "Cancel", 0, n, self)
         prog.setWindowModality(Qt.WindowModality.WindowModal)
         prog.setMinimumDuration(0)
         prog.show()
+        QApplication.processEvents()
 
-        for i, entry in enumerate(loaded_images):
-            if prog.wasCanceled():
-                break
+        workers = os.cpu_count() or 1
+        tasks   = [(i, loaded_images[i]) for i in range(n)]
+        with ProcessPoolExecutor(max_workers=workers) as exe:
+            futures = {exe.submit(self._compute_one, t): t[0] for t in tasks}
+            done = 0
+            for fut in as_completed(futures):
+                if prog.wasCanceled():
+                    break
+                idx, fwhm, ecc, orig_back, star_cnt = fut.result()
+                m0[idx], m1[idx], m2[idx], m3[idx] = fwhm, ecc, orig_back, star_cnt
+                done += 1
+                prog.setValue(done)
+                QApplication.processEvents()
 
-            data = np.asarray(entry['image_data'], dtype=np.float32)
-            if data.ndim == 3:
-                data = data.mean(axis=2)
-
-            bkg = sep.Background(data)
-            back, gb, gr = bkg.back(), bkg.globalback, bkg.globalrms
-
-            cat = sep.extract(data - back, 3*gr)
-            if len(cat):
-                sig = np.sqrt(cat['a'] * cat['b'])
-                m0[i] = np.nanmedian(2.3548 * sig)
-                m1[i] = np.nanmedian(1 - (cat['b']/cat['a']))
-                m3[i] = len(cat)
-            m2[i] = entry.get('orig_background', np.nan)
-
-            prog.setValue(i+1)
         prog.close()
 
+        # stash results
         self._orig_images = loaded_images
         self.metrics_data  = [m0, m1, m2, m3]
         self.flags         = flags
-        self._threshold_initialized = [False]*4  # reset line init
+        self._threshold_initialized = [False]*4
 
     def plot(self, loaded_images, indices=None):
         """
@@ -29539,7 +29605,7 @@ class BlinkTab(QWidget):
         # run SEP for the other metrics
         bkg = sep.Background(data)
         back, gr, rr = bkg.back(), bkg.globalback, bkg.globalrms
-        cat = sep.extract(data - back, 3*rr)
+        cat = sep.extract(data - back, 5.0, err=gr, minarea=9)
         if len(cat)==0:
             return np.nan
 
@@ -29722,8 +29788,8 @@ class BlinkTab(QWidget):
             progress = int((index + 1) / total_files * 100)
             self.progress_bar.setValue(progress)
             QApplication.processEvents()  # Ensure the UI updates in real-time
-        if self.metrics_window is not None:
-            self.metrics_window.set_metrics(self.loaded_images)
+        if self.metrics_window is not None and self.metrics_window.isVisible():
+            self.metrics_window.update_metrics(self.loaded_images)
 
         print(f"Loaded {len(self.loaded_images)} images into memory.")
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
