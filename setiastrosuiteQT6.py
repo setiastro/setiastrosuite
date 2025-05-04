@@ -35,7 +35,7 @@ from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndi
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
-
+import multiprocessing
 import matplotlib
 matplotlib.use("QtAgg") 
 import matplotlib.pyplot as plt
@@ -48255,6 +48255,10 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
 
 
 if __name__ == '__main__':
+    # ——— Multiprocessing “freeze” support for Windows executables ———
+    multiprocessing.freeze_support()
+    multiprocessing.set_start_method('spawn', force=True)
+
     # Configure logging to capture errors for debugging
     logging.basicConfig(
         filename="astro_editing_suite.log",
@@ -48262,39 +48266,30 @@ if __name__ == '__main__':
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
+    # Start Qt application
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(icon_path))
 
     # ===================== SPLASH SCREEN CODE HERE =====================
-    # 1) Load your splash image
-    splash_pix = QPixmap(resource_path("astrosuite.png"))  # or your actual path
+    splash_pix = QPixmap(resource_path("astrosuite.png"))
     splash = QSplashScreen(splash_pix)
-
-    # 2) Show the splash screen
     splash.show()
-    # Force the app to process events so the splash shows
     app.processEvents()
 
     try:
-        # 3) Create and initialize your main window (the big load time may happen here)
+        # Initialize main window
         window = AstroEditingSuite()
-
-        # 4) Now that the window is ready, display it
         window.show()
 
-        # 5) Hide the splash
+        # Close the splash screen once the main window is ready
         splash.finish(window)
 
         sys.exit(app.exec())
     except Exception as e:
-        # Log the error
         logging.error("Unhandled exception occurred", exc_info=True)
-
-        # Display a critical error message to the user
         QMessageBox.critical(
             None,
             "Application Error",
-            f"An unexpected error occurred:\n{str(e)}\n\n"
-            "Please check the log file for more details."
+            f"An unexpected error occurred:\n{str(e)}\n\nPlease check the log file for more details."
         )
         sys.exit(1)
