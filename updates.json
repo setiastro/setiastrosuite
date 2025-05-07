@@ -1,9 +1,9 @@
 {
-  "version": "2.15.9",
+  "version": "2.15.10",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.9/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.9/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.9/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Subframe Selector in Blink now uses multicores for measurements, many multiple bug fixes in Blink"
+  "notes": "Blink Updates and HR Diagram in WIMI"
 }
