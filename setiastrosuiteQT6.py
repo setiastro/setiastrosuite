@@ -43101,7 +43101,7 @@ CATEGORY_TO_COLOR = {
 
 
 Simbad.ROW_LIMIT = 0  # Remove row limit for full results
-Simbad.TIMEOUT = 60  # Increase timeout for long queries
+Simbad.TIMEOUT = 300  # Increase timeout for long queries
 
 # Astrometry.net API constants
 ASTROMETRY_API_URL = "http://nova.astrometry.net/api/"
@@ -45427,6 +45427,8 @@ class MainWindow(QMainWindow):
         ys = np.linspace(0, full_h-1, h_ds)
         Xp, Yp = np.meshgrid(xs, ys)
         RA, DEC = self.wcs.pixel_to_world_values(Xp, Yp)
+        ra_min, ra_max = float(RA.min()), float(RA.max())
+        dec_min, dec_max = float(DEC.min()), float(DEC.max())
 
         # ─── 5) Gather objects & build labels/URLs ────────────────────
         pix_xs, pix_ys = [], []
@@ -45438,26 +45440,32 @@ class MainWindow(QMainWindow):
                 name   = obj["name"]
                 ra     = float(obj["ra"])
                 dec    = float(obj["dec"])
-                # try SIMBAD comoving_distance in Gpc etc.
+
+                # --- compute distance in ly, with absolute‐value guard ---
                 try:
+                    # comoving_distance stored in Gyr:
                     d_gy = float(obj["comoving_distance"])
-                    d_ly = d_gy * 1e9
+                    d_ly = abs(d_gy) * 1e9 + 10
                 except (ValueError, TypeError):
                     raw_cd = str(obj["comoving_distance"]).strip()
                     if raw_cd.endswith("GLy"):
-                        d_ly = float(raw_cd[:-3].strip()) * 1e9
+                        d_ly = abs(float(raw_cd[:-3].strip())) * 1e9 + 10
                     elif raw_cd.endswith("Ly"):
-                        d_ly = float(raw_cd[:-2].strip())
+                        d_ly = abs(float(raw_cd[:-2].strip())) + 10
                     else:
-                        d_ly = float(raw_cd)
-                zshift = float(obj.get("redshift", 0.0))
+                        d_ly = abs(float(raw_cd)) + 10
+
+                # skip any zero/negative after abs
                 if d_ly <= 0:
                     continue
+
+                zshift = float(obj.get("redshift", 0.0))
 
                 px, py = self.wcs.world_to_pixel_values(ra, dec)
                 if not (0 <= px < full_w and 0 <= py < full_h):
                     continue
 
+                # choose log or linear
                 z = math.log10(d_ly) if z_scale == "Logarithmic" else d_ly
                 ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
 
@@ -45481,8 +45489,8 @@ class MainWindow(QMainWindow):
                     f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
                     f"Ident={enc}&submit=SIMBAD+search"
                 )
-                qcol = obj.get("color", QColor(128,128,128))
-                legend_qcolors.append(qcol)
+                legend_qcolors.append(obj.get("color", QColor(128,128,128)))
+
                 if show_lines:
                     lines.append(go.Scatter3d(
                         x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
@@ -45497,32 +45505,39 @@ class MainWindow(QMainWindow):
         if not zs_raw:
             QMessageBox.warning(self, "No Objects", "No valid distance objects to plot.")
             return
-        zs = np.array(zs_raw)
-
-        # ─── build legend_cols (one per object) from your 2D‐view mapping ───
-        legend_cols = [
-            obj.get("plot_color", "gray")
-            for obj in self.results
-        ]
-
+        zs = np.array(zs_raw, dtype=float)
+        # drop any NaNs before taking min/max
+        valid = ~np.isnan(zs)
+        if not valid.any():
+            QMessageBox.warning(self, "No Objects", "All distance values are invalid.")
+            return
+        zs = zs[valid]
+        print(f"[DEBUG] z_option = {z_option}")
+        print(f"[DEBUG] zs_raw (first 10) = {zs_raw[:10]}")
+        print(f"[DEBUG] zs array shape = {zs.shape}")
+        print(f"[DEBUG] zs.min() = {zs.min()}, zs.max() = {zs.max()}")
         # ─── 6) Determine plane_z & z_range ──────────────────────────
-        if z_option=="Min-Max":
-            plane_z = zs.min();   z_range=(zs.min(), zs.max())
-        elif z_option=="Custom":
-            plane_z = z_min;     z_range=(z_min, z_max)
-        else:
-            plane_z=0;            z_range=None
-        if z_scale=="Linear" and z_option=="Default":
-            z_range=(0, linear_max)
+        if z_option == "Min-Max":
+            plane_z = float(np.nanmin(zs))
+            z_range = (float(np.nanmin(zs)), float(np.nanmax(zs)))
+        elif z_option == "Custom":
+            plane_z = z_min
+            z_range = (z_min, z_max)
+        else:  # Default
+            plane_z = 0
+            z_range = None
+
+        if z_scale == "Linear" and z_option == "Default":
+            z_range = (0, linear_max)
 
         # ─── 7) Build image‐plane layer ──────────────────────────────
         if "Grayscale" in plane_style:
             Zp = np.full_like(RA, plane_z)
             plane = go.Surface(
                 x=RA, y=DEC, z=Zp,
-                surfacecolor=np.mean(img_ds,axis=2),
+                surfacecolor=np.mean(img_ds, axis=2),
                 colorscale="gray", showscale=False, opacity=1.0,
-                contours={"x": {"show":False},"y": {"show":False},"z": {"show":False}}
+                contours={"x": {"show":False}, "y": {"show":False}, "z": {"show":False}}
             )
         else:
             flat = (img_ds*255).astype(int).reshape(-1,3)
@@ -45553,20 +45568,14 @@ class MainWindow(QMainWindow):
                 obj_cols.append(f"rgb({mr},{mg},{mb})")
 
         elif obj_color == "Legend Color":
-            # convert each collected QColor to a Plotly rgb(...) string
-            obj_cols = [
-                f"rgb({qc.red()},{qc.green()},{qc.blue()})"
-                for qc in legend_qcolors
-            ]
-
+            obj_cols = [f"rgb({qc.red()},{qc.green()},{qc.blue()})" for qc in legend_qcolors]
         elif obj_color == "Solid (Custom)":
             c = custom_col
             obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})"] * len(zs)
-
-        else:  # Solid (Red)
+        else:
             obj_cols = ["red"] * len(zs)
 
-        # ─── 9) Scatter objects (attach URLs) ────────────────────────
+        # ─── 9) Scatter objects ───────────────────────────────────────
         scatter = go.Scatter3d(
             x=world_xs, y=world_ys, z=zs,
             mode="markers",
@@ -45579,37 +45588,28 @@ class MainWindow(QMainWindow):
         fig = go.Figure(data=[plane] + lines + [scatter])
         scene = dict(
             xaxis_title="RA (deg)",
+            xaxis=dict(range=[ra_min, ra_max], autorange=False),
             yaxis_title="Dec (deg)",
-            yaxis=dict(autorange="reversed"),
-            aspectmode="manual", aspectratio=dict(x=1,y=1,z=z_height),
-            zaxis={}
+            yaxis=dict(range=[dec_max, dec_min], autorange=False),
+            aspectmode="manual",
+            aspectratio=dict(x=1, y=1, z=z_height),
+            zaxis=dict(
+                title=("log10(Distance in ly)" if z_scale=="Logarithmic" else "Distance (ly)"),
+                tickformat="~s",
+                **({"range": list(z_range)} if z_range else {}),
+                **({"autorange": "reversed"} if reverse_z else {})
+            )
         )
-        if z_range:
-            scene["zaxis"]["range"] = list(z_range)
-        if reverse_z:
-            scene["zaxis"]["autorange"] = "reversed"
-        scene["zaxis"]["title"] = (
-            "log10(Distance in ly)" if z_scale=="Logarithmic"
-            else "Distance (ly)"
-        )
-        scene["zaxis"]["tickformat"] = "~s"
-        fig.update_layout(
-            title="3D Distance Model",
-            autosize=True, scene=scene,
-            margin=dict(l=0,r=0,b=0,t=40)
-        )
+        fig.update_layout(title="3D Distance Model", autosize=True, scene=scene,
+                        margin=dict(l=0, r=0, b=0, t=40))
 
         # ─── 11) Build & inject HTML ─────────────────────────────────
         html = fig.to_html(include_plotlyjs="cdn", full_html=True)
-        items = "".join(
-            f'<li><a href="{u}" target="_blank">{n}</a></li>'
-            for n,u in zip(names, urls)
-        )
-        sidebar = (
-            '<div style="padding:10px;font-family:sans-serif;'
-            'margin-top:20px;border-top:1px solid #ccc;">'
-            '<h3>Objects</h3><ul>' + items + '</ul></div>'
-        )
+        items = "".join(f'<li><a href="{u}" target="_blank">{n}</a></li>'
+                        for n,u in zip(names, urls))
+        sidebar = ( '<div style="padding:10px;font-family:sans-serif;'
+                    'margin-top:20px;border-top:1px solid #ccc;">'
+                    '<h3>Objects</h3><ul>' + items + '</ul></div>' )
         js = """
         <script>
         var gd = document.getElementsByClassName('plotly-graph-div')[0];
@@ -45623,17 +45623,19 @@ class MainWindow(QMainWindow):
 
         # Save & preview
         default = os.path.expanduser("~/3d_distance_model.html")
-        fn,_ = QFileDialog.getSaveFileName(self,"Save 3D Plot As",
-                                        default,"HTML Files (*.html)")
+        fn,_ = QFileDialog.getSaveFileName(self, "Save 3D Plot As",
+                                        default, "HTML Files (*.html)")
         if fn:
             if not fn.lower().endswith(".html"):
                 fn += ".html"
-            with open(fn,"w",encoding="utf-8") as f:
+            with open(fn, "w", encoding="utf-8") as f:
                 f.write(html)
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html",
+                                        mode="w", encoding="utf-8")
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
+
 
     def show_hr_diagram(self):
         """H-R Diagram: B–V vs Abs V, ticks showing B–V and T_eff together, BB colors."""
@@ -47346,7 +47348,7 @@ class MainWindow(QMainWindow):
         }
 
         try:
-            resp = requests.get(sam_url, params=params, timeout=60)
+            resp = requests.get(sam_url, params=params, timeout=300)
             resp.raise_for_status()
 
             vot = parse_single_table(BytesIO(resp.content))
@@ -47385,12 +47387,19 @@ class MainWindow(QMainWindow):
             plx   = extra.get("PLX_VALUE")
             spec  = extra.get("SP_TYPE")
 
-            # override redshift → distance via parallax if available
-            if plx is not None and plx > 0:
-                dist_pc  = 1000.0 / plx
-                dist_ly  = dist_pc * 3.261563777
-                distance = round(dist_ly / 1e9, 6)
-                red_val  = plx
+            if plx is not None:
+                pv = abs(float(plx))          # <— absolute value here
+                if pv > 0:
+                    dist_pc  = 1000.0 / pv
+                    dist_ly  = dist_pc * 3.261563777
+                    # store comoving distance in Gyr for consistency with your zs_raw pipeline:
+                    distance = round(dist_ly / 1e9, 9)
+                    red_val  = pv              # use the positive parallax in the "redshift" column
+                else:
+                    # parallax was 0⇒ no distance
+                    red_val  = red_z if red_z is not None else "--"
+                    distance = (calculate_comoving_distance(red_val)
+                                if red_val != "--" else "N/A")
             else:
                 red_val  = red_z if red_z is not None else "--"
                 distance = (calculate_comoving_distance(red_val)
