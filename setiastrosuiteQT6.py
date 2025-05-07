@@ -12,6 +12,7 @@ import math
 from datetime import datetime
 from decimal import getcontext
 from urllib.parse import quote
+from urllib.parse import quote_plus
 import webbrowser
 import warnings
 import shutil
@@ -48,6 +49,7 @@ if sys.stdout is not None:
     sys.stdout.reconfigure(encoding='utf-8')
 
 from astropy.stats import sigma_clipped_stats
+from astropy.io.votable import parse_single_table
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
@@ -242,7 +244,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.9"
+VERSION = "2.15.10"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -372,7 +374,7 @@ class AstroEditingSuite(QMainWindow):
         self.image_manager = ImageManager(max_slots=10, parent=self)  # Initialize ImageManager
         self.mask_manager = self.image_manager.mask_manager
         self.image_manager.image_changed.connect(self.update_file_name)
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")  # Replace "Seti Astro" with your actual organization name
+        self.settings = QSettings()   # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
         self.preview_windows = {}
 
@@ -4842,7 +4844,7 @@ class AstroEditingSuite(QMainWindow):
                             self,
                             "Select Bit Depth",
                             "Choose bit depth for saving:",
-                            ["16-bit", "32-bit floating point"],
+                            ["32-bit floating point", "16-bit"],
                             0,
                             False
                         )
@@ -8059,7 +8061,7 @@ class StackingSuiteDialog(QDialog):
         self.deleted_calibrated_files = []
 
         # QSettings for your app
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.settings = QSettings() 
         
 
         # Load or default these
@@ -28978,7 +28980,6 @@ class BatchProcessDialog(QDialog):
         self.status_label.setText(message)
         QApplication.processEvents()  # Ensures UI updates immediately
 
-
 class MetricsPanel(QWidget):
     """2×2 grid with clickable dots and draggable thresholds."""
     pointClicked = pyqtSignal(int, int)
@@ -29200,13 +29201,26 @@ class MetricsPanel(QWidget):
             scat.setData(x=x, y=y, brush=brushes)
 
     def _on_point_click(self, metric_idx, points):
+        """
+        If the user Shift-clicks a point, open the ImagePreviewDialog.
+        Otherwise emit pointClicked as before.
+        """
         for pt in points:
-            fi = int(round(pt.pos().x()))
-            self.pointClicked.emit(metric_idx, fi)
+            frame_idx = int(round(pt.pos().x()))
+            mods = QApplication.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                # open preview dialog
+                entry = self._orig_images[frame_idx]
+                img = entry['image_data']
+                is_mono = entry.get('is_mono', False)
+                dlg = ImagePreviewDialog(img, is_mono)
+                dlg.exec()
+            else:
+                # normal click: flag/unflag
+                self.pointClicked.emit(metric_idx, frame_idx)
 
     def _on_line_move(self, metric_idx, line):
         self.thresholdChanged.emit(metric_idx, line.value())
-
 
 class MetricsWindow(QWidget):
     def __init__(self, parent=None):
@@ -29217,28 +29231,56 @@ class MetricsWindow(QWidget):
 
         vbox = QVBoxLayout(self)
 
-        # ─── group selector ─────────────
+        # ← **new** instructions label
+        instr = QLabel(
+            "Instructions:\n"
+            " • Use the filter dropdown to restrict by FILTER.\n"
+            " • Click a dot to flag/unflag a frame.\n"
+            " • Shift-click a dot to preview the image.\n"
+            " • Drag the red lines to set thresholds.",
+            self
+        )
+        instr.setWordWrap(True)
+        instr.setStyleSheet("color: #ccc; font-size: 12px;")
+        vbox.addWidget(instr)
+
+        # → filter selector
         self.group_combo = QComboBox(self)
         self.group_combo.addItem("All")
         self.group_combo.currentTextChanged.connect(self._on_group_change)
         vbox.addWidget(self.group_combo)
 
-        # ─── the 2×2 panel ─────────────
+        # → the 2×2 metrics panel
         self.metrics_panel = MetricsPanel(self)
         vbox.addWidget(self.metrics_panel)
 
-        # internal storage of the full list
+        # keep status up‐to‐date when things happen
+        self.metrics_panel.thresholdChanged.connect(self._update_status)
+        self.metrics_panel.pointClicked   .connect(self._update_status)
+
+        # ← status label
+        self.status_label = QLabel("", self)
+        vbox.addWidget(self.status_label)
+
+        # internal storage
         self._all_images: list[dict] = []
         self._current_indices: list[int] | None = None
 
-        # connect panel’s thresholdChanged to our handler
-        self.metrics_panel.thresholdChanged.connect(self._on_panel_threshold_change)
+    def _update_status(self, *args):
+        """Recompute and show: Flagged Items X / Y (Z%)."""
+        flags = getattr(self.metrics_panel, 'flags', []) or []
+        # which subset are we in?
+        idxs = self._current_indices if self._current_indices is not None else range(len(flags))
+        total = len(idxs)
+        flagged = sum(flags[i] for i in idxs)
+        pct = (flagged/total*100) if total else 0.0
+        self.status_label.setText(f"Flagged Items {flagged}/{total}  ({pct:.1f}%)")
 
     def set_images(self, loaded_images: list[dict]):
         """Initialize with a brand-new set of images."""
         self._all_images = loaded_images
 
-        # rebuild the combo-list of FILTER groups
+        # ─── rebuild the combo-list of FILTER groups ─────────────
         self.group_combo.blockSignals(True)
         self.group_combo.clear()
         self.group_combo.addItem("All")
@@ -29250,7 +29292,7 @@ class MetricsWindow(QWidget):
                 self.group_combo.addItem(filt)
         self.group_combo.blockSignals(False)
 
-        # reset & seed per-group thresholds
+        # ─── reset & seed per-group thresholds ────────────────────
         self._thresholds_per_group.clear()
         self._thresholds_per_group["All"] = [None]*4
         for entry in loaded_images:
@@ -29258,13 +29300,17 @@ class MetricsWindow(QWidget):
             if filt not in self._thresholds_per_group:
                 self._thresholds_per_group[filt] = [None]*4
 
-        # compute & cache all metrics once
+        # ─── compute & cache all metrics once ────────────────────
         self.metrics_panel.compute_all_metrics(self._all_images)
 
-        # show “All” by default
+        # ─── show “All” by default and plot ───────────────────────
         self._current_indices = None
         self._apply_thresholds("All")
         self.metrics_panel.plot(self._all_images, indices=None)
+
+        # ─── update the flagged-items status label ───────────────
+        self._update_status()
+
 
     def _on_group_change(self, name: str):
         """Re-plot for the selected FILTER group."""
@@ -29309,7 +29355,6 @@ class MetricsWindow(QWidget):
         else:
             # same list, just redraw current selection
             self._on_group_change(self.group_combo.currentText())
-
 
 class BlinkTab(QWidget):
     def __init__(self, image_manager=None):
@@ -29424,6 +29469,11 @@ class BlinkTab(QWidget):
             """)
         left_layout.addWidget(self.fileTree)
 
+        # "Clear Flags" Button
+        self.clearFlagsButton = QPushButton('Clear Flags', self)
+        self.clearFlagsButton.clicked.connect(self.clearFlags)
+        left_layout.addWidget(self.clearFlagsButton)
+
         # "Clear Images" Button
         self.clearButton = QPushButton('Clear Images', self)
         self.clearButton.clicked.connect(self.clearImages)
@@ -29503,6 +29553,27 @@ class BlinkTab(QWidget):
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def clearFlags(self):
+        """Clear all flagged states, update tree icons & metrics."""
+        # 1) Reset internal flag state
+        for entry in self.loaded_images:
+            entry['flagged'] = False
+
+        # 2) Update tree widget: strip any "⚠️ " prefix and reset color
+        normal = self.fileTree.palette().color(QPalette.ColorRole.WindowText)
+        for item in self.get_all_leaf_items():
+            name = item.text(0).lstrip("⚠️ ")
+            item.setText(0, name)
+            item.setForeground(0, QBrush(normal))
+
+        # 3) If metrics window is open, refresh its dots & status
+        if self.metrics_window:
+            panel = self.metrics_window.metrics_panel
+            panel.flags = [False] * len(self.loaded_images)
+            panel._refresh_scatter_colors()
+            # update the "Flagged Items X/Y" label
+            self.metrics_window._update_status()
+
     def show_metrics(self):
         if self.metrics_window is None:
             self.metrics_window = MetricsWindow()
@@ -29528,6 +29599,7 @@ class BlinkTab(QWidget):
         panel = self.metrics_window.metrics_panel
         panel.flags = [entry['flagged'] for entry in self.loaded_images]
         panel._refresh_scatter_colors()
+        self.metrics_window._update_status()
 
 
     def on_threshold_change(self, metric_idx, threshold):
@@ -29582,6 +29654,7 @@ class BlinkTab(QWidget):
         # now push the *entire* up-to-date flagged list into the panel
         panel.flags = [e['flagged'] for e in self.loaded_images]
         panel._refresh_scatter_colors()
+        self.metrics_window._update_status()
 
 
 
@@ -29700,153 +29773,149 @@ class BlinkTab(QWidget):
             self.metrics_window.update_metrics([])
 
 
-    def loadImages(self, file_paths):
-        mem = psutil.virtual_memory()
-        total_gb     = mem.total     / (1024**3)
-        available_gb = mem.available / (1024**3)
+    @staticmethod
+    def _load_one_image(file_path: str, target_dtype):
+        """Load + pre-process one image & return all metadata."""
 
-        if available_gb <= 16:
-            target_dtype = np.uint8        # ~1 byte/pixel
-        elif available_gb <= 32:
-            target_dtype = np.uint16       # ~2 bytes/pixel
+        # 1) load
+        image, header, bit_depth, is_mono = load_image(file_path)
+        if image is None or image.size == 0:
+            raise ValueError("Empty image")
+
+        # 2) optional debayer
+        if is_mono:
+            # adjust this call to match your debayer signature
+            image = BlinkTab.debayer_image(image, file_path, header)
+
+        # 3) SEP background on mono float32
+        data = np.asarray(image, dtype=np.float32, order='C')
+        if data.ndim == 3:
+            data = data.mean(axis=2)
+        bkg = sep.Background(data)
+        global_back = bkg.globalback
+
+        # 4) stretch
+        target_med = 0.25
+        if image.ndim == 2:
+            stretched = stretch_mono_image(image, target_med)
         else:
-            target_dtype = np.float32      # ~4 bytes/pixel     
+            stretched = stretch_color_image(image, target_med, linked=False)
 
-        # ── DEBUG PRINT ────────────────────────────────────────────────────
-        print(f"[DEBUG] RAM: total={total_gb:.1f} GiB, available={available_gb:.1f} GiB → using {target_dtype}")
-        # ─────────────────────────────────────────────────────────────────── 
-        """Load images from the provided file paths and update the tree view."""
+        # 5) cast to target_dtype
+        clipped = np.clip(stretched, 0.0, 1.0)
+        if target_dtype is np.uint8:
+            stored = (clipped * 255).astype(np.uint8)
+        elif target_dtype is np.uint16:
+            stored = (clipped * 65535).astype(np.uint16)
+        else:
+            stored = clipped.astype(np.float32)
+
+        return file_path, header, bit_depth, is_mono, stored, global_back
+
+    @staticmethod
+    def debayer_image(image, file_path, header):
+        """Check if image is OSC (One-Shot Color) and debayer if required."""
+        if file_path.lower().endswith(('.fits', '.fit')):
+            bayer_pattern = header.get('BAYERPAT', None)
+            if bayer_pattern:
+                image = debayer_fits_fast(image, bayer_pattern)
+        elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
+            image = debayer_raw_fast(image, bayer_pattern="RGGB")
+        return image
+
+    def loadImages(self, file_paths):
+        # 0) early out
         if not file_paths:
             return
 
-        # Append new image paths
-        self.image_paths.extend(file_paths)
+        # 1) decide dtype by RAM
+        mem = psutil.virtual_memory()
+        avail = mem.available / (1024**3)
+        if avail <= 16:
+            target_dtype = np.uint8
+        elif avail <= 32:
+            target_dtype = np.uint16
+        else:
+            target_dtype = np.float32
 
-        # Dictionary to store images grouped by filter and exposure time
-        grouped_images = {}
+        total = len(file_paths)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
 
-        # Load the images into memory (storing both file path and image data)
-        total_files = len(file_paths)
+        # clear old data & tree
+        self.image_paths.clear()
+        self.loaded_images.clear()
+        self.fileTree.clear()
 
-        for index, file_path in enumerate(file_paths):
-            try:
-                image, header, bit_depth, is_mono = load_image(file_path)
-            except Exception as e:
-                print(f"Failed to load image {file_path}: {e}")
-                continue
+        # 2) schedule all loads in a process pool
+        grouped = {}  # map (obj, filt, exp) -> [paths]
+        futures = {}
+        with ProcessPoolExecutor(max_workers=os.cpu_count() or 1) as exe:
+            for p in file_paths:
+                futures[exe.submit(self._load_one_image, p, target_dtype)] = p
 
-            # Check if the image is None or empty and skip if so.
-            if image is None or image.size == 0:
-                print(f"Image {file_path} is None or empty. Skipping file.")
-                continue
+            done = 0
+            for fut in as_completed(futures):
+                try:
+                    path, header, bit_depth, is_mono, stored, back = fut.result()
+                except Exception as e:
+                    print(f"[WARN] {futures[fut]} load failed: {e}")
+                    continue
 
-            # Debayer the image if needed (for non-mono images)
-            if is_mono:
-                image = self.debayer_image(image, file_path, header)
+                # register
+                self.image_paths.append(path)
+                entry = {
+                    'file_path': path,
+                    'image_data': stored,
+                    'header': header,
+                    'bit_depth': bit_depth,
+                    'is_mono': is_mono,
+                    'flagged': False,
+                    'orig_background': back
+                }
+                self.loaded_images.append(entry)
 
-            # ─── 3) Compute pre-stretch background ───────────────────
-            # Work in float32, mono
-            data = np.asarray(image, dtype=np.float32, order='C')
-            if data.ndim == 3:
-                data = data.mean(axis=2)
-            bkg = sep.Background(data)
-            global_back = bkg.globalback
+                # grouping key
+                obj  = header.get('OBJECT','Unknown')
+                filt = header.get('FILTER','Unknown')
+                exp  = header.get('EXPOSURE','Unknown')
+                grouped.setdefault((obj,filt,exp), []).append(path)
 
-            # Stretch the image now while loading it
-            target_median = 0.25
-            if image.ndim == 2:  # Mono image
-                stretched_image = stretch_mono_image(image, target_median)
-            else:  # Color image
-                stretched_image = stretch_color_image(image, target_median, linked=False)
+                # bump progress
+                done += 1
+                pct = int(100*done/total)
+                self.progress_bar.setValue(pct)
+                QApplication.processEvents()
 
-            # ─── now down-cast into target_dtype ────────────────────────────
-            stretched = np.clip(stretched_image, 0.0, 1.0)
-            if target_dtype is np.uint8:
-                stored = (stretched * np.iinfo(np.uint8).max).astype(np.uint8)
-            elif target_dtype is np.uint16:
-                stored = (stretched * np.iinfo(np.uint16).max).astype(np.uint16)
-            else:
-                stored = stretched.astype(np.float32)
-            # ────────────────────────────────────────────────────────────────
-            
-            # Append the stretched image data
-            self.loaded_images.append({
-                'file_path': file_path,
-                'image_data': stored,
-                'header': header,
-                'bit_depth': bit_depth,
-                'is_mono': is_mono,
-                'flagged': False,
-                'orig_background': global_back
-            })
+        # 3) rebuild the tree exactly like your original code
+        #    group first by object, then filter, then exposure
+        by_object = {}
+        for (obj,filt,exp), paths in grouped.items():
+            by_object.setdefault(obj, {}) \
+                     .setdefault(filt, {})[exp] = paths
 
-            # Safely extract filter and exposure time from FITS header if available
-            object_name = header.get('OBJECT', 'Unknown') if header else 'Unknown'
-            filter_name = header.get('FILTER', 'Unknown') if header else 'Unknown'
-            exposure_time = header.get('EXPOSURE', 'Unknown') if header else 'Unknown'
+        for obj, filters in by_object.items():
+            obj_item = QTreeWidgetItem([f"Object: {obj}"])
+            self.fileTree.addTopLevelItem(obj_item)
+            obj_item.setExpanded(True)
+            for filt, exps in filters.items():
+                filt_item = QTreeWidgetItem([f"Filter: {filt}"])
+                obj_item.addChild(filt_item)
+                filt_item.setExpanded(True)
+                for exp, paths in exps.items():
+                    exp_item = QTreeWidgetItem([f"Exposure: {exp}"])
+                    filt_item.addChild(exp_item)
+                    exp_item.setExpanded(True)
+                    for p in paths:
+                        leaf = QTreeWidgetItem([os.path.basename(p)])
+                        exp_item.addChild(leaf)
 
-            # Group images by filter and exposure time
-            group_key = (object_name, filter_name, exposure_time)
-            if group_key not in grouped_images:
-                grouped_images[group_key] = []
-            grouped_images[group_key].append(file_path)
-
-            # Update progress bar
-            progress = int((index + 1) / total_files * 100)
-            self.progress_bar.setValue(progress)
-            QApplication.processEvents()  # Ensure the UI updates in real-time
-        if self.metrics_window is not None and self.metrics_window.isVisible():
-            self.metrics_window.update_metrics(self.loaded_images)
-
-        print(f"Loaded {len(self.loaded_images)} images into memory.")
+        # 4) finalize UI
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
-
-        # Optionally, reset the progress bar and loading message when done
         self.progress_bar.setValue(100)
-        self.loading_label.setText("Loading complete.")
-
-        # Display grouped images in the tree view
-        grouped_by_object = {}
-
-        # First, group by object_name
-        for (object_name, filter_name, exposure_time), paths in grouped_images.items():
-            if object_name not in grouped_by_object:
-                grouped_by_object[object_name] = {}
-            if filter_name not in grouped_by_object[object_name]:
-                grouped_by_object[object_name][filter_name] = {}
-            if exposure_time not in grouped_by_object[object_name][filter_name]:
-                grouped_by_object[object_name][filter_name][exposure_time] = []
-            grouped_by_object[object_name][filter_name][exposure_time].extend(paths)
-
-        # Now, create the tree structure
-        for object_name, filters in grouped_by_object.items():
-            # Check if object already exists in the tree
-            object_item = self.findTopLevelItemByName(f"Object: {object_name}")
-            if not object_item:
-                object_item = QTreeWidgetItem([f"Object: {object_name}"])
-                self.fileTree.addTopLevelItem(object_item)
-                object_item.setExpanded(True)  # Expand the object item
-
-            for filter_name, exposures in filters.items():
-                # Check if filter already exists under the object
-                filter_item = self.findChildItemByName(object_item, f"Filter: {filter_name}")
-                if not filter_item:
-                    filter_item = QTreeWidgetItem([f"Filter: {filter_name}"])
-                    object_item.addChild(filter_item)
-                    filter_item.setExpanded(True)  # Expand the filter item
-
-                for exposure_time, paths in exposures.items():
-                    # Check if exposure exists under the filter
-                    exposure_item = self.findChildItemByName(filter_item, f"Exposure: {exposure_time}")
-                    if not exposure_item:
-                        exposure_item = QTreeWidgetItem([f"Exposure: {exposure_time}"])
-                        filter_item.addChild(exposure_item)
-                        exposure_item.setExpanded(True)  # Expand the exposure item
-
-                    for file_path in paths:
-                        file_name = os.path.basename(file_path)
-                        item = QTreeWidgetItem([file_name])
-                        exposure_item.addChild(item)
+        if self.metrics_window and self.metrics_window.isVisible():
+            self.metrics_window.update_metrics(self.loaded_images)
 
     def findTopLevelItemByName(self, name):
         """Find a top-level item in the tree by its name."""
@@ -29989,27 +30058,6 @@ class BlinkTab(QWidget):
         else:
             QMessageBox.information(self, "No New Images", "No new images were selected or all selected images are already loaded.")
 
-
-    def debayer_image(self, image, file_path, header):
-        """Check if image is OSC (One-Shot Color) and debayer if required."""
-        # Check for OSC (Bayer pattern in FITS or RAW data)
-        if file_path.lower().endswith(('.fits', '.fit')):
-            # Check if the FITS header contains BAYERPAT (Bayer pattern)
-            bayer_pattern = header.get('BAYERPAT', None)
-            if bayer_pattern:
-                print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
-                # Apply debayering logic for FITS
-                image = debayer_fits_fast(image, bayer_pattern)
-            else:
-                print(f"No Bayer pattern found in FITS header: {file_path}")
-        elif file_path.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-            # If it's RAW (Bayer pattern detected), debayer it
-            print(f"Debayering RAW image: {file_path}")
-            # Apply debayering to the RAW image (assuming debayer_raw exists)
-            image = debayer_raw_fast(image, bayer_pattern="RGGB")
-
-        
-        return image
 
     def debayer_fits(self, image_data, bayer_pattern):
         """Debayer a FITS image using a basic Bayer pattern (2x2)."""
@@ -30664,8 +30712,6 @@ class BlinkTab(QWidget):
             # grayscale
             return QImage(buffer, w, h, w, QImage.Format.Format_Grayscale8)
 
-
-
 class CosmicClarityTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -30686,7 +30732,7 @@ class CosmicClarityTab(QWidget):
         self.preview_end_position = None
         self.preview_rect = None  # Stores the preview selection rectangle
         self.autostretch_enabled = False  # Track autostretch status
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.settings = QSettings() 
         self.cosmic_clarity_folder = None
         self.cropped_operation_queue = []
         self.image = None
@@ -32562,7 +32608,6 @@ class WaitDialog(QDialog):
     def set_progress(self, pct):
         self.progress_bar.setValue(pct)        
 
-
 class WaitForFileWorker(QThread):
     fileFound = pyqtSignal(str)
     cancelled = pyqtSignal()
@@ -32601,7 +32646,7 @@ class CosmicClaritySatelliteTab(QWidget):
         self.file_watcher = QFileSystemWatcher()  # Watcher for input and output folders
         self.file_watcher.directoryChanged.connect(self.on_folder_changed)  # Connect signal
         self.sensitivity = 0.1
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.settings = QSettings() 
         self.initUI()
         self.load_cosmic_clarity_folder()
 
@@ -33253,8 +33298,6 @@ class ImagePreviewDialog(QDialog):
         super().resizeEvent(event)
         self.display_qimage(self.np_image)
 
-
-
 class SatelliteProcessingThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
@@ -33274,7 +33317,6 @@ class SatelliteProcessingThread(QThread):
             self.log_signal.emit(f"Unexpected error: {e}")
         finally:
             self.finished_signal.emit()  # Emit the finished signal            
-
 
 class StatisticalStretchTab(QWidget):
     def __init__(self, image_manager=None):
@@ -33842,8 +33884,6 @@ class StatisticalStretchTab(QWidget):
         else:
             self.fileLabel.setText('No stretched image to save. Please generate a preview first.')
 
-
-
 # Thread for Stat Stretch background processing
 class StatisticalStretchProcessingThread(QThread):
     preview_generated = pyqtSignal(np.ndarray)  # Signal to send the generated preview image back to the main thread
@@ -33866,8 +33906,6 @@ class StatisticalStretchProcessingThread(QThread):
 
         # Emit the result once done
         self.preview_generated.emit(stretched_image)
-
-
 
 # Thread for star stretch background processing
 class ProcessingThread(QThread):
@@ -43059,12 +43097,7 @@ CATEGORY_TO_COLOR = {
     "Errors & Artefacts":           QColor(128, 128, 128),  # gray
 }
 
-# Configure Simbad to include the necessary fields, including redshift
-try:
-    from astroquery.simbad import Simbad
-    Simbad.add_votable_fields('otype', 'otypes', 'diameter', 'z_value')
-except Exception as e:
-    print("Warning: SIMBAD service is currently unavailable. SIMBAD-dependent features may be disabled.")
+
 
 Simbad.ROW_LIMIT = 0  # Remove row limit for full results
 Simbad.TIMEOUT = 60  # Increase timeout for long queries
@@ -44335,6 +44368,33 @@ class LegendDialog(QDialog):
             sw = self.swatches[category]
             sw.setStyleSheet(f"background-color: {c.name()}; border:1px solid #000;")
 
+def kelvin_to_rgb(T):
+    """Approximate conversion from black‐body temperature (K) to sRGB tuple."""
+    # based on Tanner Helland's approximation
+    # Clamp input
+    T = max(1000, min(T, 40000)) / 100.0
+    # red
+    if T <= 66:
+        r = 255
+    else:
+        r = 329.698727446 * ((T - 60) ** -0.1332047592)
+    # green
+    if T <= 66:
+        g = 99.4708025861 * math.log(T) - 161.1195681661
+    else:
+        g = 288.1221695283 * ((T - 60) ** -0.0755148492)
+    # blue
+    if T >= 66:
+        b = 255
+    elif T <= 19:
+        b = 0
+    else:
+        b = 138.5177312231 * math.log(T - 10) - 305.0447927307
+
+    # clamp and return CSS‐style rgb()
+    def clamp(x): return int(max(0, min(x, 255)))
+    return f"rgb({clamp(r)},{clamp(g)},{clamp(b)})"
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -44350,7 +44410,7 @@ class MainWindow(QMainWindow):
         self.current_tool = None  # Track the active annotation tool
         self.header = Header()
         self.marker_style = "Circle" 
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.settings = QSettings() 
             
 
         main_layout = QHBoxLayout()
@@ -44571,8 +44631,15 @@ class MainWindow(QMainWindow):
         # New 3D View Button
         self.show_3d_view_button = QPushButton("3D Distance Model")
         self.show_3d_view_button.clicked.connect(self.show_3d_model_view)
+        self.show_3d_view_button.setIcon(    QApplication.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarNormalButton))
         save_buttons_layout.addWidget(self.show_3d_view_button)
 
+        self.show_hr_button = QPushButton("H-R Diagram")
+        # Optionally give it an icon:
+        self.show_hr_button.setIcon(QApplication.style().standardIcon(
+            QStyle.StandardPixmap.SP_DesktopIcon))
+        self.show_hr_button.clicked.connect(self.show_hr_diagram)
+        save_buttons_layout.addWidget(self.show_hr_button)
 
         right_panel.addLayout(save_buttons_layout)        
 
@@ -45567,8 +45634,129 @@ class MainWindow(QMainWindow):
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
 
+    def show_hr_diagram(self):
+        """H-R Diagram: B–V vs Abs V, ticks showing B–V and T_eff together, BB colors."""
+        # 1) Sanity
+        if not getattr(self, 'query_results', None):
+            QMessageBox.information(self, "No Data",
+                "Run a SIMBAD query first to gather B, V, and distance data.")
+            return
 
+        # 2) Collect data
+        B, V, Mv, names = [], [], [], []
+        for obj in self.query_results:
+            try:
+                b = float(obj['Bmag'])
+                v = float(obj['Vmag'])
+                m = float(obj['absolute_mag'])
+            except (TypeError, ValueError, KeyError):
+                continue
+            B.append(b); V.append(v); Mv.append(m); names.append(obj['name'])
+        if not B:
+            QMessageBox.warning(self, "Insufficient Data",
+                "No objects have valid B-mag, V-mag and absolute magnitude.")
+            return
 
+        # 3) Compute B−V & T_eff & colors
+        bv = [b - v for b, v in zip(B, V)]
+        T_eff = [4600.0 * (1/(0.92*x + 1.7) + 1/(0.92*x + 0.62)) for x in bv]
+        colors = [kelvin_to_rgb(T) for T in T_eff]
+
+        # 4) Prepare hover & URLs, now including T_eff
+        hover_texts, urls = [], []
+        for nm, b, v, m, T in zip(names, B, V, Mv, T_eff):
+            hover_texts.append(
+                f"<b>{nm}</b><br>"
+                f"B: {b:.2f}  V: {v:.2f}<br>"
+                f"Abs V: {m:.2f}<br>"
+                f"Tₑff: {T:.0f} K"
+            )
+            enc = urllib.parse.quote(nm)
+            urls.append(
+                f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
+                f"Ident={enc}&submit=SIMBAD+search"
+            )
+
+        # 5) Scatter with bigger markers
+        scatter = go.Scatter(
+            x=bv, y=Mv, mode='markers',
+            marker_color=colors, marker_size=20,
+            hovertext=hover_texts, customdata=urls,
+            name="Stars"
+        )
+        fig = go.Figure(scatter)
+
+        # 6) Build custom tick labels combining B–V & T_eff
+        # choose nice tick positions
+        bv_ticks = [-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+        # compute corresponding T
+        t_ticks = [4600.0*(1/(0.92*x+1.7)+1/(0.92*x+0.62)) for x in bv_ticks]
+        # build two-line labels
+        tick_labels = [f"{x:.2f}<br>{int(t):,} K" for x,t in zip(bv_ticks, t_ticks)]
+
+        # 7) Style axes & background
+        fig.update_layout(
+            title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
+            plot_bgcolor='black',
+            paper_bgcolor='black',
+            margin=dict(l=40, r=20, t=60, b=60)
+        )
+        fig.update_xaxes(
+            title_text="B−V color (mag) ↔ Tₑff",
+            tickvals=bv_ticks,
+            ticktext=tick_labels,
+            tickfont_color='white',
+            title_font=dict(color='white'),
+            gridcolor='gray',
+            zerolinecolor='gray',
+            range=[-0.5, 2.5]
+        )
+        fig.update_yaxes(
+            title_text="Absolute V magnitude (mag)",
+            autorange='reversed',
+            tickfont_color='white',
+            title_font=dict(color='white'),
+            gridcolor='gray',
+            zerolinecolor='gray'
+        )
+
+        # 8) Sidebar & click behaviour
+        items = "".join(
+            f'<li><a href="{u}" style="color:cyan" target="_blank">{n}</a></li>'
+            for n,u in zip(names, urls)
+        )
+        sidebar = (
+            '<div style="padding:10px;font-family:sans-serif;'
+            'margin-top:10px;border-top:1px solid #444; background:black; color:white;">'
+            '<h3>Objects</h3><ul>' + items + '</ul></div>'
+        )
+        js = """
+        <script>
+        var gd = document.getElementsByClassName('plotly-graph-div')[0];
+        gd.on('plotly_click', function(e){
+            var url = e.points[0].customdata;
+            if(url) window.open(url,'_blank');
+        });
+        </script>
+        """
+
+        html = fig.to_html(include_plotlyjs='cdn', full_html=True)
+        html = html.replace("</body>", sidebar + js + "</body>")
+
+        # 9) Save & preview
+        default = os.path.join(os.path.expanduser("~"), "hr_diagram.html")
+        fn, _ = QFileDialog.getSaveFileName(self, "Save H-R Diagram As",
+                                            default, "HTML Files (*.html)")
+        if fn:
+            if not fn.lower().endswith('.html'):
+                fn += '.html'
+            with open(fn, 'w', encoding='utf-8') as f:
+                f.write(html)
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.html',
+                                        mode='w', encoding='utf-8')
+        tmp.write(html); tmp.close()
+        webbrowser.open("file://" + tmp.name)
     
     def search_defined_region(self):
         """Perform a Simbad search for the defined region and filter by selected object types."""
@@ -47065,152 +47253,184 @@ class MainWindow(QMainWindow):
 
 
     def query_simbad(self, radius_deg, max_results=None):
-        """Query Simbad based on the defined search circle using a single ADQL query, with filtering by selected types."""
-            # If max_results is not provided, use the value from settings
+        """Two-step SIMBAD lookup with debug prints for flux/plx/sp data."""
         max_results = max_results if max_results is not None else self.max_results
-        # Check if the circle center and radius are defined
+
+        # ——— 1) Validate inputs ———
         if not self.circle_center or self.circle_radius <= 0:
-            QMessageBox.warning(self, "No Search Area", "Please define a search circle by Shift-clicking and dragging.")
+            QMessageBox.warning(self, "No Search Area",
+                                "Please define a search circle by Shift-clicking and dragging.")
             return
 
-        # Calculate RA, Dec, and radius in degrees from pixel coordinates
-        ra_center, dec_center = self.calculate_ra_dec_from_pixel(self.circle_center.x(), self.circle_center.y())
+        ra_center, dec_center = self.calculate_ra_dec_from_pixel(
+            self.circle_center.x(), self.circle_center.y()
+        )
         if ra_center is None or dec_center is None:
-            QMessageBox.warning(self, "Invalid Coordinates", "Could not determine the RA/Dec of the circle center.")
+            QMessageBox.warning(self, "Invalid Coordinates",
+                                "Could not determine the RA/Dec of the circle center.")
             return
 
-        # Convert radius from arcseconds to degrees
-        radius_deg = radius_deg
-
-        # Get selected types from the tree widget
         selected_types = self.get_selected_object_types()
         if not selected_types:
-            QMessageBox.warning(self, "No Object Types Selected", "Please select at least one object type.")
+            QMessageBox.warning(self, "No Object Types Selected",
+                                "Please select at least one object type.")
             return
 
-        # Build ADQL query
+        # ——— 2) TAP query on BASIC ———
         query = f"""
-            SELECT TOP {max_results} ra, dec, main_id, rvz_redshift, otype, galdim_majaxis
+            SELECT TOP {max_results}
+                ra, dec, main_id,
+                rvz_redshift, otype, galdim_majaxis
             FROM basic
-            WHERE CONTAINS(POINT('ICRS', basic.ra, basic.dec), CIRCLE('ICRS', {ra_center}, {dec_center}, {radius_deg})) = 1
+            WHERE CONTAINS(
+                POINT('ICRS', basic.ra, basic.dec),
+                CIRCLE('ICRS', {ra_center}, {dec_center}, {radius_deg})
+            ) = 1
         """
+        for attempt in range(5):
+            try:
+                result = Simbad.query_tap(query)
+                break
+            except Exception as e:
+                if attempt < 4:
+                    time.sleep(1)
+                else:
+                    QMessageBox.critical(
+                        self,
+                        "Query Failed",
+                        f"Try again later:\n{e}"
+            )
+
+        if result is None or len(result) == 0:
+            QMessageBox.information(self, "No Results",
+                                    "No objects found in the specified area.")
+            return
+
+        # ——— 3a) list of all “star” & binary/variable OTYPE codes ———
+        star_codes = [
+            "*","V*","Pe*","HB*","Y*O","Ae*","Em*","Be*","BS*","RG*","AB*",
+            "C*","S*","sg*","s*r","s*y","s*b","HS*","pA*","WD*","LM*","BD*",
+            "N*","OH*","TT*","WR*","PM*","HV*","C?*","Pec?","Y*?","TT?","C*?",
+            "S*?","OH?","WR?","Be?","Ae?","HB?","RB?","sg?","s?r","s?y","s?b",
+            "pA?","BS?","HS?","WD?",
+            "**","EB*","Ce*","Ce?","cC*","**?",
+            "EB?","Sy?","CV?","No?","XB?","LX?","HX?","RR?","WV?","LP?","Mi?"
+        ]
+
+        # 3b) build the two sub-criteria, un-encoded:
+        ra_str  = f"{ra_center:.8f}"
+        dec_str = f"{dec_center:+.8f}"   # keep the +/– sign
+        rad_str = f"{radius_deg:.8f}d"
+
+        region_crit = f"region(CIRCLE,{ra_str} {dec_str},{rad_str})"
+        codes_list  = ",".join(f"'{c}'" for c in star_codes)
+        otype_crit  = f"otypes in ({codes_list})"
+
+        # combine with a literal '&' (not "AND")
+        criteria = f"{region_crit}&{otype_crit}"
+
+        # ——— 3c) fetch _only_ those via sim-sam ———
+        sam_url = "https://simbad.cds.unistra.fr/simbad/sim-sam"
+        params = {
+            "Criteria":      criteria,
+            "OutputMode":    "LIST",
+            "maxObject":     str(max_results),
+            "output.format": "votable",
+            "output.params": ",".join([
+                "MAIN_ID","RA","DEC",
+                "FLUX(B)","FLUX(V)",
+                "PLX_VALUE","RVZ_REDSHIFT",
+                "OTYPE","SP_TYPE"
+            ])
+        }
 
         try:
-            # Execute the query using Simbad's TAP service
-            result = Simbad.query_tap(query)
+            resp = requests.get(sam_url, params=params, timeout=60)
+            resp.raise_for_status()
 
-            # Clear previous results in the tree
-            self.results_tree.clear()
-            query_results = []
-
-            if result is None or len(result) == 0:
-                QMessageBox.information(self, "No Results", "No objects found in the specified area.")
-                return
-
-            # Process and display results, filtering by selected types
-            for row in result:
-                short_type = row["otype"]
-                if short_type not in selected_types:
-                    continue  # Skip items not in selected types
-
-                # Retrieve other data fields
-                ra = row["ra"]
-                dec = row["dec"]
-                main_id = row["main_id"]
-                redshift = row["rvz_redshift"] if row["rvz_redshift"] is not None else "--"
-                diameter = row.get("galdim_majaxis", "N/A")
-                comoving_distance = calculate_comoving_distance(float(redshift)) if redshift != "--" else "N/A"
-
-                # Map short type to long type
-                long_type = otype_long_name_lookup.get(short_type, short_type)
-
-                # Add to TreeWidget
-                item = QTreeWidgetItem([
-                    f"{ra:.6f}", f"{dec:.6f}", main_id, str(diameter), short_type, long_type, str(redshift), str(comoving_distance)
-                ])
-                self.results_tree.addTopLevelItem(item)
-
-                # Append full details as a dictionary to query_results
-                query_results.append({
-                    'ra': ra,
-                    'dec': dec,
-                    'name': main_id,
-                    'diameter': diameter,
-                    'short_type': short_type,
-                    'long_type': long_type,
-                    'redshift': redshift,
-                    'comoving_distance': comoving_distance,
-                    'source' : "Simbad"
-                })
-
-            # Set query results in the CustomGraphicsView for display
-            self.main_preview.set_query_results(query_results)
-            self.query_results = query_results  # Keep a reference to results in MainWindow
-            self.update_object_count()
+            vot = parse_single_table(BytesIO(resp.content))
+            tbl = vot.to_table(use_names_over_ids=True)
+            extras = { row["MAIN_ID"]: row for row in tbl }
 
         except Exception as e:
-            # Fallback to legacy region query if TAP fails
-            try:
-                QMessageBox.warning(self, "Query Failed", f"TAP service failed, falling back to legacy region query. Error: {str(e)}")
-                
-                # Legacy region query fallback
-                coord = SkyCoord(ra_center, dec_center, unit="deg")
-                legacy_result = Simbad.query_region(coord, radius=radius_deg * u.deg)
+            print(f"DEBUG: sim-sam failed: {e}")
+            QMessageBox.warning(
+                self,
+                "Star-only Extras Failed",
+                "Could not fetch star flux/parallax—continuing without them."
+            )
+            extras = {}
 
-                if legacy_result is None or len(legacy_result) == 0:
-                    QMessageBox.information(self, "No Results", "No objects found in the specified area (fallback query).")
-                    return
+        # ——— 4) Merge & populate results_tree exactly as before ———
+        self.results_tree.clear()
+        query_results = []
 
-                # Process legacy query results
-                query_results = []
-                self.results_tree.clear()
+        for row in result:
+            name       = row["main_id"]
+            short_type = row["otype"]
+            if short_type not in selected_types:
+                continue
 
-                for row in legacy_result:
-                    try:
-                        # Convert RA/Dec to degrees
-                        coord = SkyCoord(row["RA"], row["DEC"], unit=(u.hourangle, u.deg))
-                        ra = coord.ra.deg  # RA in degrees
-                        dec = coord.dec.deg  # Dec in degrees
-                    except Exception as coord_error:
-                        print(f"Failed to convert RA/Dec for {row['MAIN_ID']}: {coord_error}")
-                        continue  # Skip this object if conversion fails
+            # basics
+            ra, dec = float(row["ra"]), float(row["dec"])
+            diam     = row.get("galdim_majaxis", "N/A")
+            rz       = row["rvz_redshift"]
+            red_z    = float(rz) if rz is not None else None
 
-                    # Retrieve other data fields
-                    main_id = row["MAIN_ID"]
-                    short_type = row["OTYPE"]
-                    long_type = otype_long_name_lookup.get(short_type, short_type)
+            # pull extras only if it’s a star
+            extra = extras.get(name, {})
+            Bmag  = extra.get("FLUX_B")
+            Vmag  = extra.get("FLUX_V")
+            plx   = extra.get("PLX_VALUE")
+            spec  = extra.get("SP_TYPE")
 
-                    # Fallback does not provide some fields, so we use placeholders
-                    diameter = "N/A"
-                    redshift = "N/A"
-                    comoving_distance = "N/A"
+            # override redshift → distance via parallax if available
+            if plx is not None and plx > 0:
+                dist_pc  = 1000.0 / plx
+                dist_ly  = dist_pc * 3.261563777
+                distance = round(dist_ly / 1e9, 6)
+                red_val  = plx
+            else:
+                red_val  = red_z if red_z is not None else "--"
+                distance = (calculate_comoving_distance(red_val)
+                            if red_val != "--" else "N/A")
 
-                    # Add to TreeWidget for display
-                    item = QTreeWidgetItem([
-                        f"{ra:.6f}", f"{dec:.6f}", main_id, diameter, short_type, long_type, redshift, comoving_distance
-                    ])
-                    self.results_tree.addTopLevelItem(item)
+            # absolute V magnitude if we have Vmag & plx
+            absV = None
+            if Vmag is not None and plx and plx > 0:
+                absV = Vmag - (5 * np.log10(1000.0 / plx) - 5)
 
-                    # Append full details to query_results
-                    query_results.append({
-                        'ra': ra,  # Ensure degrees format
-                        'dec': dec,  # Ensure degrees format
-                        'name': main_id,
-                        'diameter': diameter,
-                        'short_type': short_type,
-                        'long_type': long_type,
-                        'redshift': redshift,
-                        'comoving_distance': comoving_distance,
-                        'source': "Simbad (Legacy)"
-                    })
+            long_type = otype_long_name_lookup.get(short_type, short_type)
 
-                # Pass fallback results to graphics and updates
-                self.main_preview.set_query_results(query_results)
-                self.query_results = query_results  # Keep a reference to results in MainWindow
-                self.update_object_count()
+            # add to tree
+            item = QTreeWidgetItem([
+                f"{ra:.6f}", f"{dec:.6f}", name,
+                str(diam), short_type, long_type,
+                f"{red_val:.6f}" if isinstance(red_val, (int,float)) else str(red_val),
+                f"{distance:.6f}" if isinstance(distance, float) else str(distance)
+            ])
+            self.results_tree.addTopLevelItem(item)
 
-            except Exception as fallback_error:
-                QMessageBox.critical(self, "Query Failed", f"Both TAP and fallback queries failed: {str(fallback_error)}")
+            query_results.append({
+                'ra': ra, 'dec': dec, 'name': name,
+                'diameter': diam,
+                'short_type': short_type,
+                'long_type': long_type,
+                'redshift': red_val,
+                'comoving_distance': distance,
+                'source': "Simbad",
+                'Bmag': Bmag, 'Vmag': Vmag,
+                'parallax_mas': plx,
+                'spectral_type': spec,
+                'absolute_mag': absV
+            })
+
+        # ——— 5) Finally hand off to your preview/plotter ———
+        self.main_preview.set_query_results(query_results)
+        self.query_results = query_results
+        self.update_object_count()
+
+
 
     def perform_deep_vizier_search(self):
         CATALOG_NAMES = {
@@ -47815,7 +48035,7 @@ class WhatsInMySky(QWidget):
     def __init__(self):
         super().__init__()
         self.settings_file = os.path.join(os.path.expanduser("~"), "sky_settings.json")
-        self.settings = QSettings("Seti Astro", "Seti Astro Suite")
+        self.settings = QSettings() 
         self.initUI()  # Build the UI
         self.load_settings()  # Load settings after UI is built
         self.object_limit = self.settings.value("object_limit", 100, type=int)
@@ -48283,6 +48503,39 @@ if __name__ == '__main__':
     splash.show()
     app.processEvents()
 
+    QCoreApplication.setOrganizationName("Seti Astro")
+    QCoreApplication.setApplicationName  ("Seti Astro Suite")
+
+    for attempt in range(5):
+        try:
+            from astroquery.simbad import Simbad
+
+            # ——— use the new, non-deprecated field names ———
+            Simbad.add_votable_fields(
+                'otype',         # short object type
+                'otypes',        # verbose object type
+                'mesdiameter',   # was 'diameter'
+                'rvz_redshift',  # was 'z_value'
+                'B',             # was 'flux(B)'
+                'V',             # was 'flux(V)'
+                'plx_value',     # was 'plx'
+                'sp'             # spectral type
+            )
+
+            Simbad.ROW_LIMIT = 0    # no row limit
+            Simbad.TIMEOUT   = 60   # seconds
+
+            # if we get here, everything succeeded—stop retrying
+            break
+
+        except Exception as e:
+            if attempt < 4:
+                # wait a second and try again
+                time.sleep(1)
+            else:
+                # last attempt failed: warn and move on
+                print("Warning: SIMBAD service is currently unavailable. "
+                    "SIMBAD-dependent features may be disabled.")
     try:
         # Initialize main window
         window = AstroEditingSuite()
