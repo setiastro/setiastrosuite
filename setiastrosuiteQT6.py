@@ -29117,7 +29117,7 @@ class MetricsPanel(QWidget):
         prog.show()
         QApplication.processEvents()
 
-        workers = os.cpu_count() or 1
+        workers = min((os.cpu_count() or 1), 60)
         tasks   = [(i, loaded_images[i]) for i in range(n)]
         with ProcessPoolExecutor(max_workers=workers) as exe:
             futures = {exe.submit(self._compute_one, t): t[0] for t in tasks}
@@ -29851,7 +29851,8 @@ class BlinkTab(QWidget):
         # 2) schedule all loads in a process pool
         grouped = {}  # map (obj, filt, exp) -> [paths]
         futures = {}
-        with ProcessPoolExecutor(max_workers=os.cpu_count() or 1) as exe:
+        max_workers = min((os.cpu_count() or 1), 60)
+        with ProcessPoolExecutor(max_workers=max_workers) as exe:
             for p in file_paths:
                 futures[exe.submit(self._load_one_image, p, target_dtype)] = p
 
