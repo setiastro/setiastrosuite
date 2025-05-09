@@ -1,9 +1,9 @@
 {
-  "version": "2.15.10",
+  "version": "2.15.11",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.10/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.11/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.11/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.11/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Blink Updates and HR Diagram in WIMI"
+  "notes": "Lots! Save-Load Custom Curves, Blink items:auto move down when you hit f, tiff file support, harder autostretch option, and more. Zoom Level indicators when using zoom buttons, crop rectangle resize and rotate handles, continuum subtract utility major overhaul"
 }
