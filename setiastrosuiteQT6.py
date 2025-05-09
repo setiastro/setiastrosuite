@@ -31,6 +31,7 @@ from datetime import datetime
 import pywt
 from io import BytesIO
 import re
+from collections import defaultdict
 from scipy.spatial import Delaunay, KDTree
 from scipy.ndimage import gaussian_filter
 import scipy.ndimage as ndi
@@ -140,6 +141,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QToolTip,
     QCheckBox,
     QDialog,
     QFormLayout,
@@ -244,7 +246,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.10"
+VERSION = "2.15.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -364,6 +366,30 @@ else:
     jwstpupil_path = 'jwstpupil.png'
     signature_icon_path = 'pen.png'
 
+def announce_zoom(method):
+    def wrapper(self, *args, **kwargs):
+        # try calling with whatever was passed, but if that fails,
+        # call the zero-arg version
+        try:
+            result = method(self, *args, **kwargs)
+        except TypeError:
+            result = method(self)
+
+        # now announce
+        try:
+            pct = self.zoom_factor * 100
+            print(f"Zoom now {pct:.0f}%")
+            vp = self.scroll_area.viewport()
+            center_local = vp.rect().center()                    # QPoint in viewport coords
+            center_global = vp.mapToGlobal(center_local)         # map to screen coords
+
+            QToolTip.showText(center_global, f"{pct}%")
+        except Exception:
+            pass
+
+        return result
+
+    return wrapper
 
 class AstroEditingSuite(QMainWindow):
     def __init__(self):
@@ -5194,276 +5220,433 @@ def siril_style_autostretch(image, sigma=3.0):
     else:
         raise ValueError("Unsupported image format for histogram stretch.")
 
+HANDLE_SIZE = 20
+
+class ResizableRotatableRectItem(QGraphicsRectItem):
+    """
+    A rectangle item with 4 corner handles for resizing and
+    alt+drag to rotate.
+    """
+    def __init__(self, rect: QRectF, parent=None):
+        super().__init__(rect, parent)
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.setAcceptHoverEvents(True)
+        self._handles = {}
+        self._active_handle = None
+        self._rotating = False
+        self._rotation_start = 0.0
+        self._pivot_scene = QPointF()
+        self._initHandles()
+        # only set origin _once_ here
+        self.setTransformOriginPoint(self.rect().center())
+
+    def _initHandles(self):
+        pen = QPen(Qt.GlobalColor.black)
+        brush = QBrush(Qt.GlobalColor.white)
+        for pos in ("tl","tr","br","bl"):
+            h = QGraphicsEllipseItem(0,0, HANDLE_SIZE, HANDLE_SIZE, self)
+            h.setPen(pen)
+            h.setBrush(brush)
+            h.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self._handles[pos] = h
+        self._updateHandlePositions()
+
+    def _updateHandlePositions(self):
+        r = self.rect()
+        s = HANDLE_SIZE
+        corners = {
+            "tl": QPointF(r.left()-s/2,  r.top()-s/2),
+            "tr": QPointF(r.right()-s/2, r.top()-s/2),
+            "br": QPointF(r.right()-s/2, r.bottom()-s/2),
+            "bl": QPointF(r.left()-s/2,  r.bottom()-s/2),
+        }
+        for pos, item in self._handles.items():
+            item.setPos(corners[pos])
+
+        # reset the transform‐origin to the box’s true center
+        scene_ctr = self.mapToScene(self.boundingRect().center())
+
+
+    def hoverMoveEvent(self, ev):
+        for pos, h in self._handles.items():
+            if h.contains(h.mapFromScene(ev.scenePos())):
+                self._setCursorForHandle(pos)
+                return
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverMoveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            # start rotating
+            self._rotating = True
+            # store where we began, in degrees
+            pivot = self.mapToScene(self.rect().center())
+            self._pivot_scene = pivot
+            v0 = ev.scenePos() - pivot
+            self._angle_ref = math.degrees(math.atan2(v0.y(), v0.x()))
+            # and the item’s starting rotation
+            self._rotation_start = self.rotation()
+            ev.accept()
+            return
+
+        # check for handle‐resize
+        for pos, h in self._handles.items():
+            if h.contains(h.mapFromScene(ev.scenePos())):
+                self._active_handle = pos
+                ev.accept()
+                return
+
+        # fallback to move
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._rotating:
+            # compute new absolute angle
+            v_new = ev.scenePos() - self._pivot_scene
+            a_new = math.degrees(math.atan2(v_new.y(), v_new.x()))
+            delta = a_new - self._angle_ref
+            # apply full delta from the very start
+            self.setRotation(self._rotation_start + delta)
+            ev.accept()
+            return
+
+        if self._active_handle:
+            self._resizeViaHandle(ev.scenePos())
+            ev.accept()
+            return
+
+        super().mouseMoveEvent(ev)
+
+
+    def mouseReleaseEvent(self, ev):
+        if self._rotating:
+            self._rotating = False
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
+
+    def _refreshPivot(self):
+        scene_ctr = self.mapToScene(self.boundingRect().center())
+        self.setTransformOriginPoint(self.mapFromScene(scene_ctr))
+
+    def _resizeViaHandle(self, scene_pt: QPointF):
+        r = self.rect()
+        p = self.mapFromScene(scene_pt)
+        # adjust rect based on which handle
+        if self._active_handle == "tl":
+            r.setTopLeft(p)
+        elif self._active_handle == "tr":
+            r.setTopRight(p)
+        elif self._active_handle == "br":
+            r.setBottomRight(p)
+        elif self._active_handle == "bl":
+            r.setBottomLeft(p)
+        # normalize and apply
+        r = r.normalized()
+        self.setRect(r)
+        self._updateHandlePositions()
+
+    def _setCursorForHandle(self, handle_name):
+        cursors = {
+            "tl": Qt.CursorShape.SizeFDiagCursor,
+            "br": Qt.CursorShape.SizeFDiagCursor,
+            "tr": Qt.CursorShape.SizeBDiagCursor,
+            "bl": Qt.CursorShape.SizeBDiagCursor,
+        }
+        self.setCursor(cursors.get(handle_name, Qt.CursorShape.ArrowCursor))
+
 class CropTool(QDialog):
-    """A cropping tool using QGraphicsView for better rectangle handling."""
+    """A cropping tool with a resizable, rotatable rectangle."""
     crop_applied = pyqtSignal(object)
-    # Class-level variable to store the previous crop rectangle
-    previous_crop_rect = None
+    # before: previous_crop_rect = None
+    previous_crop_rect = (None, 0.0, QPointF(0, 0))
 
     def __init__(self, image_manager, image_data, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Crop Tool")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-        self.setGeometry(100, 100, 800, 600)  # Initial size
-
+        self.setGeometry(100,100,800,600)
         self.image_manager = image_manager
-        self.original_image_data = image_data.copy()  # Keep a copy of the original image
-        self.image_data = image_data  # Displayed image (can be autostretched)
-        self.scene = QGraphicsScene()
-        self.graphics_view = QGraphicsView(self.scene)
-        self.pixmap_item = None
-
-        self.origin = QPointF()
-        self.current_rect = QRectF()
+        self.original_image_data = image_data.copy()
+        self.image_data = image_data
+        self.scene = QGraphicsScene(self)
+        self.view  = QGraphicsView(self.scene)
+        self._rect_item = None
         self.selection_rect_item = None
         self.drawing = False
+        self.origin = QPointF()
+        instr = QLabel(
+            "• Click-and-drag to draw crop rectangle\n"
+            "• Drag any corner handle to resize\n"
+            "• Shift + drag a corner handle to rotate"
+        )
+        layout = QVBoxLayout(self)
 
-        # Set up the layout
-        layout = QVBoxLayout()
-        layout.addWidget(self.graphics_view)
+        instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        instr.setStyleSheet("font-style: italic; color: gray;")
+        layout.addWidget(instr)
+        # install filter after view is created:
+        self.view.viewport().installEventFilter(self)
+        # Layout & buttons
 
-        # Buttons
-        self.autostretch_button = QPushButton("Toggle Autostretch")
-        self.autostretch_button.clicked.connect(self.toggle_autostretch)
-        layout.addWidget(self.autostretch_button)
+        layout.addWidget(self.view)
 
-        self.load_previous_button = QPushButton("Load Previous Crop")
-        self.load_previous_button.clicked.connect(self.load_previous_crop)
-        layout.addWidget(self.load_previous_button)
-
-        self.crop_button = QPushButton("Apply Crop")
-        self.crop_button.clicked.connect(self.apply_crop)
-        layout.addWidget(self.crop_button)
-
-        self.batch_crop_button = QPushButton("Batch Crop All Slots")
-        self.batch_crop_button.clicked.connect(self.batch_crop_all_slots)
-        layout.addWidget(self.batch_crop_button)
+        btns = [
+            ("Toggle Autostretch", self.toggle_autostretch),
+            ("Load Previous Crop", self.load_previous_crop),
+            ("Apply Crop",         self.apply_crop),
+            ("Batch Crop All Slots", self.batch_crop_all_slots),
+        ]
+        for txt, slot in btns:
+            b = QPushButton(txt);  b.clicked.connect(slot)
+            layout.addWidget(b)
 
         self.setLayout(layout)
+        self._loadImage()
+        self.view.viewport().installEventFilter(self)
 
-        # Load and display the image
-        self.load_image()
-        # Install the event filter on the QGraphicsView's viewport to handle drawing
-        self.graphics_view.viewport().installEventFilter(self)
-
-    def load_image(self):
-        """Load and display the image in the QGraphicsView."""
-        # Squeeze out the singleton channel if necessary.
+    def _loadImage(self):
         img = self.image_data
-        if img.ndim == 3 and img.shape[2] == 1:
-            img = img.squeeze(axis=2)
-
-        if img.ndim == 3:  # Color image
-            height, width, channels = img.shape
-            q_image = QImage(
-                (img * 255).astype(np.uint8).tobytes(),
-                width,
-                height,
-                3 * width,
-                QImage.Format.Format_RGB888
-            )
-        elif img.ndim == 2:  # Mono image
-            height, width = img.shape
-            q_image = QImage(
-                (img * 255).astype(np.uint8).tobytes(),
-                width,
-                height,
-                width,
-                QImage.Format.Format_Grayscale8
-            )
+        if img.ndim==3 and img.shape[2]==1:
+            img = img.squeeze(2)
+        if img.ndim==3:
+            h,w,_ = img.shape
+            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,3*w,QImage.Format.Format_RGB888)
         else:
-            raise ValueError("Unsupported image format")
-
-        pixmap = QPixmap.fromImage(q_image)
-        self.pixmap_item = QGraphicsPixmapItem(pixmap)
+            h,w = img.shape
+            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,w,QImage.Format.Format_Grayscale8)
+        pix = QPixmap.fromImage(q)
         self.scene.clear()
-        self.scene.addItem(self.pixmap_item)
-        # Fit the image in view while keeping the aspect ratio.
-        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.scene.addItem(QGraphicsPixmapItem(pix))
+        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self.scene.items():
+            self.view.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def eventFilter(self, source, ev):
+        if source is self.view.viewport():
+            # translate to scene coords when needed
+            if ev.type() in (
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseMove,
+                QEvent.Type.MouseButtonRelease
+            ):
+                scene_pt = self.view.mapToScene(ev.pos())
+
+            # if we haven't yet created our rotatable rect, intercept
+            if self._rect_item is None:
+                if ev.type() == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
+                    self.drawing = True
+                    self.origin  = scene_pt
+                    return True
+                if ev.type() == QEvent.Type.MouseMove and getattr(self, "drawing", False):
+                    r = QRectF(self.origin, scene_pt).normalized()
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                    pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                    self.selection_rect_item = self.scene.addRect(r, pen)
+                    return True
+                if ev.type() == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton and getattr(self, "drawing", False):
+                    self.drawing = False
+                    final_r = QRectF(self.origin, scene_pt).normalized()
+                    if self.selection_rect_item:
+                        self.scene.removeItem(self.selection_rect_item)
+                    self._rect_item = ResizableRotatableRectItem(final_r)
+                    pos   = self._rect_item.pos()
+                    angle = self._rect_item.rotation()
+                    CropTool.previous_crop_rect = (final_r, angle, pos)
+                    self.scene.addItem(self._rect_item)
+                    return True
+
+            # 2) If a rect already exists, don’t intercept—let the QGraphicsItem handle it!
+            return False
+
+        return super().eventFilter(source, ev)
 
 
-    def resizeEvent(self, event):
-        """
-        When the CropTool dialog is resized, re-fit the pixmap in the QGraphicsView.
-        This ensures that mouse mapping via mapToScene works correctly on the resized view.
-        """
-        super().resizeEvent(event)
-        if self.pixmap_item is not None:
-            self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
-    def batch_crop_all_slots(self):
-        """Apply the current crop rectangle to all images in the ImageManager."""
-        if self.current_rect.isNull():
-            QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying batch cropping.")
+    def _getCurrentRect(self):
+        """Return QRectF in image‐pixel coords (ignoring rotation)."""
+        if not self._rect_item:
+            return None
+        r = self._rect_item.rect()
+        # Use itemsBoundingRect() to cover the entire pixmap
+        sb = self.scene.itemsBoundingRect()
+        if sb.isEmpty():
+            return None
+        scale_x = self.original_image_data.shape[1] / sb.width()
+        scale_y = self.original_image_data.shape[0] / sb.height()
+        return QRectF(
+            r.left()   * scale_x,
+            r.top()    * scale_y,
+            r.width()  * scale_x,
+            r.height() * scale_y
+        )
+
+
+    def toggle_autostretch(self):
+        stretched = siril_style_autostretch(self.original_image_data, sigma=3.0)
+        if stretched is None:
+            return
+        # grab and clear
+        saved = self._getCurrentRect()
+        self.image_data = stretched
+        self._loadImage()
+        if saved and not saved.isNull():
+            # restore size/angle/position triple
+            rect, old_angle, old_pos = CropTool.previous_crop_rect
+            self._rect_item = ResizableRotatableRectItem(rect)
+            self._rect_item.setPos(old_pos)
+            self._rect_item.setRotation(old_angle)
+            self._rect_item.setTransformOriginPoint(rect.center())
+            self.scene.addItem(self._rect_item)
+
+    def load_previous_crop(self):
+        rect, angle, pos = CropTool.previous_crop_rect
+        if rect is None:
+            QMessageBox.information(self, "No Previous", "No previous crop stored.")
             return
 
-        # Calculate the number of images (slots with actual images)
-        num_images = sum(1 for img in self.image_manager._images.values() if img is not None)
-        if num_images == 0:
+        # remove old
+        if self._rect_item:
+            self.scene.removeItem(self._rect_item)
+
+        # create, then re‐position & rotate
+        self._rect_item = ResizableRotatableRectItem(rect)
+        self._rect_item.setPos(pos)
+        self._rect_item.setRotation(angle)
+        self._rect_item.setTransformOriginPoint(rect.center())
+        self.scene.addItem(self._rect_item)
+
+    def apply_crop(self):
+        """Crop out exactly the rotated rectangle, then derotate so the result is upright."""
+        rc = self._getCurrentRect()
+        if not rc or rc.isNull():
+            QMessageBox.warning(self, "No Selection", "Draw (and finalize) a crop first.")
+            return
+
+        # 1) Figure out the rotation angle of the rect item
+        angle = self._rect_item.rotation()  # degrees, CCW positive
+
+        # 2) Prepare the original image and rotation matrix
+        img = self.original_image_data  # numpy array HxW(xC)
+        h_img, w_img = img.shape[:2]
+        center = (w_img/2.0, h_img/2.0)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # 3) Rotate the entire image
+        #    keep same size to make cropping simpler
+        rotated = cv2.warpAffine(
+            img,
+            M,
+            (w_img, h_img),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0
+        )
+
+        # 4) Extract integer crop coords from rc (these are in un‐rotated image pixels)
+        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+
+        # clamp just in case
+        x = max(0, min(x, w_img-1))
+        y = max(0, min(y, h_img-1))
+        w = max(1, min(w, w_img - x))
+        h = max(1, min(h, h_img - y))
+
+        # 5) Crop from the rotated image
+        cropped = rotated[y:y+h, x:x+w].copy()
+
+        # 6) Notify caller
+        self.crop_applied.emit(cropped)
+
+        # save size, rotation and position for next time
+        rect = self._getCurrentRect()
+        angle = self._rect_item.rotation()
+        pos   = self._rect_item.pos()
+        CropTool.previous_crop_rect = (rect, angle, pos)
+        self.accept()
+
+    def batch_crop_all_slots(self):
+        """
+        Same logic as apply_crop, but loop through every slot in image_manager.
+        Each gets rotated + cropped by the same rectangle/angle.
+        """
+        rc = self._getCurrentRect()
+        if not rc or rc.isNull():
+            QMessageBox.warning(self, "No Selection", "Draw & finalize a crop first.")
+            return
+
+        angle = self._rect_item.rotation()
+        img0 = self.original_image_data
+        h0, w0 = img0.shape[:2]
+        center = (w0/2.0, h0/2.0)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+        # integer coords
+        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+
+        num_slots = sum(1 for im in self.image_manager._images.values() if im is not None)
+        if num_slots == 0:
             QMessageBox.information(self, "No Images", "There are no images to crop.")
             return
 
-        # Confirm the action with the user
         reply = QMessageBox.question(
-            self,
-            "Confirm Batch Crop",
-            f"Are you sure you want to apply the current crop to all {num_images} images?",
+            self, "Confirm Batch Crop",
+            f"Apply this same rotated crop to all {num_slots} images?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-
         if reply != QMessageBox.StandardButton.Yes:
-            return  # User canceled the action
+            return
 
-        # Get the crop rectangle in image coordinates
-        scene_rect = self.scene.sceneRect()
-        scale_x = self.original_image_data.shape[1] / scene_rect.width()
-        scale_y = self.original_image_data.shape[0] / scene_rect.height()
-
-        x = int(self.current_rect.left() * scale_x)
-        y = int(self.current_rect.top() * scale_y)
-        w = int(self.current_rect.width() * scale_x)
-        h = int(self.current_rect.height() * scale_y)
-
-        # Validate and adjust the crop rectangle
-        x = max(0, min(x, self.original_image_data.shape[1] - 1))
-        y = max(0, min(y, self.original_image_data.shape[0] - 1))
-        w = max(1, min(w, self.original_image_data.shape[1] - x))
-        h = max(1, min(h, self.original_image_data.shape[0] - y))
-
-        # Flag to track if any image was cropped
         any_cropped = False
+        for slot, img in self.image_manager._images.items():
+            if img is None:
+                continue
 
-        # Iterate through all images and apply the crop
-        for slot, img_data in self.image_manager._images.items():
-            if img_data is not None:
-                # Check if the crop rectangle is within the image bounds
-                if y + h > img_data.shape[0] or x + w > img_data.shape[1]:
-                    QMessageBox.warning(
-                        self,
-                        "Crop Out of Bounds",
-                        f"Crop rectangle exceeds image dimensions for slot {slot}. Skipping this image."
-                    )
-                    continue
+            # rotate this slot’s image
+            rot = cv2.warpAffine(
+                img, M, (w0, h0),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0
+            )
 
-                # Save current state to undo stack
-                self.image_manager._undo_stacks[slot].append(
-                    (self.image_manager._images[slot].copy(), self.image_manager._metadata[slot].copy())
-                )
-                # Clear redo stack since new action invalidates the redo history
-                self.image_manager._redo_stacks[slot].clear()
-                print(f"ImageManager: Previous state of Slot {slot} pushed to undo stack.")
+            # bounds‐clamp
+            x1 = max(0, min(x, w0-1))
+            y1 = max(0, min(y, h0-1))
+            w1 = max(1, min(w, w0 - x1))
+            h1 = max(1, min(h, h0 - y1))
 
-                # Apply the crop
-                cropped_image = img_data[y:y + h, x:x + w]
+            cropped = rot[y1:y1+h1, x1:x1+w1].copy()
 
-                # Update the image data in the ImageManager
-                self.image_manager._images[slot] = cropped_image
+            # push undo / clear redo
+            self.image_manager._undo_stacks[slot].append(
+                (self.image_manager._images[slot].copy(),
+                 self.image_manager._metadata[slot].copy())
+            )
+            self.image_manager._redo_stacks[slot].clear()
 
-                # Emit the image_changed signal to notify other components
-                self.image_manager.image_changed.emit(slot, cropped_image, self.image_manager._metadata[slot])
-                print(f"ImageManager: Image in Slot {slot} cropped and updated.")
-
-                any_cropped = True
+            # save & emit
+            self.image_manager._images[slot] = cropped
+            self.image_manager.image_changed.emit(
+                slot, cropped, self.image_manager._metadata[slot]
+            )
+            any_cropped = True
 
         if any_cropped:
-            QMessageBox.information(
-                self,
-                "Batch Crop Completed",
-                f"Successfully cropped {num_images} images."
-            )
+            QMessageBox.information(self, "Batch Crop Completed",
+                                    f"Successfully cropped {num_slots} images.")
             self.accept()
         else:
-            QMessageBox.information(
-                self,
-                "Batch Crop",
-                "No images were cropped."
-            )
+            QMessageBox.information(self, "Batch Crop", "No images were cropped.")
 
 
-    def eventFilter(self, source, event):
-        """Handle mouse events for drawing the cropping rectangle."""
-        if source is self.graphics_view.viewport():
-            if event.type() == QEvent.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton:
-                    self.drawing = True
-                    self.origin = self.graphics_view.mapToScene(event.pos())
-                    if self.selection_rect_item:
-                        self.scene.removeItem(self.selection_rect_item)
-                        self.selection_rect_item = None
-            elif event.type() == QEvent.Type.MouseMove:
-                if self.drawing:
-                    current_pos = self.graphics_view.mapToScene(event.pos())
-                    self.current_rect = QRectF(self.origin, current_pos).normalized()
-                    if self.selection_rect_item:
-                        self.scene.removeItem(self.selection_rect_item)
-                    pen = QPen(QColor(255, 0, 0), 5, Qt.PenStyle.DashLine)
-                    self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
-            elif event.type() == QEvent.Type.MouseButtonRelease:
-                if event.button() == Qt.MouseButton.LeftButton and self.drawing:
-                    self.drawing = False
-                    current_pos = self.graphics_view.mapToScene(event.pos())
-                    self.current_rect = QRectF(self.origin, current_pos).normalized()
-                    if self.selection_rect_item:
-                        self.scene.removeItem(self.selection_rect_item)
-                    pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
-                    self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
-        return super().eventFilter(source, event)
-
-    def toggle_autostretch(self):
-        """Apply aggressive autostretch for visualization (Siril-style)."""
-        stretched_image = siril_style_autostretch(self.original_image_data, sigma=3.0)
-
-        if stretched_image is not None:
-            self.image_data = stretched_image
-            saved_rect = self.current_rect if not self.current_rect.isNull() else None
-            self.scene.clear()
-            self.load_image()
-
-            if saved_rect:
-                pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
-                self.selection_rect_item = self.scene.addRect(saved_rect, pen)
-
-
-    def load_previous_crop(self):
-        """Load the previous crop rectangle."""
-        if CropTool.previous_crop_rect:
-            self.current_rect = CropTool.previous_crop_rect
-            if self.selection_rect_item:
-                self.scene.removeItem(self.selection_rect_item)
-            pen = QPen(QColor(0, 255, 0), 5, Qt.PenStyle.SolidLine)
-            self.selection_rect_item = self.scene.addRect(self.current_rect, pen)
-        else:
-            QMessageBox.information(self, "No Previous Crop", "No previous crop rectangle is available.")
-
-    def apply_crop(self):
-        """Crop the original image based on the selected rectangle."""
-        if not self.current_rect.isNull():
-            # Save the current crop rectangle globally
-            CropTool.previous_crop_rect = self.current_rect
-
-            # Get the scene dimensions and scale accordingly
-            scene_rect = self.scene.sceneRect()
-            scale_x = self.original_image_data.shape[1] / scene_rect.width()
-            scale_y = self.original_image_data.shape[0] / scene_rect.height()
-
-            # Convert scene rectangle to image coordinates
-            x = int(self.current_rect.left() * scale_x)
-            y = int(self.current_rect.top() * scale_y)
-            w = int(self.current_rect.width() * scale_x)
-            h = int(self.current_rect.height() * scale_y)
-
-            x = max(0, min(x, self.original_image_data.shape[1] - 1))
-            y = max(0, min(y, self.original_image_data.shape[0] - 1))
-            w = max(1, min(w, self.original_image_data.shape[1] - x))
-            h = max(1, min(h, self.original_image_data.shape[0] - y))
-
-            cropped_image = self.original_image_data[y:y + h, x:x + w]
-
-            self.crop_applied.emit(cropped_image)
-            self.accept()
-        else:
-            QMessageBox.warning(self, "No Selection", "Please draw a crop rectangle before applying.")
 
 class ImageManager(QObject):
     """
@@ -6090,6 +6273,7 @@ class ComparisonSlider(QWidget):
     def zoom_in(self):
         self.set_zoom_factor(self.zoom_factor * 1.25)
 
+    @announce_zoom
     def zoom_out(self):
         self.set_zoom_factor(self.zoom_factor / 1.25)
 
@@ -6357,12 +6541,14 @@ class MaskSlotPreviewDialog(QDialog):
 
 
     # Zoom Methods
+    @announce_zoom
     def zoom_in(self):
         """Zoom in on the mask."""
         self.previous_scale_factor = self.scale_factor
         self.scale_factor *= 1.2
         self.update_image()
 
+    @announce_zoom
     def zoom_out(self):
         """Zoom out of the mask."""
         self.previous_scale_factor = self.scale_factor
@@ -7054,12 +7240,14 @@ class MaskCreationDialog(QDialog):
         event.accept()
 
     # Zoom Methods
+    @announce_zoom
     def zoom_in(self):
         """Zoom in on the image."""
         self.previous_scale_factor = self.scale_factor
         self.scale_factor *= 1.2
         self.update_image()
 
+    @announce_zoom
     def zoom_out(self):
         """Zoom out of the image."""
         self.previous_scale_factor = self.scale_factor
@@ -7223,12 +7411,14 @@ class MaskPreviewDialog(QDialog):
 
 
     # Zoom Methods
+    @announce_zoom
     def zoom_in(self):
         """Zoom in on the mask."""
         self.previous_scale_factor = self.scale_factor
         self.scale_factor *= 1.2
         self.update_image()
 
+    @announce_zoom
     def zoom_out(self):
         """Zoom out of the mask."""
         self.previous_scale_factor = self.scale_factor
@@ -12960,10 +13150,12 @@ class MosaicPreviewWindow(QDialog):
     # ---------------------
     # ZOOM Methods
     # ---------------------
+    @announce_zoom
     def zoom_in(self):
         self.zoom_factor *= 1.2
         self.display_image(self.image_array)
 
+    @announce_zoom
     def zoom_out(self):
         self.zoom_factor /= 1.2
         if self.zoom_factor < 0.05:
@@ -21495,6 +21687,7 @@ class BlemishBlasterDialog(QDialog):
         else:
             QMessageBox.information(self, "Zoom In", "Maximum zoom level reached.")
 
+    @announce_zoom
     def zoom_out(self):
         """Zoom out the image by a predefined step."""
         new_zoom = self.zoom_factor / self.zoom_step
@@ -24146,12 +24339,14 @@ class AddStarsDialog(QDialog):
         event.accept()
 
 
+    @announce_zoom
     def zoom_in(self):
         """Zoom in on the preview image."""
         self.scale_factor *= 1.25
         self.update_image()
         print(f"Zoomed in. Current scale factor: {self.scale_factor}")
 
+    @announce_zoom
     def zoom_out(self):
         """Zoom out of the preview image."""
         self.scale_factor /= 1.25
@@ -25705,6 +25900,7 @@ class CLAHEDialog(QDialog):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         """
         Zooms in the preview image by 25%.
@@ -25712,6 +25908,7 @@ class CLAHEDialog(QDialog):
         self.current_zoom *= 1.25
         self.preview_view.scale(1.25, 1.25)
 
+    @announce_zoom
     def zoom_out(self):
         """
         Zooms out the preview image by 20%.
@@ -26073,6 +26270,7 @@ class MorphologyDialog(QDialog):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         """
         Zooms in the preview image by 25%.
@@ -26080,6 +26278,7 @@ class MorphologyDialog(QDialog):
         self.current_zoom *= 1.25
         self.preview_view.scale(1.25, 1.25)
 
+    @announce_zoom
     def zoom_out(self):
         """
         Zooms out the preview image by 20%.
@@ -27405,6 +27604,7 @@ class InsertView(QGraphicsView):
     def zoom_in(self):
         self.set_zoom(self.zoom_factor * 1.15)
 
+    @announce_zoom
     def zoom_out(self):
         self.set_zoom(self.zoom_factor / 1.15)
 
@@ -28285,52 +28485,56 @@ class XISFViewer(QWidget):
         if self.image_data is None:
             return
 
+        # pick the right source
         im_data = self.stretched_image if self.autostretch_enabled else self.image_data
 
-        # Handle mono images
+        # mono → RGB
         if im_data.ndim == 2:
-            print(f"Mono image detected with 2D shape: {im_data.shape}. Converting to 3-channel RGB for display.")
-            im_data = np.stack([im_data] * 3, axis=-1)  # Convert to 3-channel RGB
+            im_data = np.stack([im_data] * 3, axis=-1)
         elif im_data.ndim == 3 and im_data.shape[2] == 1:
-            print(f"Mono image with a single channel detected: {im_data.shape}. Converting to 3-channel RGB for display.")
-            im_data = np.repeat(im_data, 3, axis=-1)  # Expand single channel to 3 channels
+            im_data = np.repeat(im_data, 3, axis=-1)
 
-        if im_data.ndim == 3 and im_data.shape[2] == 3:
-            # For color images (or converted mono images)
-            height, width, channels = im_data.shape
-            bytes_per_line = channels * width
-
-            if im_data.dtype == np.uint8:
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            elif im_data.dtype == np.uint16:
-                im_data = (im_data / 256).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            elif im_data.dtype in [np.float32, np.float64]:
-                im_data = np.clip((im_data - im_data.min()) / (im_data.max() - im_data.min()) * 255, 0, 255).astype(np.uint8)
-                q_image = QImage(im_data.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            else:
-                print(f"Unsupported color image format: {im_data.dtype}")
-                return
-        else:
+        # now we expect a H×W×3 array
+        if im_data.ndim != 3 or im_data.shape[2] != 3:
             print(f"Unexpected image shape: {im_data.shape}")
             return
 
-        # Calculate scaled dimensions
-        scaled_width = int(q_image.width() * self.scale_factor)
-        scaled_height = int(q_image.height() * self.scale_factor)
+        h, w, c = im_data.shape
+        bytes_per_line = c * w
 
-        # Apply scaling
-        scaled_image = q_image.scaled(
-            scaled_width,
-            scaled_height,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
+        # prepare an 8-bit buffer
+        if im_data.dtype == np.uint8:
+            buf8 = im_data
 
-        pixmap = QPixmap.fromImage(scaled_image)
-        self.current_pixmap = pixmap  # Store the current pixmap
-        self.image_label.setPixmap(pixmap)
-        self.image_label.resize(scaled_image.size())
+        elif im_data.dtype == np.uint16:
+            # linear map 0…65535 → 0…255
+            buf8 = (im_data.astype(np.float32) / 65535.0 * 255.0) \
+                    .clip(0, 255).astype(np.uint8)
+
+        elif im_data.dtype in (np.float32, np.float64):
+            # assume values already in [0…1]
+            buf8 = (im_data * 255.0).clip(0, 255).astype(np.uint8)
+
+        else:
+            print(f"Unsupported dtype for display: {im_data.dtype}")
+            return
+
+        # build a QImage from the 8-bit data
+        qimg = QImage(buf8.tobytes(), w, h, bytes_per_line,
+                      QImage.Format.Format_RGB888)
+
+        # apply current zoom/scale
+        sw = int(qimg.width() * self.scale_factor)
+        sh = int(qimg.height() * self.scale_factor)
+        scaled = qimg.scaled(sw, sh,
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+
+        pix = QPixmap.fromImage(scaled)
+        self.current_pixmap = pix
+        self.image_label.setPixmap(pix)
+        self.image_label.resize(scaled.size())
+
 
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
@@ -28341,9 +28545,11 @@ class XISFViewer(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         self.center_image_on_zoom(1.25)
 
+    @announce_zoom
     def zoom_out(self):
         self.center_image_on_zoom(1 / 1.25)
 
@@ -28392,6 +28598,14 @@ class XISFViewer(QWidget):
         self.scroll_area.horizontalScrollBar().setValue(int(new_center_x - self.scroll_area.viewport().width() / 2))
         self.scroll_area.verticalScrollBar().setValue(int(new_center_y - self.scroll_area.viewport().height() / 2))
 
+        # 4) announce
+        pct = int(self.scale_factor * 100)
+        print(f"Zoom now {pct}%")
+        vp = self.scroll_area.viewport()
+        center_local = vp.rect().center()                    # QPoint in viewport coords
+        center_global = vp.mapToGlobal(center_local)         # map to screen coords
+
+        QToolTip.showText(center_global, f"{pct}%")
 
     def wheelEvent(self, event):
         if event.angleDelta().y() > 0:
@@ -28996,6 +29210,7 @@ class MetricsPanel(QWidget):
         self.metrics_data = None       # list of 4 numpy arrays
         self.flags = None              # list of bools
         self._threshold_initialized = [False]*4
+        self._open_previews = []
 
         self.plots, self.scats, self.lines = [], [], []
         titles = ["FWHM (px)", "Eccentricity", "Background", "Star Count"]
@@ -29201,22 +29416,23 @@ class MetricsPanel(QWidget):
             scat.setData(x=x, y=y, brush=brushes)
 
     def _on_point_click(self, metric_idx, points):
-        """
-        If the user Shift-clicks a point, open the ImagePreviewDialog.
-        Otherwise emit pointClicked as before.
-        """
         for pt in points:
             frame_idx = int(round(pt.pos().x()))
             mods = QApplication.keyboardModifiers()
             if mods & Qt.KeyboardModifier.ShiftModifier:
-                # open preview dialog
-                entry = self._orig_images[frame_idx]
-                img = entry['image_data']
-                is_mono = entry.get('is_mono', False)
+                entry  = self._orig_images[frame_idx]
+                img    = entry['image_data']
+                is_mono= entry.get('is_mono', False)
                 dlg = ImagePreviewDialog(img, is_mono)
-                dlg.exec()
+                dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  
+                dlg.show()
+                self._open_previews.append(dlg)  # <-- hold a reference
+
+                # optionally prune closed ones:
+                dlg.destroyed.connect(lambda _=None, d=dlg: 
+                      self._open_previews.remove(d)
+                      if d in self._open_previews else None)
             else:
-                # normal click: flag/unflag
                 self.pointClicked.emit(metric_idx, frame_idx)
 
     def _on_line_move(self, metric_idx, line):
@@ -29369,6 +29585,8 @@ class BlinkTab(QWidget):
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
         self.thresholds_by_group: dict[str, list[float|None]] = {}
+        self.aggressive_stretch_enabled = False
+        self.current_sigma = 3.7
 
         self.initUI()
         self.init_shortcuts()
@@ -29513,6 +29731,11 @@ class BlinkTab(QWidget):
         self.fit_to_preview_button.clicked.connect(self.fit_to_preview)
         zoom_controls_layout.addWidget(self.fit_to_preview_button)
 
+        self.aggressive_button = QPushButton("Aggressive Stretch", self)
+        self.aggressive_button.setCheckable(True)
+        self.aggressive_button.clicked.connect(self.toggle_aggressive)
+        zoom_controls_layout.addWidget(self.aggressive_button)
+
         right_layout.addLayout(zoom_controls_layout)
 
         # Scroll area for the preview
@@ -29552,6 +29775,13 @@ class BlinkTab(QWidget):
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def toggle_aggressive(self):
+        self.aggressive_stretch_enabled = self.aggressive_button.isChecked()
+        # force a redisplay of the current image
+        cur = self.fileTree.currentItem()
+        if cur:
+            self.on_item_clicked(cur, 0)
 
     def clearFlags(self):
         """Clear all flagged states, update tree icons & metrics."""
@@ -29823,13 +30053,27 @@ class BlinkTab(QWidget):
             image = debayer_raw_fast(image, bayer_pattern="RGGB")
         return image
 
+    @staticmethod
+    def _natural_key(path: str):
+        """
+        Split a filename into text and integer chunks so that 
+        “…_2.fit” sorts before “…_10.fit”.
+        """
+        import re
+        name = os.path.basename(path)
+        return [int(tok) if tok.isdigit() else tok.lower()
+                for tok in re.split(r'(\d+)', name)]
+
     def loadImages(self, file_paths):
         # 0) early out
         if not file_paths:
             return
 
-        # 1) decide dtype by RAM
-        mem = psutil.virtual_memory()
+        # ---------- NEW: natural sort the list of filenames ----------
+        file_paths = sorted(file_paths, key=lambda p: self._natural_key(os.path.basename(p)))
+
+        # 1) pick dtype based on RAM
+        mem   = psutil.virtual_memory()
         avail = mem.available / (1024**3)
         if avail <= 16:
             target_dtype = np.uint8
@@ -29839,7 +30083,7 @@ class BlinkTab(QWidget):
             target_dtype = np.float32
 
         total = len(file_paths)
-        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setRange(0,100)
         self.progress_bar.setValue(0)
         QApplication.processEvents()
 
@@ -29848,9 +30092,8 @@ class BlinkTab(QWidget):
         self.loaded_images.clear()
         self.fileTree.clear()
 
-        # 2) schedule all loads in a process pool
-        grouped = {}  # map (obj, filt, exp) -> [paths]
-        futures = {}
+        # 2) fire off all loads in parallel
+        futures    = {}
         max_workers = min((os.cpu_count() or 1), 60)
         with ProcessPoolExecutor(max_workers=max_workers) as exe:
             for p in file_paths:
@@ -29864,55 +30107,63 @@ class BlinkTab(QWidget):
                     print(f"[WARN] {futures[fut]} load failed: {e}")
                     continue
 
-                # register
+                header = header or {}
+
                 self.image_paths.append(path)
-                entry = {
-                    'file_path': path,
-                    'image_data': stored,
-                    'header': header,
-                    'bit_depth': bit_depth,
-                    'is_mono': is_mono,
-                    'flagged': False,
+                self.loaded_images.append({
+                    'file_path':      path,
+                    'image_data':     stored,
+                    'header':         header,
+                    'bit_depth':      bit_depth,
+                    'is_mono':        is_mono,
+                    'flagged':        False,
                     'orig_background': back
-                }
-                self.loaded_images.append(entry)
+                })
 
-                # grouping key
-                obj  = header.get('OBJECT','Unknown')
-                filt = header.get('FILTER','Unknown')
-                exp  = header.get('EXPOSURE','Unknown')
-                grouped.setdefault((obj,filt,exp), []).append(path)
-
-                # bump progress
                 done += 1
-                pct = int(100*done/total)
-                self.progress_bar.setValue(pct)
+                self.progress_bar.setValue(int(100 * done / total))
                 QApplication.processEvents()
 
-        # 3) rebuild the tree exactly like your original code
-        #    group first by object, then filter, then exposure
-        by_object = {}
-        for (obj,filt,exp), paths in grouped.items():
-            by_object.setdefault(obj, {}) \
-                     .setdefault(filt, {})[exp] = paths
+        # 3) (optional) reorder to input order — in this case file_paths is already sorted
+        #    so image_paths/loaded_images follow that same sorted order
 
-        for obj, filters in by_object.items():
+        # 4) build a nested grouping: Object -> Filter -> Exposure -> [paths]
+        grouped = defaultdict(list)
+        for entry in self.loaded_images:
+            hdr  = entry['header']
+            obj  = hdr.get('OBJECT',   'Unknown')
+            filt = hdr.get('FILTER',   'Unknown')
+            exp  = hdr.get('EXPOSURE', 'Unknown')
+            grouped[(obj, filt, exp)].append(entry['file_path'])
+        # ——— NEW: for each group, sort the file list by natural filename order ———
+        for key, paths in grouped.items():
+            paths.sort(key=lambda p: self._natural_key(os.path.basename(p)))
+        # 5) rebuild the tree in sorted key order:
+        by_object = defaultdict(lambda: defaultdict(dict))
+        for (obj, filt, exp), paths in grouped.items():
+            by_object[obj][filt][exp] = paths
+
+        for obj in sorted(by_object, key=lambda o: o.lower()):
             obj_item = QTreeWidgetItem([f"Object: {obj}"])
             self.fileTree.addTopLevelItem(obj_item)
             obj_item.setExpanded(True)
-            for filt, exps in filters.items():
+
+            for filt in sorted(by_object[obj], key=lambda f: f.lower()):
                 filt_item = QTreeWidgetItem([f"Filter: {filt}"])
                 obj_item.addChild(filt_item)
                 filt_item.setExpanded(True)
-                for exp, paths in exps.items():
+
+                for exp in sorted(by_object[obj][filt], key=lambda e: str(e).lower()):
                     exp_item = QTreeWidgetItem([f"Exposure: {exp}"])
                     filt_item.addChild(exp_item)
                     exp_item.setExpanded(True)
-                    for p in paths:
+
+                    # leaves: these were already sorted via file_paths/natural sort
+                    for p in by_object[obj][filt][exp]:
                         leaf = QTreeWidgetItem([os.path.basename(p)])
                         exp_item.addChild(leaf)
 
-        # 4) finalize UI
+        # 6) final UI touch-ups
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
         self.progress_bar.setValue(100)
         if self.metrics_window and self.metrics_window.isVisible():
@@ -29966,6 +30217,7 @@ class BlinkTab(QWidget):
             QMessageBox.warning(self, "No Selection", "No image is currently selected to flag.")
             return
         self._toggle_flag_on_item(item)
+        self.next_item()  # Move to the next item after flagging
 
 
     def on_current_item_changed(self, current, previous):
@@ -30216,48 +30468,73 @@ class BlinkTab(QWidget):
 
     
 
-
     def on_item_clicked(self, item, column):
         """Handle click on a file name in the tree to preview the image."""
         self.fileTree.setFocus()
 
-        # strip out any leading "⚠️ "
-        file_name = item.text(0).lstrip("⚠️ ").strip()
-        file_path = next((path for path in self.image_paths
-                          if os.path.basename(path) == file_name), None)
-
+        name = item.text(0).lstrip("⚠️ ").strip()
+        file_path = next((p for p in self.image_paths if os.path.basename(p) == name), None)
         if not file_path:
-            return   # nothing to show
+            return
 
-        index = self.image_paths.index(file_path)
-        stretched_image = self.loaded_images[index]['image_data']
+        idx = self.image_paths.index(file_path)
+        raw = self.loaded_images[idx]['image_data']
 
-        qimage = self.convert_to_qimage(stretched_image)
+        # bring raw into float [0..1]
+        if raw.dtype == np.uint16:
+            imgf = raw.astype(np.float32) / 65535.0
+        elif raw.dtype == np.uint8:
+            imgf = raw.astype(np.float32) / 255.0
+        else:
+            imgf = raw.astype(np.float32).clip(0,1)
+
+        # choose stretch
+        if self.aggressive_stretch_enabled:
+            disp = siril_style_autostretch(imgf, sigma=self.current_sigma)
+        else:
+            # your existing SEP‐based or linked stretch; e.g.:
+            if imgf.ndim == 2:
+                disp = stretch_mono_image(imgf, target_median=0.25, normalize=True)
+            else:
+                disp = stretch_color_image(imgf, target_median=0.25, linked=False)
+
+        # convert back to uint8 for display
+        disp8 = (disp * 255.0).clip(0,255).astype(np.uint8)
+        qimage = self.convert_to_qimage(disp8)
         pixmap = QPixmap.fromImage(qimage)
         self.current_pixmap = pixmap
         self.apply_zoom()
 
     def apply_zoom(self):
         """Apply the current zoom level to the pixmap and update the display."""
-        if self.current_pixmap:
-            # Scale the pixmap based on the zoom level
-            scaled_pixmap = self.current_pixmap.scaled(
-                self.current_pixmap.size() * self.zoom_level,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        if not self.current_pixmap:
+            return
 
-            # Update the QLabel with the scaled pixmap
-            self.preview_label.setPixmap(scaled_pixmap)
-            self.preview_label.resize(scaled_pixmap.size())
+        # 1) scale & show it
+        scaled = self.current_pixmap.scaled(
+            self.current_pixmap.size() * self.zoom_level,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.resize(scaled.size())
 
-            # Adjust scroll position to center the view
-            self.scroll_area.horizontalScrollBar().setValue(
-                (self.preview_label.width() - self.scroll_area.viewport().width()) // 2
-            )
-            self.scroll_area.verticalScrollBar().setValue(
-                (self.preview_label.height() - self.scroll_area.viewport().height()) // 2
-            )
+        # 2) center scrollbars
+        self.scroll_area.horizontalScrollBar().setValue(
+            (scaled.width() - self.scroll_area.viewport().width()) // 2
+        )
+        self.scroll_area.verticalScrollBar().setValue(
+            (scaled.height() - self.scroll_area.viewport().height()) // 2
+        )
+
+        # 3) announce zoom
+        pct = int(self.zoom_level * 100)
+        print(f"Zoom now {pct}%")
+        vp = self.scroll_area.viewport()
+        center_local = vp.rect().center()                    # QPoint in viewport coords
+        center_global = vp.mapToGlobal(center_local)         # map to screen coords
+
+        QToolTip.showText(center_global, f"{pct}%")
 
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
@@ -30274,6 +30551,7 @@ class BlinkTab(QWidget):
         self.zoom_level = min(self.zoom_level * 1.2, 3.0)  # Cap at 3x
         self.apply_zoom()
 
+    @announce_zoom
     def zoom_out(self):
         """Decrease the zoom level and refresh the image."""
         self.zoom_level = max(self.zoom_level / 1.2, 0.05)  # Cap at 0.2x
@@ -31158,10 +31436,12 @@ class CosmicClarityTab(QWidget):
             self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
             print(f"Selected Cosmic Clarity folder: {folder}")
 
+    @announce_zoom
     def zoom_in(self):
         self.zoom_factor *= 1.2
         self.update_image_display()
 
+    @announce_zoom
     def zoom_out(self):
         self.zoom_factor /= 1.2
         self.update_image_display()
@@ -33219,25 +33499,29 @@ class ImagePreviewDialog(QDialog):
         target_median = 0.25  # Target median for stretching
 
         if self.autostretch_enabled:
-            if self.is_mono:  # Apply mono stretch
-                if self.np_image.ndim == 2:  # Ensure single-channel mono
-                    stretched_mono = stretch_mono_image(self.np_image, target_median)
-                    display_image = np.stack([stretched_mono] * 3, axis=-1)  # Convert to RGB for display
-                else:
-                    raise ValueError(f"Unexpected mono image shape: {self.np_image.shape}")
-            else:  # Apply color stretch
+            if self.np_image.ndim == 2:
+                # mono stretch path
+                stretched = stretch_mono_image(self.np_image, target_median)
+                display_image = np.stack([stretched]*3, axis=-1)
+            elif self.np_image.ndim == 3 and self.np_image.shape[2] == 3:
+                # color stretch path
                 display_image = stretch_color_image(self.np_image, target_median, linked=False)
-        else:
-            if self.is_mono and self.np_image.ndim == 2:
-                display_image = np.stack([self.np_image] * 3, axis=-1)  # Convert to RGB for display
             else:
-                display_image = self.np_image  # Use original image if autostretch is off
+                raise ValueError(f"Unexpected image shape for autostretch: {self.np_image.shape}")
+        else:
+            # autostretch off: just show original
+            if self.np_image.ndim == 2:
+                display_image = np.stack([self.np_image]*3, axis=-1)
+            else:
+                display_image = self.np_image
+
 
         print(f"Debug: Display image shape before QImage conversion: {display_image.shape}")
         self.display_qimage(display_image)
 
 
 
+    @announce_zoom
     def zoom_in(self):
         """Increase the zoom factor and refresh the display."""
         self.zoom_factor *= 1.2  # Increase zoom by 20%
@@ -33246,6 +33530,7 @@ class ImagePreviewDialog(QDialog):
         else:
             self.display_qimage(self.np_image)
 
+    @announce_zoom
     def zoom_out(self):
         """Decrease the zoom factor and refresh the display."""
         self.zoom_factor /= 1.2  # Decrease zoom by 20%
@@ -33796,6 +34081,7 @@ class StatisticalStretchTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         if self.current_pixmap is not None:
             self.zoom_factor *= 1.2
@@ -33804,6 +34090,7 @@ class StatisticalStretchTab(QWidget):
             print("No image available to zoom in.")
             QMessageBox.warning(self, "Warning", "No image available to zoom in.")
 
+    @announce_zoom
     def zoom_out(self):
         if self.current_pixmap is not None:
             self.zoom_factor /= 1.2
@@ -34382,6 +34669,7 @@ class StarStretchTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         if self.current_pixmap is not None:
             self.zoom_factor *= 1.2
@@ -34390,6 +34678,7 @@ class StarStretchTab(QWidget):
             print("No image available to zoom in.")
             QMessageBox.warning(self, "Warning", "No image available to zoom in.")
 
+    @announce_zoom
     def zoom_out(self):
         if self.current_pixmap is not None:
             self.zoom_factor /= 1.2
@@ -34438,6 +34727,8 @@ class StarStretchTab(QWidget):
         if self.image is not None and self.image.size > 0:
             print(f"Applying stretch: {self.stretch_factor}, Color Boost: {self.sat_amount:.2f}, SCNR: {self.scnrCheckBox.isChecked()}")
             self.generatePreview()
+
+
 
 class FullCurvesTab(QWidget):
     def __init__(self, image_manager=None):
@@ -34564,19 +34855,18 @@ class FullCurvesTab(QWidget):
         # Add the horizontal layout with buttons to the main left layout
         left_layout.addLayout(button_layout)
 
-        # **Remove Zoom Buttons from Left Panel**
-        # Commented out to move to the right panel
-        # zoom_layout = QHBoxLayout()
-        # self.zoomInButton = QPushButton('Zoom In', self)
-        # self.zoomInButton.clicked.connect(self.zoom_in)
-        # zoom_layout.addWidget(self.zoomInButton)
+        saveloadbutton_layout = QHBoxLayout()
 
-        # self.zoomOutButton = QPushButton('Zoom Out', self)
-        # self.zoomOutButton.clicked.connect(self.zoom_out)
-        # zoom_layout.addWidget(self.zoomOutButton)
+            # Save & Load Curve buttons
+        self.saveCurveBtn = QPushButton("Save Curve", self)
+        self.saveCurveBtn.clicked.connect(self.saveCurve)
+        saveloadbutton_layout.addWidget(self.saveCurveBtn)
 
-        # left_layout.addLayout(zoom_layout)
+        self.loadCurveBtn = QPushButton("Load Curve", self)
+        self.loadCurveBtn.clicked.connect(self.loadCurve)
+        saveloadbutton_layout.addWidget(self.loadCurveBtn)
 
+        left_layout.addLayout(saveloadbutton_layout)
 
         # **Add Spinner Label**
         self.spinnerLabel = QLabel(self)
@@ -34664,6 +34954,49 @@ class FullCurvesTab(QWidget):
         """Hide the spinner animation."""
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
+
+    def saveCurve(self):
+        fname, _ = QFileDialog.getSaveFileName(self, "Save Curve As","", "SASC Curve (*.sasc)")
+        if not fname:
+            return
+        if not fname.lower().endswith(".sasc"):
+            fname += ".sasc"
+
+        handles = self.curveEditor.getControlHandles()
+        try:
+            with open(fname, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["x","y"])
+                for x,y in handles:
+                    writer.writerow([f"{x:.6f}", f"{y:.6f}"])
+            QMessageBox.information(self, "Curve Saved", f"Saved {len(handles)} handles to {fname}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error Saving Curve", str(e))
+
+    def loadCurve(self):
+        fname, _ = QFileDialog.getOpenFileName(self, "Load Curve", "", "SASC Curve (*.sasc)")
+        if not fname:
+            return
+
+        handles = []
+        try:
+            with open(fname, newline='') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # skip header
+                for row in reader:
+                    x, y = float(row[0]), float(row[1])
+                    handles.append((x,y))
+        except Exception as e:
+            QMessageBox.critical(self, "Error Loading Curve", str(e))
+            return
+
+        # reset everything _except_ endpoints
+        self.curveEditor.initCurve()
+
+        # now restore just our saved handles
+        self.curveEditor.setControlHandles(handles)
+
+        QMessageBox.information(self, "Curve Loaded", f"Restored {len(handles)} handles from {fname}")         
 
     def set_curve_mode(self):
         selected_button = self.curveModeGroup.checkedButton()
@@ -35429,10 +35762,19 @@ class FullCurvesTab(QWidget):
         if self.image is not None:
             self.zoom_factor *= 1.2
             self.show_image(self.image)
-            print(f"Zoomed in. New zoom factor: {self.zoom_factor:.2f}")
+            zoom_pct = self.zoom_factor * 100
+            print(f"Zoomed in. New zoom: {zoom_pct:.0f}%")
+
+            # Show tooltip at the center of the scrollArea’s viewport
+            vp = self.scrollArea.viewport()
+            center_local = vp.rect().center()                      # QPoint in viewport coords
+            center_global = vp.mapToGlobal(center_local)           # QPoint in screen coords
+            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+
         else:
             print("No stretched image to zoom in.")
             QMessageBox.warning(self, "Warning", "No stretched image to zoom in.")
+
 
     def zoom_out(self):
         """
@@ -35441,7 +35783,15 @@ class FullCurvesTab(QWidget):
         if self.image is not None:
             self.zoom_factor /= 1.2
             self.show_image(self.image)
-            print(f"Zoomed out. New zoom factor: {self.zoom_factor:.2f}")
+            zoom_pct = self.zoom_factor * 100
+            print(f"Zoomed out. New zoom: {zoom_pct:.0f}%")
+
+            # Show tooltip at the center of the scrollArea’s viewport
+            vp = self.scrollArea.viewport()
+            center_local = vp.rect().center()
+            center_global = vp.mapToGlobal(center_local)
+            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+
         else:
             print("No stretched image to zoom out.")
             QMessageBox.warning(self, "Warning", "No stretched image to zoom out.")
@@ -35736,6 +36086,24 @@ class CurveEditor(QGraphicsView):
         # Redraw the initial line
         self.updateCurve()
 
+    def getControlHandles(self):
+        """Return just the user-added handles (not the endpoints)."""
+        # control_points are your green, draggable handles:
+        return [(p.scenePos().x(), p.scenePos().y()) for p in self.control_points]
+
+    def setControlHandles(self, handles):
+        """Clear existing controls (but keep endpoints), then re-add."""
+        # remove any existing controls
+        for p in list(self.control_points):
+            self.scene.removeItem(p)
+        self.control_points.clear()
+
+        # now add back each one
+        for x,y in handles:
+            self.addControlPoint(x, y)
+
+        # finally redraw spline once
+        self.updateCurve()
     def addEndPoint(self, x, y, lock_axis=None, position_type=None, color=Qt.GlobalColor.red):
         point = DraggablePoint(self, x, y, color=color, lock_axis=lock_axis, position_type=position_type)
         self.scene.addItem(point)
@@ -36767,10 +37135,12 @@ class FrequencySeperationTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         self.zoom_factor *= 1.25
         self.update_previews()
 
+    @announce_zoom
     def zoom_out(self):
         self.zoom_factor /= 1.25
         self.update_previews()
@@ -37319,10 +37689,12 @@ class CombinedPreviewWindow(QWidget):
         event.accept()
 
 
+    @announce_zoom
     def zoom_in(self):
         self.zoom_factor *= 1.2
         self.updatePreview()
 
+    @announce_zoom
     def zoom_out(self):
         self.zoom_factor /= 1.2
         self.updatePreview()
@@ -38955,6 +39327,7 @@ class PerfectPalettePickerTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         """
         Zooms into the main preview image.
@@ -38966,6 +39339,7 @@ class PerfectPalettePickerTab(QWidget):
             print("Maximum zoom level reached.")
             self.status_label.setText("Maximum zoom level reached.")
 
+    @announce_zoom
     def zoom_out(self):
         """
         Zooms out of the main preview image.
@@ -39795,6 +40169,7 @@ class NBtoRGBstarsTab(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
+    @announce_zoom
     def zoom_in(self):
         if self.zoom_factor < 20.0:  # Set a maximum zoom limit (e.g., 500%)
             self.zoom_factor *= 1.25  # Increase zoom by 25%
@@ -39802,6 +40177,7 @@ class NBtoRGBstarsTab(QWidget):
         else:
             print("Maximum zoom level reached.")
 
+    @announce_zoom
     def zoom_out(self):
         if self.zoom_factor > 0.01:  # Set a minimum zoom limit (e.g., 20%)
             self.zoom_factor /= 1.25  # Decrease zoom by 20%
@@ -40688,447 +41064,505 @@ class ContinuumSubtractTab(QWidget):
         super().__init__()
         self.image_manager = image_manager
         self.initUI()
-        self.nb_image = None  # Selected NB image
-        self.continuum_image = None  # Selected Continuum image
-        self.filename = None  # Store the selected file path
+        self._threads = []
+        # — initialize every loadable image to None —
+        self.ha_image    = None
+        self.sii_image   = None
+        self.oiii_image  = None
+        self.red_image   = None
+        self.green_image = None
+        self.osc_image   = None
+
+        self.filename = None
         self.is_mono = True
-        self.combined_image = None  # Store the result of the continuum subtraction
-        self.zoom_factor = 1.0  # Initialize zoom factor for preview scaling
-        self.dragging = False
-        self.last_pos = None
-        self.processing_thread = None  # For background processing
+        self.combined_image = None
+        self.processing_thread = None
         self.original_header = None
-        self.original_pixmap = None  # To store the original QPixmap for zooming
+        self._clickable_images = {}
 
         if self.image_manager:
-            # Connect to ImageManager's image_changed signal if needed
             self.image_manager.image_changed.connect(self.on_image_changed)
 
     def initUI(self):
-        main_layout = QHBoxLayout()
+        self.spinnerLabel = QLabel()
+        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spinnerMovie = QMovie(resource_path("spinner.gif"))
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.hide()  # hidden until we start processing
 
-        # Left side controls
-        left_widget = QWidget(self)
-        left_layout = QVBoxLayout(left_widget)
-        left_widget.setFixedWidth(400)  # Fixed width for left column
+        self.statusLabel = QLabel("")  
+        self.statusLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout = QVBoxLayout()  # overall vertical: columns + bottom row
+        columns_layout = QHBoxLayout()  # holds the three groups
 
-        # Instruction box
-        instruction_box = QLabel(self)
-        instruction_box.setText("""
-            Instructions:
-            1. Load your NB and Continuum images.
-            2. Select for optional linear only output.
-            3. Click Execute to perform continuum subtraction.
-        """)
-        instruction_box.setWordWrap(True)
-        left_layout.addWidget(instruction_box)
+        # — NB group —
+        nb_group = QGroupBox("Narrowband Filters")
+        nb_l = QVBoxLayout()
+        for name, attr in [("Ha","ha"), ("SII","sii"), ("OIII","oiii")]:
+            btn = QPushButton(f"Load {name}")
+            lbl = QLabel(f"No {name}")
+            setattr(self, f"{attr}Button", btn)
+            setattr(self, f"{attr}Label", lbl)
+            btn.clicked.connect(lambda _,n=name: self.loadImage(n))
+            nb_l.addWidget(btn)
+            nb_l.addWidget(lbl)
 
-        # File Selection Buttons
-        self.nb_button = QPushButton("Load NB Image")
-        self.nb_button.clicked.connect(lambda: self.selectImage("nb"))
-        self.nb_label = QLabel("No NB image selected")
-        left_layout.addWidget(self.nb_button)
-        left_layout.addWidget(self.nb_label)
-
-        self.continuum_button = QPushButton("Load Continuum Image")
-        self.continuum_button.clicked.connect(lambda: self.selectImage("continuum"))
-        self.continuum_label = QLabel("No Continuum image selected")
-        left_layout.addWidget(self.continuum_button)
-        left_layout.addWidget(self.continuum_label)
-
-        # **Added: Clear Loaded Images Button**
+        self.linear_output_checkbox = QCheckBox("Output Linear Image Only")
+        nb_l.addWidget(self.linear_output_checkbox)    
+        nb_l.addStretch(1)
+        
+        # ** clear-all button **
         self.clear_button = QPushButton("Clear Loaded Images")
         self.clear_button.clicked.connect(self.clear_loaded_images)
-        left_layout.addWidget(self.clear_button)        
+        nb_l.addWidget(self.clear_button)
+        nb_group.setLayout(nb_l)
 
-        # Linear Output Checkbox
-        self.linear_output_checkbox = QCheckBox("Output Linear Image Only")
-        left_layout.addWidget(self.linear_output_checkbox)
+        # — Continuum group —
+        cont_group = QGroupBox("Continuum Sources")
+        cont_l = QVBoxLayout()
+        for name, attr in [("Red","red"), ("Green","green"), ("OSC","osc")]:
+            btn = QPushButton(f"Load {name}")
+            lbl = QLabel(f"No {name}")
+            setattr(self, f"{attr}Button", btn)
+            setattr(self, f"{attr}Label", lbl)
+            btn.clicked.connect(lambda _,n=name: self.loadImage(n))
+            cont_l.addWidget(btn)
+            cont_l.addWidget(lbl)
+        cont_l.addStretch(1)
+        cont_group.setLayout(cont_l)
 
-        # Progress indicator (spinner) label
-        self.spinnerLabel = QLabel(self)
-        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spinnerMovie = QMovie(resource_path("spinner.gif"))  # Ensure spinner.gif is in the correct path
-        self.spinnerLabel.setMovie(self.spinnerMovie)
-        self.spinnerLabel.hide()  # Hide spinner by default
-        left_layout.addWidget(self.spinnerLabel)
+        # — White balance diagnostics —
+        wb_group   = QGroupBox("Star-Based WB")
+        self.wb_l  = QVBoxLayout()
+        self.wb_l.setAlignment(Qt.AlignmentFlag.AlignTop)
+        wb_group.setLayout(self.wb_l)
 
-        # Status label to show processing status
-        self.statusLabel = QLabel(self)
-        self.statusLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left_layout.addWidget(self.statusLabel)
+        # put it in a scroll area so many entries won't overflow
+        wb_scroll = QScrollArea()
+        wb_scroll.setWidgetResizable(True)
+        wb_container = QWidget()
+        wb_container.setLayout(self.wb_l)
+        wb_scroll.setWidget(wb_container)
 
-        # Execute Button
+        # assemble columns
+        columns_layout.addWidget(nb_group,    1)  # stretch factor 1
+        columns_layout.addWidget(cont_group,  1)  # stretch factor 1
+        columns_layout.addWidget(wb_scroll,   2)  # stretch factor 2 (wider)
+
+        # — Bottom row: Execute & status —
+        bottom_layout = QHBoxLayout()
         self.execute_button = QPushButton("Execute")
         self.execute_button.clicked.connect(self.startContinuumSubtraction)
-        left_layout.addWidget(self.execute_button)
+        bottom_layout.addWidget(self.execute_button, stretch=1)
+        # statusLabel must already exist
+        bottom_layout.addWidget(self.spinnerLabel, stretch=1)
+        bottom_layout.addWidget(self.statusLabel,   stretch=3)
 
-        # **Remove Zoom Buttons from Left Panel**
-        # The following code is removed to eliminate zoom buttons from the left panel
-        # zoom_layout = QHBoxLayout()
-        # self.zoomInButton = QPushButton("Zoom In")
-        # self.zoomInButton.clicked.connect(self.zoom_in)
-        # zoom_layout.addWidget(self.zoomInButton)
-        #
-        # self.zoomOutButton = QPushButton("Zoom Out")
-        # self.zoomOutButton.clicked.connect(self.zoom_out)
-        # zoom_layout.addWidget(self.zoomOutButton)
-        # left_layout.addLayout(zoom_layout)
+        # — Footer —
+        footer = QLabel(
+            "Written by Franklin Marek<br>"
+            "<a href='http://www.setiastro.com'>www.setiastro.com</a>"
+        )
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer.setOpenExternalLinks(True)
+        footer.setStyleSheet("font-size: 10px;")
 
-        # Save Button
-        self.save_button = QPushButton("Save Continuum Subtracted Image")
-        self.save_button.clicked.connect(self.save_continuum_subtracted)
-        self.save_button.setEnabled(False)  # Disable until an image is processed
-        left_layout.addWidget(self.save_button)
-
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
-
-        # Spacer to push elements to the top
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-
-        # Add left widget to the main layout
-        main_layout.addWidget(left_widget)
-
-        # **Create Right Panel Layout**
-        right_widget = QWidget(self)
-        right_layout = QVBoxLayout(right_widget)
-
-        # **Add Zoom Buttons to Right Panel**
-        zoom_layout = QHBoxLayout()
-        self.zoomInButton = QPushButton("Zoom In")
-        self.zoomInButton.clicked.connect(self.zoom_in)
-        zoom_layout.addWidget(self.zoomInButton)
-
-        self.zoomOutButton = QPushButton("Zoom Out")
-        self.zoomOutButton.clicked.connect(self.zoom_out)
-        zoom_layout.addWidget(self.zoomOutButton)
-
-        # **Add "Fit to Preview" Button**
-        self.fitToPreviewButton = QPushButton("Fit to Preview")
-        self.fitToPreviewButton.clicked.connect(self.fit_to_preview)
-        zoom_layout.addWidget(self.fitToPreviewButton)        
-
-        # Add the zoom buttons layout to the right panel
-        right_layout.addLayout(zoom_layout)
-
-        # Right side for the preview inside a QScrollArea
-        self.scrollArea = QScrollArea(self)
-        self.scrollArea.setWidgetResizable(True)
-        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scrollArea.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scrollArea.viewport().installEventFilter(self)
-
-        # QLabel for the image preview
-        self.imageLabel = QLabel(self)
-        self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.scrollArea.setWidget(self.imageLabel)
-        self.scrollArea.setMinimumSize(400, 400)
-
-        right_layout.addWidget(self.scrollArea)
-
-        # Add the right widget to the main layout
-        main_layout.addWidget(right_widget)
-
+        # put it all together
+        main_layout.addLayout(columns_layout)
+        main_layout.addLayout(bottom_layout)
+        main_layout.addWidget(footer)
         self.setLayout(main_layout)
-        self.scrollArea.viewport().setMouseTracking(True)
-        self.scrollArea.viewport().installEventFilter(self)
+        self.installEventFilter(self)
 
-        # Initially disable zoom buttons until an image is loaded and previewed
-        self.zoomInButton.setEnabled(False)
-        self.zoomOutButton.setEnabled(False)
 
     def refresh(self):
         if self.image_manager:
             # You might have a way to retrieve the current image and metadata.
             # For example, if your image_manager stores the current image,
             # you could do something like:
-            current_slot = self.image_manager.current_slot
-            image, metadata = self.image_manager.get_current_image_and_metadata()
-            self.on_image_changed(current_slot, image, metadata)
+            return
 
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
         Updates the display if the current slot is affected.
         """
-        if not self.isVisible():
-            return     
-        if image is None:
-            return           
-        if slot == 0:  # Assuming slot 0 is used for shared images
-            # Ensure the image is a numpy array
-            if not isinstance(image, np.ndarray):
-                image = np.array(image)  # Convert to numpy array if needed
-
-            # Update internal state with the new image and metadata
-            self.combined_image = image
-            self.original_header = metadata.get('original_header', None)
-            self.is_mono = metadata.get('is_mono', False)
-            self.filename = metadata.get('file_path', None)
-
-            # Update the preview
-            self.update_preview()
-
-            print(f"ContinuumSubtractTab: Image updated from ImageManager slot {slot}.")
+        return
 
     def clear_loaded_images(self):
-        """Clear the loaded NB and Continuum images and reset the UI."""
-        # Clear loaded images
-        self.nb_image = None
-        self.continuum_image = None
-        self.filename = None
+        """Clear all loaded NB and continuum images and reset the UI."""
+        # 1) Clear all image attributes
+        for attr in ("ha_image", "sii_image", "oiii_image",
+                    "red_image", "green_image", "osc_image"):
+            setattr(self, attr, None)
+
+        # 2) Reset all labels
+        self.haLabel    .setText("No Ha image")
+        self.siiLabel   .setText("No SII image")
+        self.oiiiLabel  .setText("No OIII image")
+        self.redLabel   .setText("No Red image")
+        self.greenLabel .setText("No Green image")
+        self.oscLabel   .setText("No OSC image")
+
+        # 3) Clear any preview state
         self.combined_image = None
-
-        # Reset labels
-        self.nb_label.setText("No NB image selected")
-        self.continuum_label.setText("No Continuum image selected")
-
-        # Disable save button
-        self.save_button.setEnabled(False)
-
-        # Clear the preview image
-        self.imageLabel.clear()
         self.original_pixmap = None
+        self.imageLabel.clear()
 
-        # Reset zoom factor
+        # 4) Reset zoom
         self.zoom_factor = 1.0
         self.apply_zoom()
-
-        # Disable zoom buttons
-        self.zoomInButton.setEnabled(False)
+        self.zoomInButton .setEnabled(False)
         self.zoomOutButton.setEnabled(False)
 
+        # 5) Disable save/push
+        self.save_button   .setEnabled(False)
+        self.pushButton    .setEnabled(False)  # if you have a push-to-slot button
 
-        # Update status label
-        self.statusLabel.setText("Loaded images cleared.")
+        # 6) Reset status
+        self.statusLabel.setText("All loaded images cleared.")
+        print("All loaded images cleared.")
 
-        print("Loaded images cleared.")
 
-    def selectImage(self, image_type):
-        selected_file, _ = QFileDialog.getOpenFileName(self, "Select Image", "", "Images (*.png *.tif *.tiff *.fits *.fit *xisf)")
-        if selected_file:
-            try:
-                image, original_header, _, _ = load_image(selected_file)  # Load image with header
-                self.filename = selected_file
-                if image_type == "nb":
-                    self.nb_image = image
-                    self.nb_label.setText(os.path.basename(selected_file))  # Updated label
-                elif image_type == "continuum":
-                    self.continuum_image = image
-                    self.continuum_label.setText(os.path.basename(selected_file))  # Updated label
-            except Exception as e:
-                print(f"Failed to load {image_type} image: {e}")
-                if image_type == "nb":
-                    self.nb_label.setText("Error loading NB image")
-                elif image_type == "continuum":
-                    self.continuum_label.setText("Error loading Continuum image")
+    def loadImage(self, channel: str):
+        """
+        Prompt the user to load either from file or from ImageManager slots,
+        for the given channel ("Ha", "SII", "OIII", "Red", "Green", "OSC").
+        """
+        source, ok = QInputDialog.getItem(
+            self,
+            f"Select {channel} Image Source",
+            "Load image from:",
+            ["From File", "From Slot"],
+            editable=False
+        )
+        if not ok:
+            return
+
+        if source == "From File":
+            result = self.loadImageFromFile(channel)
+        else:
+            result = self.loadImageFromSlot(channel)
+
+        if not result:
+            return
+
+        image, header, bit_depth, is_mono, path = result
+
+        # Store into the right attribute & update the right label:
+        label_text = os.path.basename(path) if path else "From Slot"
+        if channel == "Ha":
+            self.ha_image = image
+            self.haLabel .setText(label_text)
+        elif channel == "SII":
+            self.sii_image = image
+            self.siiLabel.setText(label_text)
+        elif channel == "OIII":
+            self.oiii_image = image
+            self.oiiiLabel.setText(label_text)
+        elif channel == "Red":
+            self.red_image = image
+            self.redLabel.setText(label_text)
+        elif channel == "Green":
+            self.green_image = image
+            self.greenLabel.setText(label_text)
+        elif channel == "OSC":
+            self.osc_image = image
+            self.oscLabel.setText(label_text)
+        else:
+            # unexpected channel string
+            QMessageBox.critical(self, "Error", f"Unknown channel '{channel}'.")
+            return
+
+        # Store header and mono-flag for later saving
+        self.original_header = header
+        self.is_mono         = is_mono
+
+
+    def loadImageFromFile(self, channel: str):
+        file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
+        path, _ = QFileDialog.getOpenFileName(self, f"Select {channel} Image", "", file_filter)
+        if not path:
+            return None
+
+        try:
+            image, header, bit_depth, is_mono = load_image(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load {channel} image:\n{e}")
+            return None
+
+        return image, header, bit_depth, is_mono, path
+
+    def loadImageFromSlot(self, channel: str):
+        if not self.image_manager:
+            QMessageBox.critical(self, "Error", "No ImageManager; cannot load from slot.")
+            return None
+
+        # build the list of display names
+        slots = []
+        for i in range(self.image_manager.max_slots):
+            name = getattr(self.parent(), "slot_names", {}).get(i, f"Slot {i+1}")
+            slots.append(name)
+
+        choice, ok = QInputDialog.getItem(
+            self, f"Select Slot for {channel}", "Choose slot:", slots, editable=False
+        )
+        if not ok:
+            return None
+
+        # map back to index
+        idx = slots.index(choice)
+        img = self.image_manager._images.get(idx, None)
+        if img is None:
+            QMessageBox.warning(self, "Empty Slot", f"{choice} is empty.")
+            return None
+
+        meta = self.image_manager._metadata.get(idx, {})
+        return img, \
+               meta.get("original_header"), \
+               meta.get("bit_depth", "Unknown"), \
+               meta.get("is_mono", False), \
+               meta.get("file_path", None)
 
     def startContinuumSubtraction(self):
-        if self.nb_image is not None and self.continuum_image is not None:
-            # Show spinner and start background processing
-            self.showSpinner()
-            self.processing_thread = ContinuumProcessingThread(
-                self.nb_image,
-                self.continuum_image,
-                self.linear_output_checkbox.isChecked()
-            )
-            self.processing_thread.processing_complete.connect(self.display_image)
-            self.processing_thread.finished.connect(self.hideSpinner)
-            self.processing_thread.status_update.connect(self.update_status_label)
-            self.processing_thread.start()
+        # — build continuum channels with explicit None checks —
+        if hasattr(self, "red_image") and self.red_image is not None:
+            cont_red = self.red_image
+        elif hasattr(self, "osc_image") and self.osc_image is not None:
+            cont_red = self.osc_image[..., 0]
         else:
-            self.statusLabel.setText("Please select both NB and Continuum images.")
-            print("Please select both NB and Continuum images.")
+            cont_red = None
+
+        if hasattr(self, "green_image") and self.green_image is not None:
+            cont_green = self.green_image
+        elif hasattr(self, "osc_image") and self.osc_image is not None:
+            cont_green = self.osc_image[..., 1]
+        else:
+            cont_green = None
+
+        # — build tasks as before —
+        tasks = []
+        if self.ha_image is not None and cont_red is not None:
+            tasks.append(("Ha",  self.ha_image,  cont_red))
+        if self.sii_image is not None and cont_red is not None:
+            tasks.append(("SII", self.sii_image, cont_red))
+        if self.oiii_image is not None and cont_green is not None:
+            tasks.append(("OIII", self.oiii_image, cont_green))
+
+        if not tasks:
+            self.statusLabel.setText("Load at least one NB + matching continuum channel (or OSC).")
+            return
+
+
+        self.showSpinner()
+
+        self._threads.clear()
+        self._pending = len(tasks)
+        self._results = []
+
+        for name, nb, cont in tasks:
+            t = ContinuumProcessingThread(nb, cont, self.linear_output_checkbox.isChecked())
+            t.status_update.connect(self.update_status_label)
+            t.processing_complete.connect(
+                lambda img, stars, overlay, raw, after, n=name:
+                    self._onOneResult(n, img, stars, overlay, raw, after)
+            )
+            t.finished.connect(self._onThreadFinished)
+            self._threads.append(t)      # keep a reference
+            t.start()
+
+    def _onOneResult(self, filt, img, star_count, overlay_qimg, raw_pixels, after_pixels):
+        # stash for later slot‐pushing
+        self._results.append({
+            "filter":  filt,
+            "image":   img,
+            "stars":   star_count,
+            "overlay": overlay_qimg,
+            "raw":     raw_pixels,
+            "after":   after_pixels
+        })
+
+        # build scatter‐plot
+        nb_flux   = raw_pixels[:, 0]
+        cont_flux = raw_pixels[:, 1]
+        h, w = 200, 200
+        scatter_img = np.ones((h, w, 3), np.uint8) * 255
+
+        # 1) Compute best-fit in flux space: NB ≈ m·BB + c
+        m, c = np.polyfit(cont_flux, nb_flux, 1)
+
+        # 2) Choose two BB positions to draw the line at (0 and 1)
+        x0f, y0f = 0.0, c
+        x1f, y1f = 1.0, m*1.0 + c
+
+        # clip so we stay within [0,1]
+        y0f = np.clip(y0f, 0.0, 1.0)
+        y1f = np.clip(y1f, 0.0, 1.0)
+
+        # map to pixel coords
+        x0 = int(x0f * (w - 1))
+        y0 = int((1 - y0f) * (h - 1))
+        x1 = int(x1f * (w - 1))
+        y1 = int((1 - y1f) * (h - 1))
+
+        # draw the fit line (in blue, thickness 2)
+        cv2.line(scatter_img, (x0, y0), (x1, y1), (255, 0, 0), 2)
+
+        # 3) Plot points
+        xs = (cont_flux * (w - 1)).astype(int)
+        ys = ((1 - nb_flux) * (h - 1)).astype(int)
+        for x, y in zip(xs, ys):
+            cv2.circle(scatter_img, (x, y), 2, (0, 0, 255), -1)
+        # draw axes
+        cv2.line(scatter_img, (0, h - 1), (w - 1, h - 1), (0, 0, 0), 1)  # x-axis
+        cv2.line(scatter_img, (0, 0),       (0, h - 1),     (0, 0, 0), 1)  # y-axis
+
+        # put “BB Flux” centered on the x-axis
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text = "BB Flux"
+        ((tw, th), _) = cv2.getTextSize(text, font, 0.5, 1)
+        x_text = (w - tw) // 2
+        y_text = h - 5  # just above bottom
+        cv2.putText(scatter_img, text, (x_text, y_text), font, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+        # put “NB Flux” vertically along the left
+        vert_text = "NB Flux"
+        # draw each character, stepping down
+        for i, ch in enumerate(vert_text):
+            # x is a few pixels right of the y-axis, y steps by 15px
+            cv2.putText(scatter_img, ch, (2, 15 + i*15), font, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+
+        # convert to QPixmap
+        qscatter = QImage(scatter_img.data, w, h, 3*w, QImage.Format.Format_RGB888).copy()
+        scatter_pix = QPixmap.fromImage(qscatter)
+
+        # overlay thumbnail
+        thumb_pix = QPixmap.fromImage(overlay_qimg).scaled(
+            200, 200,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        # assemble entry row
+        entry = QWidget()
+        elay  = QHBoxLayout(entry)
+
+        # 1) star count label
+        elay.addWidget(QLabel(f"{filt}: {star_count} stars"))
+
+        # 2) scatter thumbnail
+        scatter_label = QLabel()
+        scatter_label.setPixmap(scatter_pix)
+        scatter_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        elay.addWidget(scatter_label)
+        # remember it & install filter
+        self._clickable_images[scatter_label] = scatter_pix
+        scatter_label.installEventFilter(self)
+
+        # 3) overlay thumbnail
+        overlay_label = QLabel()
+        overlay_label.setPixmap(thumb_pix)
+        overlay_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        elay.addWidget(overlay_label)
+        self._clickable_images[overlay_label] = QPixmap.fromImage(overlay_qimg)
+        overlay_label.installEventFilter(self)
+
+        elay.addStretch(1)
+        entry.setLayout(elay)
+
+        # add to the WB column
+        self.wb_l.addWidget(entry)
+
+    def eventFilter(self, source, event):
+        # catch mouse releases on any of our clickable labels
+        if event.type() == QEvent.Type.MouseButtonRelease and source in self._clickable_images:
+            pix = self._clickable_images[source]
+            self._showEnlarged(pix)
+            return True
+        return super().eventFilter(source, event)
+
+    def _showEnlarged(self, pixmap):
+        # simple dialog that just shows the pixmap at window-fitting size
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Detail View")
+        layout = QVBoxLayout(dlg)
+        lbl = QLabel()
+        lbl.setPixmap(pixmap.scaled(800, 800, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation))
+        layout.addWidget(lbl)
+        dlg.resize(820, 820)
+        dlg.exec()  # modal; user closes when done
+
+    def _onThreadFinished(self):
+        self._pending -= 1
+        if self._pending == 0:
+            self.hideSpinner()
+            self._pushResultsToSlots(self._results)
+
+    def _pushResultsToSlots(self, results):
+        max_slots = self.image_manager.max_slots
+        pushed = []
+        # make sure we have a place to keep our preview dialogs alive
+        if not hasattr(self, '_preview_dialogs'):
+            self._preview_dialogs = {}
+
+        for entry in results:
+            filt = entry["filter"]
+            img  = entry["image"]
+            # ensure mono
+            if img.ndim == 3 and img.shape[2] == 3:
+                img = img[..., 0]  # take one channel for the preview
+            for slot in range(max_slots):
+                existing = self.image_manager._images.get(slot)
+                if existing is None or (isinstance(existing, np.ndarray) and existing.size <= 100):
+                    name = f"{filt}_ContSub"
+                    meta = {
+                        'file_path': name,
+                        'is_mono': True,
+                        'bit_depth': "32-bit floating point",
+                        'source': name
+                    }
+                    # store and emit
+                    self.image_manager._images[slot]   = img
+                    self.image_manager._metadata[slot] = meta
+                    self.image_manager.image_changed.emit(slot, img, meta)
+
+                    # rename toolbar & menubar
+                    mw = self.window()  # AstroEditingSuite
+                    mw.slot_names[slot] = name
+                    if slot in mw.slot_actions:
+                        act = mw.slot_actions[slot]
+                        act.setText(name)
+                        act.setStatusTip(f"Open preview for {name}")
+                    if slot in mw.menubar_slot_actions:
+                        mact = mw.menubar_slot_actions[slot]
+                        mact.setText(name)
+                        mact.setStatusTip(f"Open preview for {name}")
+                    mw.menuBar().update()
+
+                    pushed.append(slot)
+                    break
+            if len(pushed) >= min(3, len(results)):
+                break
+
+        self.statusLabel.setText(f"Pushed {len(pushed)} images to slots.")
+
+        # show non-modal previews and keep them alive
+        for slot in pushed:
+            img  = self.image_manager._images[slot]
+            mono = self.image_manager._metadata[slot].get('is_mono', False)
+            dlg  = ImagePreviewDialog(img, is_mono=mono)
+            title = f"Slot {slot+1}: {mw.slot_names[slot]}"
+            dlg.setWindowTitle(title)
+            dlg.show()
+            # store a reference so it doesn’t get garbage-collected
+            self._preview_dialogs[slot] = dlg
+
+        return pushed
+
 
     def update_status_label(self, message):
         self.statusLabel.setText(message)
-
-    def wheelEvent(self, event: QWheelEvent):
-        # Check the vertical delta to determine zoom direction.
-        if event.angleDelta().y() > 0:
-            self.zoom_in()
-        else:
-            self.zoom_out()
-        # Accept the event so it isn’t propagated further (e.g. to the scroll area).
-        event.accept()
-
-    def zoom_in(self):
-        if self.zoom_factor < 5.0:  # Maximum 500% zoom
-            self.zoom_factor *= 1.2  # Increase zoom by 20%
-            self.update_preview()
-            self.statusLabel.setText(f"Zoom: {self.zoom_factor * 100:.0f}%")
-
-        else:
-            self.statusLabel.setText("Maximum zoom level reached.")
-
-    def zoom_out(self):
-        if self.zoom_factor > 0.01:  # Minimum 20% zoom
-            self.zoom_factor /= 1.2  # Decrease zoom by ~17%
-            self.update_preview()
-            self.statusLabel.setText(f"Zoom: {self.zoom_factor * 100:.0f}%")
-
-        else:
-            self.statusLabel.setText("Minimum zoom level reached.")
-
-    def fit_to_preview(self):
-        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        # Check if the original pixmap exists
-        if self.original_pixmap is not None:
-            # Get the width of the scroll area's viewport (preview area)
-            preview_width = self.scrollArea.viewport().width()
-            
-            # Get the width of the original image from the original_pixmap
-            image_width = self.original_pixmap.width()
-            
-            # Calculate the required zoom factor to fit the image's width into the preview area
-            new_zoom_factor = preview_width / image_width
-            
-            # Update the zoom factor without enforcing any limits
-            self.zoom_factor = new_zoom_factor
-            
-            # Apply the new zoom factor to update the display
-            self.apply_zoom()
-            
-            # Update the status label to reflect the new zoom level
-            self.statusLabel.setText(f"Fit to Preview: {self.zoom_factor * 100:.0f}%")
-
-        else:
-
-            self.statusLabel.setText("No image to fit to preview.")
-
-
-    def apply_zoom(self):
-        """Apply the current zoom level to the image."""
-        self.update_preview()  # Call without extra arguments; it will calculate dimensions based on zoom factor            
-
-    def update_preview(self):
-        if self.original_pixmap is not None:
-            scaled_pixmap = self.original_pixmap.scaled(
-                self.original_pixmap.size() * self.zoom_factor,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.imageLabel.setPixmap(scaled_pixmap)
-            self.imageLabel.resize(scaled_pixmap.size())
-            print(f"Preview updated with zoom factor: {self.zoom_factor}")
-        else:
-            print("Original pixmap is not set. Cannot update preview.")
-
-    def save_continuum_subtracted(self):
-        if self.combined_image is not None:
-            # Pre-populate the save dialog with the original image name
-            base_name = os.path.basename(self.filename)
-            default_save_name = os.path.splitext(base_name)[0] + '_continuumsubtracted.tif'
-            original_dir = os.path.dirname(self.filename)
-
-            # Open the save file dialog
-            save_filename, _ = QFileDialog.getSaveFileName(
-                self, 
-                'Save Image As', 
-                os.path.join(original_dir, default_save_name), 
-                'Images (*.tiff *.tif *.png *.fit *.fits);;All Files (*)'
-            )
-
-            if save_filename:
-                original_format = save_filename.split('.')[-1].lower()
-
-                # For TIFF and FITS files, prompt the user to select the bit depth
-                if original_format in ['tiff', 'tif', 'fits', 'fit']:
-                    bit_depth_options = ["16-bit", "32-bit unsigned", "32-bit floating point"]
-                    bit_depth, ok = QInputDialog.getItem(
-                        self, "Select Bit Depth", "Choose bit depth for saving:", bit_depth_options, 0, False
-                    )
-                    
-                    if ok and bit_depth:
-                        # Call save_image with the necessary parameters
-                        save_image(
-                            self.combined_image, 
-                            save_filename, 
-                            original_format, 
-                            bit_depth, 
-                            self.original_header, 
-                            self.is_mono
-                        )
-                        self.statusLabel.setText(f'Image saved as: {save_filename}')
-                        print(f"Image saved as: {save_filename}")
-                    else:
-                        self.statusLabel.setText('Save canceled.')
-                        print("Save operation canceled.")
-                else:
-                    # For non-TIFF/FITS formats, save directly without bit depth selection
-                    save_image(self.combined_image, save_filename, original_format)
-                    self.statusLabel.setText(f'Image saved as: {save_filename}')
-                    print(f"Image saved as: {save_filename}")
-            else:
-                self.statusLabel.setText('Save canceled.')
-                print("Save operation canceled.")
-        else:
-            self.statusLabel.setText("No processed image to save.")
-            print("No processed image to save.")
-
-    def display_image(self, processed_image):
-        if processed_image is not None:
-            self.combined_image = processed_image
-
-            # Convert the processed image to a displayable format
-            preview_image = (processed_image * 255).astype(np.uint8)
-            
-            # Check if the image is mono or RGB
-            if preview_image.ndim == 2:  # Mono image
-                # Create a 3-channel RGB image by duplicating the single channel
-                preview_image = np.stack([preview_image] * 3, axis=-1)  # Stack to create RGB
-
-            h, w = preview_image.shape[:2]
-
-            # Ensure the array is contiguous
-            preview_image = np.ascontiguousarray(preview_image)
-
-            # Change the format to RGB888 for displaying an RGB image
-            q_image = QImage(preview_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-
-            pixmap = QPixmap.fromImage(q_image)
-
-            # Store the original pixmap only once
-            if self.original_pixmap is None:
-                self.original_pixmap = pixmap.copy()
-
-            # Scale from original pixmap based on zoom_factor
-            scaled_pixmap = self.original_pixmap.scaled(
-                self.original_pixmap.size() * self.zoom_factor,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.imageLabel.setPixmap(scaled_pixmap)
-            self.imageLabel.resize(scaled_pixmap.size())
-
-            # Enable save and zoom buttons now that an image is processed
-            self.save_button.setEnabled(True)
-            self.zoomInButton.setEnabled(True)
-            self.zoomOutButton.setEnabled(True)
-
-            self.statusLabel.setText("Continuum subtraction completed.")
-            # Push the processed image to ImageManager
-            if self.image_manager:
-                metadata = {
-                    'file_path': self.filename,
-                    'original_header': self.original_header,
-                    'is_mono': self.is_mono,
-                    'source': 'Continuum Subtraction'
-                }
-                self.image_manager.set_image(self.combined_image, metadata, step_name="Continuum Subtraction")
-
-                print("ContinuumSubtractTab: Image pushed to ImageManager.")
-        else:
-            self.statusLabel.setText("Continuum subtraction failed.")
-            print("Continuum subtraction failed.")
 
     def showSpinner(self):
         self.spinnerLabel.show()
@@ -41138,28 +41572,10 @@ class ContinuumSubtractTab(QWidget):
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
 
-    def eventFilter(self, source, event):
-        if source is self.scrollArea.viewport():
-            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                self.dragging = True
-                self.last_pos = event.pos()
-            elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                self.dragging = False
-            elif event.type() == QEvent.Type.MouseMove and self.dragging:
-                delta = event.pos() - self.last_pos
-                self.scrollArea.horizontalScrollBar().setValue(
-                    self.scrollArea.horizontalScrollBar().value() - delta.x()
-                )
-                self.scrollArea.verticalScrollBar().setValue(
-                    self.scrollArea.verticalScrollBar().value() - delta.y()
-                )
-                self.last_pos = event.pos()
-
-        return super().eventFilter(source, event)
 
 
 class ContinuumProcessingThread(QThread):
-    processing_complete = pyqtSignal(np.ndarray)
+    processing_complete = pyqtSignal(np.ndarray, int, QImage, np.ndarray, np.ndarray)
     status_update = pyqtSignal(str)
 
     def __init__(self, nb_image, continuum_image, output_linear):
@@ -41196,6 +41612,20 @@ class ContinuumProcessingThread(QThread):
         # Normalize the red channel to the green channel
         combined_image[..., 0] = self.normalize_channel(combined_image[..., 0], combined_image[..., 1])
 
+        self.status_update.emit("Performing star-based white balance…")
+        balanced_rgb, star_count, star_overlay, raw_star_pixels, after_star_pixels = \
+            apply_star_based_white_balance(
+                combined_image,
+                threshold=1.5,
+                autostretch=False,
+                reuse_cached_sources=True,
+                return_star_colors=True
+            )
+        combined_image[:] = balanced_rgb   # replace working image with the white-balanced one
+        
+        self.status_update.emit(f"White balance complete ({star_count} stars).")
+        QCoreApplication.processEvents()
+
         # Perform continuum subtraction
         linear_image = combined_image[..., 0] - 0.9*(combined_image[..., 1]-np.median(combined_image[..., 1]))
 
@@ -41223,8 +41653,22 @@ class ContinuumProcessingThread(QThread):
 
         self.status_update.emit("Linear to Non-Linear Stretch complete.")
         QCoreApplication.processEvents()
+
+        overlay_uint8 = (star_overlay * 255).astype(np.uint8)
+        h2, w2 = overlay_uint8.shape[:2]
+        bytes_per_line = 3 * w2
+        qimg = QImage(
+            overlay_uint8.data, w2, h2, bytes_per_line,
+            QImage.Format.Format_RGB888
+        ).copy()
         # Emit the final image for preview
-        self.processing_complete.emit(final_image)
+        self.processing_complete.emit(
+            final_image,          # → np.ndarray
+            star_count,           # → int
+            qimg,                 # → QImage
+            np.array(raw_star_pixels),   # → np.ndarray
+            np.array(after_star_pixels)  # → np.ndarray
+        )
 
     def background_neutralization(self, rgb_image):
         height, width, _ = rgb_image.shape
@@ -41513,22 +41957,38 @@ def apply_star_based_white_balance(
         bg_neutralized[:, :, c] = np.clip((bg_neutralized[:, :, c] - diff) / denom, 0.0, 1.0)
 
     # Step 2: Detect or reuse star positions
+    # 2) Detect or reuse star positions
     gray_neutral = np.mean(bg_neutralized, axis=2).astype(np.float32)
-    bkg2 = sep.Background(gray_neutral)
-    data_sub = gray_neutral - bkg2.back()
-    err_val = bkg2.globalrms
+    bkg2        = sep.Background(gray_neutral)
+    data_sub    = gray_neutral - bkg2.back()
+    err_val     = bkg2.globalrms
 
+    sources, r = None, None
     if reuse_cached_sources and cached_star_sources is not None:
         sources = cached_star_sources
-        r = cached_flux_radii
+        r       = cached_flux_radii
     else:
         sources = sep.extract(data_sub, threshold, err=err_val)
         if len(sources) == 0:
             raise ValueError("No stars detected for Star-Based White Balance.")
-        r, _ = sep.flux_radius(gray_neutral, sources['x'], sources['y'], 2.0 * sources['a'], 0.2,
-                               normflux=sources['flux'], subpix=5)
-        cached_star_sources = sources
-        cached_flux_radii = r
+        r, _ = sep.flux_radius(
+            gray_neutral,
+            sources['x'], sources['y'],
+            2.0 * sources['a'], 0.2,
+            normflux=sources['flux'],
+            subpix=5
+        )
+        cached_star_sources  = sources
+        cached_flux_radii    = r
+
+    # → throw away anything too big to be a star:
+    mask    = (r > 0) & (r <= 10)
+    sources = sources[mask]
+    r       = r[mask]
+
+    if len(sources) == 0:
+        raise ValueError("All detected sources were too large; no valid stars for White Balance.")
+
 
     # NEW: Sample star colors from original image (before any adjustments)
     raw_star_pixels = []
@@ -47182,11 +47642,13 @@ class MainWindow(QMainWindow):
         else:
             self.zoom_out()
 
+    @announce_zoom
     def zoom_in(self):
         self.zoom_level *= 1.2
         self.main_preview.setTransform(QTransform().scale(self.zoom_level, self.zoom_level))
         self.update_green_box()
         
+    @announce_zoom
     def zoom_out(self):
         self.zoom_level /= 1.2
         self.main_preview.setTransform(QTransform().scale(self.zoom_level, self.zoom_level))
