@@ -246,7 +246,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.11"
+VERSION = "2.15.12"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -7822,7 +7822,11 @@ class HistogramDialog(QDialog):
         
         # Choose bin edges based on the log_scale toggle.
         if self.log_scale:
-            eps = 1e-4  # Cannot start at 0 for log scale.
+            raw_min = float(np.min(self.image))
+            eps     = max(raw_min, 1e-4)   # Cannot start at 0 for log scale.
+            self._hist_eps     = eps
+            self._hist_log_min = np.log10(eps)
+            self._hist_log_max = 0.0  # since log10(1)==0            
             bin_edges = np.logspace(np.log10(eps), 0, bin_count + 1)
             log_min = np.log10(eps)
             log_max = 0  # log10(1)=0
@@ -9663,132 +9667,95 @@ class StackingSuiteDialog(QDialog):
 
 
 
-    def populate_calibrated_lights(self, manual_addition=False):
-        if manual_addition:
-            return
-
+    def populate_calibrated_lights(self):
+        """
+        Reads both the Calibrated folder and any manually-added files,
+        groups them by FILTER, EXPOSURE±tol, SIZE, and fills self.reg_tree.
+        """
+        # 1) clear out the tree
         self.reg_tree.clear()
         self.reg_tree.setColumnCount(3)
         self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
+        hdr = self.reg_tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
 
-        # ✅ Allow user to manually resize columns
-        header = self.reg_tree.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        # 2) gather all files
+        calibrated_folder = os.path.join(self.stacking_directory or "", "Calibrated")
+        files = []
+        if os.path.isdir(calibrated_folder):
+            for fn in os.listdir(calibrated_folder):
+                if fn.lower().endswith((".fits", ".fit")):
+                    files.append(os.path.join(calibrated_folder, fn))
+        # append any manual additions
+        files += getattr(self, "manual_light_files", [])
 
-        # Preserve manually added files
-        existing_manual_files = self.light_files.copy()
-        self.light_files = {}
-
-        # 1) Gather files
-        calibrated_folder_files = []
-        if self.stacking_directory:
-            calibrated_folder = os.path.join(self.stacking_directory, "Calibrated")
-            if os.path.exists(calibrated_folder):
-                all_cal_files = [
-                    os.path.join(calibrated_folder, f)
-                    for f in os.listdir(calibrated_folder)
-                    if f.lower().endswith((".fits", ".fit"))
-                ]
-                calibrated_folder_files = [
-                    f for f in all_cal_files if f not in getattr(self, "deleted_calibrated_files", [])
-                ]
-
-        manual_files = getattr(self, "manual_light_files", [])
-        all_files = calibrated_folder_files + manual_files
-        if not all_files:
+        # nothing to do?
+        if not files:
             return
 
-        # 2) Group files
-        grouped_files = {}
-        for file_path in all_files:
+        # 3) group by header
+        grouped = {}  # key -> list of (path, exposure_float)
+        tol = self.exposure_tolerance_spin.value()
+        for fp in files:
             try:
-                with fits.open(file_path) as hdul:
-                    hdr = hdul[0].header
-                    filter_name = hdr.get("FILTER", "Unknown")
-                    exposure = hdr.get("EXPOSURE", hdr.get("EXPTIME", "Unknown"))
-                    data = hdul[0].data
-                    if data is not None:
-                        height, width = data.shape[-2:]
-                        image_size = f"{width}x{height}"
-                    else:
-                        image_size = "Unknown"
-
-                    # Try to find a matching group
-                    found_group = None
-                    for group_key in grouped_files.keys():
-                        g_filter, g_exposure, g_size = self.parse_group_key(group_key)
-                        if (
-                            filter_name == g_filter and
-                            image_size == g_size and
-                            self.exposures_within_tolerance(exposure, g_exposure, self.exposure_tolerance_spin.value())
-                        ):
-                            found_group = group_key
-                            break
-
-                    if found_group:
-                        grouped_files[found_group].append((file_path, float(exposure)))
-                    else:
-                        new_group_key = f"{filter_name} - {exposure}s ({image_size})"
-                        grouped_files[new_group_key] = [(file_path, float(exposure))]
-
+                hdr0 = fits.getheader(fp, ext=0)
+                filt = hdr0.get("FILTER", "Unknown")
+                exp  = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", 0.0))
+                exp  = float(exp)
+                data0 = fits.getdata(fp, ext=0)
+                h, w = data0.shape[-2:]
+                size = f"{w}x{h}"
             except Exception as e:
-                print(f"⚠️ Skipped {os.path.basename(file_path)}: {e}")
+                print(f"⚠️ Skipping {fp}: {e}")
+                continue
 
-        # 3) Populate the tree
-        for group_key, file_tuples in grouped_files.items():
-            file_list = [f for f, _ in file_tuples]
-            exposures = [e for _, e in file_tuples]
-
-            top_item = QTreeWidgetItem()
-            top_item.setText(0, group_key)
-
-            # 🛠 Smart metadata text
-            if len(exposures) > 1:
-                tol = self.exposure_tolerance_spin.value()
-                min_exp = min(exposures)
-                max_exp = max(exposures)
-
-                # Expand the range to reflect tolerance
-                min_exp_display = max(0, min_exp - tol)
-                max_exp_display = max_exp + tol
-
-                metadata_text = f"{len(file_list)} files, {min_exp_display:.0f}s–{max_exp_display:.0f}s"
+            # find existing group
+            match = None
+            for key in grouped:
+                f2,e2,s2 = self.parse_group_key(key)
+                if filt==f2 and s2==size and abs(exp-e2)<=tol:
+                    match = key
+                    break
+            if match is None:
+                key = f"{filt} - {exp:.1f}s ({size})"
+                grouped[key] = []
             else:
-                metadata_text = f"{len(file_list)} file"
+                key = match
 
-            top_item.setText(1, metadata_text)
-            top_item.setText(2, "Drizzle: False")
-            top_item.setData(0, Qt.ItemDataRole.UserRole, file_list)
-            self.reg_tree.addTopLevelItem(top_item)
+            grouped[key].append((fp, exp))
 
-            for fp, _ in file_tuples:
-                try:
-                    with fits.open(fp) as hdul:
-                        data = hdul[0].data
-                        if data is not None:
-                            height, width = data.shape[-2:]
-                            size_text = f"{width}x{height}"
-                        else:
-                            size_text = "Unknown"
-                except Exception:
-                    size_text = "Unknown"
+        # 4) populate the tree & store in self.light_files
+        self.light_files = {}
+        for key, lst in grouped.items():
+            paths = [p for p,_ in lst]
+            exps  = [e for _,e in lst]
 
-                child = QTreeWidgetItem([
-                    os.path.basename(fp),
-                    f"Size: {size_text}"
-                ])
-                top_item.addChild(child)
+            top = QTreeWidgetItem()
+            top.setText(0, key)
+            # metadata: "N files, min–max s"
+            if len(exps)>1:
+                mn, mx = min(exps), max(exps)
+                top.setText(1, f"{len(paths)} files, {mn:.0f}s–{mx:.0f}s")
+            else:
+                top.setText(1, f"{len(paths)} file")
+            top.setText(2, "Drizzle: False")
+            # store full list for gather_drizzle & extractor
+            top.setData(0, Qt.ItemDataRole.UserRole, paths)
+            self.reg_tree.addTopLevelItem(top)
 
-            top_item.setExpanded(True)
+            for fp,_ in lst:
+                # leaf row
+                data0 = fits.getdata(fp, ext=0)
+                h, w = data0.shape[-2:]
+                leaf = QTreeWidgetItem([os.path.basename(fp), f"Size: {w}x{h}"])
+                # store absolute path
+                leaf.setData(0, Qt.ItemDataRole.UserRole, fp)
+                top.addChild(leaf)
 
-        # 4) Update internal storage
-        self.light_files.update({k: [fp for fp, _ in v] for k, v in grouped_files.items()})
-
-        for gkey, flist in existing_manual_files.items():
-            if gkey not in self.light_files:
-                self.light_files[gkey] = flist
+            top.setExpanded(True)
+            self.light_files[key] = paths
 
 
     def update_drizzle_settings(self):
@@ -9836,84 +9803,72 @@ class StackingSuiteDialog(QDialog):
 
     def gather_drizzle_settings_from_tree(self):
         """
-        Returns a dict of the form:
-        {
-        "L - 120s (8288x5644)": {
-            "files": [...],
-            "drizzle_enabled": True,
-            "scale_factor": 2.0,
-            "drop_shrink": 0.65
-        },
-        ...
-        }
+        Returns: { group_key: {files:[...], drizzle_enabled:bool,
+                            scale_factor:float, drop_shrink:float} }
         """
-        drizzle_dict = {}
-        top_count = self.reg_tree.topLevelItemCount()
-
-        for i in range(top_count):
+        dd = {}
+        for i in range(self.reg_tree.topLevelItemCount()):
             item = self.reg_tree.topLevelItem(i)
-            if not item:
-                continue
+            key  = item.text(0)
+            files= item.data(0, Qt.ItemDataRole.UserRole) or []
+            txt  = item.text(2).lower()
 
-            group_key = item.text(0)
-            file_list = item.data(0, Qt.ItemDataRole.UserRole)
-            drizzle_text = item.text(2)  # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65" or "Drizzle: False"
+            ena = txt.startswith("drizzle: true")
+            sf  = 1.0
+            ds  = 0.65
+            if ena:
+                import re
+                m = re.search(r"scale\s*:\s*([\d\.]+)x?", txt)
+                if m: sf = float(m.group(1))
+                m = re.search(r"drop\s*:\s*([\d\.]+)", txt)
+                if m: ds = float(m.group(1))
 
-            # Default
-            drizzle_enabled = False
-            scale_factor = 1.0
-            drop_shrink = 0.65
-
-            if drizzle_text.startswith("Drizzle: False"):
-                # Drizzle is off
-                drizzle_enabled = False
-            else:
-                # e.g. "Drizzle: True, Scale: 2x, Drop: 0.65"
-                parts = drizzle_text.split(",")
-                # parts[0] -> "Drizzle: True"
-                # parts[1] -> " Scale: 2x"
-                # parts[2] -> " Drop: 0.65"
-                if len(parts) == 3:
-                    drizzle_enabled_str = parts[0].split(":")[-1].strip()  # "True"
-                    drizzle_enabled = (drizzle_enabled_str.lower() == "true")
-
-                    scale_str = parts[1].split(":")[-1].strip()  # "2x"
-                    scale_factor = float(scale_str.replace("x",""))
-
-                    drop_str = parts[2].split(":")[-1].strip()
-                    drop_shrink = float(drop_str)
-
-            drizzle_dict[group_key] = {
-                "files": file_list,
-                "drizzle_enabled": drizzle_enabled,
-                "scale_factor": scale_factor,
-                "drop_shrink": drop_shrink
+            dd[key] = {
+                "files": files,
+                "drizzle_enabled": ena,
+                "scale_factor": sf,
+                "drop_shrink": ds
             }
 
-        return drizzle_dict
+        # backfill any group that lived only in self.light_files
+        for key, fl in self.light_files.items():
+            if key not in dd:
+                dd[key] = {
+                    "files": fl,
+                    "drizzle_enabled": False,
+                    "scale_factor": 1.0,
+                    "drop_shrink": 0.65
+                }
+
+        return dd
+
 
 
     def add_light_files_to_registration(self):
-        """ Adds manually selected light frames while preserving grouping. """
+        """
+        Let the user pick some new LIGHT frames, then
+        immediately re-populate the tree so they show up
+        in the same Filter–Exposure–Size groups as everything else.
+        """
         last_dir = self.settings.value("last_opened_folder", "", type=str)
-        files, _ = QFileDialog.getOpenFileNames(self, "Select Light Frames", last_dir, "FITS Files (*.fits *.fit *.fz *.fz)")
-        
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Light Frames",
+            last_dir,
+            "FITS Files (*.fits *.fit *.fz *.fz)"
+        )
         if not files:
             return
 
+        # remember for next time
         self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
 
-        # ✅ First make sure manual_light_files exists
+        # store these in a manual list, then rebuild the tree
         if not hasattr(self, "manual_light_files"):
             self.manual_light_files = []
-
-        # ✅ Add selected files to manual_light_files
         self.manual_light_files.extend(files)
 
-        print(f"✅ Added {len(files)} manual light frames.")
-        self.update_status(f"✅ Added {len(files)} manual light frames.")
-
-        # ✅ Re-populate tree (this will rebuild everything properly)
+        # rebuild the registration tree (it reads manual_light_files + calibrated folder)
         self.populate_calibrated_lights()
 
 
@@ -11276,37 +11231,39 @@ class StackingSuiteDialog(QDialog):
         self.populate_calibrated_lights()
 
     def extract_light_files_from_tree(self):
-        """ Extracts the selected light frames from the registration tree and ensures only selected files are processed. """
-        new_light_files = {}  # Temporary dictionary for extracted files
-
-        # ✅ Clear light_files before repopulating
-        self.light_files = {}
-
+        """
+        Walks self.reg_tree and rebuilds self.light_files as
+        { group_key: [abs_path1, abs_path2, ...], ... }
+        """
+        new = {}
         for i in range(self.reg_tree.topLevelItemCount()):
-            group_item = self.reg_tree.topLevelItem(i)
-            group_key = group_item.text(0)  # Example: "L - 120s (8288x5644)"
+            group = self.reg_tree.topLevelItem(i)
+            key   = group.text(0)
+            files = []
 
-            for j in range(group_item.childCount()):
-                child_item = group_item.child(j)
-                filename = child_item.text(0)
-
-                # ✅ If it's an absolute path, use it as-is
-                if os.path.isabs(filename):
-                    full_path = filename
+            # dive into exposure → leaf or direct leaf
+            for j in range(group.childCount()):
+                sub = group.child(j)
+                leaves = []
+                if sub.childCount()>0:
+                    for k in range(sub.childCount()):
+                        leaves.append(sub.child(k))
                 else:
-                    # ✅ Try to find in the Calibrated folder
-                    calibrated_path = os.path.join(self.stacking_directory, "Calibrated", filename)
-                    full_path = calibrated_path if os.path.exists(calibrated_path) else filename
+                    leaves.append(sub)
 
-                if os.path.exists(full_path):
-                    if group_key not in new_light_files:
-                        new_light_files[group_key] = []
-                    new_light_files[group_key].append(full_path)
-                else:
-                    print(f"⚠️ WARNING: File not found: {full_path}")
+                for leaf in leaves:
+                    fp = leaf.data(0, Qt.ItemDataRole.UserRole)
+                    if fp and os.path.exists(fp):
+                        files.append(fp)
+                    else:
+                        self.update_status(f"⚠️ WARNING: File not found: {fp}")
+            if files:
+                new[key] = files
 
-        self.light_files = new_light_files  # ✅ Only use extracted files
-        print(f"✅ Extracted Light Files: {sum(len(v) for v in self.light_files.values())} total")
+        self.light_files = new
+        total = sum(len(v) for v in new.values())
+        self.update_status(f"✅ Extracted Light Files: {total} total")
+
 
     def select_reference_frame_robust(self, frame_weights, sigma_threshold=1.0):
         """
@@ -11355,12 +11312,10 @@ class StackingSuiteDialog(QDialog):
         self.update_status("🔄 Image Registration Started...")
 
         # ── 0) if the user added files “by hand”, use them
-        if hasattr(self, "manual_light_files") and self.manual_light_files:
-            # treat all manual files as one group
-            self.light_files = {"Manual": list(self.manual_light_files)}
-        else:
-            # extract from the tree as before
-            self.extract_light_files_from_tree()
+        self.extract_light_files_from_tree()
+        if not self.light_files:
+            self.update_status("⚠️ No light files to register!")
+            return
 
         # ── 1) bail if still nothing
         if not self.light_files:
@@ -34745,6 +34700,7 @@ class FullCurvesTab(QWidget):
         self.is_mono = None
         self.curve_mode = "K (Brightness)"  # Default curve mode
         self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)  # Initialize with identity LUT
+        self.ghs_sym_pt = None
 
         # Initialize the Undo stack with a limited size
         self.undo_stack = []
@@ -34779,13 +34735,24 @@ class FullCurvesTab(QWidget):
         self.fileLabel = QLabel('', self)
         left_layout.addWidget(self.fileLabel)
 
+        # ——— stretch‐type toggle ———
+        self.stretchTypeGroup = QButtonGroup(self)
+        h = QHBoxLayout()
+        for text in ("Traditional Curves", "Generalized Hyperbolic"):
+            btn = QRadioButton(text, self)
+            h.addWidget(btn)
+            self.stretchTypeGroup.addButton(btn)
+        self.stretchTypeGroup.buttons()[0].setChecked(True)
+        self.stretchTypeGroup.buttonToggled.connect(self.onStretchTypeChanged)
+        left_layout.addLayout(h)
+
         # Curve Mode Selection
         self.curveModeLabel = QLabel('Select Curve Mode:', self)
         left_layout.addWidget(self.curveModeLabel)
 
         self.curveModeGroup = QButtonGroup(self)
         curve_modes = [
-            ('K (Brightness)', 0, 0),  # Text, row, column
+            ('K (Brightness)', 0, 0),
             ('R', 1, 0),
             ('G', 2, 0),
             ('B', 3, 0),
@@ -34795,100 +34762,130 @@ class FullCurvesTab(QWidget):
             ('Chroma', 0, 2),
             ('Saturation', 1, 2)
         ]
-
         curve_mode_layout = QGridLayout()
-
-        # Connect all buttons to set_curve_mode
         for mode, row, col in curve_modes:
             button = QRadioButton(mode, self)
             if mode == "K (Brightness)":
-                button.setChecked(True)  # Default selection
-            button.toggled.connect(self.set_curve_mode)  # Update curve_mode on toggle
+                button.setChecked(True)
+            button.toggled.connect(self.set_curve_mode)
             self.curveModeGroup.addButton(button)
             curve_mode_layout.addWidget(button, row, col)
-
         left_layout.addLayout(curve_mode_layout)
         self.set_curve_mode()
 
-        # Curve editor placeholder
+        # Curve editor
         self.curveEditor = CurveEditor(self)
+        self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
         left_layout.addWidget(self.curveEditor)
-
-        # Connect the CurveEditor preview callback
         self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode))
 
+        # Status
         self.statusLabel = QLabel('X:0 Y:0', self)
         left_layout.addWidget(self.statusLabel)
 
+        # ——— GHS controls ———
+        self.ghsControls = QWidget(self)
+        vbox = QVBoxLayout(self.ghsControls)
+        # α/β sliders
+        slider_row = QHBoxLayout()
+        self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.alphaSlider.setRange(1, 300); self.alphaSlider.setValue(50)
+        self.alphaLabel = QLabel("1.00")
+        slider_row.addWidget(QLabel("α")); slider_row.addWidget(self.alphaSlider); slider_row.addWidget(self.alphaLabel)
+        self.betaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.betaSlider.setRange(1, 300); self.betaSlider.setValue(50)
+        self.betaLabel = QLabel("1.00")
+        slider_row.addWidget(QLabel("β")); slider_row.addWidget(self.betaSlider); slider_row.addWidget(self.betaLabel)
+        vbox.addLayout(slider_row)
+        self.alphaSlider.valueChanged.connect(self.updateGhsCurve)
+        self.betaSlider.valueChanged.connect(self.updateGhsCurve)
+        # γ slider
+        gamma_row = QHBoxLayout()
+        gamma_row.addStretch()
+        self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.gammaSlider.setRange(0, 500); self.gammaSlider.setValue(100)
+        self.gammaLabel = QLabel("1.00")
+        gamma_row.addWidget(QLabel("γ")); gamma_row.addWidget(self.gammaSlider); gamma_row.addWidget(self.gammaLabel)
+        gamma_row.addStretch()
+        vbox.addLayout(gamma_row)
+        self.gammaSlider.valueChanged.connect(self.updateGhsCurve)
+        # histogram & reset
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        histBtn = QPushButton("Show Histogram")
+        histBtn.clicked.connect(self.openHistogram)
+        btn_row.addWidget(histBtn)
+        resetInfBtn = QPushButton("Reset Inflection")
+        resetInfBtn.clicked.connect(self.clearGhsPivot)
+        btn_row.addWidget(resetInfBtn)
+        btn_row.addStretch()
+        vbox.addLayout(btn_row)
 
+        left_layout.addWidget(self.ghsControls)
+        self.ghsControls.hide()
 
-        # Horizontal layout for Apply, Undo, and Reset buttons
+        # ——— GHS instructions ———
+        self.ghsInstructions = QLabel(self)
+        self.ghsInstructions.setWordWrap(True)
+        self.ghsInstructions.setStyleSheet("color: gray; font-style: italic;")
+        self.ghsInstructions.setText(
+            "α controls the main S-curve shape.\n"
+            "β controls the slope at the inflection point.\n"
+            "γ adjusts overall brightness.\n"
+            "Ctrl-click image, curve grid or histogram to set inflection."
+        )
+        self.ghsInstructions.hide()
+        left_layout.addWidget(self.ghsInstructions)
+
+        # Traditional-mode Instructions
+        self.tradInstructions = QLabel(self)
+        self.tradInstructions.setWordWrap(True)
+        self.tradInstructions.setStyleSheet("color: gray; font-style: italic;")
+        self.tradInstructions.setText(
+            "Double-click to add a curve point.\n"
+            "Right-click to delete a curve point.\n"
+            "Shift-click on image to add a point at that brightness."
+        )
+        self.tradInstructions.show()
+        left_layout.addWidget(self.tradInstructions)
+
+        # ——— Apply/Undo/Reset ———
         button_layout = QHBoxLayout()
-
-        # Apply Curve Button
         self.applyButton = QPushButton('Apply Curve', self)
-        self.applyButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogApplyButton))
         self.applyButton.clicked.connect(self.startProcessing)
         button_layout.addWidget(self.applyButton)
-
-        # Undo Curve Button
         self.undoButton = QPushButton('Undo', self)
-        self.undoButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
-        self.undoButton.setEnabled(False)  # Initially disabled
         self.undoButton.clicked.connect(self.undo)
+        self.undoButton.setEnabled(False)
         button_layout.addWidget(self.undoButton)
-
-        # Reset Curve Button as a small tool button with an icon
         self.resetCurveButton = QToolButton(self)
-        self.resetCurveButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))  # Provide a suitable icon
-        self.resetCurveButton.setToolTip("Reset Curve")
-        # Set a small icon size if needed
-        self.resetCurveButton.setIconSize(QSize(16,16))
-
-        # Optionally, if you want the reset button even smaller, you can also adjust its size:
-        # self.resetCurveButton.setFixedSize(24, 24)
-
-        # Connect the clicked signal to the resetCurve method
+        self.resetCurveButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
         self.resetCurveButton.clicked.connect(self.resetCurve)
         button_layout.addWidget(self.resetCurveButton)
-
-        # Add the horizontal layout with buttons to the main left layout
         left_layout.addLayout(button_layout)
 
+        # ——— Save/Load ———
         saveloadbutton_layout = QHBoxLayout()
-
-            # Save & Load Curve buttons
         self.saveCurveBtn = QPushButton("Save Curve", self)
         self.saveCurveBtn.clicked.connect(self.saveCurve)
         saveloadbutton_layout.addWidget(self.saveCurveBtn)
-
         self.loadCurveBtn = QPushButton("Load Curve", self)
         self.loadCurveBtn.clicked.connect(self.loadCurve)
         saveloadbutton_layout.addWidget(self.loadCurveBtn)
-
         left_layout.addLayout(saveloadbutton_layout)
 
-        # **Add Spinner Label**
+        # spinner & spacer & footer
         self.spinnerLabel = QLabel(self)
-        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spinnerMovie = QMovie("spinner.gif")  # Ensure spinner.gif exists in your project directory
-        self.spinnerLabel.setMovie(self.spinnerMovie)
-        self.spinnerLabel.hide()  # Initially hidden
+        self.spinnerLabel.hide()
         left_layout.addWidget(self.spinnerLabel)
-
-        # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-
-
-
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
+        left_layout.addSpacerItem(QSpacerItem(20,40,QSizePolicy.Policy.Minimum,QSizePolicy.Policy.Expanding))
+        footer_label = QLabel(
+            "Written by Franklin Marek<br>"
+            "<a href='http://www.setiastro.com'>www.setiastro.com</a>"
+        )
         footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
+        footer_label.setStyleSheet("font-size:10px;")
         left_layout.addWidget(footer_label)
 
         # Add the left widget to the main layout
@@ -34954,6 +34951,155 @@ class FullCurvesTab(QWidget):
         """Hide the spinner animation."""
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
+
+    def onStretchTypeChanged(self, btn, checked):
+        if not checked:
+            return
+
+        is_ghs = (btn.text() == "Generalized Hyperbolic")
+
+        # Show / hide the curve-mode UI vs GHS UI
+        self.curveModeLabel.setVisible(not is_ghs)
+        for b in self.curveModeGroup.buttons():
+            b.setVisible(not is_ghs)
+        self.curveEditor.setInteractive(not is_ghs)
+
+        self.ghsControls.setVisible(is_ghs)
+        self.ghsInstructions.setVisible(is_ghs)
+
+        self.tradInstructions.setVisible(not is_ghs)
+
+        # Reinitialize handles
+        if is_ghs:
+            pts = self.generate_ghs_control_points(1.0, 1.0, n=20)
+            self.curveEditor.setControlHandles(pts)
+        else:
+            self.curveEditor.initCurve()
+
+    def openHistogram(self):
+        # 1) If we already have one open, just raise it
+        if hasattr(self, '_hist_dialog') and self._hist_dialog is not None and self._hist_dialog.isVisible():
+            self._hist_dialog.raise_()
+            self._hist_dialog.activateWindow()
+            return
+
+        # 2) Pull the current image out of ImageManager’s internal store
+        slot = self.image_manager.current_slot
+        img  = self.image_manager._images.get(slot, None)
+        if img is None:
+            QMessageBox.warning(self, "No Image", f"Slot {slot} does not contain an image.")
+            return
+
+        # 3) If it’s mono, make it 3-channel so the histogram dialog can handle it uniformly
+        if img.ndim == 2:
+            img = np.stack([img]*3, axis=-1)
+
+        # 4) Create & keep a reference so it doesn’t get GC’d
+        self._hist_dialog = HistogramDialog(self.image_manager, parent=self)
+
+        # 5) Install our event filter to catch Ctrl-clicks there
+        self._hist_dialog.hist_label.installEventFilter(self)
+
+        # 6) Connect to image_changed so it stays in sync
+        def _update_hist(slot_changed, new_img, metadata):
+            if slot_changed != self.image_manager.current_slot or new_img is None:
+                return
+            if new_img.ndim == 2:
+                new_img = np.stack([new_img]*3, axis=-1)
+            self._hist_dialog.updateHistogram(new_img)
+
+        self.image_manager.image_changed.connect(_update_hist)
+
+        # 7) Seed it with the current image and show non-modally
+        self._hist_dialog.updateHistogram(img)
+        self._hist_dialog.show()
+
+        # 8) When it closes, drop our reference so we can make a fresh one next time
+        self._hist_dialog.finished.connect(lambda _: setattr(self, '_hist_dialog', None))
+
+    def _onHistClosed(self, result):
+        # drop our reference so it can be GC’d next time
+        self._hist_dialog = None
+
+    def generate_ghs_control_points(self, alpha, beta, n=10):
+        # X in [0…1], compute y = X**alpha / (X**alpha + beta*(1-X)**alpha)
+        xs = np.linspace(0,1,n)
+        ys = xs**alpha / (xs**alpha + beta*(1-xs)**alpha)
+        # map to your 0–360 scene: x*360, (1−y)*360
+        return [(x*360, (1-y)*360) for x,y in zip(xs, ys)]
+
+    def updateGhsCurve(self):
+        # read sliders
+        α = self.alphaSlider.value() / 50.0
+        β = self.betaSlider.value() / 50.0
+        G = max(0.01, self.gammaSlider.value() / 100.0)
+        self.gammaLabel.setText(f"{G:.2f}")
+        self.alphaLabel.setText(f"{α:.2f}")
+        self.betaLabel .setText(f"{β:.2f}")
+
+        cps = self.curveEditor.control_points
+        N   = len(cps)
+        if N < 2:
+            return
+
+        # pivot in [0..1]
+        p = 0.5 if self.ghs_sym_pt is None else float(self.ghs_sym_pt)
+
+        # uniform samples
+        us = np.linspace(0.0, 1.0, N)
+
+        # raw S‐curve over full [0,1]
+        raw_vs = us**α / (us**α + β*(1.0 - us)**α)
+        raw_vs_right = us**α / (us**α + (1/β)*(1.0 - us)**α)
+
+        # mid‐height at u=0.5
+        mid_raw = (0.5**α) / (0.5**α + β*(1.0 - 0.5)**α)
+        mid_raw_right = (0.5**α) / (0.5**α + (1/β)*(1.0 - 0.5)**α)
+
+        # remap so (0.5,mid_raw) → (p,p)
+        up = np.empty_like(us)
+        vp = np.empty_like(us)
+        left  = us <= 0.5
+        right = ~left
+
+        up[left]  =   2*p*us[left]
+        vp[left]  =  raw_vs[left] * (p / mid_raw)
+
+        up[right] =   p + 2*(1-p)*(us[right] - 0.5)
+        vp[right] =  p + (raw_vs_right[right] - mid_raw_right) * ((1-p)/(1-mid_raw_right))
+
+        # apply gamma lift across *all* points
+        vp = vp ** (1.0 / G)
+
+        # map into scene coords and slide handles
+        pts = [(u * 360.0, (1.0 - v) * 360.0) for u, v in zip(up, vp)]
+        for handle, (x, y) in zip(cps, pts):
+            handle.setPos(x, y)
+
+        # redraw
+        self.curveEditor.updateCurve()
+
+
+
+
+    def onCurveSymmetryPoint(self, u, v):
+        # u is the brightness fraction, v == u on the true inflection point
+        self.ghs_sym_pt = u
+        # update your status label however you like:
+        self.statusLabel.setText(f"Inflection @ K={u:.3f}")
+        # regenerate the GHS curve around this pivot:
+        self.updateGhsCurve()
+
+    def clearGhsPivot(self):
+        """Forget any custom inflection point and recenter to p=0.5."""
+        # clear our stored pivot
+        self.ghs_sym_pt = None
+        # remove the yellow line
+        self.curveEditor.clearSymmetryLine()
+        # redraw the GHS handles around the default pivot=0.5
+        # regenerate with pivot=0.5
+        self.updateGhsCurve()
+        self.statusLabel.setText("Symmetry reset to center (p=0.5)")
 
     def saveCurve(self):
         fname, _ = QFileDialog.getSaveFileName(self, "Save Curve As","", "SASC Curve (*.sasc)")
@@ -35436,68 +35582,72 @@ class FullCurvesTab(QWidget):
             QMessageBox.critical(self, "Error", "Image processing failed.")
             return
 
-        # Retrieve the active mask
+        # — Blend with mask if present —
         mask = self.get_active_mask()
-
         if mask is not None:
-            # Ensure mask is properly formatted and normalized
-            # The mask should be a float array with values between 0 and 1
-            if mask.dtype != np.float32 and mask.dtype != np.float64:
+            # normalize & expand dims as before…
+            if mask.dtype not in (np.float32, np.float64):
                 mask = mask.astype(np.float32) / 255.0
-
-            # If mask is single-channel but image is multi-channel, expand dimensions
             if self.original_image.ndim == 3 and mask.ndim == 2:
-                mask = np.expand_dims(mask, axis=-1)
-
-            # Ensure mask dimensions match the image dimensions
+                mask = mask[..., None]
             if mask.shape[:2] != self.original_image.shape[:2]:
                 QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
                 return
-
             if mask.ndim == 2:
-                mask = np.expand_dims(mask, axis=-1)
-
-            # Now broadcast mask to match image shape if needed
+                mask = mask[..., None]
             if self.original_image.ndim == 3 and mask.shape[2] == 1:
                 mask = np.repeat(mask, self.original_image.shape[2], axis=2)
 
-            # Blend the adjusted image with the original image using the mask
-            # Formula: blended = adjusted * mask + original * (1 - mask)
-            blended_image = adjusted_image * mask + self.original_image * (1 - mask)
-            blended_image = np.clip(blended_image, 0.0, 1.0)  # Ensure values are within [0,1]
+            blended = adjusted_image * mask + self.original_image * (1 - mask)
+            blended = np.clip(blended, 0.0, 1.0)
         else:
-            # No mask applied; use the adjusted image directly
-            blended_image = adjusted_image
+            blended = adjusted_image
 
-        # Update the original image with the blended image
-        self.original_image = blended_image.copy()
-
-        # Create a downsampled preview image
-        self.preview_image = self.downsample_for_preview(blended_image, max_width=1080)
-
-        # Update the display image
-        self.image = self.preview_image.copy()
-
-        # Show the updated image in the UI
+        # — Update master copy and preview —
+        self.original_image = blended.copy()
+        self.preview_image  = self.downsample_for_preview(blended, max_width=1080)
+        self.image          = self.preview_image.copy()
         self.show_image(self.image)
 
-        # Reset the curve editor if needed
-        self.curveEditor.initCurve()
+        # — Rebuild curve editor state instead of wiping it —
+        is_ghs = (self.stretchTypeGroup.checkedButton().text()
+                == "Generalized Hyperbolic")
+        if is_ghs:
+            # current α, β (and γ if you add it)
+            α = self.alphaSlider.value() / 50.0
+            β = self.betaSlider.value() / 50.0
 
-        # Update the ImageManager with the new image
+            # how many handles do we want? preserve existing count or default 20
+            n = len(self.curveEditor.control_points) or 20
+            # rebuild the *raw* handles at the correct α/β
+            pts = self.generate_ghs_control_points(α, β, n=n)
+            self.curveEditor.setControlHandles(pts)
+
+            # now *always* run the GHS remapping (γ + pivot) so the handles
+            # end up exactly where the preview curve was
+            self.curveEditor.clearSymmetryLine()   # clear any old line
+            if self.ghs_sym_pt is not None:
+                # restore the yellow pivot line
+                self.curveEditor.setSymmetryPoint(self.ghs_sym_pt*360.0, 0)
+            # this will apply the γ-lift + remap around p
+            self.updateGhsCurve()
+        else:
+            # Traditional Bézier → back to default
+            self.curveEditor.initCurve()
+
+        # finally push it back into ImageManager
         if self.image_manager:
-            metadata = {
-                'file_path': self.loaded_image_path,
-                'original_header': self.original_header,
-                'bit_depth': self.bit_depth,
-                'is_mono': self.is_mono
-            }
+            meta = dict(
+                file_path=self.loaded_image_path,
+                original_header=self.original_header,
+                bit_depth=self.bit_depth,
+                is_mono=self.is_mono
+            )
             self.image_manager.set_image_with_step_name(
-                self.original_image.copy(),
-                metadata,
-                step_name="Curves Adjustment"
+                self.original_image.copy(), meta, step_name="Curves Adjustment"
             )
             print("FullCurvesTab: Image updated in ImageManager with step name.")
+
 
 
     def pushUndo(self, image_state):
@@ -35539,51 +35689,117 @@ class FullCurvesTab(QWidget):
 
     def resetCurve(self):
         """
-        Resets the draggable points in the curve editor without affecting other settings.
+        Resets the draggable points in the curve editor.
+        — In traditional mode, behaves as before.
+        — In generalized hyperbolic mode, resets α/β, clears inflection,
+        and redraws exactly 20 GHS handles.
         """
         try:
-            # Reset the draggable points in the curve editor
-            self.curveEditor.initCurve()
+            is_ghs = self.stretchTypeGroup.checkedButton().text() == "Generalized Hyperbolic"
 
-            # Clear the preview LUT to match the reset state of draggable points
+            if is_ghs:
+                # 1) reset sliders & labels
+                self.alphaSlider.setValue(50)
+                self.betaSlider .setValue(50)
+                self.alphaLabel .setText("1.00")
+                self.betaLabel  .setText("1.00")
+
+                # 2) clear any inflection pivot
+                self.ghs_sym_pt = None
+                self.curveEditor.clearSymmetryLine()
+
+                # 3) regenerate the default GHS control points using normalized α,β
+                α = self.alphaSlider.value() / 50.0   # -> 1.0
+                β = self.betaSlider.value()  / 50.0   # -> 1.0
+                pts = self.generate_ghs_control_points(α, β, n=20)
+                self.curveEditor.setControlHandles(pts)
+
+            else:
+                # traditional curves → back to a clean bezier
+                self.curveEditor.initCurve()
+
+            # 4) clear preview LUT & redraw
             self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)
             self.updatePreviewLUT(self.current_lut, self.curve_mode)
 
         except Exception as e:
             print(f"Error during curve reset: {e}")
-            QMessageBox.critical(self, "Error", f"Failed to reset draggable points: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to reset curve: {e}")
 
     def eventFilter(self, source, event):
-        # Handle shift+click to add a control point on the curve.
-        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-            # Check if Shift is pressed.
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                # Map the event position to the imageLabel coordinate system.
-                pos = self.imageLabel.mapFrom(source, event.pos())
-                if self.imageLabel.pixmap() is not None:
-                    pixmap_size = self.imageLabel.pixmap().size()
-                    if 0 <= pos.x() < pixmap_size.width() and 0 <= pos.y() < pixmap_size.height():
-                        # Convert from the scaled image back to original image coordinates.
-                        img_x = int(pos.x() / self.zoom_factor)
-                        img_y = int(pos.y() / self.zoom_factor)
-                        if self.image is not None:
-                            h, w = self.image.shape[:2]
-                            if 0 <= img_x < w and 0 <= img_y < h:
-                                pixel_value = self.image[img_y, img_x]
-                                # Compute the average brightness.
-                                if self.image.ndim == 3:
-                                    avg = (pixel_value[0] + pixel_value[1] + pixel_value[2]) / 3.0
-                                else:
-                                    avg = pixel_value
-                                # Map avg (0–1) to curve coordinates:
-                                new_x = avg * 360.0
-                                new_y = 360.0 - (avg * 360.0)
-                                # Add a new control point to the curve.
-                                self.curveEditor.addControlPoint(new_x, new_y)
-                                # Optionally update a status message:
-                                self.statusLabel.setText(f"Added control point at X:{new_x:.1f} Y:{new_y:.1f}")
-                                return True  # Consume the event.
-        # Existing dragging logic:
+        # ——— 1) Histogram Ctrl-click to set inflection ———
+        hist = getattr(self, "_hist_dialog", None)
+        if ( hist is not None
+            and source is hist.hist_label
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier ):
+
+            x = event.pos().x()
+            w = hist.hist_label.width()
+            frac = max(0.0, min(1.0, x / w))
+
+            if hist.log_scale:
+                # use *exactly* the same eps/log_min/log_max you drew with
+                eps     = hist._hist_eps
+                log_min = hist._hist_log_min
+                log_max = hist._hist_log_max
+                log_val = log_min + frac * (log_max - log_min)
+                k = 10 ** log_val
+            else:
+                k = frac
+
+            # store pivot and redraw GHS
+            self.ghs_sym_pt = k
+            self.curveEditor.setSymmetryPoint(k*360.0, 0)
+            self.statusLabel.setText(f"Symmetry K={k:.4f}")
+            self.updateGhsCurve()
+            return True
+
+        # ——— 2) Image-view Ctrl-click to set pivot from pixel brightness ———
+        if (
+            source is self.scrollArea.viewport()
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            pos = self.imageLabel.mapFrom(self.scrollArea.viewport(), event.pos())
+            pix = self.imageLabel.pixmap()
+            if pix and 0 <= pos.x() < pix.width() and 0 <= pos.y() < pix.height():
+                img_x = pos.x() / self.zoom_factor
+                img_y = pos.y() / self.zoom_factor
+                h, w = self.image.shape[:2]
+                if 0 <= img_x < w and 0 <= img_y < h:
+                    pv = self.image[int(img_y), int(img_x)]
+                    k = float(np.mean(pv))
+                    self.ghs_sym_pt = k
+                    self.curveEditor.setSymmetryPoint(k * 360.0, 0)
+                    self.statusLabel.setText(f"Symmetry at K={k:.3f}")
+                    self.updateGhsCurve()
+                    return True
+
+        # ——— 3) Shift-click to add control point ———
+        if (
+            source is self.scrollArea.viewport()
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            pos = self.imageLabel.mapFrom(self.scrollArea.viewport(), event.pos())
+            pix = self.imageLabel.pixmap()
+            if pix and 0 <= pos.x() < pix.width() and 0 <= pos.y() < pix.height():
+                img_x = int(pos.x() / self.zoom_factor)
+                img_y = int(pos.y() / self.zoom_factor)
+                h, w = self.image.shape[:2]
+                if 0 <= img_x < w and 0 <= img_y < h:
+                    pv = self.image[img_y, img_x]
+                    avg = float(np.mean(pv))
+                    new_x, new_y = avg * 360.0, (1 - avg) * 360.0
+                    self.curveEditor.addControlPoint(new_x, new_y)
+                    self.statusLabel.setText(f"Added control point @ X:{new_x:.1f} Y:{new_y:.1f}")
+                    return True
+
+        # ——— 4) Fall back to pan/drag ———
         if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
             self.last_pos = event.pos()
@@ -35591,8 +35807,12 @@ class FullCurvesTab(QWidget):
             self.dragging = False
         elif event.type() == QEvent.Type.MouseMove and self.dragging:
             delta = event.pos() - self.last_pos
-            self.scrollArea.horizontalScrollBar().setValue(self.scrollArea.horizontalScrollBar().value() - delta.x())
-            self.scrollArea.verticalScrollBar().setValue(self.scrollArea.verticalScrollBar().value() - delta.y())
+            self.scrollArea.horizontalScrollBar().setValue(
+                self.scrollArea.horizontalScrollBar().value() - delta.x()
+            )
+            self.scrollArea.verticalScrollBar().setValue(
+                self.scrollArea.verticalScrollBar().value() - delta.y()
+            )
             self.last_pos = event.pos()
 
         return super().eventFilter(source, event)
@@ -36029,12 +36249,14 @@ class CurveEditor(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setFixedSize(380, 425)
         self.preview_callback = None  # To trigger real-time updates
+        self.symmetry_callback = None
 
         # Initialize control points and curve path
         self.end_points = []  # Start and end points with axis constraints
         self.control_points = []  # Dynamically added control points
         self.curve_path = QPainterPath()
         self.curve_item = None  # Stores the curve line
+        self.sym_line = None
 
         # Set scene rectangle
         self.scene.setSceneRect(0, 0, 360, 360)
@@ -36104,6 +36326,15 @@ class CurveEditor(QGraphicsView):
 
         # finally redraw spline once
         self.updateCurve()
+
+    def clearSymmetryLine(self):
+        """Remove any drawn symmetry line and reset."""
+        if self.sym_line:
+            self.scene.removeItem(self.sym_line)
+            self.sym_line = None
+            # redraw without symmetry aid
+            self.updateCurve()
+
     def addEndPoint(self, x, y, lock_axis=None, position_type=None, color=Qt.GlobalColor.red):
         point = DraggablePoint(self, x, y, color=color, lock_axis=lock_axis, position_type=position_type)
         self.scene.addItem(point)
@@ -36114,6 +36345,23 @@ class CurveEditor(QGraphicsView):
         point = DraggablePoint(self, x, y, color=Qt.GlobalColor.green, lock_axis=lock_axis, position_type=None)
         self.scene.addItem(point)
         self.control_points.append(point)
+        self.updateCurve()
+
+    def setSymmetryCallback(self, fn):
+        """fn will be called with (u, v) in [0..1] when user ctrl+clicks the grid."""
+        self.symmetry_callback = fn
+
+    def setSymmetryPoint(self, x, y):
+        pen = QPen(Qt.GlobalColor.yellow)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(2)
+        if self.sym_line is None:
+            # draw a vertical symmetry line at scene X==x
+            self.sym_line = self.scene.addLine(x, 0, x, 360, pen)
+        else:
+            self.sym_line.setLine(x, 0, x, 360)
+        # if you want to re-draw the curve mirrored around x,
+        # you can trigger updateCurve() here or elsewhere
         self.updateCurve()
 
     def catmull_rom_spline(self, p0, p1, p2, p3, t):
@@ -36325,7 +36573,25 @@ class CurveEditor(QGraphicsView):
         output_values = np.clip(output_values, 0, 65535).astype(np.uint16)
 
         return output_values
-
+    
+    def mousePressEvent(self, event):
+        # ctrl+left click on the grid → pick inflection point
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            scene_pt = self.mapToScene(event.pos())
+            # clamp into scene rect
+            x = max(0, min(360, scene_pt.x()))
+            y = max(0, min(360, scene_pt.y()))
+            # draw the yellow symmetry line
+            self.setSymmetryPoint(x, y)
+            # compute normalized (u, v)
+            u = x / 360.0
+            v = 1.0 - (y / 360.0)
+            # tell anyone who cares
+            if self.symmetry_callback:
+                self.symmetry_callback(u, v)
+            return  # consume
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """
