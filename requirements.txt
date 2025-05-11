@@ -1,20 +1,49 @@
+# numeric & scientific
 numpy
-pandas
-opencv-python
-Pillow
-astropy
-astroquery
-tifffile
-pytz
 scipy
-rawpy
+pywavelets          # “pywt”
+matplotlib
+plotly
+
+# tables & I/O
+pandas
+tifffile
+Pillow              # “PIL”
+
+# networking & web
 requests
-pyqt6
+astroquery
+
+# compression
 lz4
 zstandard
-pywavelets
-pyqt6
-pyinstaller
+
+# astronomy
+astropy
 photutils
+astroalign
+sep
 reproject
+
+# performance
 numba
+
+# image formats & camera raw
+xisf
+rawpy
+
+# coordinate transforms
+astropy
+
+# utilities
+pytz
+
+# GUI
+PyQt6
+pyqtgraph
+
+# system
+psutil
+
+# computer vision
+opencv-python
