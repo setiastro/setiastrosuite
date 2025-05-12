@@ -34873,6 +34873,16 @@ class FullCurvesTab(QWidget):
         self.loadCurveBtn.clicked.connect(self.loadCurve)
         saveloadbutton_layout.addWidget(self.loadCurveBtn)
         left_layout.addLayout(saveloadbutton_layout)
+        # -------- Spinner Label --------
+        self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spinnerMovie = QMovie("spinner.gif")
+        self.spinnerLabel.setMovie(self.spinnerMovie)
+        self.spinnerLabel.hide()
+        left_layout.addWidget(self.spinnerLabel)
+
+        # Spacer
+        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # spinner & spacer & footer
         self.spinnerLabel = QLabel(self)
