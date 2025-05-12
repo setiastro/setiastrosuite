@@ -246,7 +246,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.12"
+VERSION = "2.15.13"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -378,7 +378,7 @@ def announce_zoom(method):
         # now announce
         try:
             pct = self.zoom_factor * 100
-            print(f"Zoom now {pct:.0f}%")
+            #print(f"Zoom now {pct:.0f}%")
             vp = self.scroll_area.viewport()
             center_local = vp.rect().center()                    # QPoint in viewport coords
             center_global = vp.mapToGlobal(center_local)         # map to screen coords
@@ -30484,7 +30484,7 @@ class BlinkTab(QWidget):
 
         # 3) announce zoom
         pct = int(self.zoom_level * 100)
-        print(f"Zoom now {pct}%")
+        #print(f"Zoom now {pct}%")
         vp = self.scroll_area.viewport()
         center_local = vp.rect().center()                    # QPoint in viewport coords
         center_global = vp.mapToGlobal(center_local)         # map to screen coords
@@ -30506,7 +30506,7 @@ class BlinkTab(QWidget):
         self.zoom_level = min(self.zoom_level * 1.2, 3.0)  # Cap at 3x
         self.apply_zoom()
 
-    @announce_zoom
+
     def zoom_out(self):
         """Decrease the zoom level and refresh the image."""
         self.zoom_level = max(self.zoom_level / 1.2, 0.05)  # Cap at 0.2x
@@ -30739,46 +30739,58 @@ class BlinkTab(QWidget):
 
 
     def move_items(self):
-        """Allow the user to move selected images to a different directory."""
+        """Move selected images *and* remove them from the tree+metrics."""
         selected_items = self.fileTree.selectedItems()
-        
         if not selected_items:
             QMessageBox.warning(self, "Warning", "No items selected for moving.")
             return
 
-        # Open file dialog to select a new directory
-        new_directory = QFileDialog.getExistingDirectory(self, "Select Destination Folder", "")
-        if not new_directory:
-            return  # User canceled the directory selection
+        # Ask where to move
+        new_dir = QFileDialog.getExistingDirectory(self,
+                                                "Select Destination Folder",
+                                                "")
+        if not new_dir:
+            return
+
+        # Keep track of which on‐disk paths we actually moved
+        moved_old_paths = []
 
         for item in selected_items:
-            current_name = item.text(0).lstrip("⚠️ ")
-            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+            name = item.text(0).lstrip("⚠️ ")
+            old_path = next((p for p in self.image_paths 
+                            if os.path.basename(p) == name), None)
+            if not old_path:
+                continue
 
-            if file_path:
-                new_file_path = os.path.join(new_directory, current_name)
+            new_path = os.path.join(new_dir, name)
+            try:
+                os.rename(old_path, new_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to move {old_path}: {e}")
+                continue
 
-                try:
-                    # Move the file
-                    os.rename(file_path, new_file_path)
-                    print(f"File moved from {file_path} to {new_file_path}")
-                    
-                    # Update the image paths
-                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
-                    item.setText(0, current_name)  # Update the tree view item's text (if needed)
+            moved_old_paths.append(old_path)
 
-                except Exception as e:
-                    print(f"Failed to move {file_path}: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to move the file: {e}")
+            # 1) Remove the leaf from the tree
+            parent = item.parent() or self.fileTree.invisibleRootItem()
+            parent.removeChild(item)
 
-        # Update the tree view to reflect the moved items
-        self.fileTree.clear()
-        for file_path in self.image_paths:
-            file_name = os.path.basename(file_path)
-            item = QTreeWidgetItem([file_name])
-            self.fileTree.addTopLevelItem(item)
+        # 2) Purge them from your internal lists
+        for old in moved_old_paths:
+            idx = self.image_paths.index(old)
+            del self.image_paths[idx]
+            del self.loaded_images[idx]
 
-        print(f"Moved {len(selected_items)} items.")
+        # 3) Update your “loaded X images” label
+        self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
+
+        # 4) Tell metrics to re-initialize on the new list
+        if self.metrics_window and self.metrics_window.isVisible():
+            self.metrics_window.update_metrics(self.loaded_images)
+
+        print(f"Moved and removed {len(moved_old_paths)} items.")
+
+
 
     def push_image_to_manager(self, item):
         """Push the selected image to the ImageManager."""
@@ -34701,6 +34713,7 @@ class FullCurvesTab(QWidget):
         self.curve_mode = "K (Brightness)"  # Default curve mode
         self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)  # Initialize with identity LUT
         self.ghs_sym_pt = None
+        self._base_pixmap = None
 
         # Initialize the Undo stack with a limited size
         self.undo_stack = []
@@ -34789,11 +34802,11 @@ class FullCurvesTab(QWidget):
         # α/β sliders
         slider_row = QHBoxLayout()
         self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.alphaSlider.setRange(1, 300); self.alphaSlider.setValue(50)
+        self.alphaSlider.setRange(1, 500); self.alphaSlider.setValue(50)
         self.alphaLabel = QLabel("1.00")
         slider_row.addWidget(QLabel("α")); slider_row.addWidget(self.alphaSlider); slider_row.addWidget(self.alphaLabel)
         self.betaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.betaSlider.setRange(1, 300); self.betaSlider.setValue(50)
+        self.betaSlider.setRange(1, 500); self.betaSlider.setValue(50)
         self.betaLabel = QLabel("1.00")
         slider_row.addWidget(QLabel("β")); slider_row.addWidget(self.betaSlider); slider_row.addWidget(self.betaLabel)
         vbox.addLayout(slider_row)
@@ -34809,6 +34822,31 @@ class FullCurvesTab(QWidget):
         gamma_row.addStretch()
         vbox.addLayout(gamma_row)
         self.gammaSlider.valueChanged.connect(self.updateGhsCurve)
+
+        # ─── low‐light protection LP ───────────────────────────
+        lp_row = QHBoxLayout()
+        self.lpSlider = QSlider(Qt.Orientation.Horizontal)
+        self.lpSlider.setRange(0, 360)
+        self.lpSlider.setValue(0)
+        self.lpLabel = QLabel("LP:0.00")
+        lp_row.addWidget(QLabel("LP"))
+        lp_row.addWidget(self.lpSlider)
+        lp_row.addWidget(self.lpLabel)
+        vbox.addLayout(lp_row)
+        self.lpSlider.valueChanged.connect(self.updateGhsCurve)
+
+        # ─── high‐light protection HP ──────────────────────────
+        hp_row = QHBoxLayout()
+        self.hpSlider = QSlider(Qt.Orientation.Horizontal)
+        self.hpSlider.setRange(0, 360)
+        self.hpSlider.setValue(0)
+        self.hpLabel = QLabel("HP:0.00")
+        hp_row.addWidget(QLabel("HP"))
+        hp_row.addWidget(self.hpSlider)
+        hp_row.addWidget(self.hpLabel)
+        vbox.addLayout(hp_row)
+        self.hpSlider.valueChanged.connect(self.updateGhsCurve)
+
         # histogram & reset
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -34935,7 +34973,6 @@ class FullCurvesTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
         self.scrollArea.setWidgetResizable(True)
-        self.imageLabel.mouseMoved.connect(self.handleImageMouseMove)
 
         right_layout.addWidget(self.scrollArea)
 
@@ -35039,57 +35076,75 @@ class FullCurvesTab(QWidget):
         return [(x*360, (1-y)*360) for x,y in zip(xs, ys)]
 
     def updateGhsCurve(self):
-        # read sliders
-        α = self.alphaSlider.value() / 50.0
-        β = self.betaSlider.value() / 50.0
-        G = max(0.01, self.gammaSlider.value() / 100.0)
-        self.gammaLabel.setText(f"{G:.2f}")
+        # ─── read sliders ────────────────────────────────────────────
+        α  = self.alphaSlider.value() / 50.0
+        β  = self.betaSlider.value()  / 50.0
+        G  = max(0.01, self.gammaSlider.value() / 100.0)
+
+        LP = self.lpSlider.value()      / 360.0         # low protect [0…1]
+        HP = self.hpSlider.value()      / 360.0         # high protect[0…1]
+        SP = 0.5 if self.ghs_sym_pt is None else self.ghs_sym_pt
+
+        # update labels
         self.alphaLabel.setText(f"{α:.2f}")
         self.betaLabel .setText(f"{β:.2f}")
+        self.gammaLabel.setText(f"{G:.2f}")
+
+        self.lpLabel   .setText(f"LP:{LP:.2f}")
+        self.hpLabel   .setText(f"HP:{HP:.2f}")
 
         cps = self.curveEditor.control_points
         N   = len(cps)
         if N < 2:
             return
 
-        # pivot in [0..1]
-        p = 0.5 if self.ghs_sym_pt is None else float(self.ghs_sym_pt)
-
-        # uniform samples
+        # ─── sample domain ───────────────────────────────────────────
         us = np.linspace(0.0, 1.0, N)
 
-        # raw S‐curve over full [0,1]
-        raw_vs = us**α / (us**α + β*(1.0 - us)**α)
-        raw_vs_right = us**α / (us**α + (1/β)*(1.0 - us)**α)
+        # ─── your α/β S‐curve around midpoint 0.5 ────────────────────
+        raw_vs   = us**α / (us**α + β*(1.0 - us)**α)
+        raw_vs_r = us**α / (us**α + (1/β)*(1.0 - us)**α)
+        mid_l = (0.5**α) / (0.5**α + β*(1.0 - 0.5)**α)
+        mid_r = (0.5**α) / (0.5**α + (1/β)*(1.0 - 0.5)**α)
 
-        # mid‐height at u=0.5
-        mid_raw = (0.5**α) / (0.5**α + β*(1.0 - 0.5)**α)
-        mid_raw_right = (0.5**α) / (0.5**α + (1/β)*(1.0 - 0.5)**α)
-
-        # remap so (0.5,mid_raw) → (p,p)
+        # ─── remap so (0.5,mid) → (SP,SP) ───────────────────────────
         up = np.empty_like(us)
         vp = np.empty_like(us)
+
         left  = us <= 0.5
         right = ~left
 
-        up[left]  =   2*p*us[left]
-        vp[left]  =  raw_vs[left] * (p / mid_raw)
+        up[left]  =   2 * SP * us[left]
+        vp[left]  = raw_vs[left]   * (SP / mid_l)
 
-        up[right] =   p + 2*(1-p)*(us[right] - 0.5)
-        vp[right] =  p + (raw_vs_right[right] - mid_raw_right) * ((1-p)/(1-mid_raw_right))
+        up[right] =   SP + 2*(1 - SP)*(us[right] - 0.5)
+        vp[right] =   SP + (raw_vs_r[right] - mid_r)*((1 - SP)/(1 - mid_r))
 
-        # apply gamma lift across *all* points
-        vp = vp ** (1.0 / G)
+        # ─── PROTECT shadows/highlights by BLENDING ────────────────
+        # instead of hard-clipping, mix toward the identity line:
+        #   LP=0 → no blend (full curve), LP=1 → full identity
+        if LP > 0:
+            mask_left = up <= SP
+            # mix vp toward the identity line vp=up
+            vp[mask_left] = (1 - LP) * vp[mask_left] + LP * up[mask_left]
 
-        # map into scene coords and slide handles
+        if HP > 0:
+            mask_right = up >= SP
+            vp[mask_right] = (1 - HP) * vp[mask_right] + HP * up[mask_right]
+
+        # ─── LOCAL FOCUS AROUND SP (b) ──────────────────────────────
+
+        # ─── GAMMA LIFT ──────────────────────────────────────────────
+        if abs(G - 1.0) > 1e-6:
+            vp = vp ** (1.0 / G)
+
+        # ─── write back into your handles ────────────────────────────
         pts = [(u * 360.0, (1.0 - v) * 360.0) for u, v in zip(up, vp)]
         for handle, (x, y) in zip(cps, pts):
             handle.setPos(x, y)
 
-        # redraw
+        # ─── trigger redraw ──────────────────────────────────────────
         self.curveEditor.updateCurve()
-
-
 
 
     def onCurveSymmetryPoint(self, u, v):
@@ -35179,8 +35234,6 @@ class FullCurvesTab(QWidget):
 
         # Access slot0 (recombined image) from ImageManager
         if self.image is None:
-            print("No preview image loaded.")
-            QMessageBox.warning(self, "No Image", "Preview image is not loaded.")
             return
 
         try:
@@ -35538,28 +35591,6 @@ class FullCurvesTab(QWidget):
                 return mask
         return None
 
-    def handleImageMouseMove(self, x, y):
-        if self.image is None:
-            return
-
-        h, w = self.image.shape[:2]
-        img_x = int(x / self.zoom_factor)
-        img_y = int(y / self.zoom_factor)
-
-        if 0 <= img_x < w and 0 <= img_y < h:
-            pixel_value = self.image[img_y, img_x]
-            if self.image.ndim == 3:
-                # RGB pixel: assuming pixel values are in 0-1
-                r, g, b = pixel_value
-                text = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
-                self.curveEditor.updateValueLines(r, g, b, grayscale=False)
-            else:
-                # Grayscale pixel: value is in 0-1
-                text = f"X:{img_x} Y:{img_y} Val:{pixel_value:.3f}"
-                # Pass the grayscale value for all channels and set grayscale flag to True
-                self.curveEditor.updateValueLines(pixel_value, pixel_value, pixel_value, grayscale=True)
-            self.statusLabel.setText(text)
-
 
 
     def startProcessing(self):
@@ -35737,6 +35768,8 @@ class FullCurvesTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to reset curve: {e}")
 
     def eventFilter(self, source, event):
+        if self.image is None:
+            return super().eventFilter(source, event)        
         # ——— 1) Histogram Ctrl-click to set inflection ———
         hist = getattr(self, "_hist_dialog", None)
         if ( hist is not None
@@ -35824,6 +35857,43 @@ class FullCurvesTab(QWidget):
                 self.scrollArea.verticalScrollBar().value() - delta.y()
             )
             self.last_pos = event.pos()
+
+        # ——— 5) Hover-move for pixel readout ———
+        if source is self.scrollArea.viewport() and event.type() == QEvent.Type.MouseMove:
+            # 1) get viewport coords
+            vp_pt = event.pos()
+            # 2) map to label coords
+            lbl_pt = self.imageLabel.mapFrom(self.scrollArea.viewport(), vp_pt)
+
+            pix = self.imageLabel.pixmap()
+            if pix is None:
+                return super().eventFilter(source, event)
+
+            pw, ph = pix.width(), pix.height()
+            iw, ih = self.image.shape[1], self.image.shape[0]
+
+            x, y = lbl_pt.x(), lbl_pt.y()
+            if not (0 <= x < pw and 0 <= y < ph):
+                return super().eventFilter(source, event)
+
+            # 3) un-scale into image coords
+            img_x = int(x * iw / pw)
+            img_y = int(y * ih / ph)
+
+            pv = self.image[img_y, img_x]
+            if self.image.ndim == 3:
+                r, g, b = pv
+                self.curveEditor.updateValueLines(r, g, b, grayscale=False)
+                txt = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
+            else:
+                v = float(pv)
+                self.curveEditor.updateValueLines(v, v, v, grayscale=True)
+                txt = f"X:{img_x} Y:{img_y} Val:{v:.3f}"
+
+            self.statusLabel.setText(txt)
+            return True
+
+        return super().eventFilter(source, event)
 
         return super().eventFilter(source, event)
 
@@ -35936,18 +36006,26 @@ class FullCurvesTab(QWidget):
                 return
 
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(
-                pixmap.size() * self.zoom_factor,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.imageLabel.setPixmap(scaled_pixmap)
+            # 2) keep the un-zoomed copy
+            self._base_pixmap = pixmap
+
+            # 3) actually display it scaled to current zoom
+            self._update_displayed_pixmap()
 
         except Exception as e:
             print(f"Error displaying image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
 
 
+    def _update_displayed_pixmap(self):
+        """Take _base_pixmap × zoom_factor → self.imageLabel."""
+        if self._base_pixmap is None:
+            return
+        sz = self._base_pixmap.size() * self.zoom_factor
+        scaled = self._base_pixmap.scaled(
+            sz, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        self.imageLabel.setPixmap(scaled)
 
     def update_image_display(self):
         if self.image is not None:
@@ -35986,76 +36064,49 @@ class FullCurvesTab(QWidget):
         event.accept()
 
     def zoom_in(self):
-        """
-        Zoom into the image by increasing the zoom factor.
-        """
-        if self.image is not None:
-            self.zoom_factor *= 1.2
-            self.show_image(self.image)
-            zoom_pct = self.zoom_factor * 100
-            print(f"Zoomed in. New zoom: {zoom_pct:.0f}%")
+        """Zoom into the image by increasing zoom_factor and re‐drawing."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to zoom in.")
+            return
 
-            # Show tooltip at the center of the scrollArea’s viewport
-            vp = self.scrollArea.viewport()
-            center_local = vp.rect().center()                      # QPoint in viewport coords
-            center_global = vp.mapToGlobal(center_local)           # QPoint in screen coords
-            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+        self.zoom_factor *= 1.2
+        self._update_displayed_pixmap()
 
-        else:
-            print("No stretched image to zoom in.")
-            QMessageBox.warning(self, "Warning", "No stretched image to zoom in.")
-
+        pct = int(self.zoom_factor * 100)
+        vp = self.scrollArea.viewport()
+        global_pt = vp.mapToGlobal(vp.rect().center())
+        QToolTip.showText(global_pt, f"{pct}%")
+        print(f"Zoomed in → {pct}%")
 
     def zoom_out(self):
-        """
-        Zoom out of the image by decreasing the zoom factor.
-        """
-        if self.image is not None:
-            self.zoom_factor /= 1.2
-            self.show_image(self.image)
-            zoom_pct = self.zoom_factor * 100
-            print(f"Zoomed out. New zoom: {zoom_pct:.0f}%")
+        """Zoom out of the image by decreasing zoom_factor and re‐drawing."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to zoom out.")
+            return
 
-            # Show tooltip at the center of the scrollArea’s viewport
-            vp = self.scrollArea.viewport()
-            center_local = vp.rect().center()
-            center_global = vp.mapToGlobal(center_local)
-            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+        self.zoom_factor /= 1.2
+        self._update_displayed_pixmap()
 
-        else:
-            print("No stretched image to zoom out.")
-            QMessageBox.warning(self, "Warning", "No stretched image to zoom out.")
+        pct = int(self.zoom_factor * 100)
+        vp = self.scrollArea.viewport()
+        global_pt = vp.mapToGlobal(vp.rect().center())
+        QToolTip.showText(global_pt, f"{pct}%")
+        print(f"Zoomed out → {pct}%")
 
     def fit_to_preview(self):
-        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        if self.image is not None:
-            # Get the width of the scroll area's viewport (preview area)
-            preview_width = self.scrollArea.viewport().width()
-            
-            # Get the original image width from the numpy array
-            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
-            if self.image.ndim == 3:
-                image_width = self.image.shape[1]
-            elif self.image.ndim == 2:
-                image_width = self.image.shape[1]
-            else:
-                print("Unexpected image dimensions!")
-                QMessageBox.warning(self, "Warning", "Cannot fit image to preview due to unexpected dimensions.")
-                return
-            
-            # Calculate the required zoom factor to fit the image's width into the preview area
-            new_zoom_factor = preview_width / image_width
-            
-            # Update the zoom factor without enforcing any limits
-            self.zoom_factor = new_zoom_factor
-            
-            # Apply the new zoom factor to update the display
-            self.show_image(self.image)
-            
-            print(f"Fit to preview applied. New zoom factor: {self.zoom_factor:.2f}")
-        else:
-            print("No image loaded. Cannot fit to preview.")
-            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
+        """Set zoom_factor so the image width exactly fits the viewport."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to fit.")
+            return
+
+        vpw = self.scrollArea.viewport().width()
+        imgw = self._base_pixmap.width()
+        if imgw == 0:
+            return
+
+        self.zoom_factor = vpw / imgw
+        self._update_displayed_pixmap()
+        print(f"Fit to preview → zoom_factor={self.zoom_factor:.2f}")
 
     def refresh_display(self):
         """
