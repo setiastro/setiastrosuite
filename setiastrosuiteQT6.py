@@ -35739,11 +35739,19 @@ class FullCurvesTab(QWidget):
             is_ghs = self.stretchTypeGroup.checkedButton().text() == "Generalized Hyperbolic"
 
             if is_ghs:
-                # 1) reset sliders & labels
+                # 1) reset α/β/γ sliders & labels
                 self.alphaSlider.setValue(50)
                 self.betaSlider .setValue(50)
+                self.gammaSlider.setValue(100)
                 self.alphaLabel .setText("1.00")
                 self.betaLabel  .setText("1.00")
+                self.gammaLabel .setText("1.00")
+
+                # 2) reset LP/HP sliders & labels
+                self.lpSlider.setValue(0)
+                self.hpSlider.setValue(0)
+                self.lpLabel.setText("LP:0.00")
+                self.hpLabel.setText("HP:0.00")
 
                 # 2) clear any inflection pivot
                 self.ghs_sym_pt = None
