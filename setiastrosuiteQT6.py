@@ -34751,7 +34751,7 @@ class FullCurvesTab(QWidget):
         # ——— stretch‐type toggle ———
         self.stretchTypeGroup = QButtonGroup(self)
         h = QHBoxLayout()
-        for text in ("Traditional Curves", "Generalized Hyperbolic"):
+        for text in ("Traditional Curves", "Universal Hyperbolic"):
             btn = QRadioButton(text, self)
             h.addWidget(btn)
             self.stretchTypeGroup.addButton(btn)
@@ -35003,7 +35003,7 @@ class FullCurvesTab(QWidget):
         if not checked:
             return
 
-        is_ghs = (btn.text() == "Generalized Hyperbolic")
+        is_ghs = (btn.text() == "Universal Hyperbolic")
 
         # Show / hide the curve-mode UI vs GHS UI
         self.curveModeLabel.setVisible(not is_ghs)
@@ -35652,7 +35652,7 @@ class FullCurvesTab(QWidget):
 
         # — Rebuild curve editor state instead of wiping it —
         is_ghs = (self.stretchTypeGroup.checkedButton().text()
-                == "Generalized Hyperbolic")
+                == "Universal Hyperbolic")
         if is_ghs:
             # current α, β (and γ if you add it)
             α = self.alphaSlider.value() / 50.0
@@ -35736,7 +35736,7 @@ class FullCurvesTab(QWidget):
         and redraws exactly 20 GHS handles.
         """
         try:
-            is_ghs = self.stretchTypeGroup.checkedButton().text() == "Generalized Hyperbolic"
+            is_ghs = self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic"
 
             if is_ghs:
                 # 1) reset α/β/γ sliders & labels
