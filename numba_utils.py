@@ -3,6 +3,123 @@ from numba import njit, prange
 import cv2 
 import math
 
+@njit(parallel=True, fastmath=True)
+def blend_add_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                v = A[y,x,c] + B[y,x,c] * alpha
+                # clamp 0..1
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_subtract_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                v = A[y,x,c] - B[y,x,c] * alpha
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_multiply_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                v = (A[y,x,c] * (1-alpha)) + (A[y,x,c] * B[y,x,c] * alpha)
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_divide_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    eps = 1e-6
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                # avoid division by zero
+                b = A[y,x,c] / (B[y,x,c] + eps)
+                # clamp f(A,B)
+                if b < 0.0: b = 0.0
+                elif b > 1.0: b = 1.0
+                # mix with original
+                v = A[y,x,c] * (1.0 - alpha) + b * alpha
+                # clamp final
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_screen_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                # Screen: 1 - (1-A)*(1-B)
+                b = 1.0 - (1.0 - A[y,x,c]) * (1.0 - B[y,x,c])
+                if b < 0.0: b = 0.0
+                elif b > 1.0: b = 1.0
+                v = A[y,x,c] * (1.0 - alpha) + b * alpha
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_overlay_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                a = A[y,x,c]
+                b_in = B[y,x,c]
+                # Overlay: if a < .5: 2*a*b, else: 1 - 2*(1-a)*(1-b)
+                if a <= 0.5:
+                    b = 2.0 * a * b_in
+                else:
+                    b = 1.0 - 2.0 * (1.0 - a) * (1.0 - b_in)
+                if b < 0.0: b = 0.0
+                elif b > 1.0: b = 1.0
+                v = a * (1.0 - alpha) + b * alpha
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
+
+@njit(parallel=True, fastmath=True)
+def blend_difference_numba(A, B, alpha):
+    H, W, C = A.shape
+    out = np.empty_like(A)
+    for y in prange(H):
+        for x in range(W):
+            for c in range(C):
+                # Difference: |A - B|
+                b = A[y,x,c] - B[y,x,c]
+                if b < 0.0: b = -b
+                # clamp f(A,B) is redundant since abs() already ≥0; we cap above 1
+                if b > 1.0: b = 1.0
+                v = A[y,x,c] * (1.0 - alpha) + b * alpha
+                if v < 0.0: v = 0.0
+                elif v > 1.0: v = 1.0
+                out[y,x,c] = v
+    return out
 
 @njit(parallel=True, fastmath=True)
 def rescale_image_numba(image, factor):
