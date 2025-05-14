@@ -42369,20 +42369,29 @@ class ImageCombineTab(QWidget):
         self.scrollArea.viewport().installEventFilter(self)
 
     def populateSlots(self):
-        """Reload the combo‐boxes with the up‐to‐date names from AstroEditingSuite.slot_names."""
-        for cb in (self.srcA, self.srcB, self.outSlot):
-            cb.clear()
         if not self.image_manager:
             return
 
-        # grab the real main window
-        main_win = getattr(self.image_manager, "parent", None) or self.window()
+        # block those currentIndexChanged -> updatePreview calls
+        for cb in (self.srcA, self.srcB, self.outSlot):
+            cb.blockSignals(True)
+            cb.clear()
+
+        main_win   = self.window()
         slot_names = getattr(main_win, "slot_names", {})
 
         for i in range(self.image_manager.max_slots):
-            display = slot_names.get(i, f"Slot {i}")
+            name = slot_names.get(i, f"Slot {i}")
             for cb in (self.srcA, self.srcB, self.outSlot):
-                cb.addItem(display, userData=i)
+                cb.addItem(name, userData=i)
+
+        for cb in (self.srcA, self.srcB, self.outSlot):
+            cb.blockSignals(False)
+
+        # if this tab is visible, manually trigger a single update
+        if self.isVisible():
+            self.updatePreview()
+
 
     def refresh(self):
         """Called each time the tab becomes active."""
@@ -42391,6 +42400,11 @@ class ImageCombineTab(QWidget):
         self.updatePreview()
 
     def updatePreview(self, *_):
+        # bail out if we're not the current tab
+        tabwidget = self.parent()  # should be the QTabWidget
+        if hasattr(tabwidget, "currentWidget") and tabwidget.currentWidget() is not self:
+            return
+
         idxA = self.srcA.currentData()
         idxB = self.srcB.currentData()
         if idxA is None or idxB is None:
@@ -42406,9 +42420,23 @@ class ImageCombineTab(QWidget):
         alpha = self.opacity.value() / 100.0
         mode  = self.blendMode.currentText()
 
-        blended = self.dispatch_blend(A, B, mode, alpha)
 
+        # right after loading A and B...
+        orig_ndim = A.ndim
 
+        # if grayscale, make them H×W×1 so Numba will be happy
+        if A.ndim == 2:
+            A = A[..., None]
+            B = B[..., None]
+
+        # now you can safely do the Numba blend
+        result = self.dispatch_blend(A, B, mode, alpha)
+
+        # if you originally had a 2-D image, squeeze the channel back out
+        if orig_ndim == 2:
+            result = result[..., 0]
+
+        blended = result
         # — Blend with mask if present —
         mask = self.get_active_mask()
         if mask is not None:
@@ -42540,8 +42568,22 @@ class ImageCombineTab(QWidget):
         alpha = self.opacity.value() / 100.0
         mode  = self.blendMode.currentText()
 
-        # 2) full-res blend
+        # right after loading A and B...
+        orig_ndim = A.ndim
+
+        # if grayscale, make them H×W×1 so Numba will be happy
+        if A.ndim == 2:
+            A = A[..., None]
+            B = B[..., None]
+
+        # now you can safely do the Numba blend
         result = self.dispatch_blend(A, B, mode, alpha)
+
+        # if you originally had a 2-D image, squeeze the channel back out
+        if orig_ndim == 2:
+            result = result[..., 0]
+
+        blended = result
 
         # 3) mask post-processing
         mask = self.get_active_mask()
