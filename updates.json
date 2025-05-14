@@ -1,9 +1,9 @@
 {
-  "version": "2.15.14",
+  "version": "2.16.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.14/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.14/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.15.14/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Updated Hyperbolic stretch to stretch a color channel if you so choose. Curves UI is shorter as well to be inline with other tabs. Should help some with lower monitor resolution."
+  "notes": "Image Combination Tab and Bug fixes in hyperbolic stretch and stacking suite"
 }
