@@ -44,6 +44,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Circle
 from matplotlib.ticker import MaxNLocator
+from typing import Optional
+
 
 import random
 if sys.stdout is not None:
@@ -246,7 +248,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.14"
+VERSION = "2.16.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -366,26 +368,34 @@ else:
     jwstpupil_path = 'jwstpupil.png'
     signature_icon_path = 'pen.png'
 
+
 def announce_zoom(method):
     def wrapper(self, *args, **kwargs):
-        # try calling with whatever was passed, but if that fails,
-        # call the zero-arg version
+        # 1) invoke the real zoom method, swallowing any extra args
         try:
             result = method(self, *args, **kwargs)
         except TypeError:
             result = method(self)
 
-        # now announce
+        # 2) now compute the percent and show the tooltip
         try:
-            pct = self.zoom_factor * 100
-            #print(f"Zoom now {pct:.0f}%")
-            vp = self.scroll_area.viewport()
-            center_local = vp.rect().center()                    # QPoint in viewport coords
-            center_global = vp.mapToGlobal(center_local)         # map to screen coords
+            pct = int(self.zoom_factor * 100)
 
-            QToolTip.showText(center_global, f"{pct}%")
-        except Exception:
-            pass
+            # look for either naming convention
+            sa = getattr(self, "scrollArea", None) \
+              or getattr(self, "scroll_area", None)
+
+            if sa is not None:
+                vp = sa.viewport()
+                center_local  = vp.rect().center()
+                center_global = vp.mapToGlobal(center_local)
+                QToolTip.showText(center_global, f"{pct}%")
+            else:
+                # fallback to cursor-position
+                QToolTip.showText(QCursor.pos(), f"{pct}%")
+        except Exception as e:
+            # silently ignore any tooltip failures
+            print("announce_zoom tooltip error:", e)
 
         return result
 
@@ -1180,6 +1190,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
         self.tabs.addTab(HaloBGonTab(image_manager=self.image_manager), "Halo-B-Gon")
         self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
+        self.tabs.addTab(ImageCombineTab(image_manager=self.image_manager), "Image Combination")
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
         self.tabs.currentChanged.connect(self.on_tab_changed)
@@ -5974,6 +5985,11 @@ class ImageManager(QObject):
                 return img.copy(), meta.copy()
         return None, None
 
+    def get_image_for_slot(self, slot: int) -> Optional[np.ndarray]:
+        """Return the image stored in slot, or None if empty."""
+        return self._images.get(slot)
+
+
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
         super().__init__(parent)
@@ -7723,9 +7739,9 @@ class HistogramDialog(QDialog):
         self.image = image_manager.image  # image_manager.image returns the current slot's image.
         self.zoom_factor = 1.0  # 1.0 means 100%
         self.log_scale = False  # Default: linear x-axis
+        self._connected  = False    # track our connection state
         self.initUI()
-        # Connect to the image_changed signal so that the histogram updates when the active slot changes.
-        self.image_manager.image_changed.connect(self.on_image_changed)
+
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
@@ -7781,8 +7797,22 @@ class HistogramDialog(QDialog):
         self.setLayout(main_layout)
         self.drawHistogram()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._connected:
+            self.image_manager.image_changed.connect(self.on_image_changed)
+            self._connected = True
+
+    def hideEvent(self, event):
+        if self._connected:
+            try:
+                self.image_manager.image_changed.disconnect(self.on_image_changed)
+            except (TypeError, RuntimeError):
+                pass
+            self._connected = False
+        super().hideEvent(event)
+
     def on_image_changed(self, slot, image, metadata):
-        # Update the histogram only if the changed slot is the active one.
         if slot == self.image_manager.current_slot:
             self.image = image
             self.drawHistogram()
@@ -7811,32 +7841,46 @@ class HistogramDialog(QDialog):
         base_width = 512
         height = 300
         width = int(base_width * self.zoom_factor)
+
+        
+        bin_count = 512
+        
+        # Choose bin edges based on the log_scale toggle.
+        if self.log_scale:
+            # Compute a small positive epsilon
+            raw_min = float(np.min(self.image))
+            eps     = max(raw_min, 1e-4)
+            self._hist_eps     = eps
+            self._hist_log_min = log_min = np.log10(eps)
+            self._hist_log_max = log_max = 0.0  # because log10(1)=0
+
+            if abs(log_max - log_min) < 1e-6:
+                # no dynamic range → fallback to a tiny linear stretch from eps→1
+                bin_edges = np.linspace(eps, 1.0, bin_count + 1)
+                def x_pos(edge):
+                    # if eps==1, everything collapses → draw at left
+                    if eps >= 1.0:
+                        return 0
+                    return int((edge - eps) / (1.0 - eps) * width)
+
+            else:
+                # proper log spacing
+                bin_edges = np.logspace(log_min, log_max, bin_count + 1)
+                def x_pos(edge):
+                    return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
+        else:
+            # Linear mode is unchanged
+            bin_edges = np.linspace(0, 1, bin_count + 1)
+            def x_pos(edge):
+                return int(edge * width)
+        
         
         # Create a pixmap with the computed dimensions.
         pixmap = QPixmap(width, height)
         pixmap.fill(Qt.GlobalColor.white)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        bin_count = 512
-        
-        # Choose bin edges based on the log_scale toggle.
-        if self.log_scale:
-            raw_min = float(np.min(self.image))
-            eps     = max(raw_min, 1e-4)   # Cannot start at 0 for log scale.
-            self._hist_eps     = eps
-            self._hist_log_min = np.log10(eps)
-            self._hist_log_max = 0.0  # since log10(1)==0            
-            bin_edges = np.logspace(np.log10(eps), 0, bin_count + 1)
-            log_min = np.log10(eps)
-            log_max = 0  # log10(1)=0
-            def x_pos(edge):
-                return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
-        else:
-            bin_edges = np.linspace(0, 1, bin_count + 1)
-            def x_pos(edge):
-                return int(edge * width)
-        
+
         # Draw histogram bars.
         if self.image.ndim == 3 and self.image.shape[2] == 3:
             # For RGB images, draw each channel histogram.
@@ -9702,8 +9746,12 @@ class StackingSuiteDialog(QDialog):
             try:
                 hdr0 = fits.getheader(fp, ext=0)
                 filt = hdr0.get("FILTER", "Unknown")
-                exp  = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", 0.0))
-                exp  = float(exp)
+                exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
+                try:
+                    exp = float(exp_raw)
+                except (TypeError, ValueError):
+                    print(f"⚠️ Exposure missing or invalid in {fp}, defaulting to 0.0s")
+                    exp = 0.0
                 data0 = fits.getdata(fp, ext=0)
                 h, w = data0.shape[-2:]
                 size = f"{w}x{h}"
@@ -35172,7 +35220,6 @@ class FullCurvesTab(QWidget):
                 return
             if new_img.ndim == 2:
                 new_img = np.stack([new_img]*3, axis=-1)
-            self._hist_dialog.updateHistogram(new_img)
 
         self.image_manager.image_changed.connect(_update_hist)
 
@@ -35735,7 +35782,7 @@ class FullCurvesTab(QWidget):
 
     def startProcessing(self):
         if self.original_image is None:
-            QMessageBox.warning(self, "Warning", "No image loaded to apply curve.")
+            
             return
 
         is_ghs = (self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic")
@@ -35745,25 +35792,18 @@ class FullCurvesTab(QWidget):
         self.pushUndo(source_image.copy())
         self.showSpinner()
 
+        curve_func = self.curveEditor.getCurveFunction()
+        # for GHS mode, the “curve_mode” is just which channel to apply:
         if is_ghs:
-            # read your GHS params
-            α  = self.alphaSlider.value() / 50.0
-            β  = self.betaSlider.value()  / 50.0
-            G  = max(0.01, self.gammaSlider.value() / 100.0)
-            LP = self.lpSlider.value()      / 360.0
-            HP = self.hpSlider.value()      / 360.0
-            SP = self.ghs_sym_pt if self.ghs_sym_pt is not None else 0.5
-            ch = self.currentGhsChannel
-            self.processing_thread = GhsProcessingThread(
-                source_image, ch, α, β, G, LP, HP, SP
-            )
+            curve_mode = self.currentGhsChannel  # “K (Brightness)”, “R”, “G” or “B”
         else:
-            # your existing “traditional” modes
             curve_mode = self.curveModeGroup.checkedButton().text()
-            curve_func = self.curveEditor.getCurveFunction()
-            self.processing_thread = FullCurvesProcessingThread(
-                source_image, curve_mode, curve_func
-            )
+
+        self.processing_thread = FullCurvesProcessingThread(
+            source_image,
+            curve_mode=curve_mode,
+            curve_func=curve_func
+        )
  
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
@@ -36883,61 +36923,6 @@ def build_curve_lut(curve_func, size=65536):
         lut[i] = outv
     return lut
 
-class GhsProcessingThread(QThread):
-    result_ready = pyqtSignal(np.ndarray)
-
-    def __init__(self, image, channel, α, β, G, LP, HP, SP):
-        super().__init__()
-        # work in float32 [0..1]
-        self.image   = image.astype(np.float32)
-        self.channel = channel
-        self.α, self.β, self.G, self.LP, self.HP, self.SP = α, β, G, LP, HP, SP
-
-    def run(self):
-        import numpy as np
-
-        img = self.image
-        out = img.copy()
-
-        def apply_ghs(x):
-            # x is float array [0..1]
-            α, β, G, LP, HP, SP = self.α, self.β, self.G, self.LP, self.HP, self.SP
-
-            raw_l = x**α / (x**α +   β*(1-x)**α)
-            raw_r = x**α / (x**α + (1/β)*(1-x)**α)
-            mid_l = (0.5**α)/(0.5**α +   β*(0.5)**α)
-            mid_r = (0.5**α)/(0.5**α + (1/β)*(0.5)**α)
-
-            up = np.where(x <= SP,
-                          2*SP*x,
-                          SP + 2*(1-SP)*(x-0.5))
-            vp = np.where(x <= SP,
-                          raw_l*(SP/mid_l),
-                          SP + (raw_r-mid_r)*((1-SP)/(1-mid_r)))
-
-            if LP>0:
-                m = x <= SP
-                vp[m] = (1-LP)*vp[m] + LP*up[m]
-            if HP>0:
-                m = x >= SP
-                vp[m] = (1-HP)*vp[m] + HP*up[m]
-
-            if abs(G-1.0)>1e-6:
-                vp = vp**(1.0/G)
-            return vp
-
-        # apply to whichever channel(s)
-        if self.channel == "K (Brightness)":
-            for c in range(3):
-                out[...,c] = apply_ghs(img[...,c])
-        else:
-            idx = {"R":0,"G":1,"B":2}[self.channel]
-            out[...,idx] = apply_ghs(img[...,idx])
-
-        # clamp & emit
-        out = np.clip(out, 0.0, 1.0)
-        self.result_ready.emit(out)
-
 
 class FullCurvesProcessingThread(QThread):
     result_ready = pyqtSignal(np.ndarray)
@@ -36949,6 +36934,7 @@ class FullCurvesProcessingThread(QThread):
         self.curve_func = curve_func
 
     def run(self):
+        print("Full curves thread started")
         adjusted_image = self.process_curve(self.image, self.curve_mode, self.curve_func)
         self.result_ready.emit(adjusted_image)
 
@@ -42295,6 +42281,333 @@ class ContinuumProcessingThread(QThread):
         result_image = red_channel - Q * (green_channel - median_green)
         
         return np.clip(result_image, 0, 1)  # Ensure values stay within [0, 1]
+
+
+class ImageCombineTab(QWidget):
+    def __init__(self, image_manager=None):
+        super().__init__()
+        self.image_manager = image_manager
+        self.zoom_factor = 1.0
+        self.current_pixmap = None
+
+        if self.image_manager:
+            # re-populate slot names whenever images change
+            self.image_manager.image_changed.connect(lambda *a: self.populateSlots())
+
+        self._pan_start = None
+        self._hstart    = 0
+        self._vstart    = 0
+        self.initUI()        
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # 1) Source selectors
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Source A:"))
+        self.srcA = QComboBox()
+        src_row.addWidget(self.srcA)
+        src_row.addWidget(QLabel("Source B:"))
+        self.srcB = QComboBox()
+        src_row.addWidget(self.srcB)
+        layout.addLayout(src_row)
+
+        # 2) Blend mode + opacity
+        blend_row = QHBoxLayout()
+        blend_row.addWidget(QLabel("Mode:"))
+        self.blendMode = QComboBox()
+        self.blendMode.addItems([
+            "Add","Subtract","Multiply","Divide",
+            "Screen","Overlay","Difference"
+        ])
+        blend_row.addWidget(self.blendMode)
+        blend_row.addWidget(QLabel("Opacity:"))
+        self.opacity = QSlider(Qt.Orientation.Horizontal)
+        self.opacity.setRange(0, 100)
+        self.opacity.setValue(100)
+        blend_row.addWidget(self.opacity)
+        layout.addLayout(blend_row)
+
+        # 3) Preview widget
+        # 3) Preview in scroll area
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.imageLabel = ImageLabel(self)            # or your ImagePreviewWidget
+        self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scrollArea.setWidget(self.imageLabel)
+        layout.addWidget(self.scrollArea, stretch=1)
+
+        # 6) Zoom buttons
+        zoom_row = QHBoxLayout()
+        zoom_in_btn  = QPushButton("Zoom In ＋")
+        zoom_out_btn = QPushButton("Zoom Out －")
+        fit_btn      = QPushButton("⧉ Fit to Preview")
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        fit_btn.clicked.connect(self.fit_to_preview)
+        zoom_row.addWidget(zoom_out_btn)
+        zoom_row.addWidget(fit_btn)
+        zoom_row.addWidget(zoom_in_btn)
+        layout.addLayout(zoom_row)
+
+        # 5) Output & apply
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("Output →"))
+        self.outSlot = QComboBox()
+        out_row.addWidget(self.outSlot)
+        self.applyBtn = QPushButton("Apply Combination")
+        out_row.addWidget(self.applyBtn)
+        layout.addLayout(out_row)
+
+        # hookups
+        self.srcA     .currentIndexChanged.connect(self.updatePreview)
+        self.srcB     .currentIndexChanged.connect(self.updatePreview)
+        self.blendMode.currentIndexChanged.connect(self.updatePreview)
+        self.opacity  .valueChanged     .connect(self.updatePreview)
+
+        self.applyBtn.clicked.connect(self.commitCombination)
+        self.scrollArea.viewport().installEventFilter(self)
+
+    def populateSlots(self):
+        """Reload the combo‐boxes with the up‐to‐date names from AstroEditingSuite.slot_names."""
+        for cb in (self.srcA, self.srcB, self.outSlot):
+            cb.clear()
+        if not self.image_manager:
+            return
+
+        # grab the real main window
+        main_win = getattr(self.image_manager, "parent", None) or self.window()
+        slot_names = getattr(main_win, "slot_names", {})
+
+        for i in range(self.image_manager.max_slots):
+            display = slot_names.get(i, f"Slot {i}")
+            for cb in (self.srcA, self.srcB, self.outSlot):
+                cb.addItem(display, userData=i)
+
+    def refresh(self):
+        """Called each time the tab becomes active."""
+        self.populateSlots()
+        # also re-draw the preview in case A/B/mode/opacity didn't change
+        self.updatePreview()
+
+    def updatePreview(self, *_):
+        idxA = self.srcA.currentData()
+        idxB = self.srcB.currentData()
+        if idxA is None or idxB is None:
+            return
+
+        imgA = self.image_manager.get_image_for_slot(idxA)
+        imgB = self.image_manager.get_image_for_slot(idxB)
+        if imgA is None or imgB is None:
+            return
+
+        A = imgA.astype(np.float32, copy=False)
+        B = imgB.astype(np.float32, copy=False)
+        alpha = self.opacity.value() / 100.0
+        mode  = self.blendMode.currentText()
+
+        blended = self.dispatch_blend(A, B, mode, alpha)
+
+
+        # — Blend with mask if present —
+        mask = self.get_active_mask()
+        if mask is not None:
+            h, w = blended.shape[:2]
+
+            # expand 2D → 3D if needed
+            if mask.ndim == 2:
+                mask = mask[..., None]
+
+            # check shape
+            if mask.shape[0] != h or mask.shape[1] != w:
+                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                return
+
+            # if it's single-channel but blended is 3-channel, replicate
+            if blended.ndim == 3 and mask.shape[2] == 1:
+                mask = np.repeat(mask, blended.shape[2], axis=2)
+
+            # blend: inside mask use `blended`, outside use original A
+            blended = blended * mask + A * (1.0 - mask)
+            blended = np.clip(blended, 0.0, 1.0)
+
+        # convert to 8-bit preview
+        h, w = blended.shape[:2]
+        arr8 = (blended*255).astype(np.uint8)
+        if arr8.ndim == 2:
+            qimg = QImage(arr8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            qimg = QImage(arr8.data, w, h, 3*w, QImage.Format.Format_RGB888)
+
+        pix = QPixmap.fromImage(qimg)
+        # store for zoom/pan, then just reapply the current zoom
+        self.current_pixmap = pix
+        self.apply_zoom()
+
+    def apply_zoom(self):
+        """Scale the stored pixmap by zoom_factor and set on the label."""
+        if self.current_pixmap is None:
+            return
+        scaled = self.current_pixmap.scaled(
+            self.current_pixmap.size() * self.zoom_factor,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.imageLabel.setPixmap(scaled)
+
+    @announce_zoom
+    def zoom_in(self):
+        self.zoom_factor *= 1.25
+        self.apply_zoom()
+
+    @announce_zoom
+    def zoom_out(self):
+        self.zoom_factor /= 1.25
+        self.apply_zoom()
+
+
+    def eventFilter(self, source, event):
+        # only intercept on the scrollArea’s viewport
+        if source is self.scrollArea.viewport():
+            # mouse-down: start panning
+            if (event.type() == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self._pan_start = event.pos()
+                self._hstart   = self.scrollArea.horizontalScrollBar().value()
+                self._vstart   = self.scrollArea.verticalScrollBar().value()
+                return True
+
+            # mouse-move: drag
+            elif (event.type() == QEvent.Type.MouseMove
+                  and self._pan_start is not None):
+                delta = event.pos() - self._pan_start
+                self.scrollArea.horizontalScrollBar().setValue(self._hstart - delta.x())
+                self.scrollArea.verticalScrollBar().setValue(self._vstart - delta.y())
+                return True
+
+            # mouse-up: stop panning
+            elif (event.type() == QEvent.Type.MouseButtonRelease
+                  and event.button() == Qt.MouseButton.LeftButton):
+                self._pan_start = None
+                return True
+
+            # any other event on this source: explicitly don’t handle
+            return False
+
+        # for everything else, fallback to default
+        return super().eventFilter(source, event)
+
+    def fit_to_preview(self):
+        """Reset zoom so the image fits the available viewport."""
+        if self.current_pixmap is None:
+            return
+        area = self.scrollArea.viewport().size()
+        pix = self.current_pixmap.size()
+        # choose the smaller scale factor that fits both dims
+        sx = area.width()  / pix.width()
+        sy = area.height() / pix.height()
+        self.zoom_factor = min(sx, sy, 1.0)
+        self.apply_zoom()
+
+    def get_active_mask(self):
+        """
+        Retrieves the currently applied mask from MaskManager, normalized to [0..1].
+        Returns None if no mask is applied.
+        """
+        if not (self.image_manager and self.image_manager.mask_manager):
+            return None
+
+        mask = self.image_manager.mask_manager.get_applied_mask()
+        if mask is None:
+            return None
+
+        # normalize to float [0..1]
+        if mask.dtype not in (np.float32, np.float64):
+            mask = mask.astype(np.float32) / 255.0
+        return mask
+
+    def commitCombination(self):
+        """Run the exact same blend (full-res, njit) and shove into outSlot."""
+        idxA   = self.srcA.currentData()
+        idxB   = self.srcB.currentData()
+        outIdx = self.outSlot.currentData()
+        if None in (idxA, idxB, outIdx):
+            return
+
+        # 1) fetch & prepare
+        A     = self.image_manager.get_image_for_slot(idxA).astype(np.float32, copy=False)
+        B     = self.image_manager.get_image_for_slot(idxB).astype(np.float32, copy=False)
+        alpha = self.opacity.value() / 100.0
+        mode  = self.blendMode.currentText()
+
+        # 2) full-res blend
+        result = self.dispatch_blend(A, B, mode, alpha)
+
+        # 3) mask post-processing
+        mask = self.get_active_mask()
+        if mask is not None:
+            m = mask.astype(np.float32)
+            # normalize
+            if m.max() > 1.0:
+                m /= 255.0
+            # make it (H,W,1) if needed
+            if m.ndim == 2:
+                m = m[..., None]
+            # broadcast to all channels
+            if result.ndim == 3 and m.shape[2] == 1:
+                m = np.repeat(m, result.shape[2], axis=2)
+            # shape check
+            if m.shape[:2] != result.shape[:2]:
+                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                return
+            # inside mask = blended, outside = original A
+            result = result * m + A * (1.0 - m)
+            result = np.clip(result, 0.0, 1.0)
+
+        # 4) build metadata
+        meta = {
+            'file_path': f"Combined_{mode}",
+            'is_mono':   (result.ndim == 2),
+            'bit_depth': "32-bit floating point",
+            'source':    f"Combine: {mode}"
+        }
+
+        # 5) store into slot (emits image_changed)
+        self.image_manager.set_image_for_slot(outIdx, result, meta)
+
+        # 6) rename that slot in the UI, just like ContinuumSubtract
+        mw   = self.window()  # AstroEditingSuite
+        name = f"{mode} Combine"
+        mw.slot_names[outIdx] = name
+
+        # toolbar
+        if outIdx in mw.slot_actions:
+            btn = mw.slot_actions[outIdx]
+            btn.setText(name)
+            btn.setStatusTip(f"Open preview for {name}")
+
+        # menubar
+        if outIdx in mw.menubar_slot_actions:
+            act = mw.menubar_slot_actions[outIdx]
+            act.setText(name)
+            act.setStatusTip(f"Open preview for {name}")
+
+        mw.menuBar().update()
+
+        print(f"Combined → slot {outIdx+1}: {name}")
+
+
+    def dispatch_blend(self, A, B, mode, alpha):
+        if   mode == "Add":        return blend_add_numba(A, B, alpha)
+        elif mode == "Subtract":   return blend_subtract_numba(A, B, alpha)
+        elif mode == "Multiply":   return blend_multiply_numba(A, B, alpha)
+        elif mode == "Divide":     return blend_divide_numba(A, B, alpha)
+        elif mode == "Screen":     return blend_screen_numba(A, B, alpha)
+        elif mode == "Overlay":    return blend_overlay_numba(A, B, alpha)
+        elif mode == "Difference": return blend_difference_numba(A, B, alpha)
+        # fallback
+        out = A + (B * alpha)
+        return np.clip(out, 0.0, 1.0)
 
 def preprocess_narrowband_image(image):
     """
