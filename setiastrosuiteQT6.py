@@ -246,7 +246,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.13"
+VERSION = "2.15.14"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -34718,7 +34718,14 @@ class FullCurvesTab(QWidget):
         # Initialize the Undo stack with a limited size
         self.undo_stack = []
         self.max_undo = 10  # Maximum number of undo steps        
-
+        self.ghsParams = {
+            "α": 1.0,
+            "β": 1.0,
+            "γ": 1.0,
+            "LP": 0.0,
+            "HP": 0.0,
+            "sym_pt": None
+        }
         # Precompute transformation matrices
         self.M = np.array([
             [0.4124564, 0.3575761, 0.1804375],
@@ -34790,7 +34797,7 @@ class FullCurvesTab(QWidget):
         self.curveEditor = CurveEditor(self)
         self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
         left_layout.addWidget(self.curveEditor)
-        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode))
+        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode, self.currentGhsChannel))
 
         # Status
         self.statusLabel = QLabel('X:0 Y:0', self)
@@ -34799,29 +34806,90 @@ class FullCurvesTab(QWidget):
         # ——— GHS controls ———
         self.ghsControls = QWidget(self)
         vbox = QVBoxLayout(self.ghsControls)
-        # α/β sliders
+
+        # ——— Channel selector + histogram/reset buttons on one line ———
+        ch_row = QHBoxLayout()
+        ch_row.addWidget(QLabel("Channel:"))
+        self.ghsChannelCombo = QComboBox()
+        for ch in ("K (Brightness)", "R", "G", "B"):
+            self.ghsChannelCombo.addItem(ch)
+        ch_row.addWidget(self.ghsChannelCombo)
+        ch_row.addStretch()
+
+        # histogram & reset buttons in the same row
+        histBtn = QPushButton("Histogram")
+        histBtn.setFixedHeight(self.ghsChannelCombo.sizeHint().height())
+        histBtn.clicked.connect(self.openHistogram)
+        ch_row.addWidget(histBtn)
+
+        resetInfBtn = QPushButton("Reset Inflection")
+        resetInfBtn.setFixedHeight(self.ghsChannelCombo.sizeHint().height())
+        resetInfBtn.clicked.connect(self.clearGhsPivot)
+        ch_row.addWidget(resetInfBtn)
+
+        vbox.addLayout(ch_row)
+
+        self.ghsChannelCombo.currentTextChanged.connect(self._onGhsChannelChanged)
+        self.currentGhsChannel = "K (Brightness)"
+
+        # α/β sliders + edits
         slider_row = QHBoxLayout()
+
+        # α
         self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.alphaSlider.setRange(1, 500); self.alphaSlider.setValue(50)
-        self.alphaLabel = QLabel("1.00")
-        slider_row.addWidget(QLabel("α")); slider_row.addWidget(self.alphaSlider); slider_row.addWidget(self.alphaLabel)
+        self.alphaSlider.setRange(1, 500)
+        self.alphaSlider.setValue(50)
+        self.alphaEdit = QLineEdit("1.00")
+        self.alphaEdit.setFixedWidth(50)
+        self.alphaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        slider_row.addWidget(QLabel("α"))
+        slider_row.addWidget(self.alphaSlider)
+        slider_row.addWidget(self.alphaEdit)
+
+        # β
         self.betaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.betaSlider.setRange(1, 500); self.betaSlider.setValue(50)
-        self.betaLabel = QLabel("1.00")
-        slider_row.addWidget(QLabel("β")); slider_row.addWidget(self.betaSlider); slider_row.addWidget(self.betaLabel)
+        self.betaSlider.setRange(1, 500)
+        self.betaSlider.setValue(50)
+        self.betaEdit = QLineEdit("1.00")
+        self.betaEdit.setFixedWidth(50)
+        self.betaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        slider_row.addWidget(QLabel("β"))
+        slider_row.addWidget(self.betaSlider)
+        slider_row.addWidget(self.betaEdit)
+
         vbox.addLayout(slider_row)
-        self.alphaSlider.valueChanged.connect(self.updateGhsCurve)
-        self.betaSlider.valueChanged.connect(self.updateGhsCurve)
-        # γ slider
+
+        # connect α/β signals
+        self.alphaSlider.valueChanged.connect(self._onAlphaSliderChanged)
+        self.alphaEdit.editingFinished.connect(self._onAlphaEditFinished)
+        self.betaSlider.valueChanged.connect(self._onBetaSliderChanged)
+        self.betaEdit.editingFinished.connect(self._onBetaEditFinished)
+
+        # γ slider + edit
         gamma_row = QHBoxLayout()
         gamma_row.addStretch()
         self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.gammaSlider.setRange(0, 500); self.gammaSlider.setValue(100)
-        self.gammaLabel = QLabel("1.00")
-        gamma_row.addWidget(QLabel("γ")); gamma_row.addWidget(self.gammaSlider); gamma_row.addWidget(self.gammaLabel)
+        self.gammaSlider.setRange(0, 500)
+        self.gammaSlider.setValue(100)
+        self.gammaEdit = QLineEdit("1.00")
+        self.gammaEdit.setFixedWidth(50)
+        self.gammaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        gamma_row.addWidget(QLabel("γ"))
+        gamma_row.addWidget(self.gammaSlider)
+        gamma_row.addWidget(self.gammaEdit)
         gamma_row.addStretch()
+        help_btn = QToolButton(self)
+        help_btn.setText("?")
+        help_btn.setToolTip("GHS instructions")
+        help_btn.setFixedSize(20, 20)
+        help_btn.clicked.connect(self.showGhsHelp)
+
+        # stick it up in the GHS controls header, e.g. next to "Channel:"
+        gamma_row.addWidget(help_btn)
         vbox.addLayout(gamma_row)
-        self.gammaSlider.valueChanged.connect(self.updateGhsCurve)
+
+        self.gammaSlider.valueChanged.connect(self._onGammaSliderChanged)
+        self.gammaEdit.editingFinished.connect(self._onGammaEditFinished)
 
         # ─── low‐light protection LP ───────────────────────────
         lp_row = QHBoxLayout()
@@ -34847,33 +34915,8 @@ class FullCurvesTab(QWidget):
         vbox.addLayout(hp_row)
         self.hpSlider.valueChanged.connect(self.updateGhsCurve)
 
-        # histogram & reset
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        histBtn = QPushButton("Show Histogram")
-        histBtn.clicked.connect(self.openHistogram)
-        btn_row.addWidget(histBtn)
-        resetInfBtn = QPushButton("Reset Inflection")
-        resetInfBtn.clicked.connect(self.clearGhsPivot)
-        btn_row.addWidget(resetInfBtn)
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
-
         left_layout.addWidget(self.ghsControls)
         self.ghsControls.hide()
-
-        # ——— GHS instructions ———
-        self.ghsInstructions = QLabel(self)
-        self.ghsInstructions.setWordWrap(True)
-        self.ghsInstructions.setStyleSheet("color: gray; font-style: italic;")
-        self.ghsInstructions.setText(
-            "α controls the main S-curve shape.\n"
-            "β controls the slope at the inflection point.\n"
-            "γ adjusts overall brightness.\n"
-            "Ctrl-click image, curve grid or histogram to set inflection."
-        )
-        self.ghsInstructions.hide()
-        left_layout.addWidget(self.ghsInstructions)
 
         # Traditional-mode Instructions
         self.tradInstructions = QLabel(self)
@@ -34921,12 +34964,6 @@ class FullCurvesTab(QWidget):
 
         # Spacer
         left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-
-        # spinner & spacer & footer
-        self.spinnerLabel = QLabel(self)
-        self.spinnerLabel.hide()
-        left_layout.addWidget(self.spinnerLabel)
-        left_layout.addSpacerItem(QSpacerItem(20,40,QSizePolicy.Policy.Minimum,QSizePolicy.Policy.Expanding))
         footer_label = QLabel(
             "Written by Franklin Marek<br>"
             "<a href='http://www.setiastro.com'>www.setiastro.com</a>"
@@ -34999,6 +35036,18 @@ class FullCurvesTab(QWidget):
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
 
+    def showGhsHelp(self):
+        QMessageBox.information(
+            self,
+            "Universal Hyperbolic (GHS) Help",
+            "α controls the main S-curve shape.\n"
+            "β controls the slope at the inflection point.\n"
+            "γ adjusts overall brightness.\n"
+            "LP/HP blend into shadows/highlights.\n"
+            "Ctrl-click image, curve grid or histogram to set inflection.\n\n"
+            "Use the channel dropdown to select which channel to stretch."
+        )
+
     def onStretchTypeChanged(self, btn, checked):
         if not checked:
             return
@@ -35012,7 +35061,6 @@ class FullCurvesTab(QWidget):
         self.curveEditor.setInteractive(not is_ghs)
 
         self.ghsControls.setVisible(is_ghs)
-        self.ghsInstructions.setVisible(is_ghs)
 
         self.tradInstructions.setVisible(not is_ghs)
 
@@ -35022,6 +35070,77 @@ class FullCurvesTab(QWidget):
             self.curveEditor.setControlHandles(pts)
         else:
             self.curveEditor.initCurve()
+
+    # ——— handlers for α/β/γ ———
+    def _onAlphaSliderChanged(self, v):
+        val = v / 50.0
+        self.alphaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+    def _onAlphaEditFinished(self):
+        try:
+            v = float(self.alphaEdit.text())
+            new_slider_val = int(v * 50)
+            self.alphaSlider.setValue(new_slider_val)
+            # even if the slider didn’t actually change, force an update:
+            self.updateGhsCurve()
+        except ValueError:
+            pass
+
+    def _onBetaSliderChanged(self, v):
+        val = v / 50.0
+        self.betaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+    def _onBetaEditFinished(self):
+        try:
+            v = float(self.betaEdit.text())
+            new_slider_val = int(v * 50)
+            self.betaSlider.setValue(new_slider_val)
+            self.updateGhsCurve()
+        except ValueError:
+            pass
+
+    def _onGammaSliderChanged(self, v):
+        val = max(0.01, v / 100.0)
+        self.gammaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+    def _onGammaEditFinished(self):
+        try:
+            v = float(self.gammaEdit.text())
+            v = max(0.01, v)
+            new_slider_val = int(v * 100)
+            self.gammaSlider.setValue(new_slider_val)
+            self.updateGhsCurve()
+        except ValueError:
+            pass
+
+    def _onGhsChannelChanged(self, ch_name):
+        self.currentGhsChannel = ch_name
+        if self.stretchTypeGroup.checkedButton().text() != "Universal Hyperbolic":
+            return
+
+        # clear any pivot line if you like
+        self.curveEditor.clearSymmetryLine()
+
+        # fetch and re-overlay the *same* curve
+        lut = self.curveEditor.get8bitLUT()
+
+        # recolor the spline
+        color_map = {
+            "K (Brightness)": Qt.GlobalColor.white,
+            "R":               Qt.GlobalColor.red,
+            "G":               Qt.GlobalColor.green,
+            "B":               Qt.GlobalColor.blue,
+        }
+        pen = QPen(color_map[ch_name])
+        pen.setWidth(3)
+        if getattr(self.curveEditor, "curve_item", None):
+            self.curveEditor.curve_item.setPen(pen)
+
+        # re-apply that LUT in the preview
+        self.updatePreviewLUT(lut, self.curve_mode, ch_name)
 
     def openHistogram(self):
         # 1) If we already have one open, just raise it
@@ -35085,11 +35204,6 @@ class FullCurvesTab(QWidget):
         HP = self.hpSlider.value()      / 360.0         # high protect[0…1]
         SP = 0.5 if self.ghs_sym_pt is None else self.ghs_sym_pt
 
-        # update labels
-        self.alphaLabel.setText(f"{α:.2f}")
-        self.betaLabel .setText(f"{β:.2f}")
-        self.gammaLabel.setText(f"{G:.2f}")
-
         self.lpLabel   .setText(f"LP:{LP:.2f}")
         self.hpLabel   .setText(f"HP:{HP:.2f}")
 
@@ -35144,7 +35258,21 @@ class FullCurvesTab(QWidget):
             handle.setPos(x, y)
 
         # ─── trigger redraw ──────────────────────────────────────────
-        self.curveEditor.updateCurve()
+        from PyQt6.QtGui import QPen
+        from PyQt6.QtCore import Qt
+        color_map = {
+            "K (Brightness)": Qt.GlobalColor.white,
+            "R":               Qt.GlobalColor.red,
+            "G":               Qt.GlobalColor.green,
+            "B":               Qt.GlobalColor.blue,
+        }
+        pen = QPen(color_map[self.currentGhsChannel])
+        pen.setWidth(3)
+        if getattr(self.curveEditor, "curve_item", None):
+            self.curveEditor.curve_item.setPen(pen)
+        # ─── finally update the real-time preview for THIS channel ────
+        lut = self.curveEditor.get8bitLUT()
+        self.updatePreviewLUT(lut, self.curve_mode, self.currentGhsChannel)
 
 
     def onCurveSymmetryPoint(self, u, v):
@@ -35229,11 +35357,25 @@ class FullCurvesTab(QWidget):
         return x, y, w, h
 
 
-    def updatePreviewLUT(self, lut, curve_mode):
+    def updatePreviewLUT(self, lut, curve_mode, ghschannel=None):
         """Apply the 8-bit LUT to the preview image for real-time updates on slot 0."""
 
         # Access slot0 (recombined image) from ImageManager
         if self.image is None:
+            return
+
+        if ghschannel is None:
+            ghschannel = self.currentGhsChannel
+
+        if (self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic"
+                and ghschannel in ("R","G","B")):
+            # grab the existing LUT (which was built for K)
+            # and apply it just to the selected channel:
+            idx = {"R":0, "G":1, "B":2}[ghschannel]
+            img8 = (self.image*255).astype(np.uint8)
+            out = img8.copy()
+            out[...,idx] = lut[out[...,idx]]
+            self.show_image(out.astype(np.float32)/255.0)
             return
 
         try:
@@ -35591,30 +35733,41 @@ class FullCurvesTab(QWidget):
                 return mask
         return None
 
-
-
     def startProcessing(self):
         if self.original_image is None:
             QMessageBox.warning(self, "Warning", "No image loaded to apply curve.")
             return
 
-        curve_mode = self.curveModeGroup.checkedButton().text()
-        curve_func = self.curveEditor.getCurveFunction()
-
-
+        is_ghs = (self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic")
         source_image = self.original_image.copy()
 
-        # Push the current image to the undo stack before modifying
-        self.pushUndo(self.original_image.copy())
-
-        # Show the spinner before starting processing
+        # Push onto undo stack
+        self.pushUndo(source_image.copy())
         self.showSpinner()
 
-        # Initialize and start the processing thread
-        self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, curve_func)
+        if is_ghs:
+            # read your GHS params
+            α  = self.alphaSlider.value() / 50.0
+            β  = self.betaSlider.value()  / 50.0
+            G  = max(0.01, self.gammaSlider.value() / 100.0)
+            LP = self.lpSlider.value()      / 360.0
+            HP = self.hpSlider.value()      / 360.0
+            SP = self.ghs_sym_pt if self.ghs_sym_pt is not None else 0.5
+            ch = self.currentGhsChannel
+            self.processing_thread = GhsProcessingThread(
+                source_image, ch, α, β, G, LP, HP, SP
+            )
+        else:
+            # your existing “traditional” modes
+            curve_mode = self.curveModeGroup.checkedButton().text()
+            curve_func = self.curveEditor.getCurveFunction()
+            self.processing_thread = FullCurvesProcessingThread(
+                source_image, curve_mode, curve_func
+            )
+ 
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
-        print("Started FullCurvesProcessingThread.")
+        print("Started processing thread.")
 
     def finishProcessing(self, adjusted_image):
         self.hideSpinner()
@@ -35650,30 +35803,12 @@ class FullCurvesTab(QWidget):
         self.image          = self.preview_image.copy()
         self.show_image(self.image)
 
-        # — Rebuild curve editor state instead of wiping it —
-        is_ghs = (self.stretchTypeGroup.checkedButton().text()
-                == "Universal Hyperbolic")
-        if is_ghs:
-            # current α, β (and γ if you add it)
-            α = self.alphaSlider.value() / 50.0
-            β = self.betaSlider.value() / 50.0
-
-            # how many handles do we want? preserve existing count or default 20
-            n = len(self.curveEditor.control_points) or 20
-            # rebuild the *raw* handles at the correct α/β
-            pts = self.generate_ghs_control_points(α, β, n=n)
-            self.curveEditor.setControlHandles(pts)
-
-            # now *always* run the GHS remapping (γ + pivot) so the handles
-            # end up exactly where the preview curve was
-            self.curveEditor.clearSymmetryLine()   # clear any old line
-            if self.ghs_sym_pt is not None:
-                # restore the yellow pivot line
-                self.curveEditor.setSymmetryPoint(self.ghs_sym_pt*360.0, 0)
-            # this will apply the γ-lift + remap around p
-            self.updateGhsCurve()
+        # — Reset the GHS UI when in GHS mode, otherwise re-init a Bézier curve —
+        if self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic":
+            # This will zero out α/β/γ/LP/HP, clear the pivot line, 
+            # and rebuild the default 20-point GHS handles.
+            self.resetCurve()
         else:
-            # Traditional Bézier → back to default
             self.curveEditor.initCurve()
 
         # finally push it back into ImageManager
@@ -35743,9 +35878,6 @@ class FullCurvesTab(QWidget):
                 self.alphaSlider.setValue(50)
                 self.betaSlider .setValue(50)
                 self.gammaSlider.setValue(100)
-                self.alphaLabel .setText("1.00")
-                self.betaLabel  .setText("1.00")
-                self.gammaLabel .setText("1.00")
 
                 # 2) reset LP/HP sliders & labels
                 self.lpSlider.setValue(0)
@@ -36750,6 +36882,61 @@ def build_curve_lut(curve_func, size=65536):
         elif outv > 1.0: outv = 1.0
         lut[i] = outv
     return lut
+
+class GhsProcessingThread(QThread):
+    result_ready = pyqtSignal(np.ndarray)
+
+    def __init__(self, image, channel, α, β, G, LP, HP, SP):
+        super().__init__()
+        # work in float32 [0..1]
+        self.image   = image.astype(np.float32)
+        self.channel = channel
+        self.α, self.β, self.G, self.LP, self.HP, self.SP = α, β, G, LP, HP, SP
+
+    def run(self):
+        import numpy as np
+
+        img = self.image
+        out = img.copy()
+
+        def apply_ghs(x):
+            # x is float array [0..1]
+            α, β, G, LP, HP, SP = self.α, self.β, self.G, self.LP, self.HP, self.SP
+
+            raw_l = x**α / (x**α +   β*(1-x)**α)
+            raw_r = x**α / (x**α + (1/β)*(1-x)**α)
+            mid_l = (0.5**α)/(0.5**α +   β*(0.5)**α)
+            mid_r = (0.5**α)/(0.5**α + (1/β)*(0.5)**α)
+
+            up = np.where(x <= SP,
+                          2*SP*x,
+                          SP + 2*(1-SP)*(x-0.5))
+            vp = np.where(x <= SP,
+                          raw_l*(SP/mid_l),
+                          SP + (raw_r-mid_r)*((1-SP)/(1-mid_r)))
+
+            if LP>0:
+                m = x <= SP
+                vp[m] = (1-LP)*vp[m] + LP*up[m]
+            if HP>0:
+                m = x >= SP
+                vp[m] = (1-HP)*vp[m] + HP*up[m]
+
+            if abs(G-1.0)>1e-6:
+                vp = vp**(1.0/G)
+            return vp
+
+        # apply to whichever channel(s)
+        if self.channel == "K (Brightness)":
+            for c in range(3):
+                out[...,c] = apply_ghs(img[...,c])
+        else:
+            idx = {"R":0,"G":1,"B":2}[self.channel]
+            out[...,idx] = apply_ghs(img[...,idx])
+
+        # clamp & emit
+        out = np.clip(out, 0.0, 1.0)
+        self.result_ready.emit(out)
 
 
 class FullCurvesProcessingThread(QThread):
@@ -49118,7 +49305,7 @@ class WhatsInMySky(QWidget):
         self.latitude = safe_cast(self.settings.value("latitude", 0.0), 0.0, float)
         self.longitude = safe_cast(self.settings.value("longitude", 0.0), 0.0, float)
         self.date = self.settings.value("date", datetime.now().strftime("%Y-%m-%d"))
-        self.time = self.settings.value("time", "00:00:00")
+        self.time = self.settings.value("time", "00:00")
         self.timezone = self.settings.value("timezone", "UTC")
         self.min_altitude = safe_cast(self.settings.value("min_altitude", 0.0), 0.0, float)
         self.object_limit = safe_cast(self.settings.value("object_limit", 100), 100, int)
