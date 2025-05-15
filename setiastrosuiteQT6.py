@@ -211,6 +211,7 @@ from PyQt6.QtGui import (
     QShortcut,
     QPolygon,
     QPolygonF,
+    QKeyEvent,
     QPalette, 
     QWheelEvent, 
     QDoubleValidator,
@@ -232,6 +233,7 @@ from PyQt6.QtCore import (
     QFileSystemWatcher,
     QEvent,
     pyqtSlot,
+    QLocale,
     QProcess,
     QSize,
     QObject,
@@ -12575,8 +12577,6 @@ class StackingSuiteDialog(QDialog):
                             coordinates that were rejected for THAT file only.
         ref_header: the header from the reference file (or a new one if missing)
         """
-        import os
-        from concurrent.futures import ThreadPoolExecutor, as_completed
         self.update_status(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
         if not file_list:
             self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
@@ -34743,7 +34743,19 @@ class StarStretchTab(QWidget):
             print(f"Applying stretch: {self.stretch_factor}, Color Boost: {self.sat_amount:.2f}, SCNR: {self.scnrCheckBox.isChecked()}")
             self.generatePreview()
 
-
+class CommaToDotLineEdit(QLineEdit):
+    def keyPressEvent(self, event: QKeyEvent):
+        print("C2D got:", event.key(), repr(event.text()), event.modifiers())
+        # if they hit comma (and it's not a Ctrl+Comma shortcut), turn it into a dot
+        if event.text() == "," and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            # synthesize a “.” keypress instead
+            event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_Period,
+                event.modifiers(),
+                "."
+            )
+        super().keyPressEvent(event)
 
 class FullCurvesTab(QWidget):
     def __init__(self, image_manager=None):
@@ -34887,9 +34899,12 @@ class FullCurvesTab(QWidget):
         self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
         self.alphaSlider.setRange(1, 500)
         self.alphaSlider.setValue(50)
-        self.alphaEdit = QLineEdit("1.00")
+        self.alphaEdit = CommaToDotLineEdit("1.00")
         self.alphaEdit.setFixedWidth(50)
-        self.alphaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        alphaValidator = QDoubleValidator(0.01, 10.0, 2, self)
+        alphaValidator.setLocale(QLocale.c())  
+        self.alphaEdit.setValidator(alphaValidator)
+        self.alphaEdit.returnPressed.connect(self._onAlphaEditFinished)
         slider_row.addWidget(QLabel("α"))
         slider_row.addWidget(self.alphaSlider)
         slider_row.addWidget(self.alphaEdit)
@@ -34898,9 +34913,12 @@ class FullCurvesTab(QWidget):
         self.betaSlider = QSlider(Qt.Orientation.Horizontal)
         self.betaSlider.setRange(1, 500)
         self.betaSlider.setValue(50)
-        self.betaEdit = QLineEdit("1.00")
+        self.betaEdit = CommaToDotLineEdit("1.00")
         self.betaEdit.setFixedWidth(50)
-        self.betaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        betaValidator = QDoubleValidator(0.01, 10.0, 2, self)
+        betaValidator.setLocale(QLocale.c())
+        self.betaEdit.setValidator(betaValidator)
+        self.betaEdit.returnPressed.connect(self._onBetaEditFinished)
         slider_row.addWidget(QLabel("β"))
         slider_row.addWidget(self.betaSlider)
         slider_row.addWidget(self.betaEdit)
@@ -34919,9 +34937,12 @@ class FullCurvesTab(QWidget):
         self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
         self.gammaSlider.setRange(0, 500)
         self.gammaSlider.setValue(100)
-        self.gammaEdit = QLineEdit("1.00")
+        self.gammaEdit = CommaToDotLineEdit("1.00")
         self.gammaEdit.setFixedWidth(50)
-        self.gammaEdit.setValidator(QDoubleValidator(0.01, 10.0, 2, self))
+        gammaValidator = QDoubleValidator(0.01, 10.0, 2, self)
+        gammaValidator.setLocale(QLocale.c())
+        self.gammaEdit.setValidator(gammaValidator)
+        self.gammaEdit.returnPressed.connect(self._onGammaEditFinished)
         gamma_row.addWidget(QLabel("γ"))
         gamma_row.addWidget(self.gammaSlider)
         gamma_row.addWidget(self.gammaEdit)
@@ -35126,28 +35147,35 @@ class FullCurvesTab(QWidget):
         self.updateGhsCurve()
 
     def _onAlphaEditFinished(self):
+        # replace any comma -> dot
+        txt = self.alphaEdit.text().replace(",", ".")
         try:
-            v = float(self.alphaEdit.text())
-            new_slider_val = int(v * 50)
-            self.alphaSlider.setValue(new_slider_val)
-            # even if the slider didn’t actually change, force an update:
-            self.updateGhsCurve()
+            v = float(txt)
         except ValueError:
-            pass
+            return
+
+        # clamp and sync slider
+        v = max(0.01, min(v, 10.0))
+        self.alphaEdit.setText(f"{v:.2f}")
+        self.alphaSlider.setValue(int(v * 50))
+        self.updateGhsCurve()
 
     def _onBetaSliderChanged(self, v):
         val = v / 50.0
         self.betaEdit.setText(f"{val:.2f}")
         self.updateGhsCurve()
 
+
     def _onBetaEditFinished(self):
+        txt = self.betaEdit.text().replace(",", ".")
         try:
-            v = float(self.betaEdit.text())
-            new_slider_val = int(v * 50)
-            self.betaSlider.setValue(new_slider_val)
-            self.updateGhsCurve()
+            v = float(txt)
         except ValueError:
-            pass
+            return
+        v = max(0.01, min(v, 10.0))
+        self.betaEdit.setText(f"{v:.2f}")
+        self.betaSlider.setValue(int(v * 50))
+        self.updateGhsCurve()
 
     def _onGammaSliderChanged(self, v):
         val = max(0.01, v / 100.0)
@@ -35155,14 +35183,15 @@ class FullCurvesTab(QWidget):
         self.updateGhsCurve()
 
     def _onGammaEditFinished(self):
+        txt = self.gammaEdit.text().replace(",", ".")
         try:
-            v = float(self.gammaEdit.text())
-            v = max(0.01, v)
-            new_slider_val = int(v * 100)
-            self.gammaSlider.setValue(new_slider_val)
-            self.updateGhsCurve()
+            v = float(txt)
         except ValueError:
-            pass
+            return
+        v = max(0.01, v)
+        self.gammaEdit.setText(f"{v:.2f}")
+        self.gammaSlider.setValue(int(v * 100))
+        self.updateGhsCurve()
 
     def _onGhsChannelChanged(self, ch_name):
         self.currentGhsChannel = ch_name
@@ -36075,7 +36104,7 @@ class FullCurvesTab(QWidget):
 
         return super().eventFilter(source, event)
 
-        return super().eventFilter(source, event)
+
 
 
     def refresh(self):
