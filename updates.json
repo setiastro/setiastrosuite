@@ -1,9 +1,9 @@
 {
-  "version": "2.16.0",
+  "version": "2.16.1",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.0/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Image Combination Tab and Bug fixes in hyperbolic stretch and stacking suite"
+  "notes": "Crop tool bug fix, PPP image mismatch bug fix, and Mask + button shows mask names"
 }
