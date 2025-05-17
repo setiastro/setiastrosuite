@@ -2,6 +2,7 @@ import sys
 import urllib
 
 # Standard library imports
+from itertools import combinations
 import pickle
 import os
 import tempfile
@@ -127,6 +128,7 @@ from collections import defaultdict
 import fnmatch
 import pyqtgraph as pg
 import psutil
+from PyQt6.QtGui import QIntValidator
 # ----- QtWidgets -----
 from PyQt6.QtWidgets import (
     QApplication,
@@ -250,7 +252,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.0"
+VERSION = "2.16.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -2017,36 +2019,44 @@ class AstroEditingSuite(QMainWindow):
 
     def apply_mask(self):
         """Prompt user for a mask slot and flag it in MaskManager for application."""
-        # Check available mask slots
-        available_slots = [slot for slot in range(self.mask_manager.max_slots) if self.mask_manager.get_mask(slot) is not None]
-
+        # 1) Gather all non‐empty mask slots
+        available_slots = [
+            slot for slot in range(self.mask_manager.max_slots)
+            if self.mask_manager.get_mask(slot) is not None
+        ]
         if not available_slots:
             QMessageBox.warning(self, "No Masks Available", "There are no masks to apply.")
             return
 
-        # Prompt user to select a mask slot
-        slot, ok = QInputDialog.getItem(
+        # 2) Build the list of display names, using any custom names
+        display_names = [
+            self.mask_slot_names.get(slot, f"Mask Slot {slot}")
+            for slot in available_slots
+        ]
+
+        # 3) Ask the user to choose one
+        chosen_name, ok = QInputDialog.getItem(
             self,
             "Select Mask Slot",
-            "Choose a mask slot to apply:",
-            [f"Slot {s}" for s in available_slots],
-            0,  # Default selection
-            False  # Do not allow user input outside the options
+            "Choose a mask to apply:",
+            display_names,
+            0,
+            False
         )
-
         if not ok:
-            return  # User canceled
+            return
 
-        # Extract selected slot number
-        selected_slot = int(slot.split()[-1])
+        # 4) Map the chosen display name back to the slot index
+        idx = display_names.index(chosen_name)
+        selected_slot = available_slots[idx]
 
-        # Flag the mask in MaskManager
+        # 5) Apply it
         self.mask_manager.apply_mask_from_slot(selected_slot)
 
-        # Update the UI banner to indicate an active mask
-        self.update_mask_banner(selected_slot, self.mask_manager.get_applied_mask())
-
-        print(f"Mask from Slot {selected_slot} flagged for application.")
+        # 6) Update banner (you can also display chosen_name here)
+        self.update_mask_banner(selected_slot,
+                                self.mask_manager.get_applied_mask())
+        print(f"Mask from {chosen_name} (slot {selected_slot}) flagged for application.")
 
     def apply_mask_from_slot(self, slot):
         """
@@ -2596,7 +2606,6 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
-                    import webbrowser
                     # Open the appropriate link based on the user's OS
                     platform = sys.platform
                     if platform.startswith("win"):
@@ -2652,7 +2661,6 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setDetailedText(detailed_text)
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
-                    import webbrowser
                     # Open the appropriate link based on the user's OS
                     platform = sys.platform
                     if platform.startswith("win"):
@@ -4929,7 +4937,6 @@ class AstroEditingSuite(QMainWindow):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -5233,7 +5240,7 @@ def siril_style_autostretch(image, sigma=3.0):
     else:
         raise ValueError("Unsupported image format for histogram stretch.")
 
-HANDLE_SIZE = 20
+HANDLE_SIZE = 80
 
 class ResizableRotatableRectItem(QGraphicsRectItem):
     """
@@ -5336,11 +5343,31 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
 
 
     def mouseReleaseEvent(self, ev):
+        # if we were rotating, finish that
         if self._rotating:
             self._rotating = False
             ev.accept()
             return
+
+        # if we were resizing, clear that flag so next click goes to move/rotate
+        if self._active_handle:
+            self._active_handle = None
+            ev.accept()
+            return
+
         super().mouseReleaseEvent(ev)
+
+    def itemChange(self, change, value):
+        """
+        Qt calls this whenever position, rotation, scale, etc. change.
+        We use it to update our handle‐positions so they follow both moves and rotations.
+        """
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemRotationHasChanged
+        ):
+            self._updateHandlePositions()
+        return super().itemChange(change, value)
 
     def _refreshPivot(self):
         scene_ctr = self.mapToScene(self.boundingRect().center())
@@ -5422,19 +5449,27 @@ class CropTool(QDialog):
         self.view.viewport().installEventFilter(self)
 
     def _loadImage(self):
+        """Load the current image into the scene and remember the pixmap item."""
         img = self.image_data
-        if img.ndim==3 and img.shape[2]==1:
+        if img.ndim == 3 and img.shape[2] == 1:
             img = img.squeeze(2)
-        if img.ndim==3:
-            h,w,_ = img.shape
-            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,3*w,QImage.Format.Format_RGB888)
+        if img.ndim == 3:
+            h, w, _ = img.shape
+            q = QImage((img * 255).astype(np.uint8).tobytes(), w, h, 3 * w,
+                       QImage.Format.Format_RGB888)
         else:
-            h,w = img.shape
-            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,w,QImage.Format.Format_Grayscale8)
+            h, w = img.shape
+            q = QImage((img * 255).astype(np.uint8).tobytes(), w, h, w,
+                       QImage.Format.Format_Grayscale8)
+
         pix = QPixmap.fromImage(q)
         self.scene.clear()
-        self.scene.addItem(QGraphicsPixmapItem(pix))
-        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        pix_item = QGraphicsPixmapItem(pix)
+        pix_item.setZValue(-1)             # so rectangle stays on top
+        self.scene.addItem(pix_item)
+        self._pixmap_item = pix_item       # 🌟 remember for coordinate mapping
+        self.view.fitInView(self.scene.itemsBoundingRect(),
+                            Qt.AspectRatioMode.KeepAspectRatio)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -5537,25 +5572,29 @@ class CropTool(QDialog):
         self.scene.addItem(self._rect_item)
 
     def apply_crop(self):
-        """Crop out exactly the rotated rectangle, then derotate so the result is upright."""
-        rc = self._getCurrentRect()
-        if not rc or rc.isNull():
+        """Crop out exactly the rotated & moved rectangle, using the rectangle’s own center as the pivot."""
+        if not self._rect_item:
             QMessageBox.warning(self, "No Selection", "Draw (and finalize) a crop first.")
             return
 
-        # 1) Figure out the rotation angle of the rect item
-        angle = self._rect_item.rotation()  # degrees, CCW positive
+        # 1) Grab the rotation angle and rectangle’s center in SCENE coords
+        angle = self._rect_item.rotation()                # degrees CCW positive
+        rect_local = self._rect_item.rect()
+        scene_center = self._rect_item.mapToScene(rect_local.center())
 
-        # 2) Prepare the original image and rotation matrix
-        img = self.original_image_data  # numpy array HxW(xC)
-        h_img, w_img = img.shape[:2]
-        center = (w_img/2.0, h_img/2.0)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        # 2) Convert scene_center → image‐pixel pivot
+        pm = self._pixmap_item.pixmap()
+        pm_w, pm_h = pm.width(), pm.height()
+        h_img, w_img = self.original_image_data.shape[:2]
+        sx = w_img / pm_w
+        sy = h_img / pm_h
+        pivot_x = scene_center.x() * sx
+        pivot_y = scene_center.y() * sy
 
-        # 3) Rotate the entire image
-        #    keep same size to make cropping simpler
+        # 3) Rotate **around that pivot**, not image center
+        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
         rotated = cv2.warpAffine(
-            img,
+            self.original_image_data,
             M,
             (w_img, h_img),
             flags=cv2.INTER_LINEAR,
@@ -5563,52 +5602,84 @@ class CropTool(QDialog):
             borderValue=0
         )
 
-        # 4) Extract integer crop coords from rc (these are in un‐rotated image pixels)
-        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+        # 4) Figure out the axis‐aligned bounding box of your rect in scene coords
+        corners = [
+            rect_local.topLeft(), rect_local.topRight(),
+            rect_local.bottomRight(), rect_local.bottomLeft()
+        ]
+        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
+        bb = QPolygonF(scene_pts).boundingRect()
 
-        # clamp just in case
-        x = max(0, min(x, w_img-1))
-        y = max(0, min(y, h_img-1))
-        w = max(1, min(w, w_img - x))
-        h = max(1, min(h, h_img - y))
+        # 5) Map that bounding box into **image**‐pixel coords
+        x0 = int(bb.left()   * sx)
+        y0 = int(bb.top()    * sy)
+        w0 = int(bb.width()  * sx)
+        h0 = int(bb.height() * sy)
 
-        # 5) Crop from the rotated image
-        cropped = rotated[y:y+h, x:x+w].copy()
+        # 6) Clamp to valid image range
+        x0 = max(0, min(x0, w_img-1))
+        y0 = max(0, min(y0, h_img-1))
+        w0 = max(1, min(w0, w_img - x0))
+        h0 = max(1, min(h0, h_img - y0))
 
-        # 6) Notify caller
+        # 7) Crop
+        cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
         self.crop_applied.emit(cropped)
 
-        # save size, rotation and position for next time
-        rect = self._getCurrentRect()
-        angle = self._rect_item.rotation()
-        pos   = self._rect_item.pos()
+        # 8) Save for “Load Previous Crop”
+        rect = self._rect_item.rect()
+        pos  = self._rect_item.scenePos()
         CropTool.previous_crop_rect = (rect, angle, pos)
+
         self.accept()
+
 
     def batch_crop_all_slots(self):
         """
-        Same logic as apply_crop, but loop through every slot in image_manager.
-        Each gets rotated + cropped by the same rectangle/angle.
+        Apply the same rotated & moved crop to all images in image_manager.
         """
-        rc = self._getCurrentRect()
-        if not rc or rc.isNull():
+        # 1) Make sure we have a selection
+        rect_local = self._rect_item.rect() if self._rect_item else None
+        if rect_local is None or rect_local.isNull():
             QMessageBox.warning(self, "No Selection", "Draw & finalize a crop first.")
             return
 
+        # 2) Grab rotation angle and rect center in scene coords
         angle = self._rect_item.rotation()
+        scene_center = self._rect_item.mapToScene(rect_local.center())
+
+        # 3) Map scene_center → image‐pixel pivot
+        pm = self._pixmap_item.pixmap()
+        pm_w, pm_h = pm.width(), pm.height()
         img0 = self.original_image_data
-        h0, w0 = img0.shape[:2]
-        center = (w0/2.0, h0/2.0)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        h_img, w_img = img0.shape[:2]
+        sx, sy = w_img/pm_w, h_img/pm_h
+        pivot_x, pivot_y = scene_center.x()*sx, scene_center.y()*sy
 
-        # integer coords
-        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+        # 4) Build rotation matrix around that pivot
+        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
 
+        # 5) Compute the axis-aligned bounding box of the rotated rect in scene coords
+        corners = [
+            rect_local.topLeft(), rect_local.topRight(),
+            rect_local.bottomRight(), rect_local.bottomLeft()
+        ]
+        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
+        bb = QPolygonF(scene_pts).boundingRect()
+
+        # 6) Map BB → image pixels & clamp
+        x0 = int(bb.left()*sx);    y0 = int(bb.top()*sy)
+        w0 = int(bb.width()*sx);   h0 = int(bb.height()*sy)
+        x0 = max(0, min(x0, w_img-1))
+        y0 = max(0, min(y0, h_img-1))
+        w0 = max(1, min(w0, w_img - x0))
+        h0 = max(1, min(h0, h_img - y0))
+
+        # 7) Confirm
         num_slots = sum(1 for im in self.image_manager._images.values() if im is not None)
         if num_slots == 0:
             QMessageBox.information(self, "No Images", "There are no images to crop.")
             return
-
         reply = QMessageBox.question(
             self, "Confirm Batch Crop",
             f"Apply this same rotated crop to all {num_slots} images?",
@@ -5618,25 +5689,22 @@ class CropTool(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        # 8) Rotate & crop every slot
         any_cropped = False
         for slot, img in self.image_manager._images.items():
             if img is None:
                 continue
 
-            # rotate this slot’s image
-            rot = cv2.warpAffine(
-                img, M, (w0, h0),
+            # rotate around pivot
+            rotated = cv2.warpAffine(
+                img, M, (w_img, h_img),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT, borderValue=0
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
             )
 
-            # bounds‐clamp
-            x1 = max(0, min(x, w0-1))
-            y1 = max(0, min(y, h0-1))
-            w1 = max(1, min(w, w0 - x1))
-            h1 = max(1, min(h, h0 - y1))
-
-            cropped = rot[y1:y1+h1, x1:x1+w1].copy()
+            # crop same box
+            cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
 
             # push undo / clear redo
             self.image_manager._undo_stacks[slot].append(
@@ -5652,9 +5720,12 @@ class CropTool(QDialog):
             )
             any_cropped = True
 
+        # 9) Wrap up
         if any_cropped:
-            QMessageBox.information(self, "Batch Crop Completed",
-                                    f"Successfully cropped {num_slots} images.")
+            QMessageBox.information(
+                self, "Batch Crop Completed",
+                f"Successfully cropped {num_slots} images."
+            )
             self.accept()
         else:
             QMessageBox.information(self, "Batch Crop", "No images were cropped.")
@@ -7196,8 +7267,6 @@ class MaskCreationDialog(QDialog):
             return np.zeros(self.image.shape[:2], dtype=np.float32)
 
     def create_star_mask(self, image, exclusion_mask=None):
-        import sep
-
         # 1) Build a grayscale detection image
         if image.ndim == 3:
             data = (0.2126*image[...,0] + 0.7152*image[...,1] + 0.0722*image[...,2]).astype(np.float32)
@@ -8521,7 +8590,6 @@ class StackingSuiteDialog(QDialog):
 
                 # Try extracting EXIF metadata
                 try:
-                    import exifread
                     with open(file_path, 'rb') as f:
                         tags = exifread.process_file(f, details=False)
 
@@ -9867,7 +9935,6 @@ class StackingSuiteDialog(QDialog):
             sf  = 1.0
             ds  = 0.65
             if ena:
-                import re
                 m = re.search(r"scale\s*:\s*([\d\.]+)x?", txt)
                 if m: sf = float(m.group(1))
                 m = re.search(r"drop\s*:\s*([\d\.]+)", txt)
@@ -12255,7 +12322,6 @@ class StackingSuiteDialog(QDialog):
         measured_frames = []
 
         # Decide how many images to load at once. Typically # of CPU cores:
-        import os
         max_workers = os.cpu_count() or 4
         chunk_size = max_workers  # or a custom formula if you prefer
 
@@ -13693,7 +13759,6 @@ class MosaicMasterDialog(QDialog):
                         
                     # (Optional: You can still detect stars if needed, but here we opt to use astroalign directly.)
                     try:
-                        import astroalign
                         # reproj_red is already a grayscale version from the reprojected image.
                         reproj_gray = reproj_red  
                         self.status_label.setText("Computing affine transform with astroalign...")
@@ -14502,7 +14567,6 @@ class MosaicMasterDialog(QDialog):
 
             except Exception as e:
                 print(f"[DEBUG] process_alignment error => {e}")
-                import traceback
                 traceback.print_exc()
                 return False
 
@@ -15726,7 +15790,6 @@ class MosaicMasterDialog(QDialog):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -16299,7 +16362,6 @@ class StellarAlignmentDialog(QDialog):
         QApplication.processEvents()
 
         try:
-            import astroalign
             # Compute the transform to align the target image to the source.
             # Note: The order of arguments matters: here we find a transform that maps tgt_gray to src_gray.
             transform_obj, (src_pts, tgt_pts) = astroalign.find_transform(tgt_gray, src_gray)
@@ -16313,7 +16375,6 @@ class StellarAlignmentDialog(QDialog):
         self.status_label.setText("Warping target image with astroalign transform...")
         QApplication.processEvents()
 
-        import cv2
         H, W = src.shape[:2]
         # Apply the computed transform to the target image.
         if tgt.ndim == 2:
@@ -16559,7 +16620,6 @@ class StarRegistrationWorker(QRunnable):
 
     @staticmethod
     def compute_affine_transform_astroalign(source_img, reference_img):
-        import astroalign
         try:
             transform_obj, _ = astroalign.find_transform(source_img, reference_img)
             return transform_obj.params[0:2, :]
@@ -17148,8 +17208,6 @@ class StarRegistrationThread(QThread):
 
     @staticmethod
     def apply_affine_transform_static(image, transform_matrix):
-        import numpy as np
-        import cv2
         # Ensure the transform matrix is a NumPy array of shape (2,3) and type float32.
         transform_matrix = np.array(transform_matrix, dtype=np.float32).reshape(2, 3)
         
@@ -17199,8 +17257,7 @@ class StarRegistrationThread(QThread):
         
         Returns an affine transform (2x3 matrix) or None if matching fails.
         """
-        import numpy as np
-        from itertools import combinations
+        
         from scipy.spatial import Delaunay
 
         if len(img_stars) < 3:
@@ -17926,7 +17983,6 @@ class PlateSolver(QDialog):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -18860,7 +18916,6 @@ class BatchPlateSolverDialog(QDialog):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -19084,7 +19139,6 @@ class PSFViewer(QDialog):
             r = np.zeros(len(sources))
         r = 2*sources['a']
         # Build an Astropy Table for the star catalog.
-        from astropy.table import Table
         star_catalog = Table()
         star_catalog['xcentroid'] = sources['x']
         star_catalog['ycentroid'] = sources['y']
@@ -19679,9 +19733,6 @@ class SupernovaAsteroidHunterTab(QWidget):
         Each anomaly is assumed to have keys: minX, minY, maxX, maxY
         3) Return the 8-bit color image (H,W,3).
         """
-        import cv2
-        import numpy as np
-
         # Ensure 3 channels
         if stretched_image.ndim == 2:
             stretched_3ch = np.stack([stretched_image]*3, axis=-1)
@@ -19872,9 +19923,6 @@ class SupernovaAsteroidHunterTab(QWidget):
         'image' is assumed to be float32 in [0..1], shape (H,W) or (H,W,3).
         'anomalies' is a list of dicts, each with keys: minX, minY, maxX, maxY, etc.
         """
-        import cv2
-        import numpy as np
-
         # 1) Convert to 3-channel if needed
         if image.ndim == 2:
             # grayscale => replicate to 3-ch so we can draw colored rectangles
@@ -22108,7 +22156,7 @@ class CustomSpinBox(QWidget):
         self.lineEdit = QLineEdit(str(initial))
         self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
         # Optionally, restrict input to integers using a validator.
-        from PyQt6.QtGui import QIntValidator
+        
         self.lineEdit.setValidator(QIntValidator(self.minimum, self.maximum, self))
         self.lineEdit.editingFinished.connect(self.editingFinished)
 
@@ -28903,7 +28951,6 @@ class XISFViewer(QWidget):
 
 
     def process_batch(self, input_dir, output_dir, file_format, update_status_callback):
-        import glob
         from pathlib import Path
 
         xisf_files = glob.glob(f"{input_dir}/*.xisf")
@@ -29251,7 +29298,6 @@ class MetricsPanel(QWidget):
         return sentinel “bad” values so the frame will be flagged.
         """
         idx, entry = i_entry
-        import numpy as np, sep
 
         # rebuild normalized mono data
         img = entry['image_data']
@@ -30062,7 +30108,6 @@ class BlinkTab(QWidget):
         Split a filename into text and integer chunks so that 
         “…_2.fit” sorts before “…_10.fit”.
         """
-        import re
         name = os.path.basename(path)
         return [int(tok) if tok.isdigit() else tok.lower()
                 for tok in re.split(r'(\d+)', name)]
@@ -31728,7 +31773,6 @@ class CosmicClarityTab(QWidget):
         """Save the current image to the specified path in TIF format."""
         if self.image is not None:
             try:
-                from tifffile import imwrite
                 # Force saving as `.tif` format
                 if not file_path.endswith(".tif"):
                     file_path += ".tif"
@@ -35334,8 +35378,6 @@ class FullCurvesTab(QWidget):
             handle.setPos(x, y)
 
         # ─── trigger redraw ──────────────────────────────────────────
-        from PyQt6.QtGui import QPen
-        from PyQt6.QtCore import Qt
         color_map = {
             "K (Brightness)": Qt.GlobalColor.white,
             "R":               Qt.GlobalColor.red,
@@ -36697,8 +36739,6 @@ class CurveEditor(QGraphicsView):
         self.preview_callback = callback
 
     def get8bitLUT(self):
-        import numpy as np
-
         # 8-bit LUT size
         lut_size = 256
 
@@ -36814,8 +36854,6 @@ class CurveEditor(QGraphicsView):
         return [(pt.x(), pt.y()) for pt in self.curve_points]
 
     def getLUT(self):
-        import numpy as np
-
         # 16-bit LUT size
         lut_size = 65536
 
@@ -36969,7 +37007,6 @@ class FullCurvesProcessingThread(QThread):
 
     @staticmethod
     def process_curve(image, curve_mode, curve_func):
-        import numpy as np
 
         if image is None or curve_func is None:
             return image
@@ -39120,6 +39157,19 @@ class PerfectPalettePickerTab(QWidget):
 
         print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC1: {have_osc1} | OSC2: {have_osc2}")
 
+        # ———————————————————————————————————————————————————————
+        # 0) Force all loaded images down to single-channel if they’re 3-channel arrays
+        # ———————————————————————————————————————————————————————
+        def squeeze_to_mono(img):
+            if img is not None and img.ndim == 3:
+                return img[:, :, 0]
+            return img
+
+        self.ha_image   = squeeze_to_mono(self.ha_image)
+        self.oiii_image = squeeze_to_mono(self.oiii_image)
+        self.sii_image  = squeeze_to_mono(self.sii_image)
+        self.osc1_image = squeeze_to_mono(self.osc1_image)
+        self.osc2_image = squeeze_to_mono(self.osc2_image)
 
         # 🔹 **NEW: Check for image size mismatches**
         image_shapes = {
@@ -39839,7 +39889,6 @@ class PerfectPalettePickerTab(QWidget):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -44221,7 +44270,6 @@ otype_long_name_lookup = {
     "QSO": "Quasar"
 }
 
-from PyQt6.QtGui import QColor
 
 # ────────────────────────────────────────────────
 # 1a) Map each SIMBAD otype → one of our high-level categories
@@ -47914,7 +47962,6 @@ class MainWindow(QMainWindow):
         # Check if the ASTAP executable is set in settings.
         astap_exe = self.settings.value("astap/exe_path", "", type=str)
         if not astap_exe or not os.path.exists(astap_exe):
-            import sys
             if sys.platform.startswith("win"):
                 executable_filter = "Executables (*.exe);;All Files (*)"
             else:
@@ -47988,7 +48035,6 @@ class MainWindow(QMainWindow):
         wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
         if os.path.exists(wcs_path):
             try:
-                import re
                 wcs_header = {}
                 with open(wcs_path, "r") as f:
                     text = f.read()
@@ -48128,7 +48174,6 @@ class MainWindow(QMainWindow):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -49886,8 +49931,6 @@ if __name__ == '__main__':
 
     for attempt in range(5):
         try:
-            from astroquery.simbad import Simbad
-
             # ——— use the new, non-deprecated field names ———
             Simbad.add_votable_fields(
                 'otype',         # short object type
