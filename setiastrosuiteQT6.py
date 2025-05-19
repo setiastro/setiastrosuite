@@ -3,6 +3,8 @@ import urllib
 
 # Standard library imports
 from itertools import combinations
+from tifffile import imwrite
+
 import pickle
 import os
 import tempfile
@@ -39168,8 +39170,6 @@ class PerfectPalettePickerTab(QWidget):
         self.ha_image   = squeeze_to_mono(self.ha_image)
         self.oiii_image = squeeze_to_mono(self.oiii_image)
         self.sii_image  = squeeze_to_mono(self.sii_image)
-        self.osc1_image = squeeze_to_mono(self.osc1_image)
-        self.osc2_image = squeeze_to_mono(self.osc2_image)
 
         # 🔹 **NEW: Check for image size mismatches**
         image_shapes = {
