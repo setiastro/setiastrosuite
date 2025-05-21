@@ -1,9 +1,9 @@
 {
-  "version": "2.16.1",
+  "version": "2.16.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Crop tool bug fix, PPP image mismatch bug fix, and Mask + button shows mask names"
+  "notes": "Further improvements to PSFViewer, if it errors on finding too many stars you can increase the sigma needed to lower the stars detected. Added Ellipse drawing in the Mask Creation Tool"
 }
