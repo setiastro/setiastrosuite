@@ -39277,6 +39277,14 @@ class PerfectPalettePickerTab(QWidget):
         is_mono = metadata.get('is_mono', False)
         file_path = metadata.get('file_path', None)
 
+        # ←── NEW: detect 3-channel grayscale and collapse it
+        if image.ndim == 3 \
+        and np.allclose(image[:,:,0], image[:,:,1]) \
+        and np.allclose(image[:,:,0], image[:,:,2]):
+            print(f"{image_type} slot image is 3-channel gray; extracting channel 0")
+            image   = image[:, :, 0]
+            is_mono = True
+
         return image, original_header, bit_depth, is_mono, file_path
 
 
