@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.2"
+VERSION = "2.16.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1196,7 +1196,7 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
         self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
         self.tabs.addTab(HaloBGonTab(image_manager=self.image_manager), "Halo-B-Gon")
-        self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
+        self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager, parent=self), "Continuum Subtraction")
         self.tabs.addTab(ImageCombineTab(image_manager=self.image_manager), "Image Combination")
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
@@ -41831,8 +41831,9 @@ class HaloProcessingThread(QThread):
 
 
 class ContinuumSubtractTab(QWidget):
-    def __init__(self, image_manager):
-        super().__init__()
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
         self.image_manager = image_manager
         self.initUI()
         self._threads = []
@@ -42065,35 +42066,54 @@ class ContinuumSubtractTab(QWidget):
         return image, header, bit_depth, is_mono, path
 
     def loadImageFromSlot(self, channel: str):
+        """
+        Prompt the user to pick one of the ImageManager’s slots (using custom names if defined)
+        and load that image.
+        """
         if not self.image_manager:
-            QMessageBox.critical(self, "Error", "No ImageManager; cannot load from slot.")
+            QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
             return None
 
-        # build the list of display names
-        slots = []
-        for i in range(self.image_manager.max_slots):
-            name = getattr(self.parent(), "slot_names", {}).get(i, f"Slot {i+1}")
-            slots.append(name)
+        # Look up the main window’s custom slot names
+        main_win = getattr(self, "parent_window", None) or self.window()
+        slot_names = getattr(main_win, "slot_names", {})
 
+        # Build the list of display names (zero-based)
+        display_names = [
+            slot_names.get(i, f"Slot {i}") 
+            for i in range(self.image_manager.max_slots)
+        ]
+
+        # Ask the user to choose one
         choice, ok = QInputDialog.getItem(
-            self, f"Select Slot for {channel}", "Choose slot:", slots, editable=False
+            self,
+            f"Select Slot for {channel}",
+            "Choose a slot:",
+            display_names,
+            0,
+            False
         )
-        if not ok:
+        if not ok or not choice:
             return None
 
-        # map back to index
-        idx = slots.index(choice)
-        img = self.image_manager._images.get(idx, None)
+        # Map back to the numeric index
+        idx = display_names.index(choice)
+
+        # Retrieve the image and metadata
+        img = self.image_manager._images.get(idx)
         if img is None:
             QMessageBox.warning(self, "Empty Slot", f"{choice} is empty.")
             return None
 
         meta = self.image_manager._metadata.get(idx, {})
-        return img, \
-               meta.get("original_header"), \
-               meta.get("bit_depth", "Unknown"), \
-               meta.get("is_mono", False), \
-               meta.get("file_path", None)
+        return (
+            img,
+            meta.get("original_header"),
+            meta.get("bit_depth", "Unknown"),
+            meta.get("is_mono", False),
+            meta.get("file_path", None)
+        )
+
 
     def startContinuumSubtraction(self):
         # — build continuum channels with explicit None checks —
