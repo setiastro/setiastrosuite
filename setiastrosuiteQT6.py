@@ -42600,7 +42600,7 @@ class ImageCombineTab(QWidget):
         blend_row.addWidget(QLabel("Mode:"))
         self.blendMode = QComboBox()
         self.blendMode.addItems([
-            "Add","Subtract","Multiply","Divide",
+            "Average","Add","Subtract","Blend","Multiply","Divide",
             "Screen","Overlay","Difference"
         ])
         blend_row.addWidget(self.blendMode)
@@ -42923,6 +42923,23 @@ class ImageCombineTab(QWidget):
 
 
     def dispatch_blend(self, A, B, mode, alpha):
+        """
+        Blend two float32 images A and B according to the selected mode.
+        'Average'    : simple (A + B) / 2
+        'Blend'      : standard alpha blend A*(1−alpha) + B*alpha
+        other modes  : various NumPy/Numba-accelerated operations
+        """
+        # Average mode: ignore the alpha slider
+        if mode == "Average":
+            out = (A + B) * 0.5
+            return np.clip(out, 0.0, 1.0)
+
+        # Blend mode: use the alpha slider
+        if mode == "Blend":
+            out = A * (1.0 - alpha) + B * alpha
+            return np.clip(out, 0.0, 1.0)
+
+        # All the existing specialized modes
         if   mode == "Add":        return blend_add_numba(A, B, alpha)
         elif mode == "Subtract":   return blend_subtract_numba(A, B, alpha)
         elif mode == "Multiply":   return blend_multiply_numba(A, B, alpha)
@@ -42930,8 +42947,9 @@ class ImageCombineTab(QWidget):
         elif mode == "Screen":     return blend_screen_numba(A, B, alpha)
         elif mode == "Overlay":    return blend_overlay_numba(A, B, alpha)
         elif mode == "Difference": return blend_difference_numba(A, B, alpha)
-        # fallback
-        out = A + (B * alpha)
+
+        # Fallback: simple add-blend
+        out = A * (1.0 - alpha) + B * alpha
         return np.clip(out, 0.0, 1.0)
 
 def preprocess_narrowband_image(image):
