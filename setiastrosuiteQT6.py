@@ -10604,7 +10604,7 @@ class StackingSuiteDialog(QDialog):
             memmap_path = os.path.join(master_dir, f"temp_dark_{exposure_time}_{image_size}.dat")
             final_stacked = np.memmap(
                 memmap_path,
-                dtype=np.float32,
+                dtype=np.float64,
                 mode='w+',
                 shape=(height, width, channels)
             )
@@ -10997,7 +10997,7 @@ class StackingSuiteDialog(QDialog):
             height, width = ref_data.shape[:2]
             channels = 1 if ref_data.ndim == 2 else 3
             memmap_path = os.path.join(master_dir, f"temp_flat_{session}_{exposure_time}_{image_size}_{filter_name}.dat")
-            final_stacked = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(height, width, channels))
+            final_stacked = np.memmap(memmap_path, dtype=np.float64, mode="w+", shape=(height, width, channels))
             num_frames = len(file_list)
 
             for y_start in range(0, height, self.chunk_height):
@@ -12733,12 +12733,12 @@ class StackingSuiteDialog(QDialog):
         out_h = int(h * scale_factor)
         out_w = int(w * scale_factor)
         if is_mono:
-            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
-            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float64)
+            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float64)
             finalize_func = finalize_drizzle_2d
         else:
-            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
-            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
+            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
             finalize_func = finalize_drizzle_3d
 
         # 6) For each aligned file, deposit raw pixels—skipping only that file's rejections
@@ -12875,7 +12875,7 @@ class StackingSuiteDialog(QDialog):
         self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
         QApplication.processEvents()
         # 2) Allocate final integrated image and set up a dictionary for rejections
-        integrated_image = np.zeros((height, width, channels), dtype=np.float32)
+        integrated_image = np.zeros((height, width, channels), dtype=np.float64)
         per_file_rejections = {f: [] for f in file_list}
 
         # 3) Define tile dimensions
@@ -12893,7 +12893,7 @@ class StackingSuiteDialog(QDialog):
 
                 # Build a tile stack: shape (N, tile_h, tile_w, channels)
                 N = len(file_list)
-                tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float32)
+                tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
                 weights_list = []
                 num_cores = os.cpu_count() or 4
 
@@ -43849,6 +43849,10 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
             fits_header['NAXIS1'] = img_array.shape[1]
             fits_header['NAXIS2'] = img_array.shape[0]
+
+            # force 32-bit floats and update header
+            img_array_fits = img_array_fits.astype(np.float32)
+            fits_header['BITPIX'] = -32
 
             # **💾 Save the FITS File**
             hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
