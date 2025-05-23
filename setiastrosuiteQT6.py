@@ -39223,71 +39223,61 @@ class PerfectPalettePickerTab(QWidget):
             print(f"An unexpected error occurred while loading {image_type} image: {e}")
 
     def load_image_from_slot(self, image_type):
+        """
+        Prompt the user to pick one of the ImageManager’s slots (using
+        custom names if defined) and load that image.
+        """
         if not self.image_manager:
             QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
-            print("ImageManager is not initialized. Cannot load image from slot.")
             return None
 
-        # Build the list using the parent's slot_names dictionary.
-        available_slots = []
-        # Access parent's slot_names dictionary.
-        slot_names = self.parent_window.slot_names if self.parent_window else {}
-        for i in range(self.image_manager.max_slots):
-            slot_name = slot_names.get(i, f"Slot {i+1}")
-            available_slots.append(slot_name)
+        # Look up the main window’s custom slot names
+        parent = self.parent_window or self.window()
+        slot_names = getattr(parent, "slot_names", {})
 
-        slot_choice, ok = QInputDialog.getItem(
+        # Build the list of display names (zero-based)
+        display_names = [
+            slot_names.get(i, f"Slot {i}")
+            for i in range(self.image_manager.max_slots)
+        ]
+
+        # Ask the user to choose one
+        choice, ok = QInputDialog.getItem(
             self,
-            f"Select Slot for {image_type} Image",
+            f"Select Slot for {image_type}",
             "Choose a slot:",
-            available_slots,
+            display_names,
             editable=False
         )
-
-        if not ok or not slot_choice:
-            QMessageBox.warning(self, "Cancelled", f"{image_type} image loading cancelled.")
-            print(f"{image_type} image loading cancelled by the user.")
+        if not ok:
             return None
 
-        # Find the slot index that matches the chosen display name.
-        target_slot_num = None
-        for i in range(self.image_manager.max_slots):
-            current_name = slot_names.get(i, f"Slot {i+1}")
-            if current_name == slot_choice:
-                target_slot_num = i
-                break
+        # Map back to the numeric index
+        idx = display_names.index(choice)
 
-        if target_slot_num is None:
-            QMessageBox.critical(self, "Error", f"Invalid slot selection: {slot_choice}")
-            print(f"Error: Could not map slot name '{slot_choice}' to a slot number.")
-            return None
-
-        image = self.image_manager._images.get(target_slot_num, None)
+        # Retrieve the image and metadata
+        image = self.image_manager._images.get(idx)
         if image is None:
-            QMessageBox.warning(self, "Empty Slot", f"{slot_choice} does not contain an image.")
-            print(f"{slot_choice} is empty. Cannot load {image_type} image.")
+            QMessageBox.warning(self, "Empty Slot", f"{choice} is empty.")
             return None
 
-        print(f"{image_type} image selected from {slot_choice}.")
+        metadata = self.image_manager._metadata.get(idx, {})
+        original_header = metadata.get("header", None)
+        bit_depth       = metadata.get("bit_depth", "Unknown")
+        is_mono         = metadata.get("is_mono", False)
+        file_path       = metadata.get("file_path", None)
 
-        # Retrieve metadata.
-        metadata = self.image_manager._metadata.get(target_slot_num, {})
-        original_header = metadata.get('header', None)
-        bit_depth = metadata.get('bit_depth', "Unknown")
-        is_mono = metadata.get('is_mono', False)
-        file_path = metadata.get('file_path', None)
-
-        # ⇨ UNCONDITIONAL COLLAPSE
-        if image.ndim == 3:
+        # Only collapse multi-channel down to mono for NB slots,
+        # but keep full RGB for OSC1/OSC2
+        if image.ndim == 3 and image_type not in ("OSC1", "OSC2"):
+            # if it's truly grayscale stored in 3 channels, or just NB RGB
+            # we only want a single plane for NB
             print(f"[DEBUG] {image_type}: collapsing 3-channel image → channel 0 only")
             image = image[:, :, 0]
             is_mono = True
 
         print(f"[DEBUG] {image_type} final shape = {image.shape}, is_mono = {is_mono}")
         return image, original_header, bit_depth, is_mono, file_path
-
-
-
 
     def load_image_from_file(self, image_type):
         """
@@ -39299,32 +39289,36 @@ class PerfectPalettePickerTab(QWidget):
         Returns:
             tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
         """
-
-
         file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             f"Select {image_type} Image File",
             "",
             file_filter
-
         )
-        
         if not file_path:
             QMessageBox.warning(self, "No File Selected", f"No {image_type} image file selected. Operation cancelled.")
             print(f"No {image_type} image file selected.")
             return None
-        
+
         print(f"{image_type} image file selected: {file_path}")
-        
+
         # Load the image using your existing load_image function
         image, original_header, bit_depth, is_mono = load_image(file_path)
         if image is None:
             QMessageBox.critical(self, "Error", f"Failed to load {image_type} image from file.")
             print(f"Failed to load {image_type} image from file: {file_path}")
             return None
-        
+
+        # Only collapse to single‐channel for NB slots; preserve full RGB for OSC1/OSC2
+        if image.ndim == 3 and image_type not in ("OSC1", "OSC2"):
+            print(f"[DEBUG] {image_type}: collapsing 3-channel image → channel 0 only")
+            image = image[:, :, 0]
+            is_mono = True
+
+        print(f"[DEBUG] {image_type} final shape = {image.shape}, is_mono = {is_mono}")
         return image, original_header, bit_depth, is_mono, file_path
+
 
     def get_image_shape(self, image):
         """Returns the shape of the image or None if not set."""
