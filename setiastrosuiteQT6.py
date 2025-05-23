@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.3"
+VERSION = "2.16.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -42939,7 +42939,7 @@ class ImageCombineTab(QWidget):
             out = A * (1.0 - alpha) + B * alpha
             return np.clip(out, 0.0, 1.0)
 
-        # All the existing specialized modes
+        # All the existing specialized modescha
         if   mode == "Add":        return blend_add_numba(A, B, alpha)
         elif mode == "Subtract":   return blend_subtract_numba(A, B, alpha)
         elif mode == "Multiply":   return blend_multiply_numba(A, B, alpha)
@@ -47709,28 +47709,64 @@ class MainWindow(QMainWindow):
     def on_tree_item_double_clicked(self, item):
         """Handle double-click event on a TreeWidget item to open SIMBAD or NED URL based on source."""
         object_name = item.text(2)  # Assuming 'Name' is in the third column
-        ra = float(item.text(0).strip())  # Assuming RA is in the first column
-        dec = float(item.text(1).strip())  # Assuming Dec is in the second column
-        
-        # Retrieve the entry directly from self.query_results
-        entry = next((result for result in self.query_results if float(result['ra']) == ra and float(result['dec']) == dec), None)
-        source = entry.get('source', 'Simbad') if entry else 'Simbad'  # Default to "Simbad" if entry not found
 
-        if source == "Simbad" and object_name:
-            # Open Simbad URL with encoded object name
-            encoded_name = quote(object_name)
-            simbad_url = f"https://simbad.cds.unistra.fr/simbad/sim-basic?Ident={encoded_name}&submit=SIMBAD+search"
-            webbrowser.open(simbad_url)
-        elif source == "Vizier":
-            # Format the NED search URL with proper RA, Dec, and radius
-            radius = 5 / 60  # Radius in arcminutes (5 arcseconds)
-            dec_sign = "%2B" if dec >= 0 else "-"  # Determine sign for declination
-            ned_url = f"http://ned.ipac.caltech.edu/conesearch?search_type=Near%20Position%20Search&ra={ra:.6f}d&dec={dec_sign}{abs(dec):.6f}d&radius={radius:.3f}&in_csys=Equatorial&in_equinox=J2000.0"
-            webbrowser.open(ned_url)
-        elif source == "Mast":
-            # Open MAST URL using RA and Dec with a small radius for object lookup
-            mast_url = f"https://mast.stsci.edu/portal/Mashup/Clients/Mast/Portal.html?searchQuery={ra}%2C{dec}%2Cradius%3D0.0006"
-            webbrowser.open(mast_url)            
+        # parse only if float() fails
+        def parse_value(txt):
+            try:
+                return float(txt)
+            except ValueError:
+                parts = txt.strip().split()
+                if len(parts) == 3:
+                    a, b, c = parts
+                    sign = -1 if a.startswith('-') else 1
+                    return sign * (abs(float(a)) + float(b)/60 + float(c)/3600)
+                raise
+
+        ra  = parse_value(item.text(0).strip())
+        dec = parse_value(item.text(1).strip())
+
+        # lookup, falling back to string→float only on failure
+        def get_parsed(result, key):
+            try:
+                return float(result[key])
+            except ValueError:
+                return parse_value(result[key])
+
+        entry = next(
+            (r for r in self.query_results
+            if get_parsed(r, 'ra') == ra and get_parsed(r, 'dec') == dec),
+            None
+        )
+        source = (entry.get('source') if entry else 'Simbad') or 'Simbad'
+        print(f"[DEBUG] Matched source: {source!r}")  # ← debug print
+
+        s = source.strip().lower()
+
+        if s == "simbad" and object_name:
+            encoded = quote(object_name)
+            webbrowser.open(
+                f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
+                f"Ident={encoded}&submit=SIMBAD+search"
+            )
+
+        elif "viz" in s:   # catches 'Vizier', etc.
+            radius   = 5/60  # arcminutes
+            dec_sign = "%2B" if dec >= 0 else "-"
+            webbrowser.open(
+                f"http://ned.ipac.caltech.edu/conesearch?"
+                f"search_type=Near%20Position%20Search&"
+                f"ra={ra:.6f}d&"
+                f"dec={dec_sign}{abs(dec):.6f}d&"
+                f"radius={radius:.3f}&"
+                "in_csys=Equatorial&in_equinox=J2000.0"
+            )
+
+        elif s == "mast":
+            webbrowser.open(
+                f"https://mast.stsci.edu/portal/Mashup/Clients/Mast/Portal.html?"
+                f"searchQuery={ra}%2C{dec}%2Cradius%3D0.0006"
+            )
+           
 
     def copy_ra_dec_to_clipboard(self):
         """Copy the currently displayed RA and Dec to the clipboard."""
@@ -49247,7 +49283,8 @@ class MainWindow(QMainWindow):
                             "short_type": type_short,
                             "long_type": long_type,
                             "redshift": redshift,
-                            "comoving_distance": comoving_distance
+                            "comoving_distance": comoving_distance,
+                            "source": "Vizier"
                         }
                     else:
                         existing = unique_entries[key]["diameter"]
@@ -49258,7 +49295,8 @@ class MainWindow(QMainWindow):
                                 "short_type": type_short,
                                 "long_type": long_type,
                                 "redshift": redshift,
-                                "comoving_distance": comoving_distance
+                                "comoving_distance": comoving_distance,
+                                "source": "Vizier"
                             })
 
             # Populate tree & preview
