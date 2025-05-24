@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.4"
+VERSION = "2.16.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -25563,15 +25563,19 @@ class BackgroundNeutralizationDialog(QDialog):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("Background Neutralization")
-        self.setGeometry(100, 100, 800, 600)  # Set appropriate size
+        self.setGeometry(100, 100, 800, 600)
+        
+        # new flag for auto-stretch
+        self.auto_stretch = False
+        self.zoom_factor = 1.0        
         self.initUI()
-        self.selection_rect_item = None  # To store the QGraphicsRectItem
+        self.selection_rect_item = None
 
     def initUI(self):
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
 
         # Instruction Label
-        instruction_label = QLabel("Draw a sample box on the image to define the neutralization region.")
+        instruction_label = QLabel("Draw a sample box or use Find Background to auto-select.")
         layout.addWidget(instruction_label)
 
         # Graphics View for Image Display
@@ -25580,58 +25584,281 @@ class BackgroundNeutralizationDialog(QDialog):
         self.graphics_view.setScene(self.scene)
         layout.addWidget(self.graphics_view)
 
-        # Load and Display Image
-        self.load_image()
+        # Buttons: Apply, Cancel, Auto-Stretch, Find Background
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("Apply Neutralization")
+        apply_btn.clicked.connect(self.apply_neutralization)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        self.toggle_stretch_btn = QPushButton("Enable Auto-Stretch")
+        self.toggle_stretch_btn.clicked.connect(self.toggle_auto_stretch)
+        find_bg_btn = QPushButton("Find Background")
+        find_bg_btn.clicked.connect(self.find_background)
 
-        # Initialize Variables for Drawing
+        btn_row.addWidget(apply_btn)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.toggle_stretch_btn)
+        btn_row.addWidget(find_bg_btn)
+        layout.addLayout(btn_row)
+
+        # Zoom controls
+        zoom_row = QHBoxLayout()
+        zoom_in_btn  = QPushButton("Zoom In ＋")
+        zoom_out_btn = QPushButton("Zoom Out －")
+        fit_btn      = QPushButton("Fit to View")
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        fit_btn.clicked.connect(self.fit_to_view)
+        zoom_row.addWidget(zoom_out_btn)
+        zoom_row.addWidget(fit_btn)
+        zoom_row.addWidget(zoom_in_btn)
+        layout.addLayout(zoom_row)
+
+        # Prepare for drawing rectangle
         self.origin = QPointF()
         self.current_rect = QRectF()
         self.drawing = False
-
-        # Connect Mouse Events
         self.graphics_view.viewport().installEventFilter(self)
 
-        # Apply and Cancel Buttons
-        button_layout = QVBoxLayout()
-        apply_button = QPushButton("Apply Neutralization")
-        apply_button.clicked.connect(self.apply_neutralization)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(apply_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
+        # finally load
+        self.load_image()
 
-        self.setLayout(layout)
 
     def load_image(self):
-        """Loads the current image from the ImageManager and displays it."""
-        image = self.image_manager.image
-        if image is not None:
-            # Assuming image is a NumPy array normalized to [0,1]
-            height, width, channels = image.shape
-            if channels == 3:
-                q_image = QImage(
-                    (image * 255).astype(np.uint8).tobytes(),
-                    width,
-                    height,
-                    3 * width,
-                    QImage.Format.Format_RGB888
-                )
-            else:
-                # Handle other channel numbers if necessary
-                q_image = QImage(
-                    (image * 255).astype(np.uint8).tobytes(),
-                    width,
-                    height,
-                    QImage.Format.Format_Grayscale8
-                )
-            pixmap = QPixmap.fromImage(q_image)
-            self.pixmap_item = QGraphicsPixmapItem(pixmap)
-            self.scene.addItem(self.pixmap_item)
-            self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-        else:
+        """Loads the current image, applies auto-stretch, resets zoom & displays it."""
+        self.scene.clear()
+        self.selection_rect_item = None
+        img = self.image_manager.image
+        if img is None:
             QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
             self.reject()
+            return
+
+        display = img.copy()
+        if self.auto_stretch:
+            display = stretch_color_image(display, 0.25, linked=False, normalize=False)
+
+        h, w, ch = display.shape
+        data = (display * 255).astype(np.uint8).tobytes()
+        if ch == 3:
+            qimg = QImage(data, w, h, 3*w, QImage.Format.Format_RGB888)
+        else:
+            qimg = QImage(data, w, h, w,   QImage.Format.Format_Grayscale8)
+        pix = QPixmap.fromImage(qimg)
+
+        # reset zoom & show
+        self.zoom_factor = 1.0
+        self.graphics_view.resetTransform()
+        self.pixmap_item = QGraphicsPixmapItem(pix)
+        self.scene.addItem(self.pixmap_item)
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def zoom_in(self):
+        """Zoom in by 25%."""
+        if self.zoom_factor < 5.0:
+            self.zoom_factor *= 1.25
+            self.graphics_view.scale(1.25, 1.25)
+
+    def zoom_out(self):
+        """Zoom out by 20%."""
+        if self.zoom_factor > 0.2:
+            self.zoom_factor /= 1.25
+            self.graphics_view.scale(0.8, 0.8)
+
+    def fit_to_view(self):
+        """Reset zoom so the image fits in the view."""
+        self.zoom_factor = 1.0
+        self.graphics_view.resetTransform()
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def toggle_auto_stretch(self):
+        """Toggle between normal and auto-stretched display."""
+        self.auto_stretch = not self.auto_stretch
+        self.toggle_stretch_btn.setText(
+            "Disable Auto-Stretch" if self.auto_stretch else "Enable Auto-Stretch"
+        )
+        self.load_image()
+
+    def toggle_auto_stretch(self):
+        """Toggle between normal and auto-stretched display."""
+        self.auto_stretch = not self.auto_stretch
+        self.toggle_stretch_btn.setText(
+            "Disable Auto-Stretch" if self.auto_stretch else "Enable Auto-Stretch"
+        )
+        # re-load the image so we immediately see the effect
+        self.load_image()
+
+    def find_background(self):
+        """Locate the best 50×50 background patch (≥100px from edges), allow small shifts to avoid stars, and draw it."""
+        img = self.image_manager.image
+        if img is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
+            return
+
+        h, w, ch = img.shape
+        if ch != 3:
+            QMessageBox.warning(self, "Not RGB", "Only 3-channel RGB supported.")
+            return
+
+        # work on luminance
+        lum = img.mean(axis=2)
+
+        # 1) find the raw best center by downhill‐walk search
+        best_y, best_x = self._find_best_patch_center(lum)
+
+        # 2) enforce a 100px border so a 50×50 never touches edges
+        margin = 100
+        half   = 25
+        min_cx = margin + half
+        max_cx = w - (margin + half)
+        min_cy = margin + half
+        max_cy = h - (margin + half)
+        best_x = int(np.clip(best_x, min_cx, max_cx))
+        best_y = int(np.clip(best_y, min_cy, max_cy))
+
+        # 3) refine by testing shifts of ±half pix in both directions
+        best_val = np.inf
+        cx, cy   = best_x, best_y
+        for dy in (-half, 0, +half):
+            for dx in (-half, 0, +half):
+                ty = int(np.clip(best_y + dy, min_cy, max_cy))
+                tx = int(np.clip(best_x + dx, min_cx, max_cx))
+                y0, y1 = ty - half, ty + half
+                x0, x1 = tx - half, tx + half
+                m = np.median(lum[y0:y1, x0:x1])
+                if m < best_val:
+                    best_val = m
+                    cy, cx   = ty, tx
+
+        # 4) build the final 50×50 in image coords
+        ix0, ix1 = cx - half, cx + half
+        iy0, iy1 = cy - half, cy + half
+
+        # 5) map to scene coords and draw
+        scene_rect = self.scene.sceneRect()
+        sx = scene_rect.width()  / w
+        sy = scene_rect.height() / h
+        x0, y0 = ix0 * sx, iy0 * sy
+        x1, y1 = ix1 * sx, iy1 * sy
+
+        if self.selection_rect_item:
+            self.scene.removeItem(self.selection_rect_item)
+
+        pen = QPen(QColor(255, 215, 0), 2)  # gold
+        rect = QRectF(QPointF(x0, y0), QPointF(x1, y1))
+        self.selection_rect_item = QGraphicsRectItem(rect)
+        self.selection_rect_item.setPen(pen)
+        self.scene.addItem(self.selection_rect_item)
+
+        # store so Apply uses same region (in image coords!)
+        self.current_rect = QRectF(ix0, iy0, ix1 - ix0, iy1 - iy0)
+
+
+
+
+    def _find_best_patch_center(self, plane: np.ndarray):
+        """
+        1) tile medians 10×10
+        2) pick two darkest tiles
+        3) 100 downhill walks per tile → finals
+        4) for each final point compute median in a 50×50 square
+        5) pick the point with the smallest such median
+        """
+        h, w = plane.shape
+        th, tw = h//10, w//10
+
+        # 1) tile medians
+        meds = np.zeros((10,10), float)
+        for i in range(10):
+            for j in range(10):
+                y0, x0 = i*th, j*tw
+                y1 = (i+1)*th if i<9 else h
+                x1 = (j+1)*tw if j<9 else w
+                meds[i,j] = np.median(plane[y0:y1, x0:x1])
+
+        # 2) two darkest
+        flat = meds.flatten()
+        idxs = np.argsort(flat)[:2]
+
+        # 3) downhill from random in each tile
+        finals = []
+        for idx in idxs:
+            ti, tj = divmod(idx, 10)
+            y0, x0 = ti*th, tj*tw
+            y1 = (ti+1)*th if ti<9 else h
+            x1 = (tj+1)*tw if tj<9 else w
+            for _ in range(200):
+                y = np.random.randint(y0, y1)
+                x = np.random.randint(x0, x1)
+                while True:
+                    mv, mpos = plane[y,x], (y,x)
+                    for dy in (-1,0,1):
+                        for dx in (-1,0,1):
+                            if dy==0 and dx==0: continue
+                            ny, nx = y+dy, x+dx
+                            if 0<=ny<h and 0<=nx<w and plane[ny,nx] < mv:
+                                mv, mpos = plane[ny,nx], (ny,nx)
+                    if mpos == (y,x):
+                        break
+                    y, x = mpos
+                finals.append(mpos)
+
+        # 4) compute each 50×50 median
+        best_val = np.inf
+        best_pt = (h//2, w//2)
+        for (y,x) in finals:
+            y0 = max(0, y-25); y1 = min(h, y+25)
+            x0 = max(0, x-25); x1 = min(w, x+25)
+            m = np.median(plane[y0:y1, x0:x1])
+            if m < best_val:
+                best_val, best_pt = m, (y,x)
+
+        return best_pt
+
+    def _compute_bg_median(self, plane: np.ndarray) -> float:
+        """Implements your PI‐style finder on a single channel."""
+        h, w = plane.shape
+        th, tw = h//10, w//10
+        # 1) tile medians
+        tile_meds = np.zeros((10,10), float)
+        for i in range(10):
+            for j in range(10):
+                y0, x0 = i*th, j*tw
+                y1 = (i+1)*th if i<9 else h
+                x1 = (j+1)*tw if j<9 else w
+                tile_meds[i,j] = np.median(plane[y0:y1, x0:x1])
+        # 2) pick two darkest tiles
+        idxs = np.argsort(tile_meds.flatten())[:2]
+        # 3) random walks
+        finals = []
+        for idx in idxs:
+            ti, tj = divmod(idx, 10)
+            y0, x0 = ti*th, tj*tw
+            y1 = (ti+1)*th if ti<9 else h
+            x1 = (tj+1)*tw if tj<9 else w
+            for _ in range(100):
+                y = np.random.randint(y0, y1)
+                x = np.random.randint(x0, x1)
+                # downhill walk
+                while True:
+                    mv, mpos = plane[y,x], (y,x)
+                    for dy in (-1,0,1):
+                        for dx in (-1,0,1):
+                            if dy==0 and dx==0: continue
+                            ny, nx = y+dy, x+dx
+                            if 0<=ny<h and 0<=nx<w and plane[ny,nx] < mv:
+                                mv, mpos = plane[ny,nx], (ny,nx)
+                    if mpos == (y,x):
+                        break
+                    y, x = mpos
+                finals.append((y,x))
+        # 4) medians of 50×50 around each final point
+        square_meds = []
+        for (y,x) in finals:
+            y0, y1 = max(0,y-25), min(h,y+25)
+            x0, x1 = max(0,x-25), min(w,x+25)
+            square_meds.append(np.median(plane[y0:y1, x0:x1]))
+        return float(min(square_meds))
 
     def eventFilter(self, source, event):
         """Handles mouse events for drawing the sample box."""
@@ -29717,7 +29944,7 @@ class MetricsWindow(QWidget):
         vbox.addWidget(self.status_label)
 
         # internal storage
-        self._all_images: list[dict] = []
+        self._all_images = []
         self._current_indices: list[int] | None = None
 
     def _update_status(self, *args):
@@ -29730,7 +29957,7 @@ class MetricsWindow(QWidget):
         pct = (flagged/total*100) if total else 0.0
         self.status_label.setText(f"Flagged Items {flagged}/{total}  ({pct:.1f}%)")
 
-    def set_images(self, loaded_images: list[dict]):
+    def set_images(self, loaded_images):
         """Initialize with a brand-new set of images."""
         self._all_images = loaded_images
 
@@ -29799,7 +30026,7 @@ class MetricsWindow(QWidget):
             # if saved[idx] is None, we leave it so that
             # the panel’s own auto-init can run on next plot()
 
-    def update_metrics(self, loaded_images: list[dict]):
+    def update_metrics(self, loaded_images):
         """
         Called whenever BlinkTab.loadImages or clearImages fires.
         If it's a new list, re-init; otherwise just re-plot current group.
