@@ -28872,126 +28872,35 @@ class XISFViewer(QWidget):
         if file_path.lower().endswith(('.fits', '.fit', '.fz', '.fz')):
             print(f"running debayer_image on {file_path}")
             bayer_pattern = header.get('BAYERPAT', None)
-            # If BAYERPAT not found, try iterating through HDUs.
             if bayer_pattern is None:
                 bayer_header = get_bayer_header(file_path)
-                if bayer_header:
-                    bayer_pattern = bayer_header.get('BAYERPAT', None)
+                bayer_pattern = bayer_header.get('BAYERPAT', None) if bayer_header else None
+
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
                 is_mono = False
-                image = self.debayer_fits(image, bayer_pattern)
+                # use numba-accelerated fast version
+                image = debayer_fits_fast(image, bayer_pattern)
             else:
                 print(f"No Bayer pattern found in FITS header: {file_path}")
+
         elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-            # For RAW files, apply debayering (assuming debayer_raw exists)
+            # For RAW files, apply fast debayer_raw_fast
             print(f"Debayering RAW image: {file_path}")
             is_mono = False
-            image = self.debayer_raw(image)
-        
+            image = debayer_raw_fast(image)
+
         return image, is_mono
 
 
     def debayer_fits(self, image_data, bayer_pattern):
-        """Debayer a FITS image using a basic Bayer pattern (2x2)."""
-        if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern
-            r = image_data[::2, ::2]  # Red
-            g1 = image_data[::2, 1::2]  # Green 1
-            g2 = image_data[1::2, ::2]  # Green 2
-            b = image_data[1::2, 1::2]  # Blue
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'BGGR':
-            # BGGR Bayer pattern
-            b = image_data[::2, ::2]  # Blue
-            g1 = image_data[::2, 1::2]  # Green 1
-            g2 = image_data[1::2, ::2]  # Green 2
-            r = image_data[1::2, 1::2]  # Red
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GRBG':
-            # GRBG Bayer pattern
-            g1 = image_data[::2, ::2]  # Green 1
-            r = image_data[::2, 1::2]  # Red
-            b = image_data[1::2, ::2]  # Blue
-            g2 = image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GBRG':
-            # GBRG Bayer pattern
-            g1 = image_data[::2, ::2]  # Green 1
-            b = image_data[::2, 1::2]  # Blue
-            r = image_data[1::2, ::2]  # Red
-            g2 = image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        else:
-            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
-
-
+        """Legacy alias to the fast numba-accelerated debayer."""
+        return debayer_fits_fast(image_data, bayer_pattern)
 
 
     def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
-        """Debayer a RAW image based on the Bayer pattern."""
-        if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern (Debayering logic example)
-            r = raw_image_data[::2, ::2]  # Red
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            b = raw_image_data[1::2, 1::2]  # Blue
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-        
-        elif bayer_pattern == 'BGGR':
-            # BGGR Bayer pattern
-            b = raw_image_data[::2, ::2]  # Blue
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            r = raw_image_data[1::2, 1::2]  # Red
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GRBG':
-            # GRBG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            r = raw_image_data[::2, 1::2]  # Red
-            b = raw_image_data[1::2, ::2]  # Blue
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GBRG':
-            # GBRG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            b = raw_image_data[::2, 1::2]  # Blue
-            r = raw_image_data[1::2, ::2]  # Red
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        else:
-            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+        """Legacy alias to the fast numba-accelerated debayer."""
+        return debayer_raw_fast(raw_image_data, bayer_pattern)
 
 
     def display_image(self):
