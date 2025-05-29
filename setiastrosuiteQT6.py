@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.5"
+VERSION = "2.16.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1262,7 +1262,6 @@ class AstroEditingSuite(QMainWindow):
         # Window Properties
         # --------------------
         self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
-        self.setGeometry(100, 100, 800, 600)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
@@ -7795,29 +7794,58 @@ class MaskPreviewDialog(QDialog):
                 self.save_image(self.mask, filename)
                 QMessageBox.information(self, "Mask Saved", f"Mask saved to {filename}.")
                 self.accept()
+
         elif choice == "Save to Mask Slot":
             # Traverse parent hierarchy until we find the main window with a mask_manager.
             parent = self.parent()
             while parent and not hasattr(parent, 'mask_manager'):
                 parent = parent.parent()
+
             if parent and hasattr(parent, 'mask_manager'):
-                slot, ok = QInputDialog.getInt(
-                    self,
-                    "Save to Mask Slot",
-                    f"Enter slot number (0-{parent.mask_manager.max_slots - 1}):",
-                    0,
-                    0,
-                    parent.mask_manager.max_slots - 1,
+                max_slot = parent.mask_manager.max_slots - 1
+
+                # Create a small dialog with your CustomSpinBox
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Save to Mask Slot")
+                layout = QVBoxLayout(dlg)
+
+                # Prompt
+                prompt = QLabel(f"Enter slot number (0–4):", dlg)
+                layout.addWidget(prompt)
+
+                # Custom spin box for slot selection
+                slot_spin = CustomSpinBox(
+                    minimum=0,
+                    maximum=4,
+                    initial=0,
+                    step=1,
+                    parent=dlg
                 )
-                if ok:
+                layout.addWidget(slot_spin)
+
+                # OK / Cancel buttons
+                buttons = QDialogButtonBox(
+                    QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+                    parent=dlg
+                )
+                buttons.accepted.connect(dlg.accept)
+                buttons.rejected.connect(dlg.reject)
+                layout.addWidget(buttons)
+
+                if dlg.exec() == QDialog.DialogCode.Accepted.value:
+                    slot = slot_spin.value
                     parent.mask_manager.set_mask(slot, self.mask)
-                    # ** Update the mask slot toolbar so that the button for this slot shows a blue border **
+
+                    # Update the toolbar highlight if available
                     if hasattr(parent, 'update_mask_slot_toolbar_highlight'):
                         parent.update_mask_slot_toolbar_highlight()
+
                     QMessageBox.information(self, "Mask Saved", f"Mask saved to Slot {slot}.")
                     self.accept()
+
             else:
                 QMessageBox.warning(self, "No Mask Manager", "Parent does not have a mask_manager.")
+
 
 
     def save_image(self, mask, filename):
@@ -8019,6 +8047,7 @@ class HistogramDialog(QDialog):
         self.image = image_manager.image  # image_manager.image returns the current slot's image.
         self.zoom_factor = 1.0  # 1.0 means 100%
         self.log_scale = False  # Default: linear x-axis
+        self.log_y     = False
         self._connected  = False    # track our connection state
         self.initUI()
 
@@ -8066,7 +8095,13 @@ class HistogramDialog(QDialog):
         self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
         self.log_toggle_button.toggled.connect(self.toggleLogScale)
         controls_layout.addWidget(self.log_toggle_button)
-        
+
+        self.log_y_button = QPushButton("Toggle Log Y-Axis", self)
+        self.log_y_button.setCheckable(True)
+        self.log_y_button.setToolTip("Toggle between linear & logarithmic Y-axis")
+        self.log_y_button.toggled.connect(self.toggleLogYScale)
+        controls_layout.addWidget(self.log_y_button)
+
         main_layout.addLayout(controls_layout)
         
         # Close button.
@@ -8075,6 +8110,10 @@ class HistogramDialog(QDialog):
         main_layout.addWidget(close_btn)
         
         self.setLayout(main_layout)
+        self.drawHistogram()
+
+    def toggleLogYScale(self, checked: bool):
+        self.log_y = checked
         self.drawHistogram()
 
     def showEvent(self, event):
@@ -8171,10 +8210,13 @@ class HistogramDialog(QDialog):
             ]
             for ch in range(3):
                 hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_edges)
-                if hist.max() > 0:
-                    hist = hist.astype(np.float32) / hist.max()
-                else:
-                    hist = hist.astype(np.float32)
+                hist = hist.astype(np.float32)
+                if self.log_y:
+                    # log-scale the Y axis: log(count+1) → avoid log(0)
+                    hist = np.log10(hist + 1.0)
+                # now normalize to [0,1] for drawing
+                maxv = hist.max()
+                hist = hist / maxv if maxv > 0 else hist
                 painter.setPen(QPen(channel_colors[ch]))
                 for i in range(bin_count):
                     x0 = x_pos(bin_edges[i])
@@ -8189,10 +8231,13 @@ class HistogramDialog(QDialog):
             else:
                 gray = self.image
             hist, _ = np.histogram(gray.ravel(), bins=bin_edges)
-            if hist.max() > 0:
-                hist = hist.astype(np.float32) / hist.max()
-            else:
-                hist = hist.astype(np.float32)
+            hist = hist.astype(np.float32)
+            if self.log_y:
+                # log-scale the Y axis: log(count+1) → avoid log(0)
+                hist = np.log10(hist + 1.0)
+            # now normalize to [0,1] for drawing
+            maxv = hist.max()
+            hist = hist / maxv if maxv > 0 else hist
             painter.setPen(QPen(QColor(0, 0, 0)))
             for i in range(bin_count):
                 x0 = x_pos(bin_edges[i])
@@ -27777,11 +27822,26 @@ class PixelMathDialog(QDialog):
                     new_img = result
 
                 # If it's a scalar, fill the current image shape
-                current_img = self.image_manager.image
-                if current_img.ndim == 2:
-                    current_img = np.stack([current_img]*3, axis=-1)
+                ref = self.image_manager.image
+                if ref is None:
+                    # fall back to the first non-empty slot variable
+                    for i in range(self.image_manager.max_slots):
+                        slot_img = self.image_manager._images.get(i)
+                        if slot_img is not None:
+                            ref = slot_img
+                            break
+                if ref is None:
+                    raise ValueError("No image or slot referenced; cannot infer output size.")
+
+                # normalize ref to 3-channel if needed
+                if ref.ndim == 2:
+                    ref_arr = np.stack([ref]*3, axis=-1)
+                else:
+                    ref_arr = ref
+
+                # if scalar, broadcast
                 if np.isscalar(new_img):
-                    new_img = np.full(current_img.shape, new_img, dtype=current_img.dtype)
+                    new_img = np.full(ref_arr.shape, new_img, dtype=ref_arr.dtype)
 
                 # Update the image
                 current_slot = self.image_manager.current_slot
@@ -27918,11 +27978,10 @@ class PixelMathDialog(QDialog):
 
         # Insert current image as 'img'
         current_img = self.image_manager.image
-        if current_img is None:
-            raise ValueError("No current image loaded.")
-        if current_img.ndim == 2:
-            current_img = np.stack([current_img]*3, axis=-1)
-        safe_namespace["img"] = PixelImage(current_img)
+        if current_img is not None:
+            if current_img.ndim == 2:
+                current_img = np.stack([current_img]*3, axis=-1)
+            safe_namespace["img"] = PixelImage(current_img)
 
         # Insert image slots as slot0, slot1, ...
         max_slots = self.image_manager.max_slots
@@ -27942,10 +28001,7 @@ class PixelMathDialog(QDialog):
         # Evaluate
             # Instead of a direct `eval`, we now do:
         return self.evaluate_multiline_expression(expr, safe_namespace)
-        if isinstance(result, PixelImage):
-            return result
-        else:
-            return result  # Could be scalar or ndarray
+
 
 class TransformHandle(QGraphicsEllipseItem):
     def __init__(self, parent_item, scene):
@@ -28547,7 +28603,7 @@ class XISFViewer(QWidget):
         # Left side layout for image display and save button
         left_widget = QWidget()        
         left_layout = QVBoxLayout(left_widget)
-        left_widget.setMinimumSize(600, 600)
+        left_widget.setMinimumSize(400, 400)
         
         self.load_button = QPushButton("Load Image File")
         self.load_button.clicked.connect(self.load_xisf)
@@ -28600,16 +28656,6 @@ class XISFViewer(QWidget):
         self.batch_process_button.clicked.connect(self.open_batch_process_window)
         left_layout.addWidget(self.batch_process_button)
 
-
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
-
         self.load_logo()
 
         # Right side layout for metadata display
@@ -28631,7 +28677,7 @@ class XISFViewer(QWidget):
         # Add left widget and metadata tree to the splitter
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([800, 200])  # Initial sizes for the left (preview) and right (metadata) sections
+        #splitter.setSizes([800, 200])  # Initial sizes for the left (preview) and right (metadata) sections
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -29744,9 +29790,15 @@ class MetricsPanel(QWidget):
             )
 
             if len(cat) > 0:
+                # σ = geometric mean of the two RMS axes
                 sig      = np.sqrt(cat['a'] * cat['b'])
                 fwhm     = np.nanmedian(2.3548 * sig)
-                ecc      = np.nanmedian(1 - (cat['b'] / cat['a']))
+
+                # true eccentricity e = sqrt(1 - (b/a)^2)
+                ratios   = np.clip(cat['b'] / cat['a'], 0, 1)
+                ecc_vals = np.sqrt(1.0 - ratios**2)
+                ecc      = np.nanmedian(ecc_vals)
+
                 star_cnt = len(cat)
             else:
                 fwhm, ecc, star_cnt = np.nan, np.nan, 0
@@ -29754,7 +29806,7 @@ class MetricsPanel(QWidget):
         except Exception as e:
             # catch SEP overflow (or any other) and mark as “bad” frame
             # you can even check `if "internal pixel buffer full" in str(e):`
-            fwhm, ecc, star_cnt = 10.0, 0.5, 0
+            fwhm, ecc, star_cnt = 10.0, 1.0, 0
 
         orig_back = entry.get('orig_background', np.nan)
         return idx, fwhm, ecc, orig_back, star_cnt
@@ -31562,6 +31614,12 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.sharpen_channels_label)
         left_layout.addWidget(self.sharpen_channels_dropdown)
 
+        self.auto_detect_psf_checkbox = QCheckBox("Auto Detect PSF", self)
+        self.auto_detect_psf_checkbox.setToolTip("Automatically measure PSF per chunk and choose the two nearest radius models")
+        self.auto_detect_psf_checkbox.setChecked(True)
+        left_layout.addWidget(self.auto_detect_psf_checkbox)
+        self.auto_detect_psf_checkbox.toggled.connect(self._on_auto_detect_toggled)
+
         # Non-Stellar Sharpening PSF Slider
         self.psf_slider_label = QLabel("Non-Stellar Sharpening PSF (1-8): 3")
         self.psf_slider = QSlider(Qt.Orientation.Horizontal)
@@ -31632,7 +31690,7 @@ class CosmicClarityTab(QWidget):
         #left_layout.addWidget(self.save_button)  
 
         # Spacer to push the wrench button to the bottom
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Cosmic Clarity folder path label
         self.cosmic_clarity_folder_label = QLabel("No folder selected")
@@ -31651,18 +31709,9 @@ class CosmicClarityTab(QWidget):
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)  
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)   
 
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Right panel for image preview with zoom controls
         right_layout = QVBoxLayout()
@@ -31791,6 +31840,20 @@ class CosmicClarityTab(QWidget):
 
         self.base_pixmap = QPixmap.fromImage(qimage)
         print("Base pixmap updated.")
+
+    def _on_auto_detect_toggled(self, checked):
+        # whenever the box changes, re-show or hide the PSF slider
+        self._update_psf_visibility()
+
+    def _update_psf_visibility(self):
+        if self.auto_detect_psf_checkbox.isChecked():
+            self.psf_slider_label.hide()
+            self.psf_slider.hide()
+        else:
+            # only show it when we’re in a sharpen mode
+            if self.sharpen_radio.isChecked() or self.both_radio.isChecked():
+                self.psf_slider_label.show()
+                self.psf_slider.show()
 
     def update_psf_slider_label(self):
         """Update the label text to display the current value of the PSF slider as a non-integer."""
@@ -32199,6 +32262,7 @@ class CosmicClarityTab(QWidget):
         if self.superres_radio.isChecked():
             self.hide_sharpen_controls()
             self.hide_denoise_controls()
+            self.hide_superres_controls()
             self.show_superres_controls()
             self.gpu_label.hide()
             self.gpu_dropdown.hide()
@@ -32220,28 +32284,28 @@ class CosmicClarityTab(QWidget):
 
 
     def show_sharpen_controls(self):
-        self.sharpen_mode_label.show()
-        self.sharpen_mode_dropdown.show()
-        self.psf_slider_label.show()
-        self.psf_slider.show()
-        self.stellar_amount_label.show()
-        self.stellar_amount_slider.show()
-        self.nonstellar_amount_label.show()
-        self.nonstellar_amount_slider.show()
-        self.sharpen_channels_label.show()
-        self.sharpen_channels_dropdown.show()
+        for w in (
+            self.sharpen_mode_label, self.sharpen_mode_dropdown,
+            self.psf_slider_label, self.psf_slider,
+            self.stellar_amount_label, self.stellar_amount_slider,
+            self.nonstellar_amount_label, self.nonstellar_amount_slider,
+            self.sharpen_channels_label, self.sharpen_channels_dropdown,
+            self.auto_detect_psf_checkbox
+        ):
+            w.show()
+        # now hide or show PSF slider depending on checkbox state
+        self._update_psf_visibility()
 
     def hide_sharpen_controls(self):
-        self.sharpen_mode_label.hide()
-        self.sharpen_mode_dropdown.hide()
-        self.psf_slider_label.hide()
-        self.psf_slider.hide()
-        self.stellar_amount_label.hide()
-        self.stellar_amount_slider.hide()
-        self.nonstellar_amount_label.hide()
-        self.nonstellar_amount_slider.hide()
-        self.sharpen_channels_label.hide()
-        self.sharpen_channels_dropdown.hide()
+        for w in (
+            self.sharpen_mode_label, self.sharpen_mode_dropdown,
+            self.psf_slider_label, self.psf_slider,
+            self.stellar_amount_label, self.stellar_amount_slider,
+            self.nonstellar_amount_label, self.nonstellar_amount_slider,
+            self.sharpen_channels_label, self.sharpen_channels_dropdown,
+            self.auto_detect_psf_checkbox
+        ):
+            w.hide()
 
     def show_denoise_controls(self):
         self.denoise_strength_label.show()
@@ -32940,6 +33004,8 @@ class CosmicClarityTab(QWidget):
             ]
             if self.sharpen_channels_dropdown.currentText() == "Yes":
                 cmd.append("--sharpen_channels_separately")
+            if self.auto_detect_psf_checkbox.isChecked():
+                cmd.append("--auto_detect_psf")
         elif mode == "denoise":
             cmd += [
                 "--denoise_strength", f"{self.denoise_strength_slider.value() / 100:.2f}",
@@ -33482,15 +33548,6 @@ class CosmicClaritySatelliteTab(QWidget):
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
         # Right layout for TreeBoxes
         right_layout = QVBoxLayout()
@@ -34196,17 +34253,8 @@ class StatisticalStretchTab(QWidget):
 
 
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -34795,17 +34843,8 @@ class StarStretchTab(QWidget):
         left_layout.addWidget(self.spinnerLabel)
 
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -35208,6 +35247,71 @@ class CommaToDotLineEdit(QLineEdit):
             )
         super().keyPressEvent(event)
 
+class CurveDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Curves Editor")
+        self.setMinimumSize(400, 400)
+
+        layout = QVBoxLayout(self)
+
+        # 1) Curve editor canvas
+        self.curveEditor = CurveEditor(self)
+        layout.addWidget(self.curveEditor)
+
+        # 2) Pixel info row
+        info_row = QHBoxLayout()
+        self.xLabel = QLabel("X:0");    info_row.addWidget(self.xLabel)
+        self.yLabel = QLabel("Y:0");    info_row.addWidget(self.yLabel)
+        self.rLabel = QLabel("R:0.000");info_row.addWidget(self.rLabel)
+        self.gLabel = QLabel("G:0.000");info_row.addWidget(self.gLabel)
+        self.bLabel = QLabel("B:0.000");info_row.addWidget(self.bLabel)
+        info_row.addStretch(1)
+        layout.addLayout(info_row)
+
+        # 3) Status-message line
+        self.statusMsg = QLabel("", self)
+        self.statusMsg.setStyleSheet("color: gray;")
+        layout.addWidget(self.statusMsg)
+
+        # 4) Instructions
+        self.instructions = QLabel(
+            "Double-click to add, right-click to remove, shift-click on image to add at brightness.",
+            self
+        )
+        self.instructions.setStyleSheet("color:gray; font-style:italic;")
+        layout.addWidget(self.instructions)
+
+        # 5) Apply / Undo / Reset bar
+        bar = QHBoxLayout()
+        self.applyBtn = QPushButton("Apply Curve");  bar.addWidget(self.applyBtn)
+        self.undoBtn  = QPushButton("Undo");         bar.addWidget(self.undoBtn)
+        self.resetBtn = QPushButton("Reset");        bar.addWidget(self.resetBtn)
+        self.undoBtn.setEnabled(False)
+        layout.addLayout(bar)
+
+        # wire up external callbacks
+        self.applyBtn.clicked.connect(lambda: parent.startProcessing())
+        self.undoBtn .clicked.connect(lambda: parent.undo())
+        self.resetBtn.clicked.connect(lambda: parent.resetCurve())
+        self.curveEditor.setSymmetryCallback(parent.onCurveSymmetryPoint)
+        self.curveEditor.setPreviewCallback(
+            lambda lut: parent.updatePreviewLUT(lut,
+                                               parent.curve_mode,
+                                               parent.currentGhsChannel)
+        )
+
+    def updatePixelInfo(self, x, y, r, g, b):
+        self.xLabel.setText(f"X:{x}")
+        self.yLabel.setText(f"Y:{y}")
+        self.rLabel.setText(f"R:{r:.3f}")
+        self.gLabel.setText(f"G:{g:.3f}")
+        self.bLabel.setText(f"B:{b:.3f}")
+
+    def updateStatusMessage(self, text: str):
+        self.statusMsg.setText(text)
+
+
 class FullCurvesTab(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -35225,6 +35329,12 @@ class FullCurvesTab(QWidget):
         self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)  # Initialize with identity LUT
         self.ghs_sym_pt = None
         self._base_pixmap = None
+        self.curveDialog = CurveDialog(parent=self)
+        self.curveEditor = self.curveDialog.curveEditor
+        self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
+        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(
+            lut, self.curve_mode, self.currentGhsChannel
+        ))        
 
         # Initialize the Undo stack with a limited size
         self.undo_stack = []
@@ -35261,10 +35371,6 @@ class FullCurvesTab(QWidget):
         left_widget = QWidget(self)
         left_layout = QVBoxLayout(left_widget)
         left_widget.setFixedWidth(400)
-
-        # File label
-        self.fileLabel = QLabel('', self)
-        left_layout.addWidget(self.fileLabel)
 
         # ——— stretch‐type toggle ———
         self.stretchTypeGroup = QButtonGroup(self)
@@ -35304,16 +35410,6 @@ class FullCurvesTab(QWidget):
         left_layout.addLayout(curve_mode_layout)
         self.set_curve_mode()
 
-        # Curve editor
-        self.curveEditor = CurveEditor(self)
-        self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
-        left_layout.addWidget(self.curveEditor)
-        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode, self.currentGhsChannel))
-
-        # Status
-        self.statusLabel = QLabel('X:0 Y:0', self)
-        left_layout.addWidget(self.statusLabel)
-
         # ——— GHS controls ———
         self.ghsControls = QWidget(self)
         vbox = QVBoxLayout(self.ghsControls)
@@ -35343,73 +35439,95 @@ class FullCurvesTab(QWidget):
         self.ghsChannelCombo.currentTextChanged.connect(self._onGhsChannelChanged)
         self.currentGhsChannel = "K (Brightness)"
 
-        # α/β sliders + edits
-        slider_row = QHBoxLayout()
+        # ——— α/β controls —————————————————————
+        alpha_beta_row = QHBoxLayout()
 
         # α
+        alpha_beta_row.addWidget(QLabel("α"))
         self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
         self.alphaSlider.setRange(1, 500)
         self.alphaSlider.setValue(50)
-        self.alphaEdit = CommaToDotLineEdit("1.00")
-        self.alphaEdit.setFixedWidth(50)
-        alphaValidator = QDoubleValidator(0.01, 10.0, 2, self)
-        alphaValidator.setLocale(QLocale.c())  
-        self.alphaEdit.setValidator(alphaValidator)
-        self.alphaEdit.returnPressed.connect(self._onAlphaEditFinished)
-        slider_row.addWidget(QLabel("α"))
-        slider_row.addWidget(self.alphaSlider)
-        slider_row.addWidget(self.alphaEdit)
+        alpha_beta_row.addWidget(self.alphaSlider)
+
+        self.alphaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
+        )
+        alpha_beta_row.addWidget(self.alphaSpin)
 
         # β
+        alpha_beta_row.addWidget(QLabel("β"))
         self.betaSlider = QSlider(Qt.Orientation.Horizontal)
         self.betaSlider.setRange(1, 500)
         self.betaSlider.setValue(50)
-        self.betaEdit = CommaToDotLineEdit("1.00")
-        self.betaEdit.setFixedWidth(50)
-        betaValidator = QDoubleValidator(0.01, 10.0, 2, self)
-        betaValidator.setLocale(QLocale.c())
-        self.betaEdit.setValidator(betaValidator)
-        self.betaEdit.returnPressed.connect(self._onBetaEditFinished)
-        slider_row.addWidget(QLabel("β"))
-        slider_row.addWidget(self.betaSlider)
-        slider_row.addWidget(self.betaEdit)
+        alpha_beta_row.addWidget(self.betaSlider)
 
-        vbox.addLayout(slider_row)
+        self.betaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
+        )
+        alpha_beta_row.addWidget(self.betaSpin)
 
-        # connect α/β signals
-        self.alphaSlider.valueChanged.connect(self._onAlphaSliderChanged)
-        self.alphaEdit.editingFinished.connect(self._onAlphaEditFinished)
-        self.betaSlider.valueChanged.connect(self._onBetaSliderChanged)
-        self.betaEdit.editingFinished.connect(self._onBetaEditFinished)
+        vbox.addLayout(alpha_beta_row)
 
-        # γ slider + edit
+
+        # ——— γ + help row —————————————————————
         gamma_row = QHBoxLayout()
-        gamma_row.addStretch()
-        self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.gammaSlider.setRange(0, 500)
-        self.gammaSlider.setValue(100)
-        self.gammaEdit = CommaToDotLineEdit("1.00")
-        self.gammaEdit.setFixedWidth(50)
-        gammaValidator = QDoubleValidator(0.01, 10.0, 2, self)
-        gammaValidator.setLocale(QLocale.c())
-        self.gammaEdit.setValidator(gammaValidator)
-        self.gammaEdit.returnPressed.connect(self._onGammaEditFinished)
-        gamma_row.addWidget(QLabel("γ"))
-        gamma_row.addWidget(self.gammaSlider)
-        gamma_row.addWidget(self.gammaEdit)
-        gamma_row.addStretch()
-        help_btn = QToolButton(self)
-        help_btn.setText("?")
-        help_btn.setToolTip("GHS instructions")
-        help_btn.setFixedSize(20, 20)
-        help_btn.clicked.connect(self.showGhsHelp)
 
-        # stick it up in the GHS controls header, e.g. next to "Channel:"
-        gamma_row.addWidget(help_btn)
+        gamma_row.addWidget(QLabel("γ"))
+        self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.gammaSlider.setRange(1, 500)
+        self.gammaSlider.setValue(100)
+        gamma_row.addWidget(self.gammaSlider)
+
+        self.gammaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.01, parent=self
+        )
+        gamma_row.addWidget(self.gammaSpin)
+
+        # help button
+        self.ghsHelpBtn = QToolButton(self)
+        self.ghsHelpBtn.setText("?")
+        self.ghsHelpBtn.setToolTip("GHS instructions")
+        self.ghsHelpBtn.setFixedSize(20, 20)
+        self.ghsHelpBtn.clicked.connect(self.showGhsHelp)
+        gamma_row.addWidget(self.ghsHelpBtn)
+
         vbox.addLayout(gamma_row)
 
-        self.gammaSlider.valueChanged.connect(self._onGammaSliderChanged)
-        self.gammaEdit.editingFinished.connect(self._onGammaEditFinished)
+
+        # ——— wiring ————————————————————————
+        # α
+        def _onAlphaSlider(v):
+            val = v / 50.0
+            self.alphaSpin.blockSignals(True)
+            self.alphaSpin.setValue(val)
+            self.alphaSpin.blockSignals(False)
+            self.ghsParams["α"] = val
+            self.updateGhsCurve()
+        self.alphaSlider.valueChanged.connect(_onAlphaSlider)
+        self.alphaSpin.valueChanged.connect(lambda v: self.alphaSlider.setValue(int(v * 50)))
+
+        # β
+        def _onBetaSlider(v):
+            val = v / 50.0
+            self.betaSpin.blockSignals(True)
+            self.betaSpin.setValue(val)
+            self.betaSpin.blockSignals(False)
+            self.ghsParams["β"] = val
+            self.updateGhsCurve()
+        self.betaSlider.valueChanged.connect(_onBetaSlider)
+        self.betaSpin.valueChanged.connect(lambda v: self.betaSlider.setValue(int(v * 50)))
+
+        # γ
+        def _onGammaSlider(v):
+            val = v / 100.0
+            self.gammaSpin.blockSignals(True)
+            self.gammaSpin.setValue(val)
+            self.gammaSpin.blockSignals(False)
+            self.ghsParams["γ"] = val
+            self.updateGhsCurve()
+        self.gammaSlider.valueChanged.connect(_onGammaSlider)
+        self.gammaSpin.valueChanged.connect(lambda v: self.gammaSlider.setValue(int(v * 100)))
+
 
         # ─── low‐light protection LP ───────────────────────────
         lp_row = QHBoxLayout()
@@ -35437,6 +35555,7 @@ class FullCurvesTab(QWidget):
 
         left_layout.addWidget(self.ghsControls)
         self.ghsControls.hide()
+        left_layout.addStretch(1)
 
         # Traditional-mode Instructions
         self.tradInstructions = QLabel(self)
@@ -35449,6 +35568,7 @@ class FullCurvesTab(QWidget):
         )
         self.tradInstructions.show()
         left_layout.addWidget(self.tradInstructions)
+        left_layout.addStretch(1)
 
         # ——— Apply/Undo/Reset ———
         button_layout = QHBoxLayout()
@@ -35482,16 +35602,6 @@ class FullCurvesTab(QWidget):
         self.spinnerLabel.hide()
         left_layout.addWidget(self.spinnerLabel)
 
-        # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-        footer_label = QLabel(
-            "Written by Franklin Marek<br>"
-            "<a href='http://www.setiastro.com'>www.setiastro.com</a>"
-        )
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size:10px;")
-        left_layout.addWidget(footer_label)
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -35567,6 +35677,30 @@ class FullCurvesTab(QWidget):
             "Ctrl-click image, curve grid or histogram to set inflection.\n\n"
             "Use the channel dropdown to select which channel to stretch."
         )
+
+    def _onAlphaChanged(self, value: float):
+        # called whenever α spinbox changes
+        self.ghsParams["α"] = value
+        self.updateGhsCurve()
+
+    def _onBetaChanged(self, value: float):
+        # called whenever β spinbox changes
+        self.ghsParams["β"] = value
+        self.updateGhsCurve()
+
+    def _onGammaChanged(self, value: float):
+        # called whenever γ spinbox changes
+        self.ghsParams["γ"] = value
+        self.updateGhsCurve()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.curveDialog.show()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.curveDialog.hide()
+
 
     def onStretchTypeChanged(self, btn, checked):
         if not checked:
@@ -35723,9 +35857,9 @@ class FullCurvesTab(QWidget):
 
     def updateGhsCurve(self):
         # ─── read sliders ────────────────────────────────────────────
-        α  = self.alphaSlider.value() / 50.0
-        β  = self.betaSlider.value()  / 50.0
-        G  = max(0.01, self.gammaSlider.value() / 100.0)
+        α = self.ghsParams["α"]
+        β = self.ghsParams["β"]
+        G = self.ghsParams["γ"]
 
         LP = self.lpSlider.value()      / 360.0         # low protect [0…1]
         HP = self.hpSlider.value()      / 360.0         # high protect[0…1]
@@ -35804,7 +35938,7 @@ class FullCurvesTab(QWidget):
         # u is the brightness fraction, v == u on the true inflection point
         self.ghs_sym_pt = u
         # update your status label however you like:
-        self.statusLabel.setText(f"Inflection @ K={u:.3f}")
+        self.curveDialog.updateStatusMessage(f"Inflection @ K={u:.3f}")
         # regenerate the GHS curve around this pivot:
         self.updateGhsCurve()
 
@@ -35817,7 +35951,7 @@ class FullCurvesTab(QWidget):
         # redraw the GHS handles around the default pivot=0.5
         # regenerate with pivot=0.5
         self.updateGhsCurve()
-        self.statusLabel.setText("Symmetry reset to center (p=0.5)")
+        self.curveDialog.updateStatusMessage("Symmetry reset to center (p=0.5)")
 
     def saveCurve(self):
         fname, _ = QFileDialog.getSaveFileName(self, "Save Curve As","", "SASC Curve (*.sasc)")
@@ -36453,7 +36587,7 @@ class FullCurvesTab(QWidget):
             # store pivot and redraw GHS
             self.ghs_sym_pt = k
             self.curveEditor.setSymmetryPoint(k*360.0, 0)
-            self.statusLabel.setText(f"Symmetry K={k:.4f}")
+            self.curveDialog.updateStatusMessage(f"Symmetry K={k:.4f}")
             self.updateGhsCurve()
             return True
 
@@ -36475,7 +36609,7 @@ class FullCurvesTab(QWidget):
                     k = float(np.mean(pv))
                     self.ghs_sym_pt = k
                     self.curveEditor.setSymmetryPoint(k * 360.0, 0)
-                    self.statusLabel.setText(f"Symmetry at K={k:.3f}")
+                    self.curveDialog.updateStatusMessage(f"Symmetry at K={k:.3f}")
                     self.updateGhsCurve()
                     return True
 
@@ -36497,7 +36631,7 @@ class FullCurvesTab(QWidget):
                     avg = float(np.mean(pv))
                     new_x, new_y = avg * 360.0, (1 - avg) * 360.0
                     self.curveEditor.addControlPoint(new_x, new_y)
-                    self.statusLabel.setText(f"Added control point @ X:{new_x:.1f} Y:{new_y:.1f}")
+                    self.curveDialog.updateStatusMessage(f"Added control point @ X:{new_x:.1f} Y:{new_y:.1f}")
                     return True
 
         # ——— 4) Fall back to pan/drag ———
@@ -36548,7 +36682,8 @@ class FullCurvesTab(QWidget):
                 self.curveEditor.updateValueLines(v, v, v, grayscale=True)
                 txt = f"X:{img_x} Y:{img_y} Val:{v:.3f}"
 
-            self.statusLabel.setText(txt)
+            self.curveDialog.updatePixelInfo(img_x, img_y, r, g, b)
+            self.curveDialog.updateStatusMessage("")  # clear older messages
             return True
 
         return super().eventFilter(source, event)
@@ -36598,7 +36733,7 @@ class FullCurvesTab(QWidget):
             
             if not isinstance(self.loaded_image_path, str):
                 self.loaded_image_path = ""
-            self.fileLabel.setText(self.loaded_image_path)
+            #self.fileLabel.setText(self.loaded_image_path)
             
             # Update the UI elements (buttons, etc.)
             self.show_image(image)
@@ -37694,10 +37829,10 @@ class FrequencySeperationTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
 
         # 1) Load image
-        self.loadButton = QPushButton("Load Image", self)
-        self.loadButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        self.loadButton.clicked.connect(self.selectImage)
-        left_layout.addWidget(self.loadButton)
+        #self.loadButton = QPushButton("Load Image", self)
+        #self.loadButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        #self.loadButton.clicked.connect(self.selectImage)
+        #left_layout.addWidget(self.loadButton)
 
         self.fileLabel = QLabel("", self)
         left_layout.addWidget(self.fileLabel)
@@ -37863,7 +37998,7 @@ class FrequencySeperationTab(QWidget):
         left_layout.addWidget(self.spinnerLabel)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # -----------------------------
@@ -39105,12 +39240,6 @@ class PerfectPalettePickerTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_widget.setFixedWidth(300)
 
-        # Title label
-        title_label = QLabel("Perfect Palette Picker", self)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setFont(QFont("Helvetica", 14, QFont.Weight.Bold))
-        left_layout.addWidget(title_label)
-
         # Instruction label
         instruction_label = QLabel(self)
         instruction_label.setText(
@@ -39128,7 +39257,7 @@ class PerfectPalettePickerTab(QWidget):
         instruction_label.setStyleSheet(
             "font-size: 8pt; padding: 10px;"
         )
-        instruction_label.setFixedHeight(200)
+        #instruction_label.setFixedHeight(200)
         left_layout.addWidget(instruction_label)
 
         # "Linear Input Data" checkbox
@@ -39188,30 +39317,20 @@ class PerfectPalettePickerTab(QWidget):
         left_layout.addWidget(create_palettes_button)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         self.push_palette_button = QPushButton("Push Final Palette for Further Processing")
         self.push_palette_button.clicked.connect(self.push_final_palette_to_image_manager)
         left_layout.addWidget(self.push_palette_button)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Add a "Clear All Images" button
         self.clear_all_button = QPushButton("Clear All Images", self)
         self.clear_all_button.clicked.connect(self.clear_all_images)
         left_layout.addWidget(self.clear_all_button)
 
-
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setFont(QFont("Helvetica", 8))
-        left_layout.addWidget(footer_label)
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -39245,7 +39364,7 @@ class PerfectPalettePickerTab(QWidget):
         self.image_label.setMouseTracking(True)
 
         self.scroll_area.setWidget(self.image_label)
-        self.scroll_area.setMinimumSize(400, 250)
+        self.scroll_area.setMinimumHeight(100)
         right_layout.addWidget(self.scroll_area, stretch=1)
 
 
@@ -40694,17 +40813,8 @@ class NBtoRGBstarsTab(QWidget):
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -41443,17 +41553,8 @@ class HaloBGonTab(QWidget):
         # zoom_layout.addWidget(self.zoomOutButton)
         # left_layout.addLayout(zoom_layout)
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -46262,7 +46363,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("What's In My Image")
-        self.setGeometry(100, 100, 800, 600)
+        #self.setGeometry(100, 100, 800, 600)
         # Track the theme status
         self.is_dark_mode = True
         self.metadata = {}
@@ -46291,7 +46392,7 @@ class MainWindow(QMainWindow):
         logo_pixmap = QPixmap(wimilogo_path)
 
         # Scale the pixmap to fit within a desired size, maintaining the aspect ratio
-        scaled_pixmap = logo_pixmap.scaled(200, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled_pixmap = logo_pixmap.scaled(100, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
         # Set the scaled pixmap to the label
         self.logo_label.setPixmap(scaled_pixmap)
@@ -46300,7 +46401,7 @@ class MainWindow(QMainWindow):
         self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Optionally, you can set a fixed size for the label (this is for layout purposes)
-        self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
+        #self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
 
         # Add the logo_label to your layout
         left_panel.addWidget(self.logo_label)
@@ -46434,7 +46535,7 @@ class MainWindow(QMainWindow):
 
         # Mini Preview
         self.mini_preview = QLabel("Mini Preview")
-        self.mini_preview.setFixedSize(300, 300)
+        self.mini_preview.setMaximumSize(300, 300)
         self.mini_preview.mousePressEvent = self.on_mini_preview_press
         self.mini_preview.mouseMoveEvent = self.on_mini_preview_drag
         self.mini_preview.mouseReleaseEvent = self.on_mini_preview_release
@@ -46442,14 +46543,6 @@ class MainWindow(QMainWindow):
 
   
 
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_panel.addWidget(footer_label)
 
         # Right Column Layout
         right_panel = QVBoxLayout()
