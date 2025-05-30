@@ -1,9 +1,9 @@
 {
-  "version": "2.16.5",
+  "version": "2.16.6",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.5/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Added Find Background to Background Neutralization"
+  "notes": "Requires redownload of Cosmic Clarity.  Auto PSF for CC sharpening.  New UI to support lower resoltuion monitors.  Pixel math can be used on a blank slot.  Curves graph is a pop out to support lower resolution monitors.  Much much more."
 }
