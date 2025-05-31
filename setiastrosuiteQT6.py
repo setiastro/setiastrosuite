@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.16.6"
+VERSION = "2.17.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -316,6 +316,7 @@ if hasattr(sys, '_MEIPASS'):
     aperture_path = os.path.join(sys._MEIPASS, 'aperture.png')
     jwstpupil_path = os.path.join(sys._MEIPASS, 'jwstpupil.png')
     signature_icon_path = os.path.join(sys._MEIPASS, 'pen.png')
+    livestacking_path = os.path.join(sys._MEIPASS, 'livestacking.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -374,6 +375,7 @@ else:
     aperture_path = 'aperture.png'
     jwstpupil_path = 'jwstpupil.png'
     signature_icon_path = 'pen.png'
+    livestacking_path = 'livestacking.png'
 
 
 def announce_zoom(method):
@@ -876,6 +878,11 @@ class AstroEditingSuite(QMainWindow):
         stacking_suite_action.triggered.connect(self.stacking_suite_action)
         mosaic_menu.addAction(stacking_suite_action)
 
+        live_stacking_action = QAction(QIcon(livestacking_path), "Live Stacking", self)
+        live_stacking_action.setStatusTip("Open the Live Stacking interface")
+        live_stacking_action.triggered.connect(self.live_stacking)
+        mosaic_menu.addAction(live_stacking_action)
+
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
         mosaic_master_action.triggered.connect(self.open_mosaic_master)
@@ -1064,7 +1071,8 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar = QToolBar("Star Stuff Toolbar")
         mosaictoolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)  
-        mosaictoolbar.addAction(stacking_suite_action)      
+        mosaictoolbar.addAction(stacking_suite_action)  
+        mosaictoolbar.addAction(live_stacking_action)    
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
         mosaictoolbar.addAction(star_registration_action)
@@ -1272,6 +1280,14 @@ class AstroEditingSuite(QMainWindow):
         self.history_dialog.show()
 
 
+    def live_stacking(self):
+        """
+        Slot called when the user clicks “Live Stacking”.
+        Will open the LiveStackWindow (to be implemented) and show it.
+        """
+        # keep a reference so it doesn’t get garbage-collected
+        self.live_stack_window = LiveStackWindow(parent=self)
+        self.live_stack_window.show()
 
     def starspiketool(self):
         dialog = StarSpikeTool(self.image_manager, self.mask_manager, parent=self)
@@ -13071,6 +13087,854 @@ class StackingSuiteDialog(QDialog):
         
         return tile_result, rejection_mask
 
+class LiveStackSettingsDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Live Stack Settings")
+
+        # Bootstrap frames (int)
+        self.bs_spin = CustomSpinBox(
+            minimum=1,
+            maximum=100,
+            initial=parent.bootstrap_frames,
+            step=1
+        )
+        self.bs_spin.valueChanged.connect(lambda v: None)  # value() will reflect changes
+
+        # Sigma threshold (float)
+        self.sigma_spin = CustomDoubleSpinBox(
+            minimum=0.1,
+            maximum=10.0,
+            initial=parent.clip_threshold,
+            step=0.1, suffix="σ"
+        )
+        self.sigma_spin.valueChanged.connect(lambda v: None)
+
+        form = QFormLayout()
+        form.addRow("Switch to μ–σ clipping after:", self.bs_spin)
+        form.addRow("Clip threshold:", self.sigma_spin)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(btns)
+        self.setLayout(layout)
+
+    def getValues(self):
+        # CustomSpinBox.value is a property returning int
+        bs = self.bs_spin.value
+        sigma = self.sigma_spin.value()
+        return bs, sigma
+
+class LiveMetricsPanel(QWidget):
+    """
+    A simple 2×2 grid of PyQtGraph plots to show, in real time:
+      [0,0] → FWHM (px) vs. frame index
+      [0,1] → Eccentricity vs. frame index
+      [1,0] → Star Count vs. frame index
+      [1,1] → Global Stack SNR vs. frame index
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        titles = ["FWHM (px)", "Eccentricity", "Star Count", "(μ-ν)/σ (∝SNR)"]
+
+        layout = QVBoxLayout(self)
+        grid = pg.GraphicsLayoutWidget()
+        layout.addWidget(grid)
+
+        self.plots = []
+        self.scats = []
+        self._data_x = [[], [], [], []]
+        self._data_y = [[], [], [], []]
+
+        for row in range(2):
+            for col in range(2):
+                pw = grid.addPlot(row=row, col=col)
+                idx = row * 2 + col
+                pw.setTitle(titles[idx])
+                pw.showGrid(x=True, y=True, alpha=0.3)
+                pw.setLabel('bottom', "Frame #")
+                pw.setLabel('left', titles[idx])
+
+                scat = pg.ScatterPlotItem(
+                    pen=pg.mkPen(None),
+                    brush=pg.mkBrush(100, 100, 255, 200),
+                    size=6
+                )
+                pw.addItem(scat)
+                self.plots.append(pw)
+                self.scats.append(scat)
+
+    def add_point(self, frame_idx: int, fwhm: float, ecc: float, star_cnt: int, snr_val: float):
+        """
+        Append one new data point to each of the four metrics:
+           [0] = FWHM, [1] = Ecc, [2] = Star Count, [3] = Global SNR
+        """
+        values = [fwhm, ecc, star_cnt, snr_val]
+        for i in range(4):
+            self._data_x[i].append(frame_idx)
+            self._data_y[i].append(values[i])
+            self.scats[i].setData(self._data_x[i], self._data_y[i])
+
+    def clear_all(self):
+        """Clear data from all four plots."""
+        for i in range(4):
+            self._data_x[i].clear()
+            self._data_y[i].clear()
+            self.scats[i].clear()
+
+class LiveMetricsWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Stack Metrics")
+        self.resize(600, 400)
+
+        layout = QVBoxLayout(self)
+        self.metrics_panel = LiveMetricsPanel(self)
+        layout.addWidget(self.metrics_panel)
+
+def compute_frame_star_metrics(image_2d):
+    """
+    Runs SEP on a normalized 2D image to estimate:
+      - star_count (int)
+      - avg_fwhm    (float)
+      - avg_ecc     (float)
+    
+    This replaces the DAOStarFinder version, because DAOStarFinder
+    does not always produce an 'fwhm' column.  SEP will give us 'a', 'b',
+    from which FWHM = 2.3548 * sqrt(a * b), and ecc = sqrt(1 - (b/a)^2).
+    """
+    # 1) estimate background & global RMS
+    mean, median, std = sigma_clipped_stats(image_2d)
+    data = image_2d - median
+
+    try:
+        # 2) run SEP extract (threshold = 5σ)
+        objects = sep.extract(data, thresh=6.0, 
+                              err=std, 
+                              minarea=16,   # adjust if needed
+                              deblend_nthresh=32,
+                              clean=True)
+    except Exception:
+        # if SEP fails (e.g. “internal pixel buffer full”), just return zeros
+        return 0, 0.0, 0.0
+
+    if objects is None or len(objects) == 0:
+        return 0, 0.0, 0.0
+
+    # 3) star count
+    star_count = len(objects)
+
+    # 4) compute FWHM and eccentricity for each detected source
+    #    SEP’s "a" and "b" columns are the RMS ellipse axes
+    #    FWHM = 2.3548 * sqrt(a * b)
+    a_vals = objects['a']
+    b_vals = objects['b']
+    # Avoid negative or zero values:
+    a_vals = np.clip(a_vals, 1e-3, None)
+    b_vals = np.clip(b_vals, 1e-3, None)
+
+    fwhm_vals = 2.3548 * np.sqrt(a_vals * b_vals)
+    avg_fwhm = float(np.nanmean(fwhm_vals)) if len(fwhm_vals) > 0 else 0.0
+
+    # 5) compute eccentricity: e = sqrt(1 − (b/a)^2)
+    ratios = np.clip(b_vals / a_vals, 0.0, 1.0)
+    ecc_vals = np.sqrt(1.0 - ratios * ratios)
+    avg_ecc = float(np.nanmean(ecc_vals)) if len(ecc_vals) > 0 else 0.0
+
+    return star_count, avg_fwhm, avg_ecc
+
+def estimate_global_snr(
+    stack_image: np.ndarray,
+    bkg_box_size: int = 200
+) -> float:
+    """
+    “Hybrid” global SNR ≔ (μ_patch − median_patch) / σ_central,
+    where:
+      • μ_patch    and median_patch come from a small bkg_box_size×bkg_box_size patch
+        centered inside the middle 50% of the image.
+      • σ_central  is the standard deviation computed over the entire “middle 50%” region.
+
+    Steps:
+      1) Collapse to grayscale (H×W) if needed.
+      2) Identify the middle 50% rectangle of the image.
+      3) Within that, center a patch of size up to bkg_box_size×bkg_box_size.
+      4) Compute μ_patch = mean(patch), median_patch = median(patch).
+      5) Compute σ_central = std(middle50_region).
+      6) If σ_central ≤ 0, return 0. Otherwise return (μ_patch − median_patch) / σ_central.
+    """
+
+    # 1) Collapse to simple 2D float array (grayscale)
+    if stack_image.ndim == 3 and stack_image.shape[2] == 3:
+        # RGB → grayscale by averaging channels
+        gray = stack_image.mean(axis=2).astype(np.float32)
+    else:
+        # Already mono: just cast to float32
+        gray = stack_image.astype(np.float32)
+
+    H, W = gray.shape
+
+    # 2) Compute coordinates of the “middle 50%” rectangle
+    y0 = H // 4
+    y1 = y0 + (H // 2)
+    x0 = W // 4
+    x1 = x0 + (W // 2)
+
+    # Extract that central50 region as a view (no copy)
+    central50 = gray[y0:y1, x0:x1]
+
+    # 3) Within that central50, choose a patch of up to bkg_box_size×bkg_box_size, centered
+    center_h = (y1 - y0)
+    center_w = (x1 - x0)
+
+    # Clamp box size so it does not exceed central50 dimensions
+    box_h = min(bkg_box_size, center_h)
+    box_w = min(bkg_box_size, center_w)
+
+    # Compute top-left corner of that patch so it’s centered in central50
+    cy0 = y0 + (center_h - box_h) // 2
+    cx0 = x0 + (center_w - box_w) // 2
+
+    patch = gray[cy0 : cy0 + box_h, cx0 : cx0 + box_w]
+
+    # 4) Compute patch statistics
+    mu_patch = float(np.mean(patch))
+    med_patch = float(np.median(patch))
+    min_patch = float(np.min(patch))
+
+    # 5) Compute σ over the entire central50 region
+    sigma_central = float(np.std(central50))
+    if sigma_central <= 0.0:
+        return 0.0
+
+    nu = med_patch - 3.0 * sigma_central * med_patch
+
+    # 6) Return (mean − nu) / σ
+    return (mu_patch - nu) / sigma_central
+    #return (mu_patch) / sigma_central
+
+class LiveStackWindow(QDialog):
+    """
+    Live Stacking dialog:
+     - Watch a directory for new frames
+     - Apply dark/flat calibration
+     - Debayer if needed
+     - Align, stretch, and running-average stack
+     - Show the live preview
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Live Stacking")
+        self.resize(900, 600)
+
+        # ─── State Variables ─────────────────────────────────────
+        self.watch_folder = None
+        self.processed_files = set()
+        self.master_dark = None
+        self.master_flat = None
+        self.is_running = False
+        self.frame_count = 0
+        self.current_stack = None
+
+        self.brightness = 0.0   # [-1.0..+1.0]
+        self.contrast   = 1.0   # [0.1..3.0]
+        self.clip_threshold = 3.5
+        self.bootstrap_frames = 24
+
+        self._buffer = []    # store up to bootstrap_frames normalized frames
+        self._mu = None      # per-pixel mean (after bootstrap)
+        self._m2 = None      # per-pixel sum of squares differences (for Welford)
+
+        # ─── Create Separate Metrics Window (initially hidden) ─────
+        # We do NOT embed this in the stacking dialog’s layout!
+        self.metrics_window = LiveMetricsWindow(None)
+        self.metrics_window.hide()
+
+        # ─── UI ELEMENTS FOR STACKING DIALOG ───────────────────────
+        # 1) Folder selection
+        self.folder_label = QLabel("Folder: (none)")
+        self.select_folder_btn = QPushButton("Select Folder…")
+        self.select_folder_btn.clicked.connect(self.select_folder)
+
+        # 2) Load master dark/flat
+        self.load_darks_btn = QPushButton("Load Master Dark…")
+        self.load_darks_btn.clicked.connect(self.load_masters)
+        self.load_flats_btn = QPushButton("Load Master Flat…")
+        self.load_flats_btn.clicked.connect(self.load_masters)
+        self.dark_status_label = QLabel("Dark: ❌")
+        self.flat_status_label = QLabel("Flat: ❌")
+        for lbl in (self.dark_status_label, self.flat_status_label):
+            lbl.setStyleSheet("color: #cccccc; font-weight: bold;")
+        # 3) “Process & Monitor” / “Monitor Only” / “Stop” / “Reset”
+        self.process_and_monitor_btn = QPushButton("Process && Monitor")
+        self.process_and_monitor_btn.clicked.connect(self.start_and_process)
+        self.monitor_only_btn = QPushButton("Monitor Only")
+        self.monitor_only_btn.clicked.connect(self.start_monitor_only)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.clicked.connect(self.stop_live)
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.clicked.connect(self.reset_live)
+
+        self.frame_count_label = QLabel("Frames: 0")
+
+        # 4) Live‐stack preview area (QGraphicsView)
+        self.scene = QGraphicsScene(self)
+        self.view = QGraphicsView(self.scene, self)
+        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+        self._did_initial_fit = False
+
+        # 5) Zoom toolbar + Settings icon
+        tb = QToolBar()
+        zi = QAction(QIcon(":/icons/zoom_in.png"), "Zoom In", self)
+        zo = QAction(QIcon(":/icons/zoom_out.png"), "Zoom Out", self)
+        fit = QAction(QIcon(":/icons/fit.png"), "Fit to Window", self)
+
+        tb.addAction(zi)
+        tb.addAction(zo)
+        tb.addAction(fit)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+        # — Replace the QAction “wrench” with a styled QToolButton —
+        self.wrench_button = QToolButton()
+        self.wrench_button.setIcon(QIcon(wrench_path))
+        self.wrench_button.setToolTip("Settings")
+        # Apply your stylesheet to the QToolButton
+        self.wrench_button.setStyleSheet("""
+            QToolButton {
+                background-color: #FF4500;
+                color: white;
+                font-size: 16px;
+                padding: 8px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        # Connect the clicked signal to open_settings()
+        self.wrench_button.clicked.connect(self.open_settings)
+
+        # Add the styled QToolButton into the toolbar
+        tb.addWidget(self.wrench_button)
+
+        zi.triggered.connect(self.zoom_in)
+        zo.triggered.connect(self.zoom_out)
+        fit.triggered.connect(self.fit_to_window)
+
+
+        # 6) Brightness & Contrast sliders
+        bright_slider = QSlider(Qt.Orientation.Horizontal)
+        bright_slider.setRange(-100, 100)
+        bright_slider.setValue(0)
+        bright_slider.setToolTip("Brightness")
+        bright_slider.valueChanged.connect(self.on_brightness_changed)
+
+        contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        contrast_slider.setRange(10, 1000)
+        contrast_slider.setValue(100)
+        contrast_slider.setToolTip("Contrast")
+        contrast_slider.valueChanged.connect(self.on_contrast_changed)
+
+        bc_layout = QHBoxLayout()
+        bc_layout.addWidget(QLabel("Brightness"))
+        bc_layout.addWidget(bright_slider)
+        bc_layout.addWidget(QLabel("Contrast"))
+        bc_layout.addWidget(contrast_slider)
+
+        # 7) “Send to Slot” button
+        send_btn = QPushButton("Send to Slot ▶")
+        send_btn.clicked.connect(self.send_to_slot)
+
+        # 8) “Show Metrics” button
+        self.show_metrics_btn = QPushButton("Show Metrics")
+        self.show_metrics_btn.clicked.connect(self.show_metrics_window)
+
+        # ─── ASSEMBLE MAIN LAYOUT (exactly one setLayout call!) ─────
+        main_layout = QVBoxLayout()
+
+        # A) Top‐row controls
+        controls = QHBoxLayout()
+        controls.addWidget(self.select_folder_btn)
+        controls.addWidget(self.load_darks_btn)
+        controls.addWidget(self.load_flats_btn)
+        controls.addStretch()
+        controls.addWidget(self.process_and_monitor_btn)
+        controls.addWidget(self.monitor_only_btn)
+        controls.addWidget(self.stop_btn)
+        controls.addWidget(self.reset_btn)
+        main_layout.addLayout(controls)
+
+        # B) Status line: folder label + frame count
+        status_line = QHBoxLayout()
+        status_line.addWidget(self.folder_label)
+        status_line.addWidget(self.dark_status_label)
+        status_line.addWidget(self.flat_status_label)
+        status_line.addStretch()        
+        status_line.addWidget(self.frame_count_label)
+        main_layout.addLayout(status_line)
+
+        # C) Zoom toolbar
+        main_layout.addWidget(tb)
+
+        # D) Show Metrics button (separate window)
+        main_layout.addWidget(self.show_metrics_btn)
+
+        # E) Live‐stack preview area
+        main_layout.addWidget(self.view)
+
+        # F) Brightness/Contrast sliders
+        main_layout.addLayout(bc_layout)
+
+        # G) “Send to Slot” + mode/idle labels
+        main_layout.addWidget(send_btn)
+        self.mode_label = QLabel("Mode: Linear Average")
+        self.mode_label.setStyleSheet("color: #a0a0a0;")
+        main_layout.addWidget(self.mode_label)
+        self.status_label = QLabel("Idle")
+        self.status_label.setStyleSheet("color: #a0a0a0;")
+        main_layout.addWidget(self.status_label)
+
+        # Finalize
+        self.setLayout(main_layout)
+
+        # Timer for polling new files
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(1500)
+        self.poll_timer.timeout.connect(self.check_for_new_frames)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def show_metrics_window(self):
+        """Pop up the separate metrics window (never embed it here)."""
+        self.metrics_window.show()
+        self.metrics_window.raise_()
+
+    def open_settings(self):
+        dlg = LiveStackSettingsDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_bs, new_sigma = dlg.getValues()
+            # Update parameters
+            self.bootstrap_frames = new_bs
+            self.clip_threshold = new_sigma
+            # Reset so new parameters apply fresh
+            self.reset_live()
+            self.status_label.setText(
+                f"↺ Reset with BS={new_bs}, σ={new_sigma:.1f}"
+            )
+
+    def zoom_in(self):
+        self.view.scale(1.2, 1.2)
+
+    def zoom_out(self):
+        self.view.scale(1/1.2, 1/1.2)
+
+    def fit_to_window(self):
+        self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    # — Brightness / Contrast —
+
+    def on_brightness_changed(self, val: int):
+        self.brightness = val / 100.0  # map to [-1,1]
+        if self.current_stack is not None:
+            self.update_preview(self.current_stack)
+
+    def on_contrast_changed(self, val: int):
+        self.contrast = val / 100.0  # map to [0.1,10.0]
+        if self.current_stack is not None:
+            self.update_preview(self.current_stack)
+
+    # — Sending out —
+
+    def send_to_slot(self):
+        if self.current_stack is None:
+            self.status_label.setText("⚠ Nothing to send")
+            return
+
+        mgr = self.parent.image_manager
+        # Build a list of slot labels "0", "1", ..., up to max_slots-1
+        slots = [str(i) for i in range(mgr.max_slots)]
+        # Preselect the current slot
+        current = str(mgr.current_slot)
+
+        slot_str, ok = QInputDialog.getItem(
+            self, "Select Slot", "Slot:", slots,
+            current=slots.index(current),
+            editable=False
+        )
+        if not ok:
+            return
+
+        slot_index = int(slot_str)
+        metadata = {
+            "source": "LiveStack",
+            "frames_stacked": self.frame_count
+        }
+
+        # Add image and switch to it
+        mgr.set_image_for_slot(slot_index, self.current_stack.copy(), metadata, step_name="Live Stack")
+        if hasattr(self.parent, "set_active_slot"):
+            self.parent.set_active_slot(slot_index)
+        else:
+            mgr.set_current_slot(slot_index)
+
+        self.status_label.setText(f"Sent to slot {slot_index}")
+
+    def select_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder to Watch")
+        if folder:
+            self.watch_folder = folder
+            self.folder_label.setText(f"Folder: {os.path.basename(folder)}")
+
+    def load_masters(self):
+        """
+        When the user picks “Load Master Dark…” or “Load Master Flat…”, we load exactly one file
+        (the first in the dialog).  We simply store it in `self.master_dark` or `self.master_flat`,
+        but we also check its dimensions against any existing master so that the user can’t load
+        a 2D flat while the dark is 3D (for example).
+        """
+        sender = self.sender()
+        dlg = QFileDialog(self, "Select Master Files",
+                         filter="FITS or TIFF (*.fit *.fits *.tif *.tiff)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        if not dlg.exec():
+            return
+
+        chosen = dlg.selectedFiles()[0]
+        img, hdr, bit_depth, is_mono = load_image(chosen)
+        if img is None:
+            QMessageBox.warning(self, "Load Error",
+                                f"Failed to load master file:\n{chosen}")
+            return
+
+        # Convert everything to float32 for consistency
+        img = img.astype(np.float32)
+
+        if "Dark" in sender.text():
+            # If a flat is already loaded, ensure shape‐compatibility
+            if self.master_flat is not None:
+                if not self._shapes_compatible(master=img, other=self.master_flat):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "Cannot load this master dark: it has incompatible shape "
+                        "vs. the already‐loaded master flat."
+                    )
+                    return
+
+            self.master_dark = img
+            self.dark_status_label.setText("Dark: ✅")
+            self.dark_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")            
+            QMessageBox.information(
+                self, "Master Dark Loaded",
+                f"Loaded master dark:\n{os.path.basename(chosen)}"
+            )
+        else:
+            # "Flat" was clicked
+            if self.master_dark is not None:
+                if not self._shapes_compatible(master=self.master_dark, other=img):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "Cannot load this master flat: it has incompatible shape "
+                        "vs. the already‐loaded master dark."
+                    )
+                    return
+
+            self.master_flat = img
+            self.flat_status_label.setText("Flat: ✅")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")            
+            QMessageBox.information(
+                self, "Master Flat Loaded",
+                f"Loaded master flat:\n{os.path.basename(chosen)}"
+            )
+
+    def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
+        """
+        Return True if `master` and `other` can be used together in calibration:
+          - Exactly the same shape, OR
+          - master is 2D (H×W) and other is 3D (H×W×3), OR
+          - vice versa.
+        """
+        if master.shape == other.shape:
+            return True
+
+        # If one is 2D and the other is H×W×3, check the first two dims
+        if master.ndim == 2 and other.ndim == 3 and other.shape[:2] == master.shape:
+            return True
+        if other.ndim == 2 and master.ndim == 3 and master.shape[:2] == other.shape:
+            return True
+
+        return False
+
+    def _average_images(self, paths):
+        # stub: load each via load_image(), convert to float32, accumulate & divide
+        return None
+
+    def _normalized_average(self, paths):
+        # stub: load each, divide by its mean, average them, then renormalize
+        return None
+
+    def start_and_process(self):
+        """Process everything currently in folder, then begin monitoring."""
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        # Clear any old record so existing files are re-processed
+        self.processed_files.clear()
+        # Process all current files once
+        self.check_for_new_frames()
+        # Now start monitoring
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Processing & Monitoring: {os.path.basename(self.watch_folder)}")
+
+    def start_monitor_only(self):
+        """Mark existing files as seen and only process new arrivals."""
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        # Populate processed_files with all existing files so they won't be re-processed
+        exts = ("*.fit", "*.fits", "*.tif", "*.tiff")
+        all_paths = []
+        for ext in exts:
+            all_paths += glob.glob(os.path.join(self.watch_folder, ext))
+        self.processed_files = set(all_paths)
+
+        # Start monitoring
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Monitoring Only: {os.path.basename(self.watch_folder)}")
+
+    def start_live(self):
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Monitoring: {os.path.basename(self.watch_folder)}")
+        self.mode_label.setText("Mode: Linear Average")
+
+    def stop_live(self):
+        if self.is_running:
+            self.is_running = False
+            self.poll_timer.stop()
+            self.status_label.setText("■ Stopped")
+        else:
+            self.status_label.setText("■ Already stopped")
+
+    def reset_live(self):
+        if self.is_running:
+            self.is_running = False
+            self.poll_timer.stop()
+            self.status_label.setText("■ Stopped")
+        else:
+            self.status_label.setText("■ Already stopped")
+
+        # Clear all state
+        self.processed_files.clear()
+        self.frame_count = 0
+        self.current_stack = None
+
+        # Re-initialize bootstrapping stats
+        self._buffer = []
+        self._mu = None
+        self._m2 = None
+
+        # NEW: clear the metrics panel
+        self.metrics_window.metrics_panel.clear_all()
+
+        # Update labels
+        self.frame_count_label.setText("Frames: 0")
+        self.status_label.setText("↺ Reset")
+        self.mode_label.setText("Mode: Linear Average")
+
+        # Clear the displayed image
+        self.pixmap_item.setPixmap(QPixmap())
+
+        # Reset zoom/pan fit flag
+        self._did_initial_fit = False
+        self.master_dark = None
+        self.master_flat = None
+        self.dark_status_label.setText("Dark: ❌")
+        self.flat_status_label.setText("Flat: ❌")
+        self.dark_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+        self.flat_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")        
+
+
+
+
+    def check_for_new_frames(self):
+        if not self.is_running or not self.watch_folder:
+            return
+
+        # build the list of files with supported extensions
+        exts = ("*.fit", "*.fits", "*.tif", "*.tiff")
+        all_paths = []
+        for ext in exts:
+            all_paths += glob.glob(os.path.join(self.watch_folder, ext))
+
+        # only pick the ones we haven’t seen yet
+        new = [p for p in sorted(all_paths) if p not in self.processed_files]
+        if not new:
+            return
+
+        # update status
+        first = os.path.basename(new[0])
+        self.status_label.setText(f"➜ New frame: {first}")
+
+        for path in new:
+            self.processed_files.add(path)
+            self.process_frame(path)
+
+
+    def process_frame(self, path):
+        # 1) Load
+        self.status_label.setText(f"… loading {os.path.basename(path)}")
+        img, hdr, bit_depth, is_mono = load_image(path)
+        if img is None:
+            self.status_label.setText(f"⚠ Failed to load {os.path.basename(path)}")
+            return
+
+        # 2) Calibration
+        if self.master_dark is not None:
+            self.status_label.setText(f"Applying master dark to {os.path.basename(path)}")
+            QApplication.processEvents()  # allow UI to update
+            img = img.astype(np.float32) - self.master_dark
+        if self.master_flat is not None:
+            self.status_label.setText(f"Applying master flat to {os.path.basename(path)}")
+            QApplication.processEvents()  # allow UI to update
+            img = apply_flat_division_numba(img, self.master_flat)
+
+        # 3) Debayer **always before stacking**, if BAYERPAT present
+        if is_mono and hdr and 'BAYERPAT' in hdr:
+            pattern = hdr['BAYERPAT'][0] if isinstance(hdr['BAYERPAT'], tuple) else hdr['BAYERPAT']
+            img = debayer_fits_fast(img, pattern)
+            is_mono = False
+
+        # 4) Promote pure mono to 3-channel so every frame is H×W×3
+        if img.ndim == 2:
+            img = np.stack([img, img, img], axis=2)
+
+        # 5) Alignment & Running-Average Stack
+        if self.current_stack is None:
+            norm = stretch_color_image(img, target_median=0.3, linked=False)
+            self.current_stack = norm.copy()
+            self.reference_image_2d = np.mean(self.current_stack, axis=2)
+            self.frame_count = 1
+            self.mode_label.setText("Mode: Linear Average")
+            self._buffer.append(norm.copy())
+
+            # ─── NEW: compute per-frame metrics for frame #1 ───────────────
+            mono_for_metrics = np.mean(norm, axis=2)
+            sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
+            snr_val = estimate_global_snr(self.current_stack)
+            # Tell the metrics panel about frame #1
+            self.metrics_window.metrics_panel.add_point(self.frame_count, fwhm, ecc, sc, snr_val)
+
+        else:
+            mono_img = np.mean(img, axis=2)
+            delta = StarRegistrationWorker.compute_affine_transform_astroalign(
+                        mono_img, self.reference_image_2d
+                    )
+            if delta is None:
+                delta = IDENTITY_2x3
+            aligned = StarRegistrationThread.apply_affine_transform_static(img, delta)
+
+            norm = stretch_color_image(aligned, target_median=0.3, linked=False)
+
+            if self.frame_count < self.bootstrap_frames:
+                n = self.frame_count + 1
+                self.current_stack = ((self.frame_count / n) * self.current_stack
+                                    + (1.0 / n) * norm)
+                self.frame_count = n
+                self._buffer.append(norm.copy())
+
+                if self.frame_count == self.bootstrap_frames:
+                    buf = np.stack(self._buffer, axis=0)
+                    self._mu = np.mean(buf, axis=0)
+                    diffs = buf - self._mu[np.newaxis, ...]
+                    self._m2 = np.sum(diffs * diffs, axis=0)
+                    self._buffer = None
+                    self.mode_label.setText("Mode: μ-σ Clipping Average")
+            else:
+                sigma = np.sqrt(self._m2 / (self.frame_count - 1))
+                mask = np.abs(norm - self._mu) <= (self.clip_threshold * sigma)
+                clipped = np.where(mask, norm, self._mu)
+
+                n = self.frame_count + 1
+                self.current_stack = ((self.frame_count / n) * self.current_stack
+                                    + (1.0 / n) * clipped)
+
+                # Welford update
+                delta_mu = clipped - self._mu
+                self._mu += delta_mu / n
+                delta2 = clipped - self._mu
+                self._m2 += delta_mu * delta2
+
+                self.frame_count = n
+                self.mode_label.setText("Mode: μ-σ Clipping Average")
+
+            self.reference_image_2d = np.mean(self.current_stack, axis=2)
+
+            # ─── NEW: compute per-frame metrics for subsequent frames ────────
+            mono_for_metrics = np.mean(norm, axis=2)
+            sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
+            snr_val = estimate_global_snr(self.current_stack)
+            self.metrics_window.metrics_panel.add_point(self.frame_count, fwhm, ecc, sc, snr_val)
+            self.status_label.setText(f"✔ processed {os.path.basename(path)}")
+            QApplication.processEvents()  # allow UI to update
+
+        # 6) UI update (preview + labels)
+        self.frame_count_label.setText(f"Frames: {self.frame_count}")
+        self.status_label.setText(f"✔ processed {os.path.basename(path)}")
+        self.update_preview(self.current_stack)
+
+
+
+    def update_preview(self, array: np.ndarray):
+        """
+        Apply brightness/contrast, convert to QImage, and display in QGraphicsView
+        without resetting zoom/pan after the first fit.
+        """
+        # 1) normalize array [0..1] → adjust contrast & brightness
+        arr = np.clip(array, 0.0, 1.0).astype(np.float32)
+        pivot = 0.3
+        arr = ((arr - pivot) * self.contrast + pivot) + self.brightness
+        arr = np.clip(arr, 0.0, 1.0)
+
+        # 2) convert to uint8
+        arr8 = (arr * 255).astype(np.uint8)
+        h, w = arr8.shape[:2]
+
+        # 3) build QImage
+        if arr8.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            bytespp = w
+        else:
+            fmt = QImage.Format.Format_RGB888
+            bytespp = 3 * w
+        qimg = QImage(arr8.data, w, h, bytespp, fmt)
+
+        # 4) update the existing pixmap item
+        pix = QPixmap.fromImage(qimg)
+        self.pixmap_item.setPixmap(pix)
+
+        # 5) update scene rectangle so scrollbars know the new size
+        self.scene.setSceneRect(0, 0, w, h)
+
+        # 6) initial fit only once
+        if not self._did_initial_fit:
+            self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self._did_initial_fit = True
 
 def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
     """
@@ -22301,14 +23165,16 @@ class PolyGradientRemoval:
 class CustomDoubleSpinBox(QWidget):
     valueChanged = pyqtSignal(float)
 
-    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1, parent=None):
+    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1,
+                 suffix: str = "", parent=None):
         super().__init__(parent)
         self.minimum = minimum
         self.maximum = maximum
         self.step = step
         self._value = initial
+        self.suffix = suffix
 
-        # Create a line edit with a double validator.
+        # Line edit
         self.lineEdit = QLineEdit(f"{initial:.3f}")
         self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
         validator = QDoubleValidator(self.minimum, self.maximum, 3, self)
@@ -22316,27 +23182,32 @@ class CustomDoubleSpinBox(QWidget):
         self.lineEdit.setValidator(validator)
         self.lineEdit.editingFinished.connect(self.onEditingFinished)
 
-        # Create up and down buttons.
-        self.upButton = QToolButton()
-        self.upButton.setText("▲")
+        # Up/down buttons
+        self.upButton = QToolButton(); self.upButton.setText("▲")
+        self.downButton = QToolButton(); self.downButton.setText("▼")
         self.upButton.clicked.connect(self.increaseValue)
-        self.downButton = QToolButton()
-        self.downButton.setText("▼")
         self.downButton.clicked.connect(self.decreaseValue)
 
-        # Arrange buttons vertically.
+        # Buttons layout
         buttonLayout = QVBoxLayout()
         buttonLayout.addWidget(self.upButton)
         buttonLayout.addWidget(self.downButton)
         buttonLayout.setSpacing(0)
         buttonLayout.setContentsMargins(0, 0, 0, 0)
 
-        # Arrange the line edit and button layout horizontally.
+        # Optional suffix label
+        self.suffixLabel = QLabel(self.suffix) if self.suffix else None
+        if self.suffixLabel:
+            self.suffixLabel.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        # Main layout
         mainLayout = QHBoxLayout()
+        mainLayout.setSpacing(2)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
         mainLayout.addWidget(self.lineEdit)
         mainLayout.addLayout(buttonLayout)
-        mainLayout.setSpacing(0)
-        mainLayout.setContentsMargins(0, 0, 0, 0)
+        if self.suffixLabel:
+            mainLayout.addWidget(self.suffixLabel)
         self.setLayout(mainLayout)
 
         self.updateButtonStates()
