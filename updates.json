@@ -1,9 +1,9 @@
 {
-  "version": "2.16.6",
+  "version": "2.17.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.16.6/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Requires redownload of Cosmic Clarity.  Auto PSF for CC sharpening.  New UI to support lower resoltuion monitors.  Pixel math can be used on a blank slot.  Curves graph is a pop out to support lower resolution monitors.  Much much more."
+  "notes": "New Feature:  Live Stacking!  See release notes for more details!"
 }
