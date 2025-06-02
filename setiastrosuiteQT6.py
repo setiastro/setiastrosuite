@@ -255,7 +255,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.17.0"
+VERSION = "2.17.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -317,6 +317,7 @@ if hasattr(sys, '_MEIPASS'):
     jwstpupil_path = os.path.join(sys._MEIPASS, 'jwstpupil.png')
     signature_icon_path = os.path.join(sys._MEIPASS, 'pen.png')
     livestacking_path = os.path.join(sys._MEIPASS, 'livestacking.png')
+    hrdiagram_path = os.path.join(sys._MEIPASS, 'HRDiagram.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -376,6 +377,7 @@ else:
     jwstpupil_path = 'jwstpupil.png'
     signature_icon_path = 'pen.png'
     livestacking_path = 'livestacking.png'
+    hrdiagram_path = 'HRDiagram.png'
 
 
 def announce_zoom(method):
@@ -13088,10 +13090,16 @@ class StackingSuiteDialog(QDialog):
         return tile_result, rejection_mask
 
 class LiveStackSettingsDialog(QDialog):
+    """
+    Combined dialog for:
+      • Live‐stack parameters (bootstrap frames, σ‐clip threshold)
+      • Culling thresholds (max FWHM, max eccentricity, min star count)
+    """
     def __init__(self, parent):
         super().__init__(parent)
-        self.setWindowTitle("Live Stack Settings")
+        self.setWindowTitle("Live Stack & Culling Settings")
 
+        # — Live Stack Settings —
         # Bootstrap frames (int)
         self.bs_spin = CustomSpinBox(
             minimum=1,
@@ -13099,37 +13107,83 @@ class LiveStackSettingsDialog(QDialog):
             initial=parent.bootstrap_frames,
             step=1
         )
-        self.bs_spin.valueChanged.connect(lambda v: None)  # value() will reflect changes
+        self.bs_spin.valueChanged.connect(lambda v: None)
 
         # Sigma threshold (float)
         self.sigma_spin = CustomDoubleSpinBox(
             minimum=0.1,
             maximum=10.0,
             initial=parent.clip_threshold,
-            step=0.1, suffix="σ"
+            step=0.1,
+            suffix="σ"
         )
         self.sigma_spin.valueChanged.connect(lambda v: None)
 
+        # — Culling Thresholds —
+        # Max FWHM (float)
+        self.fwhm_spin = CustomDoubleSpinBox(
+            minimum=0.1,
+            maximum=50.0,
+            initial=parent.max_fwhm,
+            step=0.1,
+            suffix=" px"
+        )
+        self.fwhm_spin.valueChanged.connect(lambda v: None)
+
+        # Max eccentricity (float)
+        self.ecc_spin = CustomDoubleSpinBox(
+            minimum=0.0,
+            maximum=1.0,
+            initial=parent.max_ecc,
+            step=0.01
+        )
+        self.ecc_spin.valueChanged.connect(lambda v: None)
+
+        # Min star count (int)
+        self.star_spin = CustomSpinBox(
+            minimum=0,
+            maximum=5000,
+            initial=parent.min_star_count,
+            step=1
+        )
+        self.star_spin.valueChanged.connect(lambda v: None)
+
+        # Build form layout
         form = QFormLayout()
         form.addRow("Switch to μ–σ clipping after:", self.bs_spin)
         form.addRow("Clip threshold:", self.sigma_spin)
+        form.addRow(QLabel(""))  # blank row for separation
+        form.addRow("Max FWHM (px):", self.fwhm_spin)
+        form.addRow("Max Eccentricity:", self.ecc_spin)
+        form.addRow("Min Star Count:", self.star_spin)
 
+        # OK / Cancel buttons
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
 
+        # Assemble dialog layout
         layout = QVBoxLayout()
         layout.addLayout(form)
         layout.addWidget(btns)
         self.setLayout(layout)
 
     def getValues(self):
-        # CustomSpinBox.value is a property returning int
-        bs = self.bs_spin.value
-        sigma = self.sigma_spin.value()
-        return bs, sigma
+        """
+        Returns a tuple of five values in order:
+          (bootstrap_frames, clip_threshold,
+           max_fwhm, max_ecc, min_star_count)
+        """
+        bs      = self.bs_spin.value
+        sigma   = self.sigma_spin.value()
+        fwhm    = self.fwhm_spin.value()
+        ecc     = self.ecc_spin.value()
+        stars   = self.star_spin.value
+        return bs, sigma, fwhm, ecc, stars
+
+
 
 class LiveMetricsPanel(QWidget):
     """
@@ -13137,11 +13191,11 @@ class LiveMetricsPanel(QWidget):
       [0,0] → FWHM (px) vs. frame index
       [0,1] → Eccentricity vs. frame index
       [1,0] → Star Count vs. frame index
-      [1,1] → Global Stack SNR vs. frame index
+      [1,1] → (μ–ν)/σ (∝SNR) vs. frame index
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        titles = ["FWHM (px)", "Eccentricity", "Star Count", "(μ-ν)/σ (∝SNR)"]
+        titles = ["FWHM (px)", "Eccentricity", "Star Count", "(μ–ν)/σ (∝SNR)"]
 
         layout = QVBoxLayout(self)
         grid = pg.GraphicsLayoutWidget()
@@ -13151,6 +13205,7 @@ class LiveMetricsPanel(QWidget):
         self.scats = []
         self._data_x = [[], [], [], []]
         self._data_y = [[], [], [], []]
+        self._flags  = [[], [], [], []]  # track if each point was “bad” (True) or “good” (False)
 
         for row in range(2):
             for col in range(2):
@@ -13161,31 +13216,47 @@ class LiveMetricsPanel(QWidget):
                 pw.setLabel('bottom', "Frame #")
                 pw.setLabel('left', titles[idx])
 
-                scat = pg.ScatterPlotItem(
-                    pen=pg.mkPen(None),
-                    brush=pg.mkBrush(100, 100, 255, 200),
-                    size=6
-                )
+                scat = pg.ScatterPlotItem(pen=pg.mkPen(None),
+                                          brush=pg.mkBrush(100, 100, 255, 200),
+                                          size=6)
                 pw.addItem(scat)
                 self.plots.append(pw)
                 self.scats.append(scat)
 
-    def add_point(self, frame_idx: int, fwhm: float, ecc: float, star_cnt: int, snr_val: float):
+    def add_point(self, frame_idx: int, fwhm: float, ecc: float, star_cnt: int, snr_val: float, flagged: bool):
         """
-        Append one new data point to each of the four metrics:
-           [0] = FWHM, [1] = Ecc, [2] = Star Count, [3] = Global SNR
+        Append one new data point to each metric.  
+        If flagged == True, draw that single point in red; else blue.  
+        But keep all previously-plotted points at their original colors.
         """
         values = [fwhm, ecc, star_cnt, snr_val]
         for i in range(4):
             self._data_x[i].append(frame_idx)
             self._data_y[i].append(values[i])
-            self.scats[i].setData(self._data_x[i], self._data_y[i])
+            self._flags[i].append(flagged)
+
+            # Now build a brush list for *all* points up to index i,
+            # coloring each point according to its own flag.
+            brushes = [
+                pg.mkBrush(255, 0, 0, 200) if self._flags[i][j]
+                else pg.mkBrush(100, 100, 255, 200)
+                for j in range(len(self._data_x[i]))
+            ]
+
+            self.scats[i].setData(
+                self._data_x[i],
+                self._data_y[i],
+                brush=brushes,
+                pen=pg.mkPen(None),
+                size=6
+            )
 
     def clear_all(self):
         """Clear data from all four plots."""
         for i in range(4):
             self._data_x[i].clear()
             self._data_y[i].clear()
+            self._flags[i].clear()
             self.scats[i].clear()
 
 class LiveMetricsWindow(QWidget):
@@ -13338,6 +13409,13 @@ class LiveStackWindow(QDialog):
         self.processed_files = set()
         self.master_dark = None
         self.master_flat = None
+
+        self.cull_folder = None
+        # Default thresholds:
+        self.max_fwhm       = 15.0    # pixels
+        self.max_ecc        = 0.9     # dimensionless
+        self.min_star_count = 5      # number of stars
+
         self.is_running = False
         self.frame_count = 0
         self.current_stack = None
@@ -13367,6 +13445,12 @@ class LiveStackWindow(QDialog):
         self.load_darks_btn.clicked.connect(self.load_masters)
         self.load_flats_btn = QPushButton("Load Master Flat…")
         self.load_flats_btn.clicked.connect(self.load_masters)
+
+        # 2b) Cull folder selection
+        self.cull_folder_label = QLabel("Cull Folder: (none)")
+        self.select_cull_btn = QPushButton("Select Cull Folder…")
+        self.select_cull_btn.clicked.connect(self.select_cull_folder)
+
         self.dark_status_label = QLabel("Dark: ❌")
         self.flat_status_label = QLabel("Flat: ❌")
         for lbl in (self.dark_status_label, self.flat_status_label):
@@ -13469,6 +13553,7 @@ class LiveStackWindow(QDialog):
         controls.addWidget(self.select_folder_btn)
         controls.addWidget(self.load_darks_btn)
         controls.addWidget(self.load_flats_btn)
+        controls.addWidget(self.select_cull_btn)
         controls.addStretch()
         controls.addWidget(self.process_and_monitor_btn)
         controls.addWidget(self.monitor_only_btn)
@@ -13481,6 +13566,7 @@ class LiveStackWindow(QDialog):
         status_line.addWidget(self.folder_label)
         status_line.addWidget(self.dark_status_label)
         status_line.addWidget(self.flat_status_label)
+        status_line.addWidget(self.cull_folder_label)
         status_line.addStretch()        
         status_line.addWidget(self.frame_count_label)
         main_layout.addLayout(status_line)
@@ -13514,24 +13600,37 @@ class LiveStackWindow(QDialog):
         self.poll_timer.setInterval(1500)
         self.poll_timer.timeout.connect(self.check_for_new_frames)
 
+
     # ─────────────────────────────────────────────────────────────────────────
     def show_metrics_window(self):
         """Pop up the separate metrics window (never embed it here)."""
         self.metrics_window.show()
         self.metrics_window.raise_()
 
+
+    def select_cull_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Cull Folder")
+        if folder:
+            self.cull_folder = folder
+            self.cull_folder_label.setText(f"Cull: {os.path.basename(folder)}")
+
+
     def open_settings(self):
         dlg = LiveStackSettingsDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_bs, new_sigma = dlg.getValues()
-            # Update parameters
-            self.bootstrap_frames = new_bs
-            self.clip_threshold = new_sigma
-            # Reset so new parameters apply fresh
-            self.reset_live()
+            bs, sigma, fwhm, ecc, stars = dlg.getValues()
+            # Update live‐stack params
+            self.bootstrap_frames = bs
+            self.clip_threshold  = sigma
+            # Update culling thresholds
+            self.max_fwhm        = fwhm
+            self.max_ecc         = ecc
+            self.min_star_count  = stars
             self.status_label.setText(
-                f"↺ Reset with BS={new_bs}, σ={new_sigma:.1f}"
+                f"↺ Settings updated with CutOver={bs}, σ={sigma:.1f}, "
+                f"FWHM≤{fwhm:.1f}, ECC≤{ecc:.2f}, Stars≥{stars}"
             )
+            QApplication.processEvents()
 
     def zoom_in(self):
         self.view.scale(1.2, 1.2)
@@ -13703,7 +13802,11 @@ class LiveStackWindow(QDialog):
             self.status_label.setText("❗ No folder selected")
             return
         # Populate processed_files with all existing files so they won't be re-processed
-        exts = ("*.fit", "*.fits", "*.tif", "*.tiff")
+        exts = (
+            "*.fit", "*.fits", "*.tif", "*.tiff",
+            "*.cr2", "*.cr3", "*.nef", "*.arw",
+            "*.dng", "*.orf", "*.rw2", "*.pef"
+        )
         all_paths = []
         for ext in exts:
             all_paths += glob.glob(os.path.join(self.watch_folder, ext))
@@ -13777,7 +13880,11 @@ class LiveStackWindow(QDialog):
             return
 
         # build the list of files with supported extensions
-        exts = ("*.fit", "*.fits", "*.tif", "*.tiff")
+        exts = (
+            "*.fit", "*.fits", "*.tif", "*.tiff",
+            "*.cr2", "*.cr3", "*.nef", "*.arw",
+            "*.dng", "*.orf", "*.rw2", "*.pef"
+        )
         all_paths = []
         for ext in exts:
             all_paths += glob.glob(os.path.join(self.watch_folder, ext))
@@ -13796,22 +13903,88 @@ class LiveStackWindow(QDialog):
             self.process_frame(path)
 
 
+
     def process_frame(self, path):
         # 1) Load
-        self.status_label.setText(f"… loading {os.path.basename(path)}")
-        img, hdr, bit_depth, is_mono = load_image(path)
-        if img is None:
-            self.status_label.setText(f"⚠ Failed to load {os.path.basename(path)}")
-            return
+        # ─── 1) RAW‐file check ────────────────────────────────────────────
+        lower = path.lower()
+        raw_exts = ('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')
+        if lower.endswith(raw_exts):
+            # Attempt to decode using rawpy
+            try:
+                with rawpy.imread(path) as raw:
+                    # Postprocess into an 8‐bit RGB array
+                    # (you could tweak postprocess params if desired)
+                    img_rgb8 = raw.postprocess(
+                        use_camera_wb=True,
+                        no_auto_bright=True,
+                        output_bps=16
+                    )  # shape (H, W, 3), dtype=uint8
+
+                # Convert to float32 [0..1] so it matches load_image() behavior
+                img = img_rgb8.astype(np.float32) / 65535.0
+
+                # Build a minimal FITS header and attempt to extract EXIF tags
+                header = fits.Header()
+                header["SIMPLE"] = True
+                header["BITPIX"] = 16
+                header["CREATOR"] = "LiveStack(RAW)"
+                header["IMAGETYP"] = "RAW"
+                # Default EXPTIME/ISO/DATE-OBS in case EXIF fails
+                header["EXPTIME"] = "Unknown"
+                header["ISO"]     = "Unknown"
+                header["DATE-OBS"] = "Unknown"
+
+                try:
+                    with open(path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                    # EXIF: ExposureTime
+                    exp_tag = tags.get("EXIF ExposureTime") or tags.get("EXIF ShutterSpeedValue")
+                    if exp_tag:
+                        exp_str = str(exp_tag.values)
+                        if '/' in exp_str:
+                            top, bot = exp_str.split('/', 1)
+                            header["EXPTIME"] = (float(top)/float(bot), "Exposure Time (s)")
+                        else:
+                            header["EXPTIME"] = (float(exp_str), "Exposure Time (s)")
+                    # ISO
+                    iso_tag = tags.get("EXIF ISOSpeedRatings")
+                    if iso_tag:
+                        header["ISO"] = str(iso_tag.values)
+                    # Date/time original
+                    date_obs = tags.get("EXIF DateTimeOriginal")
+                    if date_obs:
+                        header["DATE-OBS"] = str(date_obs.values)
+                except Exception:
+                    # If EXIF parsing fails, just leave defaults
+                    pass
+
+                bit_depth = 16
+                is_mono = False
+
+            except Exception as e:
+                # If rawpy fails, bail out early
+                self.status_label.setText(f"⚠ Failed to decode RAW: {os.path.basename(path)}")
+                QApplication.processEvents()
+                return
+
+        else:
+            # ─── 2) Not RAW → call your existing load_image()
+            img, header, bit_depth, is_mono = load_image(path)
+            if img is None:
+                self.status_label.setText(f"⚠ Failed to load {os.path.basename(path)}")
+                QApplication.processEvents()
+                return
+
 
         # 2) Calibration
         if self.master_dark is not None:
             self.status_label.setText(f"Applying master dark to {os.path.basename(path)}")
-            QApplication.processEvents()  # allow UI to update
+            QApplication.processEvents()
             img = img.astype(np.float32) - self.master_dark
         if self.master_flat is not None:
             self.status_label.setText(f"Applying master flat to {os.path.basename(path)}")
-            QApplication.processEvents()  # allow UI to update
+            QApplication.processEvents()
             img = apply_flat_division_numba(img, self.master_flat)
 
         # 3) Debayer **always before stacking**, if BAYERPAT present
@@ -13820,26 +13993,14 @@ class LiveStackWindow(QDialog):
             img = debayer_fits_fast(img, pattern)
             is_mono = False
 
-        # 4) Promote pure mono to 3-channel so every frame is H×W×3
+        # 4) Promote pure mono to 3-channel
         if img.ndim == 2:
             img = np.stack([img, img, img], axis=2)
 
-        # 5) Alignment & Running-Average Stack
+        # 5) ALIGN & NORMALIZE this frame (but do not yet update the stack)
         if self.current_stack is None:
             norm = stretch_color_image(img, target_median=0.3, linked=False)
-            self.current_stack = norm.copy()
-            self.reference_image_2d = np.mean(self.current_stack, axis=2)
-            self.frame_count = 1
-            self.mode_label.setText("Mode: Linear Average")
-            self._buffer.append(norm.copy())
-
-            # ─── NEW: compute per-frame metrics for frame #1 ───────────────
-            mono_for_metrics = np.mean(norm, axis=2)
-            sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
-            snr_val = estimate_global_snr(self.current_stack)
-            # Tell the metrics panel about frame #1
-            self.metrics_window.metrics_panel.add_point(self.frame_count, fwhm, ecc, sc, snr_val)
-
+            aligned = norm.copy()
         else:
             mono_img = np.mean(img, axis=2)
             delta = StarRegistrationWorker.compute_affine_transform_astroalign(
@@ -13848,15 +14009,61 @@ class LiveStackWindow(QDialog):
             if delta is None:
                 delta = IDENTITY_2x3
             aligned = StarRegistrationThread.apply_affine_transform_static(img, delta)
-
             norm = stretch_color_image(aligned, target_median=0.3, linked=False)
 
+        # ─── Compute per-frame metrics BEFORE stacking ─────────────────────
+        mono_for_metrics = np.mean(norm, axis=2)
+        sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
+        snr_val = estimate_global_snr(self.current_stack if self.current_stack is not None else norm)
+
+        # Determine if this frame should be culled
+        flagged = False
+        if hasattr(self, 'max_fwhm') and fwhm > self.max_fwhm:
+            flagged = True
+        if hasattr(self, 'max_ecc') and ecc > self.max_ecc:
+            flagged = True
+        if hasattr(self, 'min_star_count') and sc < self.min_star_count:
+            flagged = True
+
+        if flagged:
+            # Move to cull folder if configured
+            if self.cull_folder:
+                try:
+                    os.makedirs(self.cull_folder, exist_ok=True)
+                    dst = os.path.join(self.cull_folder, os.path.basename(path))
+                    shutil.move(path, dst)
+                    self.status_label.setText(f"⚠ Culled {os.path.basename(path)} → {self.cull_folder}")
+                except Exception:
+                    self.status_label.setText(f"⚠ Failed to cull {os.path.basename(path)}")
+            else:
+                self.status_label.setText(f"⚠ Flagged (not stacked): {os.path.basename(path)}")
+
+            # Update metrics panel with flagged=True (red dot)
+            self.metrics_window.metrics_panel.add_point(
+                self.frame_count + 1, fwhm, ecc, sc, snr_val, True
+            )
+            QApplication.processEvents()
+            return
+
+        # ─── If not flagged, now update the running‐average stack ─────────
+        if self.current_stack is None:
+            # First good frame
+            self.current_stack = norm.copy()
+            self.reference_image_2d = np.mean(self.current_stack, axis=2)
+            self.frame_count = 1
+            self.mode_label.setText("Mode: Linear Average")
+            self._buffer.append(norm.copy())
+            self.status_label.setText(f"Processed {os.path.basename(path)}")
+            QApplication.processEvents()
+        else:
             if self.frame_count < self.bootstrap_frames:
                 n = self.frame_count + 1
                 self.current_stack = ((self.frame_count / n) * self.current_stack
-                                    + (1.0 / n) * norm)
+                                     + (1.0 / n) * norm)
                 self.frame_count = n
                 self._buffer.append(norm.copy())
+                self.status_label.setText(f"Processed {os.path.basename(path)}")
+                QApplication.processEvents()
 
                 if self.frame_count == self.bootstrap_frames:
                     buf = np.stack(self._buffer, axis=0)
@@ -13865,6 +14072,7 @@ class LiveStackWindow(QDialog):
                     self._m2 = np.sum(diffs * diffs, axis=0)
                     self._buffer = None
                     self.mode_label.setText("Mode: μ-σ Clipping Average")
+                    QApplication.processEvents()
             else:
                 sigma = np.sqrt(self._m2 / (self.frame_count - 1))
                 mask = np.abs(norm - self._mu) <= (self.clip_threshold * sigma)
@@ -13872,7 +14080,7 @@ class LiveStackWindow(QDialog):
 
                 n = self.frame_count + 1
                 self.current_stack = ((self.frame_count / n) * self.current_stack
-                                    + (1.0 / n) * clipped)
+                                     + (1.0 / n) * clipped)
 
                 # Welford update
                 delta_mu = clipped - self._mu
@@ -13881,22 +14089,24 @@ class LiveStackWindow(QDialog):
                 self._m2 += delta_mu * delta2
 
                 self.frame_count = n
+                self.status_label.setText(f"Processed {os.path.basename(path)}")
                 self.mode_label.setText("Mode: μ-σ Clipping Average")
+                QApplication.processEvents()
 
+            # Refresh alignment reference
             self.reference_image_2d = np.mean(self.current_stack, axis=2)
 
-            # ─── NEW: compute per-frame metrics for subsequent frames ────────
-            mono_for_metrics = np.mean(norm, axis=2)
-            sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
-            snr_val = estimate_global_snr(self.current_stack)
-            self.metrics_window.metrics_panel.add_point(self.frame_count, fwhm, ecc, sc, snr_val)
-            self.status_label.setText(f"✔ processed {os.path.basename(path)}")
-            QApplication.processEvents()  # allow UI to update
+        # ─── Update metrics panel for this good frame ────────────────────
+        self.metrics_window.metrics_panel.add_point(
+            self.frame_count, fwhm, ecc, sc, snr_val, False
+        )
 
         # 6) UI update (preview + labels)
         self.frame_count_label.setText(f"Frames: {self.frame_count}")
         self.status_label.setText(f"✔ processed {os.path.basename(path)}")
         self.update_preview(self.current_stack)
+        QApplication.processEvents()
+
 
 
 
@@ -47063,6 +47273,126 @@ class ThreeDSettingsDialog(QDialog):
             }
         return None
 
+class HRSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("H-R Diagram Settings")
+        layout = QVBoxLayout(self)
+
+        # 1) Star Color Mode
+        layout.addWidget(QLabel("Star Color Mode:"))
+        self.color_mode_cb = QComboBox()
+        self.color_mode_cb.addItems(["Realistic (blackbody)", "Solid (Custom)"])
+        layout.addWidget(self.color_mode_cb)
+
+        self.color_btn = QPushButton("Choose Solid Color…")
+        self.custom_color = QColor(255, 255, 255)
+        self.color_btn.setVisible(False)
+        layout.addWidget(self.color_btn)
+        self.color_btn.clicked.connect(self._choose_color)
+        self.color_mode_cb.currentIndexChanged.connect(
+            lambda idx: self.color_btn.setVisible(
+                self.color_mode_cb.currentText().startswith("Solid")
+            )
+        )
+
+        # 2) Background Choice
+        layout.addWidget(QLabel("Background:"))
+        self.bg_mode_cb = QComboBox()
+        self.bg_mode_cb.addItems(["HR Diagram Image", "Solid Black"])
+        layout.addWidget(self.bg_mode_cb)
+
+        # 3) Axis Range Mode
+        layout.addWidget(QLabel("Axis Range:"))
+        self.range_mode_cb = QComboBox()
+        self.range_mode_cb.addItems(["Default (–0.3→2.25, –9→19)", "Custom"])
+        layout.addWidget(self.range_mode_cb)
+
+        self.custom_range_widget = QWidget()
+        cr_layout = QHBoxLayout(self.custom_range_widget)
+        cr_layout.addWidget(QLabel("X Min:"))
+        self.xmin_spin = QDoubleSpinBox()
+        self.xmin_spin.setRange(-10.0, 10.0)
+        self.xmin_spin.setDecimals(3)
+        self.xmin_spin.setValue(-0.3)
+        cr_layout.addWidget(self.xmin_spin)
+
+        cr_layout.addWidget(QLabel("X Max:"))
+        self.xmax_spin = QDoubleSpinBox()
+        self.xmax_spin.setRange(-10.0, 10.0)
+        self.xmax_spin.setDecimals(3)
+        self.xmax_spin.setValue(2.25)
+        cr_layout.addWidget(self.xmax_spin)
+
+        cr_layout.addWidget(QLabel("Y Min:"))
+        self.ymin_spin = QDoubleSpinBox()
+        self.ymin_spin.setRange(-50.0, 50.0)
+        self.ymin_spin.setDecimals(3)
+        self.ymin_spin.setValue(-9.0)
+        cr_layout.addWidget(self.ymin_spin)
+
+        cr_layout.addWidget(QLabel("Y Max:"))
+        self.ymax_spin = QDoubleSpinBox()
+        self.ymax_spin.setRange(-50.0, 50.0)
+        self.ymax_spin.setDecimals(3)
+        self.ymax_spin.setValue(19.0)
+        cr_layout.addWidget(self.ymax_spin)
+
+        layout.addWidget(self.custom_range_widget)
+        self.custom_range_widget.setVisible(False)
+        self.range_mode_cb.currentIndexChanged.connect(
+            lambda idx: self.custom_range_widget.setVisible(
+                self.range_mode_cb.currentText().startswith("Custom")
+            )
+        )
+
+        layout.addWidget(QLabel("Show Sun:"))
+        self.show_sun_cb = QCheckBox("Include Sun on diagram")
+        self.show_sun_cb.setChecked(True)       # default ON
+        layout.addWidget(self.show_sun_cb)
+
+        # 4) OK / Cancel Buttons
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _choose_color(self):
+        col = QColorDialog.getColor(self.custom_color, self, "Select Marker Color")
+        if col.isValid():
+            self.custom_color = col
+
+    def getSettings(self):
+        """
+        Pops up the dialog. Returns a dict:
+        {
+            "color_mode":    "Realistic (blackbody)" or "Solid (Custom)",
+            "custom_color":  QColor,
+            "bg_mode":       "HR Diagram Image" or "Solid Black",
+            "range_mode":    "Default" or "Custom",
+            "x_min":         float,
+            "x_max":         float,
+            "y_min":         float,
+            "y_max":         float
+        }
+        or None if the user canceled.
+        """
+        if self.exec() == QDialog.DialogCode.Accepted:
+            return {
+                "color_mode": self.color_mode_cb.currentText(),
+                "custom_color": self.custom_color,
+                "bg_mode": self.bg_mode_cb.currentText(),
+                "range_mode": self.range_mode_cb.currentText(),
+                "x_min": self.xmin_spin.value(),
+                "x_max": self.xmax_spin.value(),
+                "y_min": self.ymin_spin.value(),
+                "y_max": self.ymax_spin.value(),
+                "show_sun":      self.show_sun_cb.isChecked(),
+            }
+        return None
+
 class LegendDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48373,14 +48703,34 @@ class MainWindow(QMainWindow):
 
 
     def show_hr_diagram(self):
-        """H-R Diagram: B–V vs Abs V, ticks showing B–V and T_eff together, BB colors."""
-        # 1) Sanity
+        """H-R Diagram: B–V vs Abs V, with selectable color, background, and axis ranges."""
+        # Pop up the settings dialog
+        settings = HRSettingsDialog(self).getSettings()
+        if settings is None:
+            return
+
+        use_realistic = settings["color_mode"].startswith("Realistic")
+        use_image_bg = settings["bg_mode"].startswith("HR Diagram")
+        solid_qcolor = settings["custom_color"]
+        show_sun = settings["show_sun"]
+
+        # Determine axis bounds
+        if settings["range_mode"].startswith("Default"):
+            x0, x1 = -0.3, 2.25
+            y0, y1 = -9.0, 19.0
+        else:
+            x0 = settings["x_min"]
+            x1 = settings["x_max"]
+            y0 = settings["y_min"]
+            y1 = settings["y_max"]
+
+        # Sanity: ensure query_results exist
         if not getattr(self, 'query_results', None):
             QMessageBox.information(self, "No Data",
                 "Run a SIMBAD query first to gather B, V, and distance data.")
             return
 
-        # 2) Collect data
+        # Collect data
         B, V, Mv, names = [], [], [], []
         for obj in self.query_results:
             try:
@@ -48395,12 +48745,16 @@ class MainWindow(QMainWindow):
                 "No objects have valid B-mag, V-mag and absolute magnitude.")
             return
 
-        # 3) Compute B−V & T_eff & colors
+        # Compute B−V & T_eff & colors
         bv = [b - v for b, v in zip(B, V)]
         T_eff = [4600.0 * (1/(0.92*x + 1.7) + 1/(0.92*x + 0.62)) for x in bv]
-        colors = [kelvin_to_rgb(T) for T in T_eff]
+        if use_realistic:
+            colors = [kelvin_to_rgb(T) for T in T_eff]
+        else:
+            hex_color = solid_qcolor.name()
+            colors = [hex_color] * len(bv)
 
-        # 4) Prepare hover & URLs, now including T_eff
+        # Prepare hover & URLs
         hover_texts, urls = [], []
         for nm, b, v, m, T in zip(names, B, V, Mv, T_eff):
             hover_texts.append(
@@ -48415,7 +48769,7 @@ class MainWindow(QMainWindow):
                 f"Ident={enc}&submit=SIMBAD+search"
             )
 
-        # 5) Scatter with bigger markers
+        # Create scatter
         scatter = go.Scatter(
             x=bv, y=Mv, mode='markers',
             marker_color=colors, marker_size=20,
@@ -48424,21 +48778,57 @@ class MainWindow(QMainWindow):
         )
         fig = go.Figure(scatter)
 
-        # 6) Build custom tick labels combining B–V & T_eff
-        # choose nice tick positions
-        bv_ticks = [-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
-        # compute corresponding T
+
+        # 1) Dense BV grid over x0→x1
+        bv_grid = np.linspace(x0, x1, 300)
+        # 2) Compute Teff at each BV
+        T_grid = 4600.0 * (1.0/(0.92*bv_grid + 1.7) + 1.0/(0.92*bv_grid + 0.62))
+        # 3) Solar Teff for normalization
+        T_sun = 5772.0
+
+        # 4) Radii in R_sun
+        radii = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+        # 5) Corresponding gray shades for each contour
+        gray_colors = [
+            "#444444",  # darkest gray for R=0.01
+            "#666666",  # R=0.1
+            "#888888",  # R=1.0
+            "#AAAAAA",  # R=10
+            "#CCCCCC",  # R=100
+            "#EEEEEE"   # R=1000 (lightest)
+        ]
+
+        for idx, R_rs in enumerate(radii):
+            # compute L/L_sun
+            L_over_Lsun = (R_rs**2) * (T_grid / T_sun)**4
+            # convert to M_V
+            MV_line = 4.83 - 2.5 * np.log10(L_over_Lsun)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=bv_grid,
+                    y=MV_line,
+                    mode='lines',
+                    line=dict(
+                        color=gray_colors[idx],
+                        dash='dash'
+                    ),
+                    name=f"R = {R_rs:g} R⊙",   # plain text “R⊙”
+                    hoverinfo='none'
+                )
+            )
+        # ───────────────────────────────────────────────────────────────────
+
+        # Build tick labels
+        bv_ticks = [-0.3, 0.0, 0.5, 1.0, 1.5, 2.0, 2.25]
         t_ticks = [4600.0*(1/(0.92*x+1.7)+1/(0.92*x+0.62)) for x in bv_ticks]
-        # build two-line labels
         tick_labels = [f"{x:.2f}<br>{int(t):,} K" for x,t in zip(bv_ticks, t_ticks)]
 
-        # 7) Style axes & background
-        fig.update_layout(
-            title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
-            plot_bgcolor='black',
-            paper_bgcolor='black',
-            margin=dict(l=40, r=20, t=60, b=60)
-        )
+        # If using image background, load via PIL
+        if use_image_bg:
+            pil_img = Image.open(hrdiagram_path)
+
+        # Force the specified x & y axis ranges
         fig.update_xaxes(
             title_text="B−V color (mag) ↔ Tₑff",
             tickvals=bv_ticks,
@@ -48447,18 +48837,65 @@ class MainWindow(QMainWindow):
             title_font=dict(color='white'),
             gridcolor='gray',
             zerolinecolor='gray',
-            range=[-0.5, 2.5]
+            range=[x0, x1]
         )
         fig.update_yaxes(
             title_text="Absolute V magnitude (mag)",
-            autorange='reversed',
+            range=[y1, y0],         # reversed on purpose: y1 (–9) at top, y0 (19) at bottom
+            autorange=False,
             tickfont_color='white',
             title_font=dict(color='white'),
             gridcolor='gray',
-            zerolinecolor='gray'
+            zerolinecolor='gray',
         )
 
-        # 8) Sidebar & click behaviour
+        # Add the image behind the plot if chosen
+        if use_image_bg:
+            fig.add_layout_image(
+                dict(
+                    source=pil_img,
+                    xref="x", yref="y",
+                    x=x0, y=y0,
+                    sizex=(x1 - x0),
+                    sizey=(y1 - y0),
+                    xanchor="left", yanchor="top",
+                    sizing="stretch",
+                    opacity=1.0,
+                    layer="below"
+                )
+            )
+
+        # Add a special marker for the Sun (B−V=0.66, Mv=4.8)
+        if show_sun:
+            sun_scatter = go.Scatter(
+                x=[0.66], y=[4.8],
+                mode='markers+text',
+                marker=dict(
+                    color='gold',
+                    size=30,
+                    symbol='star'
+                ),
+                name="Sun"
+            )
+            fig.add_trace(sun_scatter)
+
+        # Style axes & background
+        if use_image_bg:
+            fig.update_layout(
+                title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='black',
+                margin=dict(l=40, r=20, t=60, b=60)
+            )
+        else:
+            fig.update_layout(
+                title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
+                plot_bgcolor='black',
+                paper_bgcolor='black',
+                margin=dict(l=40, r=20, t=60, b=60)
+            )
+
+        # Sidebar & click behaviour
         items = "".join(
             f'<li><a href="{u}" style="color:cyan" target="_blank">{n}</a></li>'
             for n,u in zip(names, urls)
@@ -48481,7 +48918,7 @@ class MainWindow(QMainWindow):
         html = fig.to_html(include_plotlyjs='cdn', full_html=True)
         html = html.replace("</body>", sidebar + js + "</body>")
 
-        # 9) Save & preview
+        # Save & preview
         default = os.path.join(os.path.expanduser("~"), "hr_diagram.html")
         fn, _ = QFileDialog.getSaveFileName(self, "Save H-R Diagram As",
                                             default, "HTML Files (*.html)")
@@ -48495,6 +48932,7 @@ class MainWindow(QMainWindow):
                                         mode='w', encoding='utf-8')
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
+
     
     def search_defined_region(self):
         """Perform a Simbad search for the defined region and filter by selected object types."""
