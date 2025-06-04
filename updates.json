@@ -1,9 +1,9 @@
 {
-  "version": "2.17.1",
+  "version": "2.17.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Realtime culling in Live Stacking.  updated HR-Diagram settings in WIMI"
+  "notes": "New Function: Convolution/Deconvolution. This houses some advanced traditional convolution and deconvolution options including estimating the PSF of your image based on stellar profiles for those looking for a more traditional approach to deconvolution over neural net based sharpening."
 }
