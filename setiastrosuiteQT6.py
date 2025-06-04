@@ -29998,6 +29998,22 @@ class ConvoDeconvoDialog(QDialog):
         # 7) Finally, initialize the preview once
         self._update_psf_preview()
 
+    def showEvent(self, event):
+        """
+        Whenever this dialog is shown (or re‐shown), pull in the current active
+        slot’s image and reset preview. This way it won’t “remember” the old one.
+        """
+        super().showEvent(event)
+        # Clear any previous preview so we start fresh:
+        self._preview_result = None
+
+        # Reload the “original” from the active slot:
+        self._load_original_on_startup()
+
+        # Also clear PSF‐preview label (if you want it blank on open):
+        self.conv_psf_label.clear()
+        self.sep_psf_preview.clear()
+
     def closeEvent(self, event):
         """
         When the user closes this dialog, clear out all large arrays,
