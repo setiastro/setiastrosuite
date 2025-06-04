@@ -36,7 +36,7 @@ from io import BytesIO
 import re
 from collections import defaultdict
 from scipy.spatial import Delaunay, KDTree
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, laplace
 import scipy.ndimage as ndi
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
@@ -48,7 +48,11 @@ import numpy as np
 from matplotlib.patches import Circle
 from matplotlib.ticker import MaxNLocator
 from typing import Optional
-
+from skimage.restoration import richardson_lucy, denoise_bilateral, denoise_tv_chambolle
+from skimage.color import rgb2gray, rgb2lab, lab2rgb
+from skimage.transform import warp_polar, warp
+from skimage import img_as_float32
+from numpy.fft import fft2, ifft2, fftshift, ifftshift
 
 import random
 if sys.stdout is not None:
@@ -114,7 +118,7 @@ from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import Rbf
 from scipy.ndimage import median_filter
 from scipy.ndimage import convolve
-
+from scipy.signal import fftconvolve
 
 import rawpy
 import numpy.ma as ma
@@ -148,6 +152,7 @@ from PyQt6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QGraphicsPolygonItem,
+    QFrame,
     QToolTip,
     QCheckBox,
     QDialog,
@@ -255,7 +260,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.17.1"
+VERSION = "2.17.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -318,6 +323,7 @@ if hasattr(sys, '_MEIPASS'):
     signature_icon_path = os.path.join(sys._MEIPASS, 'pen.png')
     livestacking_path = os.path.join(sys._MEIPASS, 'livestacking.png')
     hrdiagram_path = os.path.join(sys._MEIPASS, 'HRDiagram.png')
+    convoicon_path = os.path.join(sys._MEIPASS, 'convo.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -378,6 +384,7 @@ else:
     signature_icon_path = 'pen.png'
     livestacking_path = 'livestacking.png'
     hrdiagram_path = 'HRDiagram.png'
+    convoicon_path = 'convo.png'
 
 
 def announce_zoom(method):
@@ -424,6 +431,7 @@ class AstroEditingSuite(QMainWindow):
         self.settings = QSettings()   # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
         self.preview_windows = {}
+        self._convo_deconvo_window = None
 
         # NEW: Dictionary to store custom slot names (default names)
         self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
@@ -606,6 +614,12 @@ class AstroEditingSuite(QMainWindow):
         
         # Add White Balance to Functions menu
         functions_menu.addAction(whitebalance_action)   
+
+        convo_icon = QIcon(convoicon_path)  # Set this to your 16×16 or 24×24 icon path
+        self.convo_deconvo_action = QAction(convo_icon, "Convolution / Deconvolution", self)
+        self.convo_deconvo_action.setStatusTip("Open Convolution & Deconvolution tool")
+        self.convo_deconvo_action.triggered.connect(self.convo_deconvo_show)
+        functions_menu.addAction(self.convo_deconvo_action)
 
         # Extract Luminance Action with Icon
         extract_luminance_icon = QIcon(LExtract_path)
@@ -1020,6 +1034,8 @@ class AstroEditingSuite(QMainWindow):
         whitebalance_action.setToolTip("Adjust white balance of the image.")
         toolbar.addAction(whitebalance_action)
 
+        toolbar.addAction(self.convo_deconvo_action)
+
         extract_luminance_icon = QIcon(LExtract_path)
         extract_luminance_action = QAction(extract_luminance_icon, "Extract Luminance", self)
         extract_luminance_action.triggered.connect(self.extract_luminance)
@@ -1294,6 +1310,19 @@ class AstroEditingSuite(QMainWindow):
     def starspiketool(self):
         dialog = StarSpikeTool(self.image_manager, self.mask_manager, parent=self)
         dialog.exec()
+
+    def convo_deconvo_show(self):
+        """
+        Show (or re‐show) the Convolution/Deconvolution dialog.
+        Store it as an instance attribute so it doesn’t get garbage‐collected.
+        """
+        if self._convo_deconvo_window is None:
+            self._convo_deconvo_window = ConvoDeconvoDialog(parent=self)
+            # If you need to pass data (e.g. the current image) into the dialog,
+            # you could do it here, e.g.:
+            #   self._convo_deconvo_window.set_image(self.image_manager.get_current_image())
+        self._convo_deconvo_window.show()
+        self._convo_deconvo_window.raise_()  # bring to front
 
     def remove_pedestal(self):
         # 1) Prompt the user
@@ -13478,9 +13507,10 @@ class LiveStackWindow(QDialog):
 
         # 5) Zoom toolbar + Settings icon
         tb = QToolBar()
-        zi = QAction(QIcon(":/icons/zoom_in.png"), "Zoom In", self)
-        zo = QAction(QIcon(":/icons/zoom_out.png"), "Zoom Out", self)
-        fit = QAction(QIcon(":/icons/fit.png"), "Fit to Window", self)
+
+        zi = QAction(QIcon.fromTheme("zoom-in"), "Zoom In", self)
+        zo = QAction(QIcon.fromTheme("zoom-out"), "Zoom Out", self)
+        fit = QAction(QIcon.fromTheme("zoom-fit-best"), "Fit to Window", self)
 
         tb.addAction(zi)
         tb.addAction(zo)
@@ -13988,8 +14018,8 @@ class LiveStackWindow(QDialog):
             img = apply_flat_division_numba(img, self.master_flat)
 
         # 3) Debayer **always before stacking**, if BAYERPAT present
-        if is_mono and hdr and 'BAYERPAT' in hdr:
-            pattern = hdr['BAYERPAT'][0] if isinstance(hdr['BAYERPAT'], tuple) else hdr['BAYERPAT']
+        if is_mono and header and 'BAYERPAT' in header:
+            pattern = header['BAYERPAT'][0] if isinstance(header['BAYERPAT'], tuple) else header['BAYERPAT']
             img = debayer_fits_fast(img, pattern)
             is_mono = False
 
@@ -29650,6 +29680,2182 @@ class SignatureInsertWindow(QMainWindow):
         arr = np.frombuffer(ptr, np.uint8).reshape((h, img.bytesPerLine()))
         arr = arr[:, :w * 4].reshape((h, w, 4))
         return arr.astype(np.float32) / 255.0
+
+class InteractiveGraphicsView(QGraphicsView):
+    """
+    A QGraphicsView that captures Shift+Click to define a Larson–Sekanina center.
+    Draws a small crosshair at the chosen point.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ls_center = None    # (x, y) in scene coordinates
+        self.cross_items = []    # To hold the QGraphicsLineItem(s) for the marker
+
+    def mousePressEvent(self, event):
+        # If Shift is held during a left‐click, record the LS center:
+        if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) and event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            x, y = scene_pt.x(), scene_pt.y()
+            self.ls_center = (x, y)
+            self._draw_crosshair_at(x, y)
+            # Don’t propagate further, so we don’t start panning:
+            return
+
+        # Otherwise, fallback to normal panning behavior:
+        super().mousePressEvent(event)
+
+    def _draw_crosshair_at(self, x: float, y: float):
+        # Remove any existing crosshair
+        for item in self.cross_items:
+            self.scene().removeItem(item)
+        self.cross_items.clear()
+
+        size = 10  # crosshair half‐length in pixels
+        pen = QPen(QColor(255, 0, 0), 2)
+        # Horizontal line
+        hline = self.scene().addLine(x - size, y, x + size, y, pen)
+        # Vertical line
+        vline = self.scene().addLine(x, y - size, x, y + size, pen)
+        self.cross_items.extend([hline, vline])
+
+class FloatSliderWithEdit(QWidget):
+    """
+    A composite widget combining a QSlider (integer) and a QLineEdit (float).
+    Internally maps the slider’s integer range [min_int … max_int] → float range
+    [min_float … max_float] in fixed steps.  Emits valueChanged(float).
+    """
+
+    # Signal with the new float value whenever it changes.
+    valueChanged = pyqtSignal(float)
+
+    def __init__(
+        self,
+        *,
+        minimum: float,
+        maximum: float,
+        step: float,
+        initial: float,
+        suffix: str = "",
+        parent = None
+    ):
+        """
+        - minimum, maximum: the float range.
+        - step: the smallest increment (e.g. 0.1).
+        - initial: starting float value (must lie between [minimum..maximum]).
+        - suffix: e.g. " px" or "°", appended in the QLineEdit.
+        """
+        super().__init__(parent)
+
+        self._min = minimum
+        self._max = maximum
+        self._step = step
+        self._suffix = suffix
+
+        # Compute integer mapping factor = 1/step
+        self._factor = 1.0 / step
+        # So slider integer range:
+        self._int_min = int(round(minimum * self._factor))
+        self._int_max = int(round(maximum * self._factor))
+
+        # Layout: QSlider on the left, QLineEdit on the right
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 1) Build QSlider
+        self.slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider.setRange(self._int_min, self._int_max)
+        layout.addWidget(self.slider, stretch=1)
+
+        # 2) Build QLineEdit with validator for float
+        self.edit = QLineEdit(self)
+        self.edit.setFixedWidth(60)
+        validator = QDoubleValidator(minimum, maximum, int(abs(np.log10(step))), self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.edit.setValidator(validator)
+        layout.addWidget(self.edit)
+
+        # 3) Initialize both to the given initial value
+        self.setValue(initial)
+
+        # 4) Connect slider→edit
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        # 5) Connect edit→slider (when editing is finished)
+        self.edit.editingFinished.connect(self._on_edit_finished)
+
+    def _on_slider_changed(self, int_val: int):
+        """
+        Called whenever the slider moves.  Convert int_val → float,
+        update the text field, and emit valueChanged(float).
+        """
+        f = int_val / self._factor
+        # Clamp to [min..max] in case of rounding
+        if f < self._min: f = self._min
+        if f > self._max: f = self._max
+        text = f"{f:.{max(0, int(-np.log10(self._step)))}f}{self._suffix}"
+        # Block signals on edit so we don’t re-enter _on_edit_finished
+        self.edit.blockSignals(True)
+        self.edit.setText(text)
+        self.edit.blockSignals(False)
+        self.valueChanged.emit(f)
+
+    def _on_edit_finished(self):
+        """
+        Called when the user types a number and presses Enter (or leaves the field).
+        Parse the float (ignoring suffix), clamp it, update the slider.
+        """
+        txt = self.edit.text().rstrip(self._suffix)
+        try:
+            f = float(txt)
+        except ValueError:
+            # If parsing fails, reset to slider’s current float
+            current_int = self.slider.value()
+            f = current_int / self._factor
+
+        if f < self._min:
+            f = self._min
+        elif f > self._max:
+            f = self._max
+
+        int_val = int(round(f * self._factor))
+        self.slider.blockSignals(True)
+        self.slider.setValue(int_val)
+        self.slider.blockSignals(False)
+        # Setting the slider will trigger _on_slider_changed, which updates the text & emits.
+
+    def value(self) -> float:
+        """Return the current float value."""
+        return self.slider.value() / self._factor
+
+    def setValue(self, f: float):
+        """Programmatically set to a given float f (clamped & rounded)."""
+        if f < self._min:
+            f = self._min
+        elif f > self._max:
+            f = self._max
+        int_val = int(round(f * self._factor))
+        self.slider.blockSignals(True)
+        self.slider.setValue(int_val)
+        self.slider.blockSignals(False)
+        # Also update the text explicitly:
+        s = f"{(int_val / self._factor):.{max(0, int(-np.log10(self._step)))}f}{self._suffix}"
+        self.edit.setText(s)
+        # Finally, emit that value
+        self.valueChanged.emit(int_val / self._factor)
+
+class ConvoDeconvoDialog(QDialog):
+    """
+    Convolution / Deconvolution dialog with a two‐column layout:
+     - Left column: parameter tabs + action buttons (Preview, Undo, Push, Close)
+     - Right column: a QGraphicsView showing the preview, with Zoom In/Out/Fit controls
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Convolution / Deconvolution")
+        self.resize(1000, 650)
+        self._use_custom_psf = False
+        self._custom_psf = None
+        # Make it a top‐level window (won't minimize with parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window)
+
+        # Keep track of original & preview images for Undo/Push
+        self._original_image = None
+        self._preview_result = None
+
+        # ─── Build the two‐column layout ───────────────────────────────────
+        main_layout = QHBoxLayout(self)
+        # Left panel (controls) will be fixed‐width
+        left_panel = QFrame()
+        left_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        left_panel.setFixedWidth(350)
+        left_layout = QVBoxLayout(left_panel)
+        main_layout.addWidget(left_panel)
+
+        # Right panel (preview) will expand
+        preview_panel = QFrame()
+        preview_layout = QVBoxLayout(preview_panel)
+        main_layout.addWidget(preview_panel, stretch=1)
+
+        # ─── LEFT PANEL: TABS + Action Buttons ────────────────────────────
+        # 1) Tab widget
+        self.tabs = QTabWidget()
+        left_layout.addWidget(self.tabs)
+
+        self.deconv_param_stack = {}
+        self.deconv_stack_container = QWidget()
+        self.deconv_stack_layout = QVBoxLayout(self.deconv_stack_container)
+
+        # Build both tabs (as before)
+        self._build_convolution_tab()
+        self._build_deconvolution_tab()
+        self._build_psf_estimator_tab()
+        self._build_tv_denoise_tab()
+        self.sep_use_button.clicked.connect(self._on_use_stellar_psf)
+
+        # 2) PSF preview label (64×64)
+        self.conv_psf_label = QLabel()
+        self.conv_psf_label.setFixedSize(64, 64)
+        self.conv_psf_label.setStyleSheet("border: 1px solid #888;")
+        left_layout.addWidget(self.conv_psf_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # (strength)
+        self.strength_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=1.0, suffix=""
+        )
+        strength_layout = QHBoxLayout()
+        strength_layout.addWidget(QLabel("Strength:"))
+        strength_layout.addWidget(self.strength_slider)
+        left_layout.addLayout(strength_layout)
+
+        # 2) Action buttons
+        btn_layout = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview")
+        self.undo_btn    = QPushButton("Undo")
+        self.push_btn    = QPushButton("Push to Slot")
+        self.close_btn   = QPushButton("Close")
+        btn_layout.addWidget(self.preview_btn)
+        btn_layout.addWidget(self.undo_btn)
+        left_layout.addLayout(btn_layout)
+
+        btn_layout2 = QHBoxLayout()
+        btn_layout2.addWidget(self.push_btn)
+        btn_layout2.addWidget(self.close_btn)
+        left_layout.addLayout(btn_layout2)
+
+        # Add stretch so these stay at the bottom of left panel
+        left_layout.addStretch()
+
+        self.rl_status_label = QLabel("")
+        self.rl_status_label.setStyleSheet("color: #ffffff; background-color: #333333; padding: 4px;")
+        self.rl_status_label.setFixedHeight(24)
+        left_layout.addWidget(self.rl_status_label)
+
+        # ─── RIGHT PANEL: Zoom Controls + QGraphicsView ───────────────────
+        # 1) Zoom toolbar (in a horizontal layout)
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addStretch()
+        self.zoom_in_btn  = QToolButton()
+        self.zoom_in_btn.setIcon(QIcon.fromTheme("zoom-in"))
+        self.zoom_in_btn.setToolTip("Zoom In")
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setIcon(QIcon.fromTheme("zoom-out"))
+        self.zoom_out_btn.setToolTip("Zoom Out")
+        self.fit_btn      = QToolButton()
+        self.fit_btn.setIcon(QIcon.fromTheme("zoom-fit-best"))
+        self.fit_btn.setToolTip("Fit to Preview")
+        zoom_layout.addWidget(self.zoom_in_btn)
+        zoom_layout.addWidget(self.zoom_out_btn)
+        zoom_layout.addWidget(self.fit_btn)
+        preview_layout.addLayout(zoom_layout)
+
+        # 2) QGraphicsView + QGraphicsScene for the preview
+        self.scene = QGraphicsScene()
+        self.view = InteractiveGraphicsView(self.scene)
+        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+        preview_layout.addWidget(self.view)
+
+        self._load_original_on_startup()
+
+        # ─── Connect signals for buttons ───────────────────────────────────
+        self.preview_btn.clicked.connect(self._on_preview)
+        self.undo_btn.clicked.connect(self._on_undo)
+        self.push_btn.clicked.connect(self._on_push_to_slot)
+        self.close_btn.clicked.connect(self.close)
+
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        self.fit_btn.clicked.connect(self._on_fit_clicked)
+
+        # 4) Whenever the user switches tabs, or changes Algorithm, or any PSF slider:
+        self.tabs.currentChanged.connect(self._update_psf_preview)
+        self.deconv_algo_combo.currentTextChanged.connect(self._update_psf_preview)
+
+        self.sep_run_button.clicked.connect(self._on_run_sep)
+        #self.sep_use_button.clicked.connect(self._on_use_stellar_psf)
+        self.sep_save_button.clicked.connect(self._on_save_stellar_psf)
+
+        # 5) Connect all convolution sliders to the same updater:
+        for s in (
+            self.conv_radius_slider,
+            self.conv_shape_slider,
+            self.conv_aspect_slider,
+            self.conv_rotation_slider
+        ):
+            s.valueChanged.connect(self._update_psf_preview)
+
+        # 6) Connect all RL‐decon sliders to the same updater:
+        for s in (
+            self.rl_psf_radius_slider,
+            self.rl_psf_shape_slider,
+            self.rl_psf_aspect_slider,
+            self.rl_psf_rotation_slider
+        ):
+            s.valueChanged.connect(self._update_psf_preview)
+
+        # 7) Finally, initialize the preview once
+        self._update_psf_preview()
+
+    def closeEvent(self, event):
+        """
+        When the user closes this dialog, clear out any large arrays and custom flags.
+        """
+        # 1) Clear Larson–Sekanina center
+        if hasattr(self.view, "ls_center"):
+            self.view.ls_center = None
+
+        # 2) Drop references to NumPy arrays
+        self._original_image = None
+        self._preview_result = None
+
+        # 3) Clear custom PSF & flag
+        self._custom_psf = None
+        self._use_custom_psf = False
+
+        # 4) Call the base implementation so it actually closes
+        super().closeEvent(event)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _load_original_on_startup(self):
+        """
+        Called once during __init__ to fetch the current active slot’s image
+        and display it. Also stores it as self._original_image for Undo.
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            return
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            return
+
+        # Store as “original” so Undo can revert to this
+        self._original_image = img.copy()
+        # We want to fit on first display, so set flag:
+        self._auto_fit = True
+        self._display_in_view(img)
+
+    def _build_convolution_tab(self):
+        conv_tab = QWidget()
+        layout = QVBoxLayout(conv_tab)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # ── Radius (0.1 … 500.0, step=0.1) ─────────────────────────
+        self.conv_radius_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=200.0,
+            step=0.1,
+            initial=5.0,
+            suffix=" px"
+        )
+        form.addRow("Radius:", self.conv_radius_slider)
+
+        # ── Kurtosis (σ) (0.1 … 10.0, step=0.1) ─────────────────────
+        self.conv_shape_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=10.0,
+            step=0.1,
+            initial=2.0,
+            suffix="σ"
+        )
+        form.addRow("Kurtosis (σ):", self.conv_shape_slider)
+
+        # ── Aspect Ratio (0.1 … 10.0, step=0.1) ────────────────────
+        self.conv_aspect_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=10.0,
+            step=0.1,
+            initial=1.0,
+            suffix=""
+        )
+        form.addRow("Aspect Ratio:", self.conv_aspect_slider)
+
+        # ── Rotation (0.0 … 360.0, step=1.0) ───────────────────────
+        self.conv_rotation_slider = FloatSliderWithEdit(
+            minimum=0.0,
+            maximum=360.0,
+            step=1.0,
+            initial=0.0,
+            suffix="°"
+        )
+        form.addRow("Rotation:", self.conv_rotation_slider)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        self.tabs.addTab(conv_tab, "Convolution")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _build_deconvolution_tab(self):
+        deconv_tab = QWidget()
+        outer_layout = QVBoxLayout(deconv_tab)
+
+        # ── (1) Algorithm selector ─────────────────────────────────────────
+        algo_layout = QHBoxLayout()
+        algo_label = QLabel("Algorithm:")
+        self.deconv_algo_combo = QComboBox()
+        self.deconv_algo_combo.addItems([
+            "Richardson-Lucy",
+            "Wiener",
+            "Larson-Sekanina",
+            "Van Cittert",
+        ])
+        self.deconv_algo_combo.currentTextChanged.connect(self._on_deconv_algo_changed)
+        algo_layout.addWidget(algo_label)
+        algo_layout.addWidget(self.deconv_algo_combo)
+        algo_layout.addStretch()
+        outer_layout.addLayout(algo_layout)
+
+        # ── (2) Shared PSF slider group (radius/kurtosis/aspect/rotation) ──
+        self.psf_param_group = QWidget()
+        psf_group_layout = QFormLayout(self.psf_param_group)
+        psf_group_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.rl_psf_radius_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=100.0, step=0.1, initial=3.0, suffix=" px"
+        )
+        psf_group_layout.addRow("PSF Radius:", self.rl_psf_radius_slider)
+
+        self.rl_psf_shape_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=10.0, step=0.1, initial=2.0, suffix="σ"
+        )
+        psf_group_layout.addRow("PSF Kurtosis (σ):", self.rl_psf_shape_slider)
+
+        self.rl_psf_aspect_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=10.0, step=0.1, initial=1.0, suffix=""
+        )
+        psf_group_layout.addRow("PSF Aspect Ratio:", self.rl_psf_aspect_slider)
+
+        self.rl_psf_rotation_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=360.0, step=1.0, initial=0.0, suffix="°"
+        )
+        psf_group_layout.addRow("PSF Rotation:", self.rl_psf_rotation_slider)
+
+        outer_layout.addWidget(self.psf_param_group)
+        # Hide PSF sliders if not in RL or Wiener initially
+        if self.deconv_algo_combo.currentText() not in ("Richardson-Lucy", "Wiener"):
+            self.psf_param_group.setVisible(False)
+
+        # ── (2b) Shared “Using Stellar PSF” bar ────────────────────────────
+        self.custom_psf_bar = QWidget()
+        bar_layout = QHBoxLayout(self.custom_psf_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(4)
+
+        self.rl_custom_label = QLabel("Using Stellar PSF")
+        self.rl_custom_label.setStyleSheet(
+            "color: #ffffff; background-color: #007acc; padding: 2px;"
+        )
+        self.rl_custom_label.setVisible(False)
+
+        self.rl_disable_custom_btn = QPushButton("Disable Stellar PSF")
+        self.rl_disable_custom_btn.setToolTip(
+            "Revert to using the Gaussian defined by the PSF sliders"
+        )
+        self.rl_disable_custom_btn.setVisible(False)
+
+        bar_layout.addWidget(self.rl_custom_label)
+        bar_layout.addWidget(self.rl_disable_custom_btn)
+        bar_layout.addStretch()
+
+        outer_layout.addWidget(self.custom_psf_bar)
+        # Hide that bar completely unless stellar PSF is active AND algo is RL or Wiener
+        self.custom_psf_bar.setVisible(False)
+
+        # ── (3) Stacked parameter panels ───────────────────────────────────
+        self.deconv_param_stack.clear()
+        self.deconv_stack_container = QWidget()
+        self.deconv_stack_layout = QVBoxLayout(self.deconv_stack_container)
+
+        # ---- (3a) RL panel (iterations, clip, L* only) ----
+        rl_widget = QWidget()
+        rl_form = QFormLayout(rl_widget)
+        rl_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.rl_iterations_slider = FloatSliderWithEdit(
+            minimum=1.0, maximum=100.0, step=1.0, initial=30.0, suffix=""
+        )
+        rl_form.addRow("Iterations:", self.rl_iterations_slider)
+
+        # ── Regularization Type (None vs. Tikhonov vs. TV) ───────────
+        self.rl_reg_combo = QComboBox()
+        self.rl_reg_combo.addItems([
+            "None (Plain R–L)",
+            "Tikhonov (L2)",
+            "Total Variation (TV)"
+        ])
+        rl_form.addRow("Regularization:", self.rl_reg_combo)
+
+        self.rl_clip_checkbox = QCheckBox("Enable de‐ring")
+        self.rl_clip_checkbox.setChecked(True)
+        rl_form.addRow("", self.rl_clip_checkbox)
+
+        self.rl_luminance_only_checkbox = QCheckBox("Deconvolve L* Only")
+        self.rl_luminance_only_checkbox.setChecked(True)
+        self.rl_luminance_only_checkbox.setToolTip(
+            "If checked and the image is color, RL runs only on the L* channel."
+        )
+        rl_form.addRow("", self.rl_luminance_only_checkbox)
+
+        rl_widget.setLayout(rl_form)
+        self.deconv_param_stack["Richardson-Lucy"] = rl_widget
+
+        # ---- (3b) Wiener panel (λ slider, regularization, L* only) ----
+        wiener_widget = QWidget()
+        wiener_layout = QVBoxLayout(wiener_widget)
+
+        wiener_form = QFormLayout()
+        wiener_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.wiener_nsr_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.001, initial=0.01, suffix=""
+        )
+        wiener_form.addRow("Noise/Signal (λ):", self.wiener_nsr_slider)
+
+        self.wiener_reg_combo = QComboBox()
+        self.wiener_reg_combo.addItems([
+            "None (Classical Wiener)",
+            "Tikhonov (L2)"
+        ])
+        wiener_form.addRow("Regularization:", self.wiener_reg_combo)
+
+        self.wiener_luminance_only_checkbox = QCheckBox("Deconvolve L* Only")
+        self.wiener_luminance_only_checkbox.setChecked(True)
+        self.wiener_luminance_only_checkbox.setToolTip(
+            "If checked and the image is color, Wiener runs only on the L* channel."
+        )
+        wiener_form.addRow("", self.wiener_luminance_only_checkbox)
+
+
+        # Add “Enable de-ring” checkbox here
+        self.wiener_dering_checkbox = QCheckBox("Enable de-ring")
+        self.wiener_dering_checkbox.setChecked(True)
+        self.wiener_dering_checkbox.setToolTip(
+            "If checked, apply a single bilateral denoise pass after Wiener deconvolution"
+        )
+        wiener_form.addRow("", self.wiener_dering_checkbox)
+
+        wiener_layout.addLayout(wiener_form)
+        wiener_widget.setLayout(wiener_layout)
+        self.deconv_param_stack["Wiener"] = wiener_widget
+
+        # ---- (3c) Larson–Sekanina panel (no PSF or stellar bar) ----
+        ls_widget = QWidget()
+        ls_form = QFormLayout(ls_widget)
+        ls_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.ls_radial_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=50.0, step=0.1, initial=0.0, suffix=" px"
+        )
+        ls_form.addRow("Radial Step (px):", self.ls_radial_slider)
+
+        self.ls_angular_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=360.0, step=0.1, initial=1.0, suffix="°"
+        )
+        ls_form.addRow("Angular Step (°):", self.ls_angular_slider)
+
+        self.ls_operator_combo = QComboBox()
+        self.ls_operator_combo.addItems(["Divide", "Subtract"])
+        ls_form.addRow("LS Operator:", self.ls_operator_combo)
+
+        self.ls_blend_combo = QComboBox()
+        self.ls_blend_combo.addItems(["SoftLight", "Screen"])
+        ls_form.addRow("Blend Mode:", self.ls_blend_combo)
+
+        ls_widget.setLayout(ls_form)
+        self.deconv_param_stack["Larson-Sekanina"] = ls_widget
+
+        # ---- (3d) Van Cittert panel (no PSF or stellar bar) ----
+        vc_widget = QWidget()
+        vc_form = QFormLayout(vc_widget)
+        vc_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.vc_iterations_slider = FloatSliderWithEdit(
+            minimum=1, maximum=1000, step=1, initial=10, suffix=""
+        )
+        vc_form.addRow("Iterations:", self.vc_iterations_slider)
+
+        self.vc_relax_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=0.0, suffix=""
+        )
+        vc_form.addRow("Relaxation (0–1):", self.vc_relax_slider)
+
+        vc_widget.setLayout(vc_form)
+        self.deconv_param_stack["Van Cittert"] = vc_widget
+
+        # ── Add all panels (hidden initially) ─────────────────────────────────
+        for name, widget in self.deconv_param_stack.items():
+            widget.setVisible(False)
+            self.deconv_stack_layout.addWidget(widget)
+
+        # Show only the starting algorithm’s panel
+        first_algo = self.deconv_algo_combo.currentText()
+        if first_algo in self.deconv_param_stack:
+            self.deconv_param_stack[first_algo].setVisible(True)
+
+        outer_layout.addWidget(self.deconv_stack_container)
+        outer_layout.addStretch()
+        self.tabs.addTab(deconv_tab, "Deconvolution")
+
+        # ── Connect “Disable Stellar PSF” and PSF‐slider changes to clear custom flag ──
+        self.rl_disable_custom_btn.clicked.connect(self._clear_custom_psf_flag)
+        for s in (
+            self.rl_psf_radius_slider,
+            self.rl_psf_shape_slider,
+            self.rl_psf_aspect_slider,
+            self.rl_psf_rotation_slider
+        ):
+            s.valueChanged.connect(self._clear_custom_psf_flag)
+
+    def _build_psf_estimator_tab(self):
+        """
+        Build the UI for the “PSF Estimator” tab (SEP‐based), using only
+        CustomSpinBox (no QSpinBox).
+        """
+        psf_tab = QWidget()
+        layout = QVBoxLayout(psf_tab)
+
+        # — Image picker / label showing current image —
+        h_image = QHBoxLayout()
+        h_image.addWidget(QLabel("Image for PSF Estimate:"))
+        self.sep_image_label = QLabel("(Current Active Image)")
+        h_image.addWidget(self.sep_image_label)
+        layout.addLayout(h_image)
+
+        # — SEP Detection Parameters —
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Detection σ (float)
+        self.sep_threshold_slider = FloatSliderWithEdit(
+            minimum=1.0, maximum=5.0, step=0.1, initial=2.5, suffix=" σ"
+        )
+        form.addRow("Detection σ:", self.sep_threshold_slider)
+
+        # Min Area (px²) → use CustomSpinBox
+        self.sep_minarea_spin = CustomSpinBox(
+            minimum=1, maximum=100, initial=5, step=1
+        )
+        form.addRow("Min Area (px²):", self.sep_minarea_spin)
+
+        # Saturation Cutoff (float)
+        self.sep_sat_slider = FloatSliderWithEdit(
+            minimum=1000, maximum=100000, step=500, initial=50000, suffix=" ADU"
+        )
+        form.addRow("Saturation Cutoff:", self.sep_sat_slider)
+
+        # Max Stars → use CustomSpinBox
+        self.sep_maxstars_spin = CustomSpinBox(
+            minimum=1, maximum=500, initial=50, step=1
+        )
+        form.addRow("Max Stars:", self.sep_maxstars_spin)
+
+        # Half‐Width (px) → use CustomSpinBox
+        self.sep_stamp_spin = CustomSpinBox(
+            minimum=5, maximum=50, initial=15, step=1
+        )
+        form.addRow("Half‐Width (px):", self.sep_stamp_spin)
+
+        layout.addLayout(form)
+
+        # — Buttons: Run SEP & Use / Save PSF —
+        h_buttons = QHBoxLayout()
+        self.sep_run_button = QPushButton("Run SEP Extraction")
+        self.sep_save_button = QPushButton("Save PSF…")
+        self.sep_use_button  = QPushButton("Use as Current PSF")
+        h_buttons.addWidget(self.sep_run_button)
+        h_buttons.addWidget(self.sep_save_button)
+        h_buttons.addWidget(self.sep_use_button)
+        layout.addLayout(h_buttons)
+
+        # — PSF Preview (64×64 QLabel) —
+        self.psf_estimate_title = QLabel("Estimated PSF (64×64):")
+        layout.addWidget(self.psf_estimate_title, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.sep_psf_preview = QLabel()
+        self.sep_psf_preview.setFixedSize(64, 64)
+        self.sep_psf_preview.setStyleSheet("border: 1px solid #888;")
+        layout.addWidget(self.sep_psf_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        layout.addStretch()
+        self.tabs.addTab(psf_tab, "PSF Estimator")
+
+        # Placeholder for the last computed PSF
+        self._last_stellar_psf = None
+
+    def _build_tv_denoise_tab(self):
+        """
+        Build the UI for a “TV Denoise” tab, allowing the user to choose
+        total‐variation denoising parameters and apply them.
+        """
+        tvd_tab = QWidget()
+        layout = QVBoxLayout(tvd_tab)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # TV weight (0.0 … 1.0)
+        self.tv_weight_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=0.1, suffix=""
+        )
+        form.addRow("TV Weight:", self.tv_weight_slider)
+
+        # Max iterations for TV algorithm (1 … 100, step=1)
+        self.tv_iter_slider = FloatSliderWithEdit(
+            minimum=1, maximum=100, step=1, initial=10, suffix=""
+        )
+        form.addRow("Max Iterations:", self.tv_iter_slider)
+
+        # Multichannel checkbox
+        self.tv_multichannel_checkbox = QCheckBox("Multi‐channel")
+        self.tv_multichannel_checkbox.setChecked(True)
+        self.tv_multichannel_checkbox.setToolTip(
+            "If checked and the image is color, run TV on all channels jointly"
+        )
+        form.addRow("", self.tv_multichannel_checkbox)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        self.tabs.addTab(tvd_tab, "TV Denoise")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_deconv_algo_changed(self, selected: str):
+        # Hide all panels, then show the one for `selected`
+        for name, widget in self.deconv_param_stack.items():
+            widget.setVisible(False)
+        if selected in self.deconv_param_stack:
+            self.deconv_param_stack[selected].setVisible(True)
+
+        # 1) Always clear stellar‐PSF bar if we’re not in RL or Wiener
+        if selected not in ("Richardson-Lucy", "Wiener"):
+            self._use_custom_psf = False
+            self.custom_psf_bar.setVisible(False)
+        else:
+            # If user had already clicked “Use Stellar PSF,” show it
+            if self._use_custom_psf and (self._custom_psf is not None):
+                self.custom_psf_bar.setVisible(True)
+            else:
+                self.custom_psf_bar.setVisible(False)
+
+        # 2) Show PSF sliders group only for RL or Wiener
+        self.psf_param_group.setVisible(selected in ("Richardson-Lucy", "Wiener"))
+
+    def _on_ls_operator_changed(self, op_text: str):
+        """
+        Whenever the user picks “Subtract” or “Divide” in the LS Operator dropdown,
+        this forces the Blend‐Mode dropdown to the matching mode:
+          Subtract → Screen
+          Divide   → SoftLight
+        """
+        if op_text == "Divide":
+            # If the user explicitly chose Divide, auto‐select SoftLight
+            self.ls_blend_combo.setCurrentText("SoftLight")
+        else:
+            # Otherwise (Subtract), force Screen
+            self.ls_blend_combo.setCurrentText("Screen")
+
+    def _make_psf_pixmap(self, radius, kurtosis, aspect, rotation_deg) -> QPixmap:
+        """
+        Build a float32 PSF via make_elliptical_gaussian_psf(...),
+        convert to 0–255 grayscale, wrap in QImage, scale to 64×64,
+        center it in a 64×64 QPixmap, and return that QPixmap.
+        """
+        psf = make_elliptical_gaussian_psf(radius, kurtosis, aspect, rotation_deg)
+        h, w = psf.shape
+
+        if psf.max() > 0:
+            norm = (psf / psf.max()) * 255.0
+        else:
+            norm = psf
+        img8 = norm.astype(np.uint8)
+
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        return final
+
+    def _make_stellar_psf_pixmap(self, psf_kernel: np.ndarray) -> QPixmap:
+        """
+        Given a 2D float32 PSF (sum=1), produce a 64×64 QPixmap centered in a transparent background.
+        """
+        h, w = psf_kernel.shape
+        maxval = psf_kernel.max()
+        if maxval > 0:
+            img8 = (psf_kernel / maxval * 255.0).astype(np.uint8)
+        else:
+            img8 = np.zeros_like(psf_kernel, dtype=np.uint8)
+
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        return final
+
+
+    def _update_psf_preview(self):
+        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        algo = self.deconv_algo_combo.currentText()
+
+        if current_tab == "Convolution":
+            r, k, a, rot = (
+                self.conv_radius_slider.value(),
+                self.conv_shape_slider.value(),
+                self.conv_aspect_slider.value(),
+                self.conv_rotation_slider.value(),
+            )
+            pix = self._make_psf_pixmap(r, k, a, rot)
+            self.conv_psf_label.setPixmap(pix)
+
+        elif current_tab == "Deconvolution" and algo in ("Richardson-Lucy", "Wiener"):
+            if self._use_custom_psf and (self._custom_psf is not None):
+                stellar_pix = self._make_stellar_psf_pixmap(self._custom_psf)
+                self.conv_psf_label.setPixmap(stellar_pix)
+            else:
+                r, k, a, rot = (
+                    self.rl_psf_radius_slider.value(),
+                    self.rl_psf_shape_slider.value(),
+                    self.rl_psf_aspect_slider.value(),
+                    self.rl_psf_rotation_slider.value(),
+                )
+                pix = self._make_psf_pixmap(r, k, a, rot)
+                self.conv_psf_label.setPixmap(pix)
+        else:
+            self.conv_psf_label.clear()
+
+    def get_active_mask(self) -> np.ndarray | None:
+        """
+        Retrieves the currently applied mask from MaskManager (if any),
+        normalizes it to [0..1], and makes sure the shape matches
+        the active image’s dimensions.  Returns None if no mask is
+        applied or if shapes mismatch.
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            return None
+
+        mask_manager = self.parent().image_manager.mask_manager
+        if mask_manager is None:
+            return None
+
+        mask = mask_manager.get_applied_mask()
+        if mask is None:
+            return None
+
+        # Convert to float32 [0..1]
+        if mask.dtype not in (np.float32, np.float64):
+            mask = mask.astype(np.float32) / 255.0
+
+        # If active image is color (H×W×3) but mask is 2D (H×W), broadcast to 3 channels
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            return None
+
+        H_img, W_img = img.shape[:2]
+        if mask.shape[:2] != (H_img, W_img):
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Mask dimensions do not match the image dimensions."
+            )
+            return None
+
+        if img.ndim == 3 and img.shape[2] == 3 and mask.ndim == 2:
+            mask = np.expand_dims(mask, axis=-1)  # now (H×W×1)
+            mask = np.repeat(mask, 3, axis=2)      # (H×W×3)
+
+        return mask
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_preview(self):
+        """
+        1) Get active image from ImageManager
+        2) Perform convolution or deconvolution (with optional L* only)
+        3) If a mask is applied, blend processed & original via mask
+        4) Display the final blended result in QGraphicsView
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            self._show_message("Error: No ImageManager found")
+            return
+
+        img, metadata = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            self._show_message("No active image to process.")
+            return
+
+        # Save original for Undo (only the very first time)
+        if self._original_image is None:
+            self._original_image = img.copy()
+
+        tab = self.tabs.currentIndex()
+        current_tab_name = self.tabs.tabText(self.tabs.currentIndex())
+
+        if current_tab_name == "Convolution":
+            # ─── CONVOLUTION ───────────────────────────────────────────
+            radius  = self.conv_radius_slider.value()
+            kurtosis = self.conv_shape_slider.value()
+            aspect  = self.conv_aspect_slider.value()
+            rotation = self.conv_rotation_slider.value()
+
+            psf_kernel = make_elliptical_gaussian_psf(
+                radius, kurtosis, aspect, rotation
+            ).astype(np.float32)
+
+            processed = self._convolve_color(img, psf_kernel)
+            processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+        elif current_tab_name == "Deconvolution":
+            # ─── DECONVOLUTION ─────────────────────────────────────────
+            algo = self.deconv_algo_combo.currentText()
+
+            if algo == "Richardson-Lucy":
+                iters = self.rl_iterations_slider.value()
+                reg_type = self.rl_reg_combo.currentText()
+                pr    = self.rl_psf_radius_slider.value()
+                ps    = self.rl_psf_shape_slider.value()
+                pa    = self.rl_psf_aspect_slider.value()
+                pt    = self.rl_psf_rotation_slider.value()
+
+                psf_kernel = make_elliptical_gaussian_psf(
+                    pr, ps, pa, pt
+                ).astype(np.float32)
+
+                clip_flag = self.rl_clip_checkbox.isChecked()
+
+                # If “L* only” & image is color, extract L*, run RL on L*, then recombine
+                if getattr(self, "rl_luminance_only_checkbox", None) is not None \
+                   and self.rl_luminance_only_checkbox.isChecked() \
+                   and img.ndim == 3 and img.shape[2] == 3:
+                    # Convert RGB→Lab, scale L* to [0..1]
+                    lab = rgb2lab(img.astype(np.float32))
+                    L  = (lab[:, :, 0] / 100.0).astype(np.float32)
+
+                    # Run R–L on the L* channel only
+                    deconv_L = self._richardson_lucy_color(L, psf_kernel, iterations=iters, reg_type=reg_type, clip_flag=clip_flag)
+
+                    # Put deconv_L back into L* (scale up to [0..100])
+                    lab[:, :, 0] = deconv_L * 100.0
+
+                    # Convert Lab→RGB
+                    rgb_deconv = lab2rgb(lab.astype(np.float32))
+                    processed = np.clip(rgb_deconv.astype(np.float32), 0.0, 1.0)
+                    processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+                else:
+                    # Just run R–L on full (grayscale or 3-channel)
+                    processed = self._richardson_lucy_color(
+                        img.astype(np.float32),
+                        psf_kernel,
+                        iterations=iters,
+                        reg_type=reg_type,
+                        clip_flag=clip_flag
+                    )
+                    processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+            # ── 2) WIENER (CLASSICAL) ────────────────────────────────────
+            elif algo == "Wiener":
+                # 1) Decide which PSF to use: stellar (if flagged) or Gaussian from sliders
+                if self._use_custom_psf and (self._custom_psf is not None):
+                    small_psf = self._custom_psf.astype(np.float32)
+                else:
+                    pr = self.rl_psf_radius_slider.value()
+                    ps = self.rl_psf_shape_slider.value()
+                    pa = self.rl_psf_aspect_slider.value()
+                    pt = self.rl_psf_rotation_slider.value()
+                    small_psf = make_elliptical_gaussian_psf(pr, ps, pa, pt).astype(np.float32)
+
+                # 2) Read lambda and regularization choice
+                nsr = self.wiener_nsr_slider.value()
+                reg_choice = self.wiener_reg_combo.currentText()
+                if reg_choice == "None (Classical Wiener)":
+                    reg_type = "Wiener"
+                else:
+                    reg_type = "Tikhonov"
+
+                do_dering = self.wiener_dering_checkbox.isChecked()
+
+                # 3) Apply Wiener on L* only or all channels
+                if getattr(self, "wiener_luminance_only_checkbox", None) is not None \
+                and self.wiener_luminance_only_checkbox.isChecked() \
+                and img.ndim == 3 and img.shape[2] == 3:
+
+                    lab = rgb2lab(img.astype(np.float32))
+                    L = (lab[:, :, 0] / 100.0).astype(np.float32)
+
+                    deconv_L = self._wiener_deconv_with_kernel(L, small_psf, nsr, reg_type, do_dering)
+                    lab[:, :, 0] = np.clip(deconv_L * 100.0, 0.0, 100.0)
+                    rgb_deconv = lab2rgb(lab.astype(np.float32))
+                    processed = np.clip(rgb_deconv.astype(np.float32), 0.0, 1.0)
+                    processed = processed * self.strength_slider.value() \
+                                + (1 - self.strength_slider.value()) * img
+                else:
+                    processed = self._wiener_deconv_with_kernel(img, small_psf, nsr, reg_type, do_dering)
+                    processed = np.clip(processed, 0.0, 1.0)
+                    processed = processed * self.strength_slider.value() \
+                                + (1 - self.strength_slider.value()) * img
+            elif algo == "Larson-Sekanina":
+                # … your Larson-Sekanina code (no mask at this stage) …
+                if not hasattr(self.view, "ls_center") or self.view.ls_center is None:
+                    QMessageBox.information(
+                        self,
+                        "Hold Shift + Click",
+                        "To choose a Larson–Sekanina center, "
+                        "please hold Shift and click on the preview."
+                    )
+                    return
+
+                center = self.view.ls_center
+                rstep  = self.ls_radial_slider.value()
+                astep  = self.ls_angular_slider.value()
+                operator = self.ls_operator_combo.currentText()
+                blend_mode = self.ls_blend_combo.currentText()
+
+                B = larson_sekanina(
+                    image=img,
+                    center=center,
+                    radial_step=rstep,
+                    angular_step_deg=astep,
+                    operator=operator
+                )
+                A = img
+                if A.ndim == 3 and A.shape[2] == 3:
+                    B_rgb = np.repeat(B[:, :, np.newaxis], 3, axis=2)
+                    A_rgb = A
+                else:
+                    A_rgb = A[..., np.newaxis]
+                    B_rgb = B[..., np.newaxis]
+
+                if blend_mode == "Screen":
+                    C = A_rgb + B_rgb - (A_rgb * B_rgb)
+                else:  # SoftLight
+                    C = (1 - 2 * B_rgb) * (A_rgb**2) + 2 * B_rgb * A_rgb
+
+                processed = np.clip(C, 0.0, 1.0)
+                processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img 
+            elif algo == "Van Cittert":
+                iters2 = self.vc_iterations_slider.value()
+                relax  = self.vc_relax_slider.value()
+                if img.ndim == 3 and img.shape[2] == 3:
+                    chans = []
+                    for c in range(3):
+                        ch = img[:, :, c]
+                        deconv_ch = van_cittert_deconv(ch, iters2, relax)
+                        chans.append(deconv_ch)
+                    processed = np.stack(chans, axis=2)
+                else:
+                    processed = van_cittert_deconv(img, iters2, relax)
+                processed = np.clip(processed, 0.0, 1.0)
+                processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+            else:
+                self._show_message("Unknown deconvolution algorithm")
+                return
+
+        elif current_tab_name == "TV Denoise":
+            weight = self.tv_weight_slider.value()
+            max_iter = int(self.tv_iter_slider.value())
+            multichannel = self.tv_multichannel_checkbox.isChecked()
+
+            if img.ndim == 3 and multichannel:
+                # TV on all channels jointly
+                processed = denoise_tv_chambolle(
+                    img.astype(np.float32),
+                    weight=weight,
+                    max_num_iter=max_iter,
+                    channel_axis=-1
+                ).astype(np.float32)
+            else:
+                # Grayscale or per‐channel
+                if img.ndim == 3 and img.shape[2] == 3:
+                    # Apply TV to each channel separately
+                    channels_out = []
+                    for c in range(3):
+                        ch = img[:, :, c].astype(np.float32)
+                        denoised_ch = denoise_tv_chambolle(
+                            ch,
+                            weight=weight,
+                            max_num_iter=max_iter,
+                            channel_axis=None
+                        ).astype(np.float32)
+                        channels_out.append(denoised_ch)
+                    processed = np.stack(channels_out, axis=2)
+                else:
+                    gray = img.astype(np.float32) if img.ndim == 2 else img
+                    processed = denoise_tv_chambolle(
+                        gray,
+                        weight=weight,
+                        max_num_iter=max_iter,
+                        channel_axis=None
+                    ).astype(np.float32)
+
+            processed = np.clip(processed, 0.0, 1.0)
+            processed = (
+                processed * self.strength_slider.value()
+                + (1 - self.strength_slider.value()) * img
+            )
+
+
+        # ─── If there is an active mask, blend “processed” & “original” via the mask ─────
+        mask = self.get_active_mask()
+        if mask is not None:
+            # Ensure the mask is broadcast to same channels as `processed`
+            if processed.ndim == 3 and mask.ndim == 2:
+                mask = np.expand_dims(mask, axis=-1)
+            # Blend: processed * mask + original * (1 - mask)
+            blended = processed * mask + self._original_image * (1.0 - mask)
+            blended = np.clip(blended, 0.0, 1.0)
+            final_result = blended
+        else:
+            final_result = processed
+
+        # 3) Store & show the final_result
+        self._preview_result = final_result
+        self._display_in_view(final_result)
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_undo(self):
+        """Revert to the original image (clears preview)."""
+        if self._original_image is not None:
+            self._preview_result = None
+            self._display_in_view(self._original_image)
+        else:
+            self._show_message("Nothing to undo.")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_push_to_slot(self):
+        """
+        Push the last preview into the current slot via ImageManager.set_image(),
+        which automatically handles undo history. Then pop up a small dialog
+        and reload the new slot image into the preview area so the user can
+        continue iterating.
+        """
+        if self._preview_result is None:
+            QMessageBox.warning(self, "No Preview", "No preview to push. Click Preview first.")
+            return
+
+        # 1) Grab current image and metadata (prior to overwrite)
+        _, metadata = self.parent().image_manager.get_current_image_and_metadata()
+        new_meta = metadata.copy()
+        new_meta["source"] = "ConvoDeconvo"
+
+        # 2) Commit the preview into the same slot (ImageManager will push the old image
+        #    onto its undo stack automatically)
+        self.parent().image_manager.set_image(self._preview_result.copy(), new_meta, step_name="ConvoDeconvo")
+
+        # 3) Inform the user with a quick message box
+        QMessageBox.information(self, "Pushed to Slot", "Result has been pushed into the current slot.")
+
+        # 4) Reload from the slot (in case the user wants to iterate further).
+        #    Now “original” becomes the freshly‐pushed image.
+        img_after, _ = self.parent().image_manager.get_current_image_and_metadata()
+        self._original_image = img_after.copy()
+        self._preview_result = None
+
+        # 5) Display it in the QGraphicsView (preserving current zoom/pan if desired).
+        #    Usually you want to keep whatever zoom/pan the user had, so do NOT force a fit.
+        self._display_in_view(self._original_image)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _show_message(self, text: str):
+        """Temporarily show a text placeholder in the preview area."""
+        self.scene.clear()
+        self.pixmap_item = QGraphicsPixmapItem()  # blank
+        self.scene.addItem(self.pixmap_item)
+        self.view.resetTransform()
+        self.preview_label = QLabel(text)
+        # Instead of reusing preview_label, we push a temporary text into the scene:
+        temp_label = QLabel(text)
+        temp_label.setStyleSheet("color: white; background-color: #222;")
+        temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Convert QLabel to QPixmap:
+        pixmap = temp_label.grab()
+        self.pixmap_item.setPixmap(pixmap)
+        self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _convolve_color(self, image: np.ndarray, psf_kernel: np.ndarray) -> np.ndarray:
+        """
+        If 2D: convolve directly. If 3D (H,W,3): convolve each channel.
+        """
+        if image.ndim == 2:
+            return fftconvolve(image, psf_kernel, mode="same")
+        elif image.ndim == 3 and image.shape[2] == 3:
+            chans = []
+            for c in range(3):
+                ch = image[:, :, c]
+                conv_ch = fftconvolve(ch, psf_kernel, mode="same")
+                chans.append(conv_ch)
+            return np.stack(chans, axis=2)
+        else:
+            return image.copy()
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _richardson_lucy_color(self,
+                            image: np.ndarray,
+                            psf_kernel: np.ndarray,
+                            iterations: int,
+                            reg_type: str = "None (Plain R–L)",
+                            clip_flag: bool = True
+                            ) -> np.ndarray:
+        """
+        Run Richardson–Lucy with optional Tikhonov or TV regularization, in parallel
+        over horizontal strips (with overlap), followed by an optional bilateral‐denoise
+        if clip_flag=True.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            float32 in [0..1], either 2D (H×W) or 3D (H×W×3).
+        psf_kernel : np.ndarray
+            2D float32 PSF (sum=1).
+        iterations : int
+        reg_type : str
+            "None (Plain R–L)", "Tikhonov (L2)", or "Total Variation (TV)".
+        clip_flag : bool
+            If True, apply one bilateral denoise pass on each tile’s output.
+
+        Returns
+        -------
+        deconv : np.ndarray
+            float32 in [0..1], same shape as `image`.
+        """
+        iters = int(round(iterations))
+        psf = psf_kernel.astype(np.float32)
+
+        def _deconv_2d_parallel(gray: np.ndarray) -> np.ndarray:
+            H, W = gray.shape
+            psf_h, psf_w = psf.shape
+            half_psf = max(psf_h, psf_w) // 2
+            extra = 15
+            pad = half_psf + extra
+            overlap = pad
+
+            n_cores = os.cpu_count() or 1
+            n_cores = min(n_cores, H)
+            tile_h = math.ceil(H / n_cores)
+
+            tile_ranges = []
+            for i in range(n_cores):
+                y0 = i * tile_h
+                y1 = min((i + 1) * tile_h, H)
+                if y0 >= H:
+                    break
+                tile_ranges.append((y0, y1))
+
+            accum_image = np.zeros((H, W), dtype=np.float32)
+            accum_weight = np.zeros((H, W), dtype=np.float32)
+
+            def _build_vertical_ramp(L: int, ov: int) -> np.ndarray:
+                w = np.ones(L, dtype=np.float32)
+                if ov <= 0:
+                    return w
+                if 2 * ov >= L:
+                    for i in range(L):
+                        w[i] = 1.0 - abs((i - (L - 1) / 2) / ((L - 1) / 2))
+                    return w
+                for i in range(ov):
+                    w[i] = (i + 1) / float(ov)
+                for i in range(ov):
+                    idx = L - 1 - i
+                    w[idx] = (i + 1) / float(ov)
+                return w
+
+            tile_inputs = []
+            for idx, (y0, y1) in enumerate(tile_ranges):
+                y0_ext = max(0, y0 - overlap)
+                y1_ext = min(H, y1 + overlap)
+                core_tile = gray[y0_ext:y1_ext, :]
+
+                padded = np.pad(
+                    core_tile,
+                    ((pad, pad), (pad, pad)),
+                    mode="reflect"
+                )
+
+                L_ext = y1_ext - y0_ext
+                tile_inputs.append((
+                    idx, padded, psf, iters, clip_flag, pad, reg_type,
+                    y0_ext, y1_ext, L_ext
+                ))
+
+            results = [None] * len(tile_inputs)
+            with ProcessPoolExecutor() as executor:
+                for tile_index, deconv_ext in executor.map(_rl_tile_process_reg, tile_inputs):
+                    results[tile_index] = deconv_ext
+
+            for idx, (y0, y1) in enumerate(tile_ranges):
+                (_, _, _, _, _, _, _, y0_ext, y1_ext, L_ext) = tile_inputs[idx]
+                deconv_ext = results[idx]
+
+                w = _build_vertical_ramp(L_ext, overlap)
+                w2d = np.broadcast_to(w[:, None], (L_ext, W)).astype(np.float32)
+
+                accum_image[y0_ext:y1_ext, :] += deconv_ext * w2d
+                accum_weight[y0_ext:y1_ext, :] += w2d
+
+            final_deconv = np.zeros_like(accum_image, dtype=np.float32)
+            mask_nonzero = accum_weight > 0
+            final_deconv[mask_nonzero] = accum_image[mask_nonzero] / accum_weight[mask_nonzero]
+
+            return final_deconv
+
+        if image.ndim == 2:
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText(f"Running RL for {iters} iterations")
+                QApplication.processEvents()
+            deconv = _deconv_2d_parallel(image.astype(np.float32))
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText("")
+                QApplication.processEvents()
+            return np.clip(deconv, 0.0, 1.0)
+
+        elif image.ndim == 3 and image.shape[2] == 3:
+            channels_out = []
+            for c in range(3):
+                if hasattr(self, "rl_status_label"):
+                    self.rl_status_label.setText(f"Running RL on ch {c+1} for {iters} iterations")
+                    QApplication.processEvents()
+                ch = image[:, :, c].astype(np.float32)
+                deconv_ch = _deconv_2d_parallel(ch)
+                channels_out.append(np.clip(deconv_ch, 0.0, 1.0))
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText("")
+                QApplication.processEvents()
+            return np.stack(channels_out, axis=2)
+
+        else:
+            return image.copy()
+
+    def _wiener_deconv_with_kernel(self,
+                                image: np.ndarray,
+                                small_psf: np.ndarray,
+                                nsr: float,
+                                reg_type: str,
+                                do_dering: bool
+                                ) -> np.ndarray:
+        """
+        2D Wiener or Tikhonov deconvolution using an explicit small_psf array.
+        - image: 2D float32 or 3D (H×W×3) float32 in [0..1].
+        - small_psf: 2D float32 PSF (normalized so sum=1).
+        - nsr: noise‐to‐signal parameter [0..1].
+        - reg_type: "Wiener" or "Tikhonov".
+        Returns: deconvolved image (same shape as input) clipped to [0..1].
+        """
+        def _deconv_gray(im2d: np.ndarray, do_dering_flag: bool) -> np.ndarray:
+            H, W = im2d.shape
+            psf_h, psf_w = small_psf.shape
+
+            # Zero-pad PSF to image size, centered
+            Hpsf = np.zeros((H, W), dtype=np.float32)
+            cy, cx = H // 2, W // 2
+            y0 = cy - psf_h // 2
+            x0 = cx - psf_w // 2
+            Hpsf[y0:y0+psf_h, x0:x0+psf_w] = small_psf
+
+            # Convert to frequency domain
+            H_f = fft2(ifftshift(Hpsf))
+            H_f_conj = np.conj(H_f)
+            mag2 = np.abs(H_f) ** 2
+
+            # Choose K = nsr (Wiener) or nsr^2 (Tikhonov)
+            if reg_type == "Tikhonov":
+                K = nsr * nsr
+            else:
+                K = nsr
+
+            denom = mag2 + K
+            W_filter = H_f_conj / denom
+
+            I_f = fft2(im2d)
+            deconv_f = W_filter * I_f
+            deconv = np.real(ifft2(deconv_f)).astype(np.float32)
+
+            if do_dering_flag:
+                # One bilateral‐denoise pass on the full deconv image
+                deconv = denoise_bilateral(
+                    deconv,
+                    sigma_color=0.08,
+                    sigma_spatial=1
+                )
+
+            return deconv.clip(0.0, 1.0)
+
+        # If color, run per-channel; else grayscale
+        if image.ndim == 2:
+            return _deconv_gray(image.astype(np.float32), do_dering)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            chans = []
+            for c in range(3):
+                ch = image[:, :, c].astype(np.float32)
+                chans.append(_deconv_gray(ch, do_dering))
+            return np.stack(chans, axis=2)
+        else:
+            # Fallback: return copy
+            return image.copy()
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _display_in_view(self, array: np.ndarray):
+        """
+        Convert `array` → QPixmap and show in the existing QGraphicsView.
+        Does NOT reset the zoom/pan unless self._auto_fit is True.
+        After doing an auto‐fit, sets self._auto_fit = False.
+        """
+        arr = array.copy()
+        # Convert to 8‐bit for display:
+        if arr.dtype in (np.float32, np.float64):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr8 = (arr * 255).astype(np.uint8)
+        elif arr.dtype == np.uint16:
+            arr8 = (np.clip(arr, 0, 65535) // 257).astype(np.uint8)
+        elif arr.dtype == np.uint8:
+            arr8 = arr
+        else:
+            mn, mx = arr.min(), arr.max()
+            if mx > mn:
+                arr8 = ((arr - mn) / (mx - mn) * 255).astype(np.uint8)
+            else:
+                arr8 = np.zeros_like(arr, dtype=np.uint8)
+
+        h, w = arr8.shape[:2]
+        if arr8.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            bytespp = w
+        else:
+            fmt = QImage.Format.Format_RGB888
+            bytespp = 3 * w
+
+        qimg = QImage(arr8.data, w, h, bytespp, fmt)
+        pix = QPixmap.fromImage(qimg)
+
+        # Update the pixmap item
+        self.pixmap_item.setPixmap(pix)
+        # Resize the scene to match the new image dimensions
+        self.scene.setSceneRect(0, 0, w, h)
+
+        # If self._auto_fit is True, reset any previous zoom, then fit to view.
+        # Otherwise, leave the user’s current zoom/pan alone.
+        if getattr(self, "_auto_fit", False):
+            self.view.resetTransform()
+            self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self._auto_fit = False
+
+    # ─────────────────────────────────────────────────────────────────────
+    def zoom_in(self):
+        """Zoom in by 20%."""
+        self.view.scale(1.2, 1.2)
+
+    def zoom_out(self):
+        """Zoom out by 20%."""
+        self.view.scale(1/1.2, 1/1.2)
+
+    def _on_fit_clicked(self):
+        """
+        Called when the user clicks “Fit to Preview.” We set self._auto_fit = True
+        and then re‐invoke _display_in_view on whichever image is currently shown.
+        """
+        self._auto_fit = True
+        if self._preview_result is not None:
+            # Fit the preview image
+            self._display_in_view(self._preview_result)
+        elif self._original_image is not None:
+            # No preview yet, so fit the original image
+            self._display_in_view(self._original_image)
+        else:
+            # Nothing to fit; clear or do nothing
+            pass
+
+
+
+    def _on_run_sep(self):
+        """
+        Called when “Run SEP Extraction” is clicked.
+        Grabs the active image from `self.parent().image_manager`, runs SEP,
+        shows the preview, and stores the kernel internally.
+        """
+        # 1) Grab the current image array (assume parent has image_manager.get_current_image())
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            QMessageBox.warning(self, "No Image", "Please load or select an image before estimating PSF.")
+            return
+
+        if img.ndim == 3:
+            # Convert to grayscale by averaging the three channels (or pick one channel)
+            img_gray = img.mean(axis=2).astype(np.float32)
+        else:
+            img_gray = img.astype(np.float32)
+
+        # 2) Read SEP parameters from the UI
+        sigma   = self.sep_threshold_slider.value()
+        minarea = self.sep_minarea_spin.value
+        sat     = self.sep_sat_slider.value()
+        maxstars= self.sep_maxstars_spin.value
+        half_w  = self.sep_stamp_spin.value
+
+        try:
+            # 3) Call the helper
+            psf_kernel = estimate_psf_from_image(
+                image_array       = img_gray,
+                threshold_sigma   = sigma,
+                min_area          = minarea,
+                saturation_limit  = sat,
+                max_stars         = maxstars,
+                stamp_half_width  = half_w
+            )
+        except RuntimeError as e:
+            QMessageBox.critical(self, "PSF Error", str(e))
+            return
+
+        # 4) Store it
+        self._last_stellar_psf = psf_kernel
+
+        # 5) Show preview in 64×64 QLabel
+        self._show_stellar_psf_preview(psf_kernel)
+
+    def _show_stellar_psf_preview(self, psf_kernel: np.ndarray):
+        """
+        Convert `psf_kernel` → 64×64 QPixmap and show in self.sep_psf_preview.
+        """
+        h, w = psf_kernel.shape
+
+        # Normalize to 0..255
+        maxval = psf_kernel.max()
+        if maxval > 0:
+            img8 = (psf_kernel / maxval * 255.0).astype(np.uint8)
+        else:
+            img8 = np.zeros_like(psf_kernel, dtype=np.uint8)
+
+        # Wrap in QImage
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+
+        # Scale to 64×64, keep aspect
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        # Center in 64×64 transparent pixmap
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        self.sep_psf_preview.setPixmap(final)
+
+    def _on_use_stellar_psf(self):
+        """
+        Called when “Use as Current PSF” is clicked.
+        Store the SEP‐derived kernel and enable the “custom” flag.
+        """
+        if self._last_stellar_psf is None:
+            QMessageBox.warning(self, "No PSF", "Please run SEP extraction first.")
+            return
+
+        # 1) Save the custom PSF array and set the flag
+        self._custom_psf = self._last_stellar_psf.copy()
+        self._use_custom_psf = True
+
+        # 1a) Immediately update the 64×64 preview label with the stellar PSF
+        stellar_pix = self._make_stellar_psf_pixmap(self._custom_psf)
+        self.conv_psf_label.setPixmap(stellar_pix)
+
+        # 2) Switch the Deconvolution algorithm to Richardson–Lucy
+        self.deconv_algo_combo.setCurrentText("Richardson-Lucy")
+
+        # 3) Show the “Using Stellar PSF” label
+        self.rl_custom_label.setVisible(True)
+        self.rl_disable_custom_btn.setVisible(True)
+
+        # 4) Inform the user
+        QMessageBox.information(
+            self,
+            "PSF Selected",
+            "Stellar PSF is now active for Richardson–Lucy."
+        )
+
+    def _clear_custom_psf_flag(self, _=None):
+        """
+        Turn off “Use Stellar PSF” mode.
+        """
+        if self._use_custom_psf:
+            self._use_custom_psf = False
+            self._custom_psf = None
+            self.rl_custom_label.setVisible(False)
+            self.rl_disable_custom_btn.setVisible(False)
+
+    def _on_save_stellar_psf(self):
+        """
+        Let the user save the last computed PSF to disk as a FITS or TIFF.
+        """
+        if self._last_stellar_psf is None:
+            QMessageBox.warning(self, "No PSF", "Run SEP extraction before saving.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save PSF as...", "", "TIFF (*.tif);;FITS (*.fits)")
+        if not path:
+            return
+
+        # If the user chose .fits or .tif, write appropriately
+        ext = path.lower().split('.')[-1]
+        if ext == 'fits':
+            hdu = fits.PrimaryHDU(self._last_stellar_psf.astype(np.float32))
+            hdu.writeto(path, overwrite=True)
+        elif ext in ('tif', 'tiff'):
+            # If you have tifffile installed:
+            import tifffile
+            tifffile.imwrite(path, self._last_stellar_psf.astype(np.float32))
+        else:
+            QMessageBox.warning(self, "Invalid Extension", "Please choose .fits or .tif.")
+            return
+        QMessageBox.information(self, "Saved", f"PSF saved to:\n{path}")
+
+def estimate_psf_from_image(image_array: np.ndarray,
+                            threshold_sigma: float,
+                            min_area: int,
+                            saturation_limit: float,
+                            max_stars: int,
+                            stamp_half_width: int) -> np.ndarray:
+    """
+    Given a 2D NumPy image (float or uint16/uint32), run SEP‐based star detection,
+    discard anything brighter than saturation_limit, extract postage stamps of size
+    (2*stamp_half_width+1)² around the star centroids, recast to float32, 
+    align & normalize each stamp, and return their average as a normalized PSF.
+    
+    Returns:
+        psf_kernel: 2D float32 array (sum=1), size = (2*stamp_half_width+1).
+    """
+    # 1) Convert to the SEP‐friendly dtype (float32) if needed
+    data = image_array.astype(np.float32)
+
+    # 2) Estimate background & RMS
+    bkg = sep.Background(data)
+    bkg_sub = data - bkg.back()  # subtract background
+
+    # 3) Run SEP extraction with given σ threshold and min_area
+    #    `err` can be None for now; SEP will estimate it from data.
+    sources = sep.extract(bkg_sub, thresh=threshold_sigma, 
+                          err=bkg.globalrms, minarea=min_area)
+    if len(sources) == 0:
+        raise RuntimeError("No sources found with SEP threshold = %.1f σ." % threshold_sigma)
+
+    # 4) Filter out saturated detections
+    #    SEP’s “peak” column is the maximum pixel value of the detection.
+    valid_sources = []
+    for src in sources:
+        if src['peak'] < saturation_limit:
+            valid_sources.append(src)
+
+    if len(valid_sources) == 0:
+        raise RuntimeError("All detected sources exceed saturation limit %.0f." % saturation_limit)
+
+    # 5) Sort by brightness (peak) descending, take brightest `max_stars`
+    valid_sources.sort(key=lambda s: s['peak'], reverse=True)
+    selected = valid_sources[: max_stars]
+
+    # 6) For each selected source, extract a postage stamp of size (2*w + 1)
+    w = stamp_half_width
+    kernel_size = 2*w + 1
+    psf_sum = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+    count = 0
+
+    for src in selected:
+        x_centroid = src['x']  # float pixel coordinate
+        y_centroid = src['y']
+
+        # Convert to nearest integer for raw indexing
+        xi = int(round(x_centroid))
+        yi = int(round(y_centroid))
+
+        # Define stamp boundaries in image coordinates
+        y0 = yi - w
+        y1 = yi + w + 1   # +1 because Python slices exclude the upper bound
+        x0 = xi - w
+        x1 = xi + w + 1
+
+        # Skip if the stamp would go partially outside the image
+        if y0 < 0 or x0 < 0 or y1 > data.shape[0] or x1 > data.shape[1]:
+            continue
+
+        stamp = bkg_sub[y0:y1, x0:x1].astype(np.float32)
+
+        # 7) Recentroid to subpixel (optional enhancement):
+        #    If you want subpixel alignment, re‐compute the centroid
+        #    of the stamp via a 2D weighted average, then shift the stamp by that offset.
+        #    For simplicity, you can skip subpixel alignment for now.
+
+        # 8) Normalize this stamp so its sum = 1 (or sum of positive values)
+        total_flux = np.sum(stamp)
+        if total_flux <= 0:
+            # Something went wrong; skip it
+            continue
+
+        stamp_normalized = stamp / total_flux
+
+        psf_sum += stamp_normalized
+        count += 1
+
+    if count == 0:
+        raise RuntimeError("No valid postage stamps extracted (all were off‐edge or zero).")
+
+    # 9) Final averaged PSF
+    psf_kernel = (psf_sum / count).astype(np.float32)
+
+    # 10) Normalize one more time to ensure sum(psf)=1 (safety)
+    psf_total = psf_kernel.sum()
+    if psf_total > 0:
+        psf_kernel /= psf_total
+    else:
+        # As a last resort, return a delta‐PSF
+        psf_kernel = np.zeros_like(psf_kernel, dtype=np.float32)
+        center = w
+        psf_kernel[center, center] = 1.0
+
+    return psf_kernel
+
+# ─────────────────────────────────────────────────────────────────────────────
+def make_elliptical_gaussian_psf(radius: float,
+                                 kurtosis: float,
+                                 aspect: float,
+                                 rotation_deg: float) -> np.ndarray:
+    """
+    Build a 2D elliptical generalized‐Gaussian PSF kernel (sum=1):
+    
+      PSF(x,y) = A ⋅ exp( − [ (x'/σ_x)^2 + (y'/σ_y)^2 ]^β )
+    
+    where:
+      σ_x = radius,
+      σ_y = radius / aspect,
+      β   = kurtosis,
+      and (x',y') is the coordinate rotated by rotation_deg (in degrees).
+    
+    Returns a normalized (sum=1) float32 array.
+    """
+    # 1) Compute σ_x and σ_y
+    sigma_x = radius
+    sigma_y = radius / aspect
+
+    # 2) Build a bounding box so we capture essentially all of the PSF
+    #    ~6×sigma_x on each side (force odd so there’s a center pixel).
+    size = int(np.ceil(6 * sigma_x))
+    if size % 2 == 0:
+        size += 1
+    half = size // 2
+
+    # 3) Create (x, y) grid centered at 0
+    xs = np.linspace(-half, half, size)
+    ys = np.linspace(-half, half, size)
+    xv, yv = np.meshgrid(xs, ys)  # shape = (size, size)
+
+    # 4) Rotate coordinates by −rotation_deg to align major axis with x'
+    θ = np.deg2rad(rotation_deg)
+    cos_t, sin_t = np.cos(θ), np.sin(θ)
+    x_rot =  cos_t * xv + sin_t * yv
+    y_rot = -sin_t * xv + cos_t * yv
+
+    # 5) Compute “generalized exponent” = [ (x'/σ_x)^2 + (y'/σ_y)^2 ]^β
+    β = kurtosis
+    squared_sum = (x_rot / sigma_x)**2 + (y_rot / sigma_y)**2
+    exponent = squared_sum ** β
+
+    # 6) Build PSF
+    psf = np.exp(-exponent)
+
+    # 7) Normalize to sum = 1
+    total = psf.sum()
+    if total != 0:
+        psf = (psf / total).astype(np.float32)
+    else:
+        psf = np.zeros_like(psf, dtype=np.float32)
+
+    return psf
+
+
+def _rl_tile_process_reg(tile_and_meta: tuple) -> tuple[int, np.ndarray]:
+    """
+    Worker for a padded tile that implements:
+      - Plain Richardson–Lucy (RL)
+      - RL + Tikhonov (L2) penalty at each iteration
+      - RL + Total Variation (TV) penalty at each iteration
+      followed by an optional single bilateral‐denoise (“dering”).
+
+    Arguments in tile_and_meta:
+      0) tile_index   : int  (to re‐assemble in order)
+      1) padded_tile  : np.ndarray of shape ((L_ext + 2*pad) × (W + 2*pad))
+      2) psf          : np.ndarray (2D, normalized kernel)
+      3) num_iter     : int  (number of RL iterations)
+      4) clip_flag    : bool (if True, apply one bilateral pass at end)
+      5) pad          : int  (how many pixels were padded on each side)
+      6) reg_type     : str  ("None (Plain R–L)", "Tikhonov (L2)", or "Total Variation (TV)")
+      7) y0_ext       : int  (row‐index of top of extended region, in the full image)
+      8) y1_ext       : int  (row‐index of bottom of extended region, in the full image)
+      9) L_ext        : int  (number of rows in the extended region, before padding)
+
+    Returns:
+      (tile_index, deconv_core) where deconv_core.shape = (L_ext, W).
+    """
+    (tile_index,
+     padded_tile,
+     psf,
+     num_iter,
+     clip_flag,
+     pad,
+     reg_type,
+     y0_ext,
+     y1_ext,
+     L_ext) = tile_and_meta
+
+    # === Choose small constants for L2 and TV penalties ===
+    alpha_L2 = 0.01     # Tikhonov weight
+    alpha_tv = 0.01     # TV weight
+
+    # === Initialize f ===
+    # For RL we typically start with sharp initial guess = padded tile itself (clipped to [eps..1])
+    f = np.clip(padded_tile.astype(np.float32), 1e-8, None)
+
+    # Pre‐flip PSF for the “backward” convolution step
+    psf_flipped = psf[::-1, ::-1]
+
+    # === Full RL loop with optional regularization ===
+    for _ in range(num_iter):
+        # 1) Convolve current estimate with PSF
+        estimate_blurred = fftconvolve(f, psf, mode="same")
+
+        # 2) Compute ratio = observed / estimate_blurred
+        ratio = padded_tile / (estimate_blurred + 1e-8)
+
+        # 3) Backproject ratio through PSF^T
+        correction = fftconvolve(ratio, psf_flipped, mode="same")
+
+        # 4) Update f
+        f = f * correction
+
+        # 5) Apply Tikhonov (L2) penalty if requested:
+        if reg_type == "Tikhonov (L2)":
+            # A simple L2 step: subtract a small Laplacian
+            # Note: `laplace(f)` returns the discrete Laplacian of f
+            f = f - alpha_L2 * laplace(f)
+
+        # 6) Apply TV penalty if requested:
+        elif reg_type == "Total Variation (TV)":
+            # Running a single‐iteration TV denoise at each step
+            f = denoise_tv_chambolle(f, weight=alpha_tv, channel_axis=None).astype(np.float32)
+
+        # 7) Ensure non‐negativity and clip to [0..1]
+        f = np.clip(f, 0.0, 1.0)
+
+    # === Optional “deringing” (one bilateral‐denoise) ===
+    if clip_flag:
+        f = denoise_bilateral(
+            f,
+            sigma_color=0.08,
+            sigma_spatial=1
+        ).astype(np.float32)
+
+    # === Crop away padding: return only the core region of size L_ext × W ===
+    full_h, full_w = f.shape
+    Wcore = full_w - 2 * pad
+    deconv_core = f[pad : pad + L_ext, pad : pad + Wcore].astype(np.float32)
+
+    return (tile_index, deconv_core)
+
+# ─────────────────────────────────────────────────────────────────────────────
+def van_cittert_deconv(image: np.ndarray, iterations: int, relaxation: float) -> np.ndarray:
+    """
+    Simple Van Cittert deconvolution:
+      f_0 = image
+      For n in [0..iterations-1]:
+        f_{n+1} = f_n + relaxation * (image - f_n * psf)
+      (Here we assume 'psf' is the same elliptical Gaussian PSF used in RL
+       with default parameters. You may want to pass a PSF separately.)
+
+    For demonstration, we’ll build a small Gaussian PSF with fixed parameters.
+    In practice, you should pass the appropriate PSF (matching how you convolved).
+    """
+    # Example: use a small 1D Gaussian PSF for van Cittert. In practice, match your convolution PSF.
+    sigma = 3.0
+    size = int(np.ceil(6 * sigma))
+    if size % 2 == 0:
+        size += 1
+    xs = np.linspace(-size//2, size//2, size)
+    kernel_1d = np.exp(-(xs**2) / (2*sigma**2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    # Create a separable 2D PSF
+    psf = np.outer(kernel_1d, kernel_1d).astype(np.float32)
+
+    # Initialize f_n
+    f = image.copy().astype(np.float32)
+
+    for _ in range(iterations):
+        conv = fftconvolve(f, psf, mode="same")
+        f = f + relaxation * (image.astype(np.float32) - conv)
+
+    return np.clip(f, 0.0, 1.0)
+
+def rotate_about_center(image: np.ndarray, angle_deg: float, center: tuple[float, float]) -> np.ndarray:
+    """
+    Rotate an image (H×W or H×W×3) by `angle_deg` degrees around a given center (y0, x0).
+    - image: np.ndarray, float32 in [0..1] or uint8/uint16.
+    - angle_deg: positive = CCW rotation (in degrees).
+    - center: (row=y0, col=x0), pivot point in pixel coords.
+    Returns a float32 array in [0..1] of the same shape as input.
+    """
+    # 1) Convert input to float32 [0..1]
+    img_f = img_as_float32(image)
+
+    H, W = img_f.shape[:2]
+    y0, x0 = center
+
+    # 2) Build a 2×3 affine transform that:
+    #    - shifts center to origin
+    #    - rotates by angle
+    #    - shifts back to (x0, y0)
+    theta = np.deg2rad(angle_deg)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    # For a point (x, y), the rotation matrix about the origin is:
+    #   [ cos  -sin ]
+    #   [ sin   cos ]
+    # To pivot about (x0, y0), we do:  Shift(-x0, -y0) → Rotate → Shift(+x0, +y0)
+    # The combined 2×3 matrix M = [ [cos, -sin, tx], [sin, cos, ty] ] where:
+    tx = x0 - ( x0 * cos_t - y0 * sin_t )
+    ty = y0 - ( x0 * sin_t + y0 * cos_t )
+
+    M = np.array([[ cos_t, -sin_t, tx ],
+                  [ sin_t,  cos_t, ty ]], dtype=np.float32)
+
+    # 3) Use skimage.warp with this affine matrix (inverse mapping).
+    #    `warp` expects the inverse transformation, so we feed `np.linalg.inv(A)` or
+    #    simply use `affine_transform=...` via the `inverse_map` argument. However,
+    #    scikit‐image lets us pass a 3×3 homogeneous matrix to `warp` directly:
+    #
+    #    We can embed M into a 3×3 as:
+    #       [ cos  -sin  tx ]
+    #       [ sin   cos  ty ]
+    #       [  0     0    1 ]
+    #
+    #    Then `warp(image, AffineTransform(matrix=inv(M3x3)).inverse)` or simpler: use
+    #    `warp(..., transform=AffineTransform(...))`.
+    #
+    #    But since `warp` also accepts a 2×3 “inverse map” if you pass `inverse_map=M_inv`
+    #    directly, we can do that. In practice, the easiest is to create a 3×3 and invert:
+    from skimage.transform import AffineTransform
+
+    # Build a 3×3 homogeneous transform from M:
+    M3 = np.eye(3, dtype=np.float32)
+    M3[:2, :] = M
+
+    # We want to tell `warp` to use the inverse of M3, so that output(x_out) = input(M3^{-1} * [x_out y_out 1]^T).
+    tform = AffineTransform(matrix=np.linalg.inv(M3))
+
+    # 4) Call warp.  For color images, `warp` applies the same transform to each channel.
+    rotated = warp(
+        img_f,
+        inverse_map=tform,      # warp will apply tform to each output pixel to sample from img_f
+        order=1,                # bilinear interpolation
+        mode='constant',        # pixels outside get filled with cval
+        cval=0.0,
+        preserve_range=True     # keep value range in [0..1]
+    )
+
+    return rotated.astype(np.float32)
+
+def _bilinear_interpolate_gray(
+    gray: np.ndarray,
+    y_coords: np.ndarray,
+    x_coords: np.ndarray,
+    cval: float = 0.0
+) -> np.ndarray:
+    """
+    Perform bilinear interpolation on a single‐channel 2D array `gray` at
+    the (possibly non‐integer) coordinates given by y_coords, x_coords.
+
+    Parameters
+    ----------
+    gray : np.ndarray
+        2D float32 array of shape (H, W), values in [0..1].
+    y_coords, x_coords : np.ndarray
+        1D arrays of the same length N, giving the fractional sample positions.
+    cval : float
+        Value to use for any sample falling outside [0..H-1]×[0..W-1].
+
+    Returns
+    -------
+    samples : np.ndarray
+        1D float32 array of length N, containing the bilinearly‐interpolated
+        values (or cval for out‐of‐bounds).
+    """
+    H, W = gray.shape
+    N = y_coords.size
+
+    # Floor and ceil indices for each coordinate
+    x0 = np.floor(x_coords).astype(int)
+    x1 = x0 + 1
+    y0 = np.floor(y_coords).astype(int)
+    y1 = y0 + 1
+
+    # Compute interpolation weights
+    dx = x_coords - x0
+    dy = y_coords - y0
+
+    # Clip indices to be within [0..W-1] or [0..H-1]
+    x0c = np.clip(x0, 0, W - 1)
+    x1c = np.clip(x1, 0, W - 1)
+    y0c = np.clip(y0, 0, H - 1)
+    y1c = np.clip(y1, 0, H - 1)
+
+    # Gather the four neighbor pixels, but we'll mask out OOB afterward
+    Ia = gray[y0c, x0c]  # top-left
+    Ib = gray[y0c, x1c]  # top-right
+    Ic = gray[y1c, x0c]  # bottom-left
+    Id = gray[y1c, x1c]  # bottom-right
+
+    # Compute the weighted sum
+    wa = (1 - dx) * (1 - dy)
+    wb = dx * (1 - dy)
+    wc = (1 - dx) * dy
+    wd = dx * dy
+    interp = (Ia * wa) + (Ib * wb) + (Ic * wc) + (Id * wd)
+
+    # Now mask out-of-bounds positions:
+    # A point is OOB if x_coords<0 or x_coords>W-1 or y_coords<0 or y_coords>H-1.
+    oob_mask = (
+        (x_coords < 0) | (x_coords >= W) |
+        (y_coords < 0) | (y_coords >= H)
+    )
+    interp[oob_mask] = cval
+
+    return interp.astype(np.float32)
+# ─────────────────────────────────────────────────────────────────────────────
+def larson_sekanina(
+    image: np.ndarray,
+    center: tuple[float, float],
+    radial_step: Optional[float],
+    angular_step_deg: float,
+    operator: str = "Divide"
+) -> np.ndarray:
+    """
+    Larson–Sekanina implemented entirely via direct Cartesian sampling, WITHOUT warp_polar.
+
+    If radial_step is None or <= 0, falls back to a single global rotation (Δr = 0).
+    Otherwise, for each pixel at (y,x), compute its
+      r = sqrt((x-x0)^2 + (y-y0)^2),  θ = atan2(y-y0, x-x0)
+      →  r' = r + radial_step,   θ' = θ + angular_step_deg*(π/180)
+      →  x' = x0 + r' * cos(θ'),  y' = y0 + r' * sin(θ')
+      Sample J = gray(y', x') by bilinear interpolation.
+      Then either Subtract or Divide (flat‐style) to get B(y,x).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        A float32 array in [0..1], shape (H,W) or (H,W,3).  If color, first converts to grayscale.
+    center : (float, float)
+        (row=y0, col=x0) pivot for polar coordinates (float).
+    radial_step : float or None
+        If <=0 or None, do Δr=0 (pure rotation). Otherwise, Δr = radial_step.
+    angular_step_deg : float
+        How many degrees to rotate CCW for every sample: Δθ in degrees.
+    operator : str, default "Divide"
+        - "Subtract": B = max(gray – J, 0), then normalize so that max(B)=1.
+        - "Divide":   B = gray * (median(J) / (J + ε)), then clip to [0..1].
+
+    Returns
+    -------
+    B : np.ndarray
+        2D float32 array of shape (H, W), values in [0..1], representing
+        the LS result ready to be blended (Screen/SoftLight) or added.
+    """
+
+    # 1) Ensure image is float32 in [0..1], reduce to grayscale if needed
+    if image.dtype != np.float32:
+        raise ValueError("larson_sekanina: input must be float32 in [0..1]")
+    if image.ndim == 3 and image.shape[2] == 3:
+        # Convert RGB → grayscale in [0..1]
+        from skimage.color import rgb2gray
+        gray = rgb2gray(image)
+    else:
+        gray = image  # already float32 [0..1]
+
+    H, W = gray.shape
+    y0, x0 = center
+
+    # Convert Δθ to radians
+    dtheta = (angular_step_deg / 180.0) * np.pi
+
+    # 2) Precompute (r, θ) for each pixel (vectorized)
+    ys = np.arange(H, dtype=np.float32)[:, None]  # shape (H,1)
+    xs = np.arange(W, dtype=np.float32)[None, :]  # shape (1,W)
+    dy = ys - y0         # shape (H,1)
+    dx = xs - x0         # shape (1,W)
+    # Broadcast to (H,W):
+    dy = np.broadcast_to(dy, (H, W))
+    dx = np.broadcast_to(dx, (H, W))
+    r  = np.sqrt(dx*dx + dy*dy)             # radius for each pixel
+    θ  = np.arctan2(dy, dx)                 # angle in [-π..π]
+    θ[θ < 0] += 2*np.pi                     # now θ in [0..2π)
+
+    # 3) Build the target (r', θ') arrays
+    if radial_step is None or radial_step <= 0:
+        # Pure rotation: Δr = 0
+        r2 = r
+    else:
+        r2 = r + radial_step
+
+    θ2 = θ + dtheta
+    θ2 %= (2*np.pi)  # wrap back into [0..2π)
+
+    # 4) Convert (r2, θ2) back to Cartesian sample positions (x2, y2)
+    x2 = x0 + r2 * np.cos(θ2)
+    y2 = y0 + r2 * np.sin(θ2)
+
+    # 5) Flatten to 1D arrays for interpolation
+    x2_flat = x2.ravel()
+    y2_flat = y2.ravel()
+
+    # 6) Bilinear‐interpolate gray at (y2_flat, x2_flat)
+    J_flat = _bilinear_interpolate_gray(gray, y2_flat, x2_flat, cval=0.0)  # shape (H*W,)
+    J = J_flat.reshape(H, W)  # shape (H, W)
+
+    # 7) Form B according to operator
+    if operator == "Divide":
+        eps = 1e-6
+        med = np.median(J)
+        if med <= 0:
+            med = 1e-6
+        B_unclipped = gray * (med / (J + eps))
+        B = np.clip(B_unclipped, 0.0, 1.0)
+    else:  # "Subtract"
+        diff = gray - J
+        B = np.clip(diff, 0.0, None)
+        maxv = B.max()
+        if maxv > 0:
+            B = B / maxv
+        else:
+            B = np.zeros_like(B)
+
+    return B.astype(np.float32)
 
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
@@ -47917,7 +50123,7 @@ class MainWindow(QMainWindow):
         self.selected_color = QColor(Qt.GlobalColor.red)  # Default annotation color
         self.selected_font = QFont("Arial", 12)  # Default font for text annotations   
         self.populate_object_tree()     
-        self._legend_dock = QDockWidget("Object Type Legend", self)
+        #self._legend_dock = QDockWidget("Object Type Legend", self)
         legend = LegendDialog(self)
         legend.setModal(False)
     
@@ -51726,34 +53932,34 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName("Seti Astro")
     QCoreApplication.setApplicationName  ("Seti Astro Suite")
 
-    for attempt in range(5):
-        try:
-            # ——— use the new, non-deprecated field names ———
-            Simbad.add_votable_fields(
-                'otype',         # short object type
-                'otypes',        # verbose object type
-                'mesdiameter',   # was 'diameter'
-                'rvz_redshift',  # was 'z_value'
-                'B',             # was 'flux(B)'
-                'V',             # was 'flux(V)'
-                'plx_value',     # was 'plx'
-                'sp'             # spectral type
-            )
+    #for attempt in range(5):
+    #    try:
+    #        # ——— use the new, non-deprecated field names ———
+    #        Simbad.add_votable_fields(
+    #            'otype',         # short object type
+    #            'otypes',        # verbose object type
+    #            'mesdiameter',   # was 'diameter'
+    #            'rvz_redshift',  # was 'z_value'
+    #            'B',             # was 'flux(B)'
+    #            'V',             # was 'flux(V)'
+    #            'plx_value',     # was 'plx'
+    #            'sp'             # spectral type
+    #        )#
 
-            Simbad.ROW_LIMIT = 0    # no row limit
-            Simbad.TIMEOUT   = 60   # seconds
+    #        Simbad.ROW_LIMIT = 0    # no row limit
+    #        Simbad.TIMEOUT   = 1   # seconds#
 
-            # if we get here, everything succeeded—stop retrying
-            break
+    #        # if we get here, everything succeeded—stop retrying
+    #        break
 
-        except Exception as e:
-            if attempt < 4:
-                # wait a second and try again
-                time.sleep(1)
-            else:
-                # last attempt failed: warn and move on
-                print("Warning: SIMBAD service is currently unavailable. "
-                    "SIMBAD-dependent features may be disabled.")
+    #    except Exception as e:
+    #        if attempt < 4:
+    #            # wait a second and try again
+    #            time.sleep(1)
+    #        else:
+    #            # last attempt failed: warn and move on
+    #            print("Warning: SIMBAD service is currently unavailable. "
+    #                "SIMBAD-dependent features may be disabled.")
     try:
         # Initialize main window
         window = AstroEditingSuite()
