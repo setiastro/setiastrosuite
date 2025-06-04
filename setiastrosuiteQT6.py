@@ -53,6 +53,7 @@ from skimage.color import rgb2gray, rgb2lab, lab2rgb
 from skimage.transform import warp_polar, warp
 from skimage import img_as_float32
 from numpy.fft import fft2, ifft2, fftshift, ifftshift
+from typing import Optional, Tuple
 
 import random
 if sys.stdout is not None:
@@ -29999,21 +30000,41 @@ class ConvoDeconvoDialog(QDialog):
 
     def closeEvent(self, event):
         """
-        When the user closes this dialog, clear out any large arrays and custom flags.
+        When the user closes this dialog, clear out all large arrays,
+        custom-PSF flags, and any QLabel pixmaps so nothing “sticks”
+        for the next time you open it.
         """
-        # 1) Clear Larson–Sekanina center
+        # 1) Clear Larson–Sekanina center (if set)
         if hasattr(self.view, "ls_center"):
             self.view.ls_center = None
 
         # 2) Drop references to NumPy arrays
-        self._original_image = None
-        self._preview_result = None
+        self._original_image   = None
+        self._preview_result   = None
 
-        # 3) Clear custom PSF & flag
-        self._custom_psf = None
-        self._use_custom_psf = False
+        # 3) Clear any SEP-derived PSF
+        self._last_stellar_psf = None
+        self._custom_psf       = None
+        self._use_custom_psf   = False
 
-        # 4) Call the base implementation so it actually closes
+        # 4) Clear all QLabel pixmaps so they don’t linger
+        self.conv_psf_label.clear()
+        self.sep_psf_preview.clear()
+
+        # 5) Clear the RL status bar text
+        self.rl_status_label.setText("")
+
+        # 6) Un‐check any “Using Stellar PSF” UI elements
+        self.rl_custom_label.setVisible(False)
+        self.rl_disable_custom_btn.setVisible(False)
+        self.custom_psf_bar.setVisible(False)
+
+        # 7) (Optional) Reset any TV-Denoise sliders to their defaults if you want
+        self.tv_weight_slider.setValue(0.1)
+        self.tv_iter_slider.setValue(10)
+        self.tv_multichannel_checkbox.setChecked(True)
+
+        # 8) Finally call the base implementation so it actually closes
         super().closeEvent(event)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -30545,7 +30566,7 @@ class ConvoDeconvoDialog(QDialog):
         else:
             self.conv_psf_label.clear()
 
-    def get_active_mask(self) -> np.ndarray | None:
+    def get_active_mask(self) -> Optional[np.ndarray]:
         """
         Retrieves the currently applied mask from MaskManager (if any),
         normalizes it to [0..1], and makes sure the shape matches
@@ -30712,7 +30733,6 @@ class ConvoDeconvoDialog(QDialog):
                     processed = processed * self.strength_slider.value() \
                                 + (1 - self.strength_slider.value()) * img
             elif algo == "Larson-Sekanina":
-                # … your Larson-Sekanina code (no mask at this stage) …
                 if not hasattr(self.view, "ls_center") or self.view.ls_center is None:
                     QMessageBox.information(
                         self,
@@ -30737,19 +30757,30 @@ class ConvoDeconvoDialog(QDialog):
                 )
                 A = img
                 if A.ndim == 3 and A.shape[2] == 3:
+                    # Color‐input path: B is 2D → replicate into 3 channels
                     B_rgb = np.repeat(B[:, :, np.newaxis], 3, axis=2)
                     A_rgb = A
                 else:
-                    A_rgb = A[..., np.newaxis]
-                    B_rgb = B[..., np.newaxis]
+                    # Grayscale‐input path: keep A and B as 2D, but we'll work in a dummy 3rd axis
+                    A_rgb = A[..., np.newaxis]   # shape = (H, W, 1)
+                    B_rgb = B[..., np.newaxis]   # shape = (H, W, 1)
 
                 if blend_mode == "Screen":
                     C = A_rgb + B_rgb - (A_rgb * B_rgb)
                 else:  # SoftLight
                     C = (1 - 2 * B_rgb) * (A_rgb**2) + 2 * B_rgb * A_rgb
 
-                processed = np.clip(C, 0.0, 1.0)
-                processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img 
+                clipped = np.clip(C, 0.0, 1.0)
+
+                # If the original was grayscale (2D), squeeze back to 2D
+                if img.ndim == 2:
+                    processed = clipped[..., 0]   # shape = (H, W)
+                else:
+                    processed = clipped           # shape = (H, W, 3)
+
+                # Now blend with the original img (they match shapes)
+                strength = self.strength_slider.value()
+                processed = processed * strength + (1 - strength) * img
             elif algo == "Van Cittert":
                 iters2 = self.vc_iterations_slider.value()
                 relax  = self.vc_relax_slider.value()
@@ -31491,7 +31522,7 @@ def make_elliptical_gaussian_psf(radius: float,
     return psf
 
 
-def _rl_tile_process_reg(tile_and_meta: tuple) -> tuple[int, np.ndarray]:
+def _rl_tile_process_reg(tile_and_meta: Tuple[int, np.ndarray]) -> Tuple[int, np.ndarray]:
     """
     Worker for a padded tile that implements:
       - Plain Richardson–Lucy (RL)
@@ -31613,7 +31644,11 @@ def van_cittert_deconv(image: np.ndarray, iterations: int, relaxation: float) ->
 
     return np.clip(f, 0.0, 1.0)
 
-def rotate_about_center(image: np.ndarray, angle_deg: float, center: tuple[float, float]) -> np.ndarray:
+def rotate_about_center(
+    image: np.ndarray,
+    angle_deg: float,
+    center: Tuple[float, float]
+) -> np.ndarray:
     """
     Rotate an image (H×W or H×W×3) by `angle_deg` degrees around a given center (y0, x0).
     - image: np.ndarray, float32 in [0..1] or uint8/uint16.
@@ -31751,7 +31786,7 @@ def _bilinear_interpolate_gray(
 # ─────────────────────────────────────────────────────────────────────────────
 def larson_sekanina(
     image: np.ndarray,
-    center: tuple[float, float],
+    center: Tuple[float, float],
     radial_step: Optional[float],
     angular_step_deg: float,
     operator: str = "Divide"
