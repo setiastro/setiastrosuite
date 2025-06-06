@@ -1,9 +1,9 @@
 {
-  "version": "2.17.2",
+  "version": "2.18.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.17.2/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Function: Convolution/Deconvolution. This houses some advanced traditional convolution and deconvolution options including estimating the PSF of your image based on stellar profiles for those looking for a more traditional approach to deconvolution over neural net based sharpening."
+  "notes": "New Function: Spectral Flux Color Calibration.  Known in PI and Siril as SPCC.  Utilizes a plate solved image to gather spectral types, spectrum, filters, and sensor to calibrate your image."
 }
