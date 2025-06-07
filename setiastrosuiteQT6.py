@@ -29683,15 +29683,42 @@ class SFCCDialog(QDialog):
                     return
 
         # --- 6) Parse the returned VOTable into an Astropy Table ---
-        try:
-            self.count_label.setText(f"Stars identified from SIMBAD…")
-            QApplication.processEvents()  # allow UI to update
-            vot = parse_single_table(BytesIO(resp.content))
-            tbl = vot.to_table(use_names_over_ids=True)
-        except Exception as e:
+        # --- 6) Parse the returned VOTable into an Astropy Table,
+        #       retrying if SIM‐SAM tells us "This query is already executing" ---
+        max_parse_tries = 20
+        for parse_try in range(1, max_parse_tries + 1):
+            try:
+                self.count_label.setText(f"Parsing SIM‐SAM response (attempt {parse_try}/{max_parse_tries})…")
+                QApplication.processEvents()
+                vot = parse_single_table(BytesIO(resp.content))
+                tbl = vot.to_table(use_names_over_ids=True)
+                break
+            except Exception as e:
+                text = ""
+                try:
+                    text = resp.content.decode(errors="ignore").lower()
+                except Exception:
+                    pass
+                # look for the SIM‐SAM "already executing" INFO
+                if 'info name="error"' in text and 'already executing' in text and parse_try < max_parse_tries:
+                    time.sleep(5)
+                    # re-fire the SIM‐SAM query (but don't crash on network errors)
+                    try:
+                        resp = requests.get(sam_url, params=params, timeout=30)
+                    except requests.RequestException as net_err:
+                        print(f"[fetch_stars] network retry failed: {net_err}")
+                    continue
+                # non‐recoverable or out of retries
+                QMessageBox.critical(
+                    self, "VOTable Parse Error",
+                    f"Could not parse SIM‐SAM response:\n{e}"
+                )
+                return
+        else:
+            # loop fell through without break
             QMessageBox.critical(
-                self, "VOTable Parse Error",
-                f"Could not parse SIM‐SAM response (try again!):\n{e}"
+                self, "SIM‐SAM Busy",
+                "SIMBAD is still processing your previous query.  Please try again later."
             )
             return
 
