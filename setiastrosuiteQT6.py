@@ -255,7 +255,8 @@ from PyQt6.QtCore import (
     QSettings,
     QRunnable,
     QThreadPool,
-    QSignalBlocker
+    QSignalBlocker,
+    QStandardPaths
 )
 
 
@@ -265,7 +266,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.0"
+VERSION = "2.18.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -28384,40 +28385,34 @@ class WhiteBalanceDialog(QDialog):
             self.reject()
 
 class SaspViewer(QMainWindow):
-    def __init__(self, sasp_data_path):
+    def __init__(self, sasp_data_path, user_custom_path):
         super().__init__()
         self.setWindowTitle("SASP Viewer (Pickles + RGB Responses)")
 
-        # 1) Load SASP_data.fits
-        try:
-            self.hdul = fits.open(sasp_data_path, mode="readonly", memmap=False)
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not open '{sasp_data_path}':\n{e}")
-            sys.exit(1)
+        # 1) Open both FITS:
+        self.base_hdul   = fits.open(sasp_data_path,   mode="readonly", memmap=False)
+        self.custom_hdul = fits.open(user_custom_path, mode="readonly", memmap=False)
 
-        # 2) Build lists: Pickles templates, Filters, Sensors
+        # 2) Build master lists from both
         self.pickles_templates = []
         self.filter_list       = []
         self.sensor_list       = []
+        for hdul in (self.custom_hdul, self.base_hdul):
+            for hdu in hdul:
+                if not isinstance(hdu, fits.BinTableHDU):
+                    continue
+                c = hdu.header.get("CTYPE","").upper()
+                e = hdu.header.get("EXTNAME","")
+                if c == "SED":
+                    self.pickles_templates.append(e)
+                elif c == "FILTER":
+                    self.filter_list.append(e)
+                elif c == "SENSOR":
+                    self.sensor_list.append(e)
 
-        for hdu in self.hdul:
-            if not isinstance(hdu, fits.BinTableHDU):
-                continue
-            ctype = hdu.header.get("CTYPE", "").upper()
-            name  = hdu.header.get("EXTNAME", "")
+        for lst in (self.pickles_templates, self.filter_list, self.sensor_list):
+            lst.sort()
 
-            if ctype == "SED":
-                self.pickles_templates.append(name)
-            elif ctype == "FILTER":
-                self.filter_list.append(name)
-            elif ctype == "SENSOR":
-                self.sensor_list.append(name)
-
-        self.pickles_templates.sort()
-        self.filter_list.sort()
-        self.sensor_list.sort()
-
-        # 3) Prepend “(None)” to RGB‐filter choices
         self.rgb_filter_choices = ["(None)"] + self.filter_list
 
         # 4) Build the UI
@@ -28453,11 +28448,20 @@ class SaspViewer(QMainWindow):
         self.b_filter_combo.addItems(self.rgb_filter_choices)
         row.addWidget(self.b_filter_combo)
 
-        # Sensor/QE dropdown
-        row.addWidget(QLabel("Sensor (QE):"))
+        # ——— LP/Cut filter & Sensor go on their own second row ———
+        row2 = QHBoxLayout()
+        vbox.addLayout(row2)
+
+        row2.addWidget(QLabel("LP/Cut Filter:"))
+        self.lp_filter_combo = QComboBox()
+        self.lp_filter_combo.addItems(self.rgb_filter_choices)
+        row2.addWidget(self.lp_filter_combo)
+
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("Sensor (QE):"))
         self.sens_combo = QComboBox()
         self.sens_combo.addItems(self.sensor_list)
-        row.addWidget(self.sens_combo)
+        row2.addWidget(self.sens_combo)
 
         # Plot button
         self.plot_btn = QPushButton("Plot")
@@ -28472,30 +28476,32 @@ class SaspViewer(QMainWindow):
         # 5) Initial plot
         self.update_plot()
 
+    def load_any(self, extname, field):
+        """
+        Look for `extname` in custom_hdul first, then base_hdul.
+        Returns the data[field] array as float.
+        """
+        for hdul in (self.custom_hdul, self.base_hdul):
+            if extname in hdul:
+                return hdul[extname].data[field].astype(float)
+        raise KeyError(f"Extension '{extname}' not found")
+
     def update_plot(self):
         star_ext = self.star_combo.currentText()
         r_filt   = self.r_filter_combo.currentText()
         g_filt   = self.g_filter_combo.currentText()
         b_filt   = self.b_filter_combo.currentText()
         sens_ext = self.sens_combo.currentText()
+        lp_ext   = self.lp_filter_combo.currentText()
 
         # -- Load star SED --
-        try:
-            hdu_star = self.hdul[star_ext]
-        except KeyError:
-            QMessageBox.warning(self, "Error", f"Star template '{star_ext}' not found.")
-            return
-        wl_star = hdu_star.data["WAVELENGTH"].astype(float)   # in Å
-        fl_star = hdu_star.data["FLUX"].astype(float)         # vegamag‐normalized
+
+        wl_star = self.load_any(star_ext, "WAVELENGTH")
+        fl_star = self.load_any(star_ext, "FLUX")
 
         # -- Load sensor QE --
-        try:
-            hdu_sens = self.hdul[sens_ext]
-        except KeyError:
-            QMessageBox.warning(self, "Error", f"Sensor '{sens_ext}' not found.")
-            return
-        wl_sens = hdu_sens.data["WAVELENGTH"].astype(float)
-        qe_sens = hdu_sens.data["THROUGHPUT"].astype(float)
+        wl_sens = self.load_any(sens_ext, "WAVELENGTH")
+        qe_sens = self.load_any(sens_ext, "THROUGHPUT")
 
         # -- Build common 1 Å grid from 1150 to 10620 Å --
         wl_min, wl_max = 1150.0, 10620.0
@@ -28510,27 +28516,32 @@ class SaspViewer(QMainWindow):
         fl_common   = sed_interp(common_wl)    # star flux on common grid
         sens_common = sens_interp(common_wl)   # QE on common grid
 
-        # -- For each of R, G, B, load filter if selected and build filter×QE & response --
+        # -- For each of R, G, B, load filter if selected and build filter×QE×LP & response --
         rgb_data = {}
         for color, filt_name in (("red",   r_filt),
                                  ("green", g_filt),
                                  ("blue",  b_filt)):
             if filt_name != "(None)":
-                try:
-                    hdu_f = self.hdul[filt_name]
-                except KeyError:
-                    QMessageBox.warning(self, "Error", f"Filter '{filt_name}' not found.")
-                    return
-                wl_filt = hdu_f.data["WAVELENGTH"].astype(float)
-                tr_filt = hdu_f.data["THROUGHPUT"].astype(float)
+                wl_filt = self.load_any(filt_name, "WAVELENGTH")
+                tr_filt = self.load_any(filt_name, "THROUGHPUT")
 
                 filt_interp = interp1d(wl_filt, tr_filt, kind="linear",
                                        bounds_error=False, fill_value=0.0)
                 filt_common = filt_interp(common_wl)
 
                 # throughput for this channel
-                T_sys_rgb = filt_common * sens_common
+                # include sensor QE and LP/Cut filter
+                if lp_ext != "(None)":
+                    wl_lp  = self.load_any(lp_ext, "WAVELENGTH")
+                    tr_lp  = self.load_any(lp_ext, "THROUGHPUT")
+                    lp_interp = interp1d(wl_lp, tr_lp, kind="linear",
+                                         bounds_error=False, fill_value=0.0)
+                    T_LP = lp_interp(common_wl)
+                else:
+                    T_LP = np.ones_like(common_wl)
 
+                # system throughput for this channel
+                T_sys_rgb = filt_common * sens_common * T_LP
                 # response = SED × (filter×QE)
                 resp_rgb = fl_common * T_sys_rgb
 
@@ -28548,11 +28559,11 @@ class SaspViewer(QMainWindow):
         # -- Compute synthetic magnitudes for each channel relative to A0V --
         mag_texts = []
         if "A0V" in self.pickles_templates:
-            hdu_veg = self.hdul["A0V"]
-            wl_veg  = hdu_veg.data["WAVELENGTH"].astype(float)
-            fl_veg  = hdu_veg.data["FLUX"].astype(float)
+            # load_any will look in custom_hdul first, then base_hdul
+            wl_veg = self.load_any("A0V", "WAVELENGTH")
+            fl_veg = self.load_any("A0V", "FLUX")
             veg_interp = interp1d(wl_veg, fl_veg, kind="linear",
-                                  bounds_error=False, fill_value=0.0)
+                                bounds_error=False, fill_value=0.0)
             fl_veg_c = veg_interp(common_wl)
 
             # Loop over color AND now correctly retrieve "filter_name" from rgb_data
@@ -28621,10 +28632,10 @@ class SaspViewer(QMainWindow):
 
         self.canvas.draw()
 
+
     def closeEvent(self, event):
-        # Close FITS on exit
-        self.hdul.close()
-        self.deleteLater()
+        self.base_hdul.close()
+        self.custom_hdul.close()
         super().closeEvent(event)
 
 def pickles_match_for_simbad(simbad_sp: str, available_extnames: list[str]) -> list[str]:
@@ -28803,25 +28814,21 @@ class SFCCDialog(QDialog):
         self.sasp_data_path = sasp_data_path
 
 
-        # Build list of all Pickles SED templates (EXTNAME where CTYPE=="SED")
-        self.sed_list = []
-        self.filter_list = []
-        self.sensor_list = []
-        with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul:
-            for hdu in hdul:
-                if not isinstance(hdu, fits.BinTableHDU):
-                    continue
-                ctype = hdu.header.get("CTYPE", "").upper()
-                ext = hdu.header.get("EXTNAME", "")
-                if ctype == "SED":
-                    self.sed_list.append(ext)
-                elif ctype == "FILTER":
-                    self.filter_list.append(ext)
-                elif ctype == "SENSOR":
-                    self.sensor_list.append(ext)
-        self.sed_list.sort()
-        self.filter_list.sort()
-        self.sensor_list.sort()
+        # open (or create) a user‐writable FITS in ~/.local/share/…
+
+        app_data = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation
+        )
+        os.makedirs(app_data, exist_ok=True)
+        self.user_custom_path = os.path.join(app_data, "usercustomcurves.fits")
+        if not os.path.exists(self.user_custom_path):
+            # create an empty FITS if it doesn't exist yet
+            fits.HDUList([fits.PrimaryHDU()]).writeto(self.user_custom_path)
+        # open for update
+
+
+        # now build your lists off both:
+        self._reload_hdu_lists()
 
         # Placeholder: will be populated by fetch_stars()
         self.star_list = []
@@ -28836,6 +28843,7 @@ class SFCCDialog(QDialog):
         self.r_filter_combo.currentIndexChanged.connect(self.save_r_filter_setting)
         self.g_filter_combo.currentIndexChanged.connect(self.save_g_filter_setting)
         self.b_filter_combo.currentIndexChanged.connect(self.save_b_filter_setting)
+        self.lp_filter_combo.currentIndexChanged.connect(self.save_lp_setting)
         self.sens_combo.currentIndexChanged.connect(self.save_sensor_setting)
         # (If you also want to remember which “White Reference” star was chosen, connect star_combo as well)
         self.star_combo.currentIndexChanged.connect(self.save_star_setting)
@@ -28914,6 +28922,16 @@ class SFCCDialog(QDialog):
         self.sens_combo.addItems(self.sensor_list)
         row3.addWidget(self.sens_combo)
 
+        # ——— Stacked LP/Cut filter dropdown ———
+        row3.addSpacing(20)
+        row3.addWidget(QLabel("LP/Cut Filter:"))
+        self.lp_filter_combo = QComboBox()
+        self.lp_filter_combo.addItem("(None)")
+        self.lp_filter_combo.addItems(self.filter_list)
+        row3.addWidget(self.lp_filter_combo)
+        row3.addStretch()
+
+
         # ——— Row 4: “Run Calibration” + “Close” ———
         row4 = QHBoxLayout()
         layout.addLayout(row4)
@@ -28950,8 +28968,38 @@ class SFCCDialog(QDialog):
         self.canvas.setVisible(False)      # hide it initially
         layout.addWidget(self.canvas, stretch=1)
 
+        self.reset_btn = QPushButton("Reset SFCC")
+        self.reset_btn.clicked.connect(self.reset_sfcc)
+        layout.addWidget(self.reset_btn)        
+
 
     # ——— QSettings helpers ———
+
+    def _reload_hdu_lists(self):
+        # 1) pickles SEDs come only from the main SASP_data.fits
+        self.sed_list = []
+        with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as base:
+            for hdu in base:
+                if isinstance(hdu, fits.BinTableHDU) and hdu.header.get("CTYPE","").upper()=="SED":
+                    self.sed_list.append(hdu.header["EXTNAME"])
+        # 2) filters/sensors come from BOTH files
+        self.filter_list = []
+        self.sensor_list = []
+        for path in (self.sasp_data_path, self.user_custom_path):
+            with fits.open(path, mode="readonly", memmap=False) as hdul:
+                for hdu in hdul:
+                    if not isinstance(hdu, fits.BinTableHDU):
+                        continue
+                    c = hdu.header.get("CTYPE","").upper()
+                    e = hdu.header.get("EXTNAME","")
+                    if c=="FILTER":
+                        self.filter_list.append(e)
+                    elif c=="SENSOR":
+                        self.sensor_list.append(e)
+        # sort them
+        self.sed_list.sort()
+        self.filter_list.sort()
+        self.sensor_list.sort()
 
     def load_settings(self):
         """
@@ -28995,6 +29043,17 @@ class SFCCDialog(QDialog):
             if idx != -1:
                 self.sens_combo.setCurrentIndex(idx)
 
+        # 6) LP/Cut filter
+        saved_lp = settings.value("SFCC/LPFilter", "")
+        if saved_lp:
+            idx = self.lp_filter_combo.findText(saved_lp)
+            if idx != -1:
+                self.lp_filter_combo.setCurrentIndex(idx)
+
+    def save_lp_setting(self, index):
+        """Write the currently selected LP/Cut filter into QSettings."""
+        current = self.lp_filter_combo.currentText()
+        QSettings().setValue("SFCC/LPFilter", current)
 
     def save_star_setting(self, index):
         """
@@ -29313,18 +29372,15 @@ class SFCCDialog(QDialog):
 
         # Step 11: Append new_hdu inside a with-block
         try:
-            with fits.open(self.sasp_data_path, mode="update", memmap=False) as hdul_temp:
-                hdul_temp.append(new_hdu)
-                hdul_temp.flush()
+            with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
+                hdul.append(new_hdu)
+                hdul.flush()
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Write Error",
-                f"Could not write to {self.sasp_data_path}:\n{e}"
-            )
+            QMessageBox.critical(self, "Write Error", f"Could not write to {self.user_custom_path}:\n{e}")
             return
 
-        # Step 12: Re‐build filter_list and sensor_list, then refresh combos
+        # now simply rebuild your lists & UI
+        self._reload_hdu_lists()
         self.refresh_filter_sensor_lists()
 
         QMessageBox.information(
@@ -29335,167 +29391,84 @@ class SFCCDialog(QDialog):
 
     def remove_custom_curve(self):
         """
-        1) Offer the user a list of all current FILTER+SENSOR extension names.
-        2) If they pick one, close the existing handle, 
-        open SASP_data.fits in readonly mode, build a new HDUList without that EXTNAME,
-        overwrite the file, re-open readonly, and refresh in-memory lists/combos.
+        1) Offer the user a list of all current FILTER+SENSOR names.
+        2) If they pick one, rebuild SASP_data.fits without that EXTNAME.
+        3) Reopen and refresh in-memory lists/combos.
         """
-        # 1) Build a combined list of all FILTER + SENSOR extnames
         all_curves = self.filter_list + self.sensor_list
         if not all_curves:
-            QMessageBox.information(self, "Remove Curve", "There are no custom curves to remove.")
+            QMessageBox.information(self, "Remove Curve", "No custom curves to remove.")
             return
 
-        # 2) Ask user which one to delete
-        curve_to_remove, ok = QInputDialog.getItem(
+        curve, ok = QInputDialog.getItem(
             self,
             "Remove Curve",
-            "Select a FILTER or SENSOR curve to remove:",
-            all_curves,
-            0,
-            False
+            "Select a FILTER or SENSOR curve to delete:",
+            all_curves, 0, False
         )
-        if not ok or not curve_to_remove:
+        if not ok or not curve:
             return
 
-        # 3) Confirm with the user
         reply = QMessageBox.question(
             self,
             "Confirm Deletion",
-            f"Are you sure you want to delete '{curve_to_remove}'?",
+            f"Delete '{curve}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 4) Close any open HDUList so we can safely overwrite the file
+        # 1) close existing handle
         try:
-            if hasattr(self, "hdul") and self.hdul is not None:
-                self.hdul.close()
-        except Exception:
-            pass
-
-        # 5) Rebuild the FITS file without the chosen EXTNAME
-        try:
-            # a) Open original in READONLY just to inspect
-            with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul_orig:
-                # Print debug info if you like:
-                # print(">>> Before removal, FILTER/SENSOR curves:")
-                # for idx, hdu in enumerate(hdul_orig):
-                #     if isinstance(hdu, fits.BinTableHDU):
-                #         ext = hdu.header.get("EXTNAME", "").strip()
-                #         ctype = hdu.header.get("CTYPE", "").strip().upper()
-                #         if ctype in ("FILTER","SENSOR"):
-                #             print(f"{idx:>4} | {ext:<20} | {ctype}")
-
-                # Build new list of HDUs to KEEP
-                hdus_to_keep = []
-                for hdu in hdul_orig:
-                    # if this is a BinTableHDU whose EXTNAME matches, skip it
-                    if (
-                        isinstance(hdu, fits.BinTableHDU)
-                        and hdu.header.get("EXTNAME", "").strip().upper() == curve_to_remove.upper()
-                    ):
-                        continue
-                    hdus_to_keep.append(hdu.copy())
-
-            # b) Write a brand-new file (overwrite=True) containing only hdus_to_keep
-            new_hdul = fits.HDUList(hdus_to_keep)
-            new_hdul.writeto(self.sasp_data_path, overwrite=True)
-            new_hdul.close()
-
+            with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
+                # find the matching EXTNAME BinTableHDU, pop it, then:
+                hdul.flush()
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Write Error",
-                f"Could not remove '{curve_to_remove}' from {self.sasp_data_path}:\n{e}"
-            )
+            QMessageBox.critical(self, "Write Error", f"Could not remove curve:\n{e}")
             return
 
-        # 6) Re-open a fresh readonly handle for future operations
-        try:
-            self.hdul = fits.open(self.sasp_data_path, mode="readonly", memmap=False)
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Reopen Error",
-                f"Could not re-open {self.sasp_data_path} after deletion:\n{e}"
-            )
-            return
+        # rebuild
+        self._reload_hdu_lists()
 
-        # 7) Refresh filter_list, sensor_list, and combo-boxes
+        # 5) refresh
         self.refresh_filter_sensor_lists()
-
-        QMessageBox.information(
-            self,
-            "Removed",
-            f"Deleted curve '{curve_to_remove}'."
-        )
-
+        QMessageBox.information(self, "Removed", f"Deleted curve '{curve}'.")
 
     def refresh_filter_sensor_lists(self):
         """
-        Re-scan SASP_data.fits for CTYPE=FILTER/SENSOR and repopulate
-        self.filter_list, self.sensor_list, and all combo-boxes.
+        Re-scan both SASP_data.fits and the user-custom FITS for
+        CTYPE=FILTER/SENSOR and repopulate self.filter_list, self.sensor_list,
+        and all the R/G/B + sensor combo-boxes.
         """
-        # 1) Read the file afresh to rebuild filter_list & sensor_list
-        self.filter_list.clear()
-        self.sensor_list.clear()
+        # 1) Rebuild the lists from disk
+        self._reload_hdu_lists()
 
-        try:
-            with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul_local:
-                for hdu in hdul_local:
-                    if not isinstance(hdu, fits.BinTableHDU):
-                        continue
-                    ctype = hdu.header.get("CTYPE", "").upper()
-                    ext   = hdu.header.get("EXTNAME", "")
-                    if ctype == "FILTER":
-                        self.filter_list.append(ext)
-                    elif ctype == "SENSOR":
-                        self.sensor_list.append(ext)
-        except Exception as e:
-            QMessageBox.critical(self, "Read Error", f"Could not open {self.sasp_data_path}:\n{e}")
-            return
-
-        self.filter_list.sort()
-        self.sensor_list.sort()
-
-        # 2) Repopulate R/G/B filter combo-boxes
+        # 2) Now self.filter_list & self.sensor_list are up to date—
+        #    do exactly the same combo-box clearing/filling you already have:
         current_r = self.r_filter_combo.currentText()
         current_g = self.g_filter_combo.currentText()
         current_b = self.b_filter_combo.currentText()
-
-        self.r_filter_combo.clear()
-        self.g_filter_combo.clear()
-        self.b_filter_combo.clear()
-
-        self.r_filter_combo.addItem("(None)")
-        self.g_filter_combo.addItem("(None)")
-        self.b_filter_combo.addItem("(None)")
-
-        self.r_filter_combo.addItems(self.filter_list)
-        self.g_filter_combo.addItems(self.filter_list)
-        self.b_filter_combo.addItems(self.filter_list)
-
-        # Try to re-select previous choices (if still valid)
-        idx = self.r_filter_combo.findText(current_r)
-        if idx != -1:
-            self.r_filter_combo.setCurrentIndex(idx)
-        idx = self.g_filter_combo.findText(current_g)
-        if idx != -1:
-            self.g_filter_combo.setCurrentIndex(idx)
-        idx = self.b_filter_combo.findText(current_b)
-        if idx != -1:
-            self.b_filter_combo.setCurrentIndex(idx)
-
-        # 3) Repopulate Sensor/QE combo-box
         current_s = self.sens_combo.currentText()
+
+        for cb, lst, prev in [
+            (self.r_filter_combo, self.filter_list, current_r),
+            (self.g_filter_combo, self.filter_list, current_g),
+            (self.b_filter_combo, self.filter_list, current_b),
+        ]:
+            cb.clear()
+            cb.addItem("(None)")
+            cb.addItems(lst)
+            idx = cb.findText(prev)
+            if idx != -1:
+                cb.setCurrentIndex(idx)
+
         self.sens_combo.clear()
         self.sens_combo.addItem("(None)")
         self.sens_combo.addItems(self.sensor_list)
         idx = self.sens_combo.findText(current_s)
         if idx != -1:
             self.sens_combo.setCurrentIndex(idx)
+
 
     def initialize_wcs_from_header(self, header):
         """Initialize a 2D WCS from a genuine fits.Header."""
@@ -29683,12 +29656,12 @@ class SFCCDialog(QDialog):
         }
 
         # Print the full URL for debugging
-        #from requests import Request, Session
-        #req = Request('GET', sam_url, params=params)
-        #prepped = Session().prepare_request(req)
-        #print("\n--- SIM‐SAM full URL (copy→paste into your browser) ---\n")
-        #print(prepped.url)
-        #print("\n----------------------------------------------------------\n")
+        from requests import Request, Session
+        req = Request('GET', sam_url, params=params)
+        prepped = Session().prepare_request(req)
+        print("\n--- SIM‐SAM full URL (copy→paste into your browser) ---\n")
+        print(prepped.url)
+        print("\n----------------------------------------------------------\n")
 
         resp = None
         for attempt in range(1, 11):
@@ -29896,6 +29869,7 @@ class SFCCDialog(QDialog):
         g_filt = self.g_filter_combo.currentText()
         b_filt = self.b_filter_combo.currentText()
         sens_name = self.sens_combo.currentText()
+        lp_filt    = self.lp_filter_combo.currentText()
 
         if not ref_sed_name:
             QMessageBox.warning(self, "Error", "Please select a reference spectral type (e.g. “A0V”).")
@@ -30022,22 +29996,32 @@ class SFCCDialog(QDialog):
             return
 
         # ——— Step 3: Build throughput curves and compute expected bandpasses ———
+        # ——— Step 3: Build throughput curves and load reference SED ———
         wl_min, wl_max = 3000, 11000
         wl_grid = np.arange(wl_min, wl_max + 1, 1.0)
 
+        # helper: first look in user file, then in base file
+        # helper: open each FITS (user first, then base) and grab filter/sensor data
         def load_curve(extname):
-            """
-            Always re-open SASP_data.fits and grab WAVELENGTH/THROUGHPUT
-            from the given extension name.
-            """
-            with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul_local:
-                wl = hdul_local[extname].data["WAVELENGTH"]
-                tp = hdul_local[extname].data["THROUGHPUT"]
-            return wl, tp
+            for path in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(path, mode="readonly", memmap=False) as hdul:
+                    if extname in hdul:
+                        d = hdul[extname].data
+                        return d["WAVELENGTH"], d["THROUGHPUT"]
+            raise KeyError(f"Curve '{extname}' not found in any FITS")
+
+        def load_sed(extname):
+            for path in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(path, mode="readonly", memmap=False) as hdul:
+                    if extname in hdul:
+                        d = hdul[extname].data
+                        return d["WAVELENGTH"], d["FLUX"]
+            raise KeyError(f"SED '{extname}' not found in any FITS")
 
         def interp_curve(wl_orig, tp_orig):
             return np.interp(wl_grid, wl_orig, tp_orig, left=0.0, right=0.0)
 
+        # system throughput for each band
         if r_filt != "(None)":
             wl_Rf, tp_Rf = load_curve(r_filt)
             T_R = interp_curve(wl_Rf, tp_Rf)
@@ -30062,19 +30046,20 @@ class SFCCDialog(QDialog):
         else:
             QE = np.ones_like(wl_grid)
 
-        T_sys_R = T_R * QE
-        T_sys_G = T_G * QE
-        T_sys_B = T_B * QE
+        # Stacked LP/Cut filter
+        if lp_filt != "(None)":
+            wl_LP, tp_LP = load_curve(lp_filt)
+            T_LP = interp_curve(wl_LP, tp_LP)
+        else:
+            T_LP = np.ones_like(wl_grid)
 
-        try:
-            with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul_local:
-                h_ref = hdul_local[ref_sed_name]
-                wl_ref = h_ref.data["WAVELENGTH"]
-                fl_ref = h_ref.data["FLUX"]
-        except KeyError:
-            QMessageBox.critical(self, "SED Error", f"Could not find '{ref_sed_name}' in SASP_data.fits.")
-            return
+        # include LP/Cut filter in the system throughput
+        T_sys_R = T_R * QE * T_LP
+        T_sys_G = T_G * QE * T_LP
+        T_sys_B = T_B * QE * T_LP
 
+        # reference SED
+        wl_ref, fl_ref = load_sed(ref_sed_name)
         fl_ref_interp = np.interp(wl_grid, wl_ref, fl_ref, left=0.0, right=0.0)
         S_ref_R = np.trapz(fl_ref_interp * T_sys_R, x=wl_grid)
         S_ref_G = np.trapz(fl_ref_interp * T_sys_G, x=wl_grid)
@@ -30112,11 +30097,11 @@ class SFCCDialog(QDialog):
                 continue
 
             ext_star = matched_exts[0]
-            with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as hdul_star:
-                if ext_star not in hdul_star:
-                    continue
-                wl_star = hdul_star[ext_star].data["WAVELENGTH"]
-                fl_star = hdul_star[ext_star].data["FLUX"]
+            try:
+                wl_star, fl_star = load_sed(ext_star)
+            except KeyError:
+                # extension not found in either custom or base HDULists
+                continue
             fl_star_interp = np.interp(wl_grid, wl_star, fl_star, left=0.0, right=0.0)
 
             S_star_R = np.trapz(fl_star_interp * T_sys_R, x=wl_grid)
@@ -30302,11 +30287,46 @@ class SFCCDialog(QDialog):
             return
 
         # Create and show a new SaspViewer using the same SASP_data path
-        self.sasp_viewer_window = SaspViewer(sasp_data_path=sasp_data_path)
+        self.sasp_viewer_window = SaspViewer(sasp_data_path=sasp_data_path, user_custom_path=self.user_custom_path)
         self.sasp_viewer_window.show()
 
         # When the SaspViewer is closed, clear the reference so we can reopen later
         self.sasp_viewer_window.destroyed.connect(self._on_sasp_closed)
+
+    def reset_sfcc(self):
+        """
+        Wipe out any fetched‐star data, reload the current image/header,
+        and reset the UI so the user can start fresh.
+        """
+        # 0) Re-fetch the active slot image & header
+        if self.main_win is not None and hasattr(self.main_win, "image_manager"):
+            img, meta = self.main_win.image_manager.get_current_image_and_metadata()
+            self.current_image = img
+            self.current_header = meta.get("original_header", None)
+
+        # 1) Clear any fetched‐star list
+        self.star_list.clear()
+
+        # 2) Reset combo-boxes to defaults:
+        #    • White Reference → Vega (A0V)
+        #idx_a0v = self.star_combo.findData("A0V")
+        #if idx_a0v >= 0:
+        #    self.star_combo.setCurrentIndex(idx_a0v)
+
+        #    • R/G/B filters → “(None)”
+        #self.r_filter_combo.setCurrentIndex(0)
+        #self.g_filter_combo.setCurrentIndex(0)
+        #self.b_filter_combo.setCurrentIndex(0)
+
+        #    • Sensor → “(None)”
+        #self.sens_combo.setCurrentIndex(0)
+
+        # 3) Hide & clear plots/labels
+        self.canvas.setVisible(False)
+        self.figure.clf()
+        self.canvas.draw()
+        self.count_label.setText("")
+        self.orientation_label.setText("Orientation: N/A")
 
     def _on_sasp_closed(self, obj):
         # Called when the SaspViewer window is closed
