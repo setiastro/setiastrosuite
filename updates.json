@@ -1,9 +1,9 @@
 {
-  "version": "2.18.1",
+  "version": "2.18.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Added ability to stack a LP or Cut filter with your RGB filters in SFCC. Fixed bug issue in Linux and Mac for adding custom curves. Added reset button to clear SFCC to use on the next image."
+  "notes": "Complete overhaul on how spectral data is retrieve. Also improved how many stars are detected and utilized."
 }
