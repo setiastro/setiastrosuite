@@ -5,5 +5,5 @@
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.2/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Complete overhaul on how spectral data is retrieve. Also improved how many stars are detected and utilized."
+  "notes": "Added Galactic spectral types. Complete overhaul on how spectral data is retrieve. Also improved how many stars are detected and utilized."
 }
