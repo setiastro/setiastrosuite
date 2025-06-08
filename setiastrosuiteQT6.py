@@ -80,6 +80,7 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u
 import itertools
 from astropy.io.fits import Header
+from pyvo.dal.exceptions import DALServiceError
 
 # Reproject for WCS-based alignment
 try:
@@ -266,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.1"
+VERSION = "2.18.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -29572,300 +29573,190 @@ class SFCCDialog(QDialog):
 
     def fetch_stars(self):
         """
-        1) Re‐initialize a clean 2‐D WCS.
-        2) Compute on‐sky radius of the image.
-        3) Build & fire a single SIM‐SAM query for all “star” OTYPEs.
-        4) Parse the returned VOTable; for each star:
-           a. Use SP_TYPE if available,
-           b. Otherwise infer a rough letter‐type from Bmag‐Vmag (B–V).
-        5) Populate self.star_combo with the unique set of spectral types (plus Vega).
-        6) Show a histogram of the letter‐class distribution.
+        1) Ensure plate-solved header & image exist.
+        2) Build 2D WCS and compute on-sky radius (deg) from center → farthest corner.
+        3) Query SIMBAD for SP_TYPE + B/V.
+        4) Infer letter if SP_TYPE missing.
+        5) Populate self.star_list, self.star_combo, and draw histogram.
         """
-
-        # --- 1) Ensure we have a plate‐solved header & image in memory ---
+        # 1) Plate-solve check
         if self.current_header is None or self.current_image is None:
-            QMessageBox.warning(
-                self, "No Plate Solution",
-                "Please plate‐solve the image first (so we have a valid WCS)."
-            )
+            QMessageBox.warning(self, "No Plate Solution",
+                                "Please plate-solve the image first.")
             return
 
-        # --- 2) Re‐initialize the 2‐D WCS in case we need to strip out extra axes ---
+        # 2) Build 2D WCS
         try:
             self.initialize_wcs_from_header(self.current_header)
-        except Exception as e:
-            import traceback
-            print("WCS Initialization Error: could not construct a 2‐D WCS from FITS header.")
-            traceback.print_exc()
+        except Exception:
+            QMessageBox.critical(self, "WCS Error",
+                                "Could not build a 2-D WCS from header.")
             return
 
-        # --- 3) Compute center pixel + corner pixel → on‐sky radius in degrees ---
-        h, w = self.current_image.shape[:2]
-        x_center, y_center = w / 2.0, h / 2.0
-        x_corner,  y_corner = w,     h
-
+        # 3) Compute search radius = center → farthest of the 4 corners
+        H, W = self.current_image.shape[:2]
+        pix = np.array([
+            [W/2.0, H/2.0],  # center
+            [0,      0],     # TL
+            [W,      0],     # TR
+            [0,      H],     # BL
+            [W,      H],     # BR
+        ])
         try:
-            center_radec = self.wcs.all_pix2world([[x_center, y_center]], 0)[0]
-            corner_radec = self.wcs.all_pix2world([[x_corner,  y_corner ]], 0)[0]
+            sky = self.wcs.all_pix2world(pix, 0)  # shape (5,2): [ra,dec]
         except Exception as e:
-            QMessageBox.critical(
-                self, "WCS Conversion Error",
-                f"Could not convert pixel coords to RA/Dec:\n{e}"
-            )
+            QMessageBox.critical(self, "WCS Conversion Error", str(e))
             return
 
-        ra_center,  dec_center = center_radec
-        ra_corner,  dec_corner = corner_radec
+        center_sky = SkyCoord(ra=sky[0,0]*u.deg, dec=sky[0,1]*u.deg, frame="icrs")
+        corners_sky = SkyCoord(ra=sky[1:,0]*u.deg, dec=sky[1:,1]*u.deg, frame="icrs")
+        radius_deg = center_sky.separation(corners_sky).max().deg
 
-        center_coord = SkyCoord(ra=ra_center * u.deg,  dec=dec_center * u.deg,  frame="icrs")
-        corner_coord = SkyCoord(ra=ra_corner * u.deg, dec=dec_corner * u.deg, frame="icrs")
-        radius_deg = center_coord.separation(corner_coord).deg
+        print(f"[fetch_stars] Center = {center_sky.to_string('hmsdms')}, Radius = {radius_deg:.4f}°")
 
-        # --- 4) Build list of “star” & “binary/variable” OTYPE codes for SIM‐SAM ---
-        star_codes = [
-            "*","V*","Pe*","HB*","Y*O","Ae*","Em*","Be*","BS*","RG*","AB*",
-            "C*","S*","sg*","s*r","s*y","s*b","HS*","pA*","WD*","LM*","BD*",
-            "N*","OH*","TT*","WR*","PM*","HV*","C?*","Pec?","Y*?","TT?","C*?",
-            "S*?","OH?","WR?","Be?","Ae?","HB?","RB?","sg?","s?r","s?y","s?b",
-            "pA?","BS?","HS?","WD?",
-            "**","EB*","Ce*","Ce?","cC*","**?",
-            "EB?","Sy?","CV?","No?","XB?","LX?","HX?","RR?","WV?","LP?","Mi?"
-        ]
-
-        ra_str  = f"{ra_center:.8f}"
-        dec_str = f"{dec_center:+.8f}"
-        rad_str = f"{radius_deg:.8f}d"
-
-        region_crit = f"region(CIRCLE,{ra_str} {dec_str},{rad_str})"
-        codes_list  = ",".join(f"'{c}'" for c in star_codes)
-        otype_crit  = f"otypes in ({codes_list})"
-        criteria    = f"{region_crit}&{otype_crit}"
-
-        # --- 5) Fire off the SIM‐SAM REST call (with retry) ---
-        sam_url = "https://simbad.u-strasbg.fr/simbad/sim-sam"
-        params = {
-            "Criteria":       criteria,
-            "OutputMode":     "LIST",
-            "maxObject":      str(len(self.current_image.flatten())),
-            "output.format":  "votable",
-            "output.params":  ",".join([
-                "MAIN_ID", "RA", "DEC",
-                "FLUX(B)", "FLUX(V)",
-                "SP_TYPE"
-            ])
-        }
-
-        # Print the full URL for debugging
-        from requests import Request, Session
-        req = Request('GET', sam_url, params=params)
-        prepped = Session().prepare_request(req)
-        print("\n--- SIM‐SAM full URL (copy→paste into your browser) ---\n")
-        print(prepped.url)
-        print("\n----------------------------------------------------------\n")
-
-        resp = None
+        # 4) Configure Simbad → SP_TYPE, B, V
+        Simbad.reset_votable_fields()
         for attempt in range(1, 11):
             try:
-                resp = requests.get(sam_url, params=params, timeout=30)
-                resp.raise_for_status()
+                Simbad.add_votable_fields('sp', 'flux(B)', 'flux(V)')
                 break
-            except Exception as e:
-                print(f"Attempt {attempt} failed: retrying")
-                self.count_label.setText(f"Attempt {attempt} to fetch stars from SIMBAD…")
-                QApplication.processEvents()  # allow UI to update
+            except DALServiceError as e:
+                print(f"[fetch_stars] TAP introspection failed (attempt {attempt}/5): {e}")
+                self.count_label.setText(f"Attempt {attempt}/10 to fetch Stars…")
+                QApplication.processEvents()
                 if attempt < 10:
-                    time.sleep(2)
+                    time.sleep(3)
                 else:
                     QMessageBox.critical(
-                        self, "SIM‐SAM Error",
-                        f"Failed to fetch star list from SIMBAD after 10 tries:\n{e}"
+                        self, "SIMBAD TAP Error",
+                        "Could not retrieve SIMBAD votable fields. Try again later."
                     )
                     return
 
-        # --- 6) Parse the returned VOTable into an Astropy Table ---
-        # --- 6) Parse the returned VOTable into an Astropy Table,
-        #       retrying if SIM‐SAM tells us "This query is already executing" ---
-        max_parse_tries = 20
-        for parse_try in range(1, max_parse_tries + 1):
+        Simbad.ROW_LIMIT = 10000
+
+        # 5) Query region (with retries)
+        result = None
+        for attempt in range(1, 11):
             try:
-                self.count_label.setText(f"Parsing SIM‐SAM response (attempt {parse_try}/{max_parse_tries})…")
-                QApplication.processEvents()
-                vot = parse_single_table(BytesIO(resp.content))
-                tbl = vot.to_table(use_names_over_ids=True)
+                result = Simbad.query_region(center_sky, radius=radius_deg * u.deg)
                 break
             except Exception as e:
-                text = ""
-                try:
-                    text = resp.content.decode(errors="ignore").lower()
-                except Exception:
-                    pass
-                # look for the SIM‐SAM "already executing" INFO
-                if 'info name="error"' in text and 'already executing' in text and parse_try < max_parse_tries:
-                    time.sleep(5)
-                    # re-fire the SIM‐SAM query (but don't crash on network errors)
-                    try:
-                        resp = requests.get(sam_url, params=params, timeout=30)
-                    except requests.RequestException as net_err:
-                        print(f"[fetch_stars] network retry failed: {net_err}")
-                    continue
-                # non‐recoverable or out of retries
-                QMessageBox.critical(
-                    self, "VOTable Parse Error",
-                    f"Could not parse SIM‐SAM response:\n{e}"
-                )
-                return
-        else:
-            # loop fell through without break
-            QMessageBox.critical(
-                self, "SIM‐SAM Busy",
-                "SIMBAD is still processing your previous query.  Please try again later."
-            )
-            return
-
-        if len(tbl) == 0:
-            QMessageBox.information(
-                self, "No Stars Found",
-                "No SIMBAD stars (of the requested OTYPEs) were found in the image footprint."
-            )
-            return
-
-        # Helper: infer a rough spectral letter from B–V
-        def infer_letter_from_bv(bv):
-            """
-            Infer a rough spectral‐type “letter” (A, B, F, G, K, or M) from B-V.
-            If bv is NaN or invalid, return None.
-            """
-            try:
-                # If bv is NaN or not a number, drop immediately:
-                if bv is None or (isinstance(bv, float) and math.isnan(bv)):
-                    return None
-
-                # Now do the normal cuts
-                if bv < 0.00:
-                    return "B"
-                elif bv < 0.30:
-                    return "A"
-                elif bv < 0.58:
-                    return "F"
-                elif bv < 0.81:
-                    return "G"
-                elif bv < 1.40:
-                    return "K"
-                elif bv >= 1.40:
-                    return "M"
+                print(f"[fetch_stars] SIMBAD query failed (attempt {attempt}/5): {e}")
+                self.count_label.setText(f"Attempt {attempt}/10 to fetch spectral fields…")
+                QApplication.processEvents()
+                if attempt < 10:
+                    time.sleep(3)
                 else:
-                    # This “else” is really only reached if bv is exactly between 1.40 and 1.40,
-                    # which is impossible. But just in case, treat it as unknown.
-                    return None
-            except Exception:
+                    QMessageBox.critical(self, "SIMBAD Error",
+                                        f"Query failed after 10 attempts:\n{e}")
+                    return
+
+        print("[fetch_stars] Raw SIMBAD result:")
+        print(result)
+        if result is not None:
+            print("[fetch_stars] Columns:", result.colnames)
+
+        # 6) No results?
+        if result is None or len(result) == 0:
+            QMessageBox.information(self, "No Stars Found",
+                                    "SIMBAD returned zero objects for that region.")
+            self.star_list = []
+            self.star_combo.clear()
+            self.star_combo.addItem("Vega (A0V)", userData="A0V")
+            return
+
+        # helper: infer spectral letter from B–V
+        def infer_letter(bv):
+            if bv is None or (isinstance(bv, float) and np.isnan(bv)):
                 return None
+            if   bv < 0.00: return "B"
+            elif bv < 0.30: return "A"
+            elif bv < 0.58: return "F"
+            elif bv < 0.81: return "G"
+            elif bv < 1.40: return "K"
+            elif bv > 1.40: return "M"
+            else:           return "U"
 
-        # --- 7) Build a set of unique spectral‐type strings ---
-        spectral_set = set()
-        letter_counts = []  # for histogram of first‐letter distribution
+        # 7) Build self.star_list + collect letters
+        self.star_list = []
+        letters = []
+        for row in result:
+            raw_sp = row['sp_type']     # direct access
+            bmag   = row['B']
+            vmag   = row['V']
+            ra_deg = float(row['ra'])
+            dec_deg= float(row['dec'])
 
-        for row in tbl:
-            raw_sp = row["SP_TYPE"]    # e.g. 'G5', 'K0III', or None
-            bmag   = row["FLUX_B"]     # might be None
-            vmag   = row["FLUX_V"]     # might be None
-            ra_str = row["RA"]    # sexagesimal string, e.g. "03 18 43.4911"
-            dec_str = row["DEC"]  # sexagesimal string, e.g. "+41 27 20.3592"
+            # parse into a SkyCoord
             try:
-                sc = SkyCoord(ra=ra_str, dec=dec_str, unit=(u.hourangle, u.deg), frame="icrs")
-                ra_val = sc.ra.deg
-                dec_val = sc.dec.deg
+                sc = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame="icrs")
             except Exception:
-                # If parsing fails (e.g. empty or malformed), skip this star
                 continue
 
-            chosen_type = None
-
-            # --- A) If SIMBAD returned a spectral type ---
+            # pick letter
+            letter = None
             if raw_sp is not None and str(raw_sp).strip() != "":
-                sp_str = str(raw_sp).strip()
-
-                # 1) Skip anything that starts with "SN" (supernovae)
-                if sp_str.upper().startswith("SN"):
-                    continue
-                if sp_str.upper().startswith("KA"):
-                    continue                
-
-                # 2) Otherwise, accept the SIMBAD spectral type as‐is
-                chosen_type = sp_str
-                letter_counts.append(chosen_type[0].upper())
-
-            # --- B) Otherwise, try to infer from B–V—but only if BOTH B and V exist ---
+                sp = str(raw_sp).strip().upper()
+                if not (sp.startswith("SN") or sp.startswith("KA")):
+                    letter = sp[0]
             else:
-                if (bmag is not None) and (vmag is not None):
+                if bmag is not None and vmag is not None:
                     try:
-                        bv_val = float(bmag) - float(vmag)
+                        letter = infer_letter(float(bmag) - float(vmag))
                     except Exception:
-                        continue
+                        pass
 
-                    letter = infer_letter_from_bv(bv_val)
-                    # If bv was NaN or out of range, infer_letter_from_bv returns None; skip those.
-                    if letter is None:
-                        continue
+            if not letter:
+                continue
 
-                    chosen_type = letter
-                    letter_counts.append(letter)
-                else:
-                    # no SP_TYPE and no valid B–V → skip
-                    continue
+            # project back into pixel
+            xpix, ypix = self.wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
+            if 0 <= xpix < W and 0 <= ypix < H:
+                self.star_list.append({
+                    "ra": sc.ra.deg,
+                    "dec": sc.dec.deg,
+                    "letter": letter,
+                    "x": xpix,
+                    "y": ypix
+                })
+                letters.append(letter)
 
-            # --- C) Finally, if we got a valid chosen_type, add it to the set ---
-            if chosen_type is not None:
-                # WCS expects scalars for pix2world → world2pix, so just pass floats
-                xpix, ypix = self.wcs.all_world2pix(ra_val, dec_val, 0)
-                # Check if the (xpix, ypix) lies inside the image bounds
-                h_img, w_img = self.current_image.shape[:2]
-                if 0 <= xpix < w_img and 0 <= ypix < h_img:
-                    self.star_list.append({
-                        "ra": ra_val,
-                        "dec": dec_val,
-                        "letter": chosen_type,
-                        "x": xpix,
-                        "y": ypix
-                    })
-                    spectral_set.add(chosen_type)
+        # 8) Populate the combo (always Vega first)
+        #spectral_types = sorted(set(letters))
+        #if "A0V" not in spectral_types:
+        #    spectral_types.insert(0, "A0V")
+        #self.star_combo.clear()
+        #for sp in spectral_types:
+        #    self.star_combo.addItem(sp, userData=sp)
 
+        # 9) Draw histogram
+        self.count_label.setText(f"Found {len(letters)} stars.")
+        self.figure.clf()
+        if letters:
+            uniq, cnt = np.unique(letters, return_counts=True)
+            # turn array into a comma-sep string
+            types_str = ", ".join(uniq)
+            # print to console
+            print(f"[fetch_stars] Unique spectral letters: {types_str}")
+            # update the UI label
+            self.count_label.setText(
+                f"Found {len(letters)} stars; spectral types: {types_str}"
+            )
 
-
-        # --- 8) Always include Vega (A0V) as the very first choice ---
-        spectral_types = sorted(spectral_set)
-        if "A0V" not in spectral_types:
-            spectral_types.insert(0, "A0V")
-
-        # ——— PRINT THE FULL LIST FOR DEBUGGING ———
-        print("=== All spectral types found or inferred ===")
-        for sp in spectral_types:
-            print(sp)
-        print("===========================================")
-
-
-        # --- 9) Re‐draw the histogram of first letters (if any) ---
-
-        ntypes = len(spectral_types)
-        self.count_label.setText(f"Found {ntypes} unique spectral types.")
-
-        if letter_counts:
-            unique, counts = np.unique(letter_counts, return_counts=True)
-
-            self.figure.clf()
             ax = self.figure.add_subplot(111)
-            ax.bar(unique, counts, color="steelblue", edgecolor="black")
-            ax.set_xlabel("Spectral Class (First Letter)")
-            ax.set_ylabel("Number of Stars")
-            ax.set_title("Spectral‐Type Letter Distribution")
+            ax.bar(uniq, cnt, edgecolor="black")
+            ax.set_xlabel("Spectral Letter")
+            ax.set_ylabel("Count")
+            ax.set_title("Spectral‐Type Distribution")
             ax.grid(axis="y", linestyle="--", alpha=0.3)
-
             self.canvas.setVisible(True)
             self.canvas.draw()
         else:
-            self.figure.clf()
-            self.canvas.draw()
+            # no letters → clear canvas and just show count
+            self.count_label.setText("Found 0 stars.")
             self.canvas.setVisible(False)
-
+            self.canvas.draw()
 
     def run_spcc(self):
         """
@@ -29971,20 +29862,22 @@ class SFCCDialog(QDialog):
         data_sub = gray - bkg.back()
         err_val = bkg.globalrms
 
-        thresh = 3.0
+        thresh = 5.0
         sources = sep.extract(data_sub, thresh, err=err_val)
         if sources.size == 0:
             QMessageBox.critical(self, "SEP Error", "SEP found no sources in the image.")
             return
 
-        r_fluxrad, _ = sep.flux_radius(
+        r_fluxrad, r_fluxrad_err = sep.flux_radius(
             gray,
             sources["x"], sources["y"],
-            2.0 * sources["a"], 0.2,
+            2.0 * sources["a"], 0.5,
             normflux=sources["flux"],
             subpix=5
         )
-        mask = (r_fluxrad > 2) & (r_fluxrad <= 10)
+        print("SEP flux radii:", r_fluxrad)
+        sys.stdout.flush()
+        mask = (r_fluxrad > .2) & (r_fluxrad <= 10)
         sources = sources[mask]
         r_fluxrad = r_fluxrad[mask]
         if sources.size == 0:
@@ -30159,6 +30052,8 @@ class SFCCDialog(QDialog):
                                     "Could not find any stars with valid measured and expected ratios.")
             return
 
+        n_stars = diag_meas_RG.size
+
         # ——— Step 5: Fit a best‐fit line y = m·x + b for both R/G and B/G ———
         # R/G fit
         # R/G fit (force intercept = 0)
@@ -30288,10 +30183,13 @@ class SFCCDialog(QDialog):
             step_name="SFCC Calibration with Free Intercept"
         )
 
+        self.count_label.setText(f"Applied SFCC color calibration using {n_stars} stars")
+        QApplication.processEvents()
+
         # ——— Step 10: Final summary dialog ———
         QMessageBox.information(
             self, "SFCC Complete",
-            f"Applied SFCC color calibration:\n"
+            f"Applied SFCC color calibration using {n_stars} stars:\n"
             f"  R: Ratio = {m_R:.4f}\n"
             f"  B: Ratio = {m_B:.4f}\n"
             "\n"
