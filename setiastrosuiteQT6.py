@@ -53,8 +53,8 @@ from skimage import img_as_float32
 from numpy.fft import fft2, ifft2, fftshift, ifftshift
 from typing import Optional, Tuple
 from scipy.signal import medfilt
-
-
+import matplotlib.ticker as mtick
+from scipy.interpolate import RBFInterpolator
 import random
 if sys.stdout is not None:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.2"
+VERSION = "2.18.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -28780,6 +28780,66 @@ def pickles_match_for_simbad(simbad_sp: str, available_extnames: list[str]) -> l
     # Fallback: no match at all
     return []
 
+def compute_gradient_map(sources, delta_flux, shape, method="poly2"):
+    """
+    sources:    Nx2 array of (x_i, y_i)
+    delta_flux: length-N array of measured/expected ratio or Δ values
+    shape:      (H, W) of the image
+    method:     "poly2", "poly3", or "rbf"
+    returns:    background_map of shape (H, W)
+    """
+    H, W = shape
+    xs, ys = sources[:, 0], sources[:, 1]
+
+    # 2nd-order polynomial
+    if method == "poly2":
+        A = np.vstack([
+            np.ones_like(xs), xs, ys,
+            xs**2, xs*ys, ys**2
+        ]).T
+        coeffs, *_ = np.linalg.lstsq(A, delta_flux, rcond=None)
+        YY, XX = np.mgrid[0:H, 0:W]
+        B = (
+            coeffs[0]
+          + coeffs[1] * XX + coeffs[2] * YY
+          + coeffs[3] * XX**2 + coeffs[4] * XX * YY + coeffs[5] * YY**2
+        )
+        return B
+
+    # 3rd-order polynomial
+    elif method == "poly3":
+        A = np.vstack([
+            np.ones_like(xs), xs, ys,
+            xs**2, xs*ys, ys**2,
+            xs**3, xs**2 * ys, xs * ys**2, ys**3
+        ]).T
+        coeffs, *_ = np.linalg.lstsq(A, delta_flux, rcond=None)
+        YY, XX = np.mgrid[0:H, 0:W]
+        B = (
+            coeffs[0]
+          + coeffs[1] * XX + coeffs[2] * YY
+          + coeffs[3] * XX**2 + coeffs[4] * XX * YY + coeffs[5] * YY**2
+          + coeffs[6] * XX**3 + coeffs[7] * XX**2 * YY
+          + coeffs[8] * XX * YY**2 + coeffs[9] * YY**3
+        )
+        return B
+
+    # radial basis function interpolation (fast, smooth)
+    elif method == "rbf":
+        # use the newer RBFInterpolator for speed and smoothing
+        pts = np.vstack([xs, ys]).T  # shape (N,2)
+        # smoothing >0 yields faster, smoother fits; tweak as needed
+        rbfi = RBFInterpolator(pts, delta_flux,
+                               kernel="thin_plate_spline",
+                               smoothing=1.0)
+        YY, XX = np.mgrid[0:H, 0:W]
+        grid_pts = np.vstack([XX.ravel(), YY.ravel()]).T
+        B = rbfi(grid_pts).reshape(H, W)
+        return B
+
+    else:
+        raise ValueError(f"Unknown method '{method}', must be 'poly2','poly3', or 'rbf'")
+
 class SFCCDialog(QDialog):
     """
     A dialog for Spectral Flux Color Calibration (SFCC).
@@ -28794,14 +28854,8 @@ class SFCCDialog(QDialog):
         self.setMinimumSize(800, 600)
 
         # ——— Fetch “active slot” image & header from the parent’s ImageManager ———
-        if parent is not None and hasattr(parent, "image_manager"):
-            img, meta = parent.image_manager.get_current_image_and_metadata()
-            self.current_image = img
-            # meta should be a dict; extract the real Header object:
-            self.current_header = meta.get("original_header", None)
-        else:
-            self.current_image = None
-            self.current_header = None
+        self.current_image = None
+        self.current_header = None
 
         # Orientation label (just for debugging)
         self.orientation_label = QLabel("Orientation: N/A")
@@ -28937,13 +28991,27 @@ class SFCCDialog(QDialog):
         row4 = QHBoxLayout()
         layout.addLayout(row4)
 
-        self.run_spcc_btn = QPushButton("Step2: Run Calibration")
+        self.run_spcc_btn = QPushButton("Step2: Run Color Calibration")
         self.run_spcc_btn.clicked.connect(self.run_spcc)
         # make the text bold:
         font2 = self.run_spcc_btn.font()
         font2.setBold(True)
         self.run_spcc_btn.setFont(font2)
         row4.addWidget(self.run_spcc_btn)
+
+        # NEW: Run Gradient Extraction
+        self.run_grad_btn = QPushButton("Run Gradient Extraction (Beta)")
+        font3 = self.run_grad_btn.font()
+        font3.setBold(True)
+        self.run_grad_btn.setFont(font3)
+        self.run_grad_btn.clicked.connect(self.run_gradient_extraction)
+        row4.addWidget(self.run_grad_btn)
+
+        #row4.addWidget(QLabel("Gradient Model:"))
+        self.grad_method_combo = QComboBox()
+        self.grad_method_combo.addItems(["poly2", "poly3", "rbf"])
+        self.grad_method_combo.setCurrentText("poly3")          # default
+        row4.addWidget(self.grad_method_combo)
 
         row4.addStretch()
         self.add_curve_btn = QPushButton("Add Custom Filter/Sensor Curve…")
@@ -28973,6 +29041,12 @@ class SFCCDialog(QDialog):
         self.reset_btn.clicked.connect(self.reset_sfcc)
         layout.addWidget(self.reset_btn)        
 
+        # 1)  Simply hide or show on demand
+        self.run_grad_btn.hide()          # not drawn, doesn’t take layout space
+        self.grad_method_combo.hide()
+        self.grad_method = "poly3"
+        self.grad_method_combo.currentTextChanged.connect(
+            lambda m: setattr(self, "grad_method", m))
 
     # ——— QSettings helpers ———
 
@@ -29244,33 +29318,123 @@ class SFCCDialog(QDialog):
 
     def add_custom_curve(self):
         """
-        1) Let user pick an image file (PNG/JPG) of a curve.
-        2) Digitize via matplotlib ginput (3 clicks for calibration).
-        3) Ask user for λ_min, λ_max, a “Name” (extname), and “Channel” (e.g. R/G/B/Q).
-        4) Extract a DataFrame of (wavelength_nm, response).
-        5) Group by integer nm, interpolate any bad points, median-filter.
-        6) Append as a new BinTableHDU under CTYPE=“FILTER” or “SENSOR”.
-        7) Save FITS, re‐load lists, and refresh combo‐boxes.
+        Add a custom filter / sensor curve via one of two methods:
+
+        • Import from a 2-column CSV   (λ_nm , response 0-1)
+        • Digitize an image (existing 3-click workflow)
+
+        The user first chooses the method; the rest proceeds accordingly.
         """
 
-        # Step 1: File dialog for image
-        img_path_str, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Curve Image to Digitize",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)"
-        )
-        if not img_path_str:
+        # ──────────────────────────────────────────────────────────────────
+        # 0)  Ask user which method
+        # -----------------------------------------------------------------
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Add Custom Curve")
+        msg.setText("Choose how you want to add the curve:")
+
+        csv_btn = msg.addButton("Import CSV",
+                                QMessageBox.ButtonRole.AcceptRole)
+        img_btn = msg.addButton("Digitize Image",
+                                QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = msg.addButton(QMessageBox.StandardButton.Cancel)
+
+        msg.exec()
+
+        if msg.clickedButton() == csv_btn:
+            self._import_curve_from_csv()
+        elif msg.clickedButton() == img_btn:
+            self._digitize_curve_from_image()
+        else:
             return  # user cancelled
 
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # 1)  CSV ROUTE  (complete)
+    # --------------------------------------------------------------------
+    def _import_curve_from_csv(self):
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self, "Select 2-column CSV (λ_nm, response)", "",
+            "CSV Files (*.csv);;All Files (*)")
+        if not csv_path:
+            return                                     # user cancelled
+
+        # --- read CSV (no header, ignore comments) ----------------------
+        try:
+            # 1st attempt: assume NO header
+            df = (pd.read_csv(csv_path, comment="#", header=None)
+                    .iloc[:, :2]                   # keep first two cols
+                    .dropna())
+            df.columns = ["wavelength_nm", "response"]
+            # make sure cast to float succeeds; will raise if header words present
+            wl_nm = df["wavelength_nm"].astype(float).to_numpy()
+            tp    = df["response"].astype(float).to_numpy()
+
+        except ValueError:
+            # retry assuming the FIRST row *is* a header
+            try:
+                df = (pd.read_csv(csv_path, comment="#", header=0)
+                        .iloc[:, :2]
+                        .dropna())
+                df.columns = ["wavelength_nm", "response"]
+                wl_nm = df["wavelength_nm"].astype(float).to_numpy()
+                tp    = df["response"].astype(float).to_numpy()
+            except Exception as e2:
+                QMessageBox.critical(self, "CSV Error",
+                    f"Could not read CSV (even with header row):\n{e2}")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "CSV Error",
+                f"Could not read CSV:\n{e}")
+            return
+
+        # --- ask name / channel ----------------------------------------
+        ok, extname_base, channel_val = self._query_name_channel()
+        if not ok:
+            return
+
+        # --- nm → Å arrays ---------------------------------------------
+        wl_ang   = (wl_nm * 10.0).astype(np.float32)
+        tr_final = tp.astype(np.float32)
+
+        # --- build HDU & append ----------------------------------------
+        self._append_curve_hdu(
+            wl_ang   = wl_ang,
+            tr_final = tr_final,
+            extname  = extname_base,
+            ctype    = "SENSOR" if channel_val == "Q" else "FILTER",
+            origin   = f"CSV:{os.path.basename(csv_path)}"
+        )
+
+        # refresh UI
+        self._reload_hdu_lists()
+        self.refresh_filter_sensor_lists()
+        QMessageBox.information(
+            self, "Done",
+            f"CSV curve '{extname_base}' added."
+        )
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # 2)  IMAGE-DIGITIZE ROUTE  (original workflow, intact)
+    # --------------------------------------------------------------------
+    def _digitize_curve_from_image(self):
+        # Step 1: pick image
+        img_path_str, _ = QFileDialog.getOpenFileName(
+            self, "Select Curve Image to Digitize", "",
+            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)")
+        if not img_path_str:
+            return
         img_filename = os.path.basename(img_path_str)
 
-        # Step 2: Load via OpenCV → rgb_img + gray_img
+        # Step 2: load image
         try:
             bgr = cv2.imread(img_path_str)
             if bgr is None:
                 raise RuntimeError(f"cv2.imread returned None for '{img_path_str}'")
-            rgb_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb_img  = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load image:\n{e}")
@@ -29283,112 +29447,105 @@ class SFCCDialog(QDialog):
             QMessageBox.critical(self, "Digitization Error", str(e))
             return
 
-        # Step 4: Ask λ_min and λ_max
-        lambda_min_str, ok1 = QInputDialog.getText(self, "λ_min", "Enter λ_min (in nm):")
-        if not ok1 or not lambda_min_str.strip():
+        # Step 4: λ_min / λ_max
+        λ_min_str, ok1 = QInputDialog.getText(self, "λ_min", "Enter λ_min (in nm):")
+        λ_max_str, ok2 = QInputDialog.getText(self, "λ_max", "Enter λ_max (in nm):")
+        if not (ok1 and ok2 and λ_min_str.strip() and λ_max_str.strip()):
             return
-        lambda_max_str, ok2 = QInputDialog.getText(self, "λ_max", "Enter λ_max (in nm):")
-        if not ok2 or not lambda_max_str.strip():
-            return
-
         try:
-            λ_min = float(lambda_min_str)
-            λ_max = float(lambda_max_str)
+            λ_min = float(λ_min_str);  λ_max = float(λ_max_str)
         except ValueError:
-            QMessageBox.critical(self, "Input Error", "λ_min and λ_max must be valid numbers.")
+            QMessageBox.critical(self, "Input Error", "λ_min and λ_max must be numbers.")
             return
 
-        # Step 5: Ask EXTNAME and Channel
-        name_str, ok3 = QInputDialog.getText(
-            self, "Curve Name",
-            "Enter a name (EXTNAME) for this curve (no spaces):"
-        )
-        if not ok3 or not name_str.strip():
+        # Step 5: name / channel
+        ok, extname_base, channel_val = self._query_name_channel()
+        if not ok:
             return
-        extname_base = name_str.strip().upper().replace(" ", "_")
 
-        channel_str, ok4 = QInputDialog.getText(
-            self, "Channel",
-            "Enter channel (e.g. R, G, B, or Q for sensor):"
-        )
-        if not ok4 or not channel_str.strip():
-            return
-        channel_val = channel_str.strip().upper()
-
-        # Step 6: Build linear mappers
-        resp_min, resp_max = 0.0, 1.0
+        # Step 6: Build transforms
         px_to_λ, py_to_resp = self.build_transforms(
             px_bl, py_bl, px_br, py_br, px_tl, py_tl,
-            λ_min, λ_max, resp_min, resp_max
-        )
+            λ_min, λ_max, 0.0, 1.0)
 
-        # Step 7: Extract raw DataFrame of (wavelength_nm, response)
+        # Step 7: extract curve points
         try:
-            df_curve = self.extract_curve(gray_img, px_to_λ, py_to_resp, λ_min, λ_max, threshold=50)
+            df_curve = self.extract_curve(gray_img, px_to_λ, py_to_resp,
+                                        λ_min, λ_max, threshold=50)
         except Exception as e:
             QMessageBox.critical(self, "Extraction Error", str(e))
             return
 
-        # Step 8: Group by integer nm, median‐filter
+        # Step 8: aggregate, interpolate, smooth
         df_curve["wl_int"] = df_curve["wavelength_nm"].round().astype(int)
-        grouped = (
-            df_curve
-            .groupby("wl_int")["response"]
-            .median()
-            .reset_index()
-            .sort_values("wl_int")
-        )
-        wl = grouped["wl_int"].to_numpy(dtype=int)
-        tr = grouped["response"].to_numpy(dtype=float)
+        grp = (df_curve.groupby("wl_int")["response"]
+                    .median()
+                    .reset_index()
+                    .sort_values("wl_int"))
+        wl = grp["wl_int"].to_numpy(dtype=int)
+        tr = grp["response"].to_numpy(dtype=float)
 
-        # Interpolate any bad points
         try:
-            tr_corr, bad_idx = self.interpolate_bad_points(wl, tr)
+            tr_corr, _ = self.interpolate_bad_points(wl, tr)
         except Exception as e:
             QMessageBox.critical(self, "Interpolation Error", str(e))
             return
 
         tr_smoothed = self.smooth_curve(tr_corr, window_size=5)
 
-        # Step 9: Convert nm→Å and build final arrays
-        wl_ang = (wl.astype(float) * 10.0).astype(np.float32)
+        # Step 9: nm → Å  arrays
+        wl_ang   = (wl.astype(float) * 10.0).astype(np.float32)
         tr_final = tr_smoothed.astype(np.float32)
 
-        # Step 10: Build new BinTableHDU
-        col_wl = fits.Column(name="WAVELENGTH", format="E", unit="Angstrom", array=wl_ang)
-        col_tr = fits.Column(name="THROUGHPUT", format="E", unit="REL", array=tr_final)
-        cols = fits.ColDefs([col_wl, col_tr])
+        # Step 10: append HDU
+        self._append_curve_hdu(
+            wl_ang   = wl_ang,
+            tr_final = tr_final,
+            extname  = extname_base,
+            ctype    = "SENSOR" if channel_val == "Q" else "FILTER",
+            origin   = f"UserDefined:{img_filename}"
+        )
 
-        try:
-            new_hdu = fits.BinTableHDU.from_columns(cols)
-        except Exception as e:
-            QMessageBox.critical(self, "FITS Error", f"Could not build new HDU:\n{e}")
-            return
-
-        # Decide CTYPE and set headers
-        ctype = "SENSOR" if channel_val == "Q" else "FILTER"
-        new_hdu.header["EXTNAME"] = extname_base
-        new_hdu.header["CTYPE"]  = ctype
-        new_hdu.header["ORIGIN"] = f"UserDefined:{img_filename}"
-
-        # Step 11: Append new_hdu inside a with-block
-        try:
-            with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
-                hdul.append(new_hdu)
-                hdul.flush()
-        except Exception as e:
-            QMessageBox.critical(self, "Write Error", f"Could not write to {self.user_custom_path}:\n{e}")
-            return
-
-        # now simply rebuild your lists & UI
         self._reload_hdu_lists()
         self.refresh_filter_sensor_lists()
-
         QMessageBox.information(
             self, "Done",
-            f"Added curve '{extname_base}' as {ctype}.\n"
-            "You can now find it in the dropdowns."
+            f"Added curve '{extname_base}'."
         )
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # Helper: ask for name / channel
+    # --------------------------------------------------------------------
+    def _query_name_channel(self):
+        name_str, ok1 = QInputDialog.getText(
+            self, "Curve Name", "Enter curve name (EXTNAME):")
+        if not (ok1 and name_str.strip()):
+            return False, None, None
+        extname = name_str.strip().upper().replace(" ", "_")
+
+        ch_str, ok2 = QInputDialog.getText(
+            self, "Channel", "Enter channel (R,G,B or Q for sensor):")
+        if not (ok2 and ch_str.strip()):
+            return False, None, None
+        return True, extname, ch_str.strip().upper()
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # Helper: append HDU to user_custom_path
+    # --------------------------------------------------------------------
+    def _append_curve_hdu(self, wl_ang, tr_final, extname, ctype, origin):
+        col_wl = fits.Column(name="WAVELENGTH", format="E", unit="Angstrom", array=wl_ang)
+        col_tr = fits.Column(name="THROUGHPUT", format="E", unit="REL",      array=tr_final)
+        new_hdu = fits.BinTableHDU.from_columns([col_wl, col_tr])
+        new_hdu.header["EXTNAME"] = extname
+        new_hdu.header["CTYPE"]   = ctype
+        new_hdu.header["ORIGIN"]  = origin
+        with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
+            hdul.append(new_hdu)
+            hdul.flush()
 
     def remove_custom_curve(self):
         """
@@ -29574,18 +29731,42 @@ class SFCCDialog(QDialog):
     def fetch_stars(self):
         """
         1) Ensure plate-solved header & image exist.
-        2) Build 2D WCS and compute on-sky radius (deg) from center → farthest corner.
-        3) Query SIMBAD for SP_TYPE + B/V.
-        4) Infer letter if SP_TYPE missing.
-        5) Populate self.star_list, self.star_combo, and draw histogram.
+        2) Build 2-D WCS and compute on-sky radius (deg).
+        3) Query SIMBAD for SP_TYPE + B / V / R.
+        4) Infer spectral class from B–V if SP_TYPE missing.
+        5) Populate self.star_list and draw a histogram of Pickles matches.
         """
-        # 1) Plate-solve check
+
+        # ─── 0) Grab current image + header ────────────────────────────
+        if self.main_win is not None and hasattr(self.main_win, "image_manager"):
+            img, meta = self.main_win.image_manager.get_current_image_and_metadata()
+            self.current_image  = img
+            self.current_header = meta.get("original_header", None)
+        else:
+            self.current_image  = None
+            self.current_header = None
+
         if self.current_header is None or self.current_image is None:
             QMessageBox.warning(self, "No Plate Solution",
                                 "Please plate-solve the image first.")
             return
 
-        # 2) Build 2D WCS
+        # ─── 1) Ensure we have Pickles templates loaded only once ──────
+        if not hasattr(self, "pickles_templates"):
+            self.pickles_templates = []
+            for p in (self.user_custom_path, self.sasp_data_path):
+                try:
+                    with fits.open(p) as hd:
+                        for hdu in hd:
+                            if (isinstance(hdu, fits.BinTableHDU)
+                                    and hdu.header.get("CTYPE", "").upper() == "SED"):
+                                extname = hdu.header.get("EXTNAME", None)
+                                if extname and extname not in self.pickles_templates:
+                                    self.pickles_templates.append(extname)
+                except Exception as e:
+                    print(f"[fetch_stars] Could not load Pickles templates from {p}: {e}")
+
+        # ─── 2) Build 2-D WCS and search radius ───────────────────────
         try:
             self.initialize_wcs_from_header(self.current_header)
         except Exception:
@@ -29593,79 +29774,60 @@ class SFCCDialog(QDialog):
                                 "Could not build a 2-D WCS from header.")
             return
 
-        # 3) Compute search radius = center → farthest of the 4 corners
         H, W = self.current_image.shape[:2]
-        pix = np.array([
-            [W/2.0, H/2.0],  # center
-            [0,      0],     # TL
-            [W,      0],     # TR
-            [0,      H],     # BL
-            [W,      H],     # BR
-        ])
+        pix = np.array([[W/2, H/2], [0,0], [W,0], [0,H], [W,H]])
         try:
-            sky = self.wcs.all_pix2world(pix, 0)  # shape (5,2): [ra,dec]
+            sky = self.wcs.all_pix2world(pix, 0)
         except Exception as e:
             QMessageBox.critical(self, "WCS Conversion Error", str(e))
             return
 
-        center_sky = SkyCoord(ra=sky[0,0]*u.deg, dec=sky[0,1]*u.deg, frame="icrs")
+        center_sky  = SkyCoord(ra=sky[0,0]*u.deg, dec=sky[0,1]*u.deg, frame="icrs")
         corners_sky = SkyCoord(ra=sky[1:,0]*u.deg, dec=sky[1:,1]*u.deg, frame="icrs")
-        radius_deg = center_sky.separation(corners_sky).max().deg
+        radius_deg  = center_sky.separation(corners_sky).max().deg
+        print(f"[fetch_stars] Center = {center_sky.to_string('hmsdms')}, "
+            f"Radius = {radius_deg:.4f}°")
 
-        print(f"[fetch_stars] Center = {center_sky.to_string('hmsdms')}, Radius = {radius_deg:.4f}°")
-
-        # 4) Configure Simbad → SP_TYPE, B, V
+        # ─── 3) Configure SIMBAD TAP ───────────────────────────────────
         Simbad.reset_votable_fields()
         for attempt in range(1, 11):
             try:
-                Simbad.add_votable_fields('sp', 'flux(B)', 'flux(V)')
+                Simbad.add_votable_fields('sp', 'flux(B)', 'flux(V)', 'flux(R)')
                 break
             except DALServiceError as e:
-                print(f"[fetch_stars] TAP introspection failed (attempt {attempt}/5): {e}")
-                self.count_label.setText(f"Attempt {attempt}/10 to fetch Stars…")
+                self.count_label.setText(f"Attempt {attempt}/10 to fetch stars…")
                 QApplication.processEvents()
                 if attempt < 10:
                     time.sleep(3)
                 else:
-                    QMessageBox.critical(
-                        self, "SIMBAD TAP Error",
-                        "Could not retrieve SIMBAD votable fields. Try again later."
-                    )
+                    QMessageBox.critical(self, "SIMBAD TAP Error",
+                                        "Could not retrieve SIMBAD fields.")
                     return
 
         Simbad.ROW_LIMIT = 10000
 
-        # 5) Query region (with retries)
-        result = None
+        # ─── 4) Query SIMBAD ───────────────────────────────────────────
         for attempt in range(1, 11):
             try:
                 result = Simbad.query_region(center_sky, radius=radius_deg * u.deg)
                 break
             except Exception as e:
-                print(f"[fetch_stars] SIMBAD query failed (attempt {attempt}/5): {e}")
-                self.count_label.setText(f"Attempt {attempt}/10 to fetch spectral fields…")
+                self.count_label.setText(f"Attempt {attempt}/10 to query SIMBAD…")
                 QApplication.processEvents()
                 if attempt < 10:
                     time.sleep(3)
                 else:
                     QMessageBox.critical(self, "SIMBAD Error",
-                                        f"Query failed after 10 attempts:\n{e}")
+                                        f"Query failed:\n{e}")
                     return
 
-        print("[fetch_stars] Raw SIMBAD result:")
-        print(result)
-        if result is not None:
-            print("[fetch_stars] Columns:", result.colnames)
-
-        # 6) No results?
         if result is None or len(result) == 0:
             QMessageBox.information(self, "No Stars Found",
-                                    "SIMBAD returned zero objects for that region.")
+                                    "SIMBAD returned zero objects in that region.")
             self.star_list = []
             self.star_combo.clear()
             self.star_combo.addItem("Vega (A0V)", userData="A0V")
             return
-
         # helper: infer spectral letter from B–V
         def infer_letter(bv):
             if bv is None or (isinstance(bv, float) and np.isnan(bv)):
@@ -29678,381 +29840,340 @@ class SFCCDialog(QDialog):
             elif bv > 1.40: return "M"
             else:           return "U"
 
-        # 7) Build self.star_list + collect letters
+        # ─── 5) Build star list + histogram items ──────────────────────
         self.star_list = []
-        letters = []
-        for row in result:
-            raw_sp = row['sp_type']     # direct access
-            bmag   = row['B']
-            vmag   = row['V']
-            ra_deg = float(row['ra'])
-            dec_deg= float(row['dec'])
+        templates_for_hist = []       # only Pickles names (no None)
 
-            # parse into a SkyCoord
+        for row in result:
+            raw_sp = row['sp_type']
+            bmag, vmag, rmag = row['B'], row['V'], row['R']
+            ra_deg, dec_deg  = float(row['ra']), float(row['dec'])
+
             try:
                 sc = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame="icrs")
             except Exception:
                 continue
 
-            # pick letter
-            letter = None
-            if raw_sp is not None and str(raw_sp).strip() != "":
+            # ── Determine spectral string (sp_clean) ──────────────────
+            sp_clean = None
+            if raw_sp and str(raw_sp).strip():
                 sp = str(raw_sp).strip().upper()
                 if not (sp.startswith("SN") or sp.startswith("KA")):
-                    letter = sp[0]
-            else:
-                if bmag is not None and vmag is not None:
-                    try:
-                        letter = infer_letter(float(bmag) - float(vmag))
-                    except Exception:
-                        pass
+                    sp_clean = sp
+            elif bmag is not None and vmag is not None:
+                try:
+                    sp_clean = infer_letter(float(bmag) - float(vmag))
+                except Exception:
+                    pass
 
-            if not letter:
+            if not sp_clean:
                 continue
 
-            # project back into pixel
+            # ── Match to Pickles template ─────────────────────────────
+            match_list   = pickles_match_for_simbad(sp_clean, self.pickles_templates)
+            best_template = match_list[0] if match_list else None
+
+            # Project to pixel coords and store star
             xpix, ypix = self.wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
             if 0 <= xpix < W and 0 <= ypix < H:
                 self.star_list.append({
                     "ra": sc.ra.deg,
                     "dec": sc.dec.deg,
-                    "letter": letter,
+                    "sp_clean": sp_clean,
+                    "pickles_match": best_template,
                     "x": xpix,
-                    "y": ypix
+                    "y": ypix,
+                    "Bmag": float(bmag) if bmag else None,
+                    "Vmag": float(vmag) if vmag else None,
+                    "Rmag": float(rmag) if rmag else None,
                 })
-                letters.append(letter)
+                if best_template is not None:
+                    templates_for_hist.append(best_template)
 
-        # 8) Populate the combo (always Vega first)
-        #spectral_types = sorted(set(letters))
-        #if "A0V" not in spectral_types:
-        #    spectral_types.insert(0, "A0V")
-        #self.star_combo.clear()
-        #for sp in spectral_types:
-        #    self.star_combo.addItem(sp, userData=sp)
-
-        # 9) Draw histogram
-        self.count_label.setText(f"Found {len(letters)} stars.")
+        # ─── 6) Histogram / UI update ─────────────────────────────────
         self.figure.clf()
-        if letters:
-            uniq, cnt = np.unique(letters, return_counts=True)
-            # turn array into a comma-sep string
+        if templates_for_hist:
+            uniq, cnt = np.unique(templates_for_hist, return_counts=True)
             types_str = ", ".join(uniq)
-            # print to console
-            print(f"[fetch_stars] Unique spectral letters: {types_str}")
-            # update the UI label
             self.count_label.setText(
-                f"Found {len(letters)} stars; spectral types: {types_str}"
+                f"Found {len(templates_for_hist)} stars; templates: {types_str}"
             )
 
             ax = self.figure.add_subplot(111)
             ax.bar(uniq, cnt, edgecolor="black")
-            ax.set_xlabel("Spectral Letter")
+            ax.set_xlabel("Spectral Type")
             ax.set_ylabel("Count")
-            ax.set_title("Spectral‐Type Distribution")
+            ax.set_title("Spectral Distribution")
+            ax.tick_params(axis='x', rotation=90)
             ax.grid(axis="y", linestyle="--", alpha=0.3)
             self.canvas.setVisible(True)
             self.canvas.draw()
         else:
-            # no letters → clear canvas and just show count
-            self.count_label.setText("Found 0 stars.")
+            self.count_label.setText("Found 0 stars with Pickles matches.")
             self.canvas.setVisible(False)
             self.canvas.draw()
 
     def run_spcc(self):
         """
         Run a *color‐ratio* SFCC (Spectral Photometric Color Calibration):
-        1) Use SEP just to detect star centroids (x,y).
-        2) Match each Simbad star (x,y) from self.star_list to the nearest SEP centroid.
-        3) At that pixel, read (R_meas, G_meas, B_meas) directly from self.current_image.
-        4) For each star’s Pickles SED, compute expected (R_exp, G_exp, B_exp)
-            by integrating SED(λ) × T_filter(λ) × QE_sensor(λ).  Form expected ratios:
-                exp_ratio_RG = R_exp / G_exp
-                exp_ratio_BG = B_exp / G_exp
-        5) Compute measured ratios:
-                meas_ratio_RG = R_meas / G_meas
-                meas_ratio_BG = B_meas / G_meas
-        6) Build diagnostic arrays diag_meas_RG, diag_exp_RG, diag_meas_BG, diag_exp_BG.
-        7) Fit a best‐fit line y = m·x + b for (meas_RG → exp_RG) and (meas_BG → exp_BG).
-        That yields slope (m_R, b_R) and (m_B, b_B).
-        8) Apply R_corrected = m_R·R_original + b_R·G_original, and
-        B_corrected = m_B·B_original + b_B·G_original.
-        Leave G unchanged.
-        9) Show diagnostics (histograms and scatter+fit lines).
-        10) Replace the current slot’s image in ImageManager with the calibrated RGB.
+        1) Use SEP to detect star centroids (x,y).
+        2) Match each Simbad star to the nearest SEP centroid.
+        3) At that pixel, read (R_meas, G_meas, B_meas).
+        4) Integrate each star’s Pickles SED → (S_star_R, S_star_G, S_star_B).
+        5) Compute exp_RG = S_star_R/S_star_G, exp_BG = S_star_B/S_star_G.
+        6) Fit meas_RG = R_meas/G_meas → exp_RG and meas_BG = B_meas/G_meas → exp_BG.
+        7) Apply R_corrected = m_R·R + b_R·G, B_corrected = m_B·B + b_B·G.
+        8) Store per-star Δ-flux for gradient extraction.
+        9) Replace image with calibrated RGB.
         """
 
-        # ——— Step 0: Validate user choices ———
+        # — Step 0: Validate user choices —
         ref_sed_name = self.star_combo.currentData()
         r_filt = self.r_filter_combo.currentText()
         g_filt = self.g_filter_combo.currentText()
         b_filt = self.b_filter_combo.currentText()
         sens_name = self.sens_combo.currentText()
-        lp_filt    = self.lp_filter_combo.currentText()
+        lp_filt = self.lp_filter_combo.currentText()
 
         if not ref_sed_name:
             QMessageBox.warning(self, "Error", "Please select a reference spectral type (e.g. “A0V”).")
             return
-
         if r_filt == "(None)" and g_filt == "(None)" and b_filt == "(None)":
             QMessageBox.warning(self, "Error", "Please pick at least one of R, G or B filters.")
             return
-
         if sens_name == "(None)":
             QMessageBox.warning(self, "Error", "Please select a sensor QE curve.")
             return
 
-        # ─── Step 1: Convert to float & run an *initial* background neutralization ─────────────
-        # Purpose: remove any large channel offsets so that SEP‐measured ratios aren't skewed by big "pedestals".
-
+        # — Step 1A: Convert to float [0..1] & neutralize large pedestals —
         img = self.current_image
         H, W, C = img.shape
         if C != 3:
             QMessageBox.critical(self, "Error", "Current image is not RGB (3 channels).")
             return
-
-        # 1A) Convert to float [0..1]
         if img.dtype == np.uint8:
-            base_float = img.astype(np.float32) / 255.0
+            base = img.astype(np.float32) / 255.0
         else:
-            base_float = img.astype(np.float32)
+            base = img.astype(np.float32)
 
-        # 1B) Initial background neutralization on base_float
-        #     (same logic as your final neutralization, but we do it before measuring stars)
+        # — record per-channel minima & medians before neutralization —
+        orig_min    = np.min(base, axis=(0,1))    # shape (3,)
+        orig_median = np.median(base, axis=(0,1)) # shape (3,)
+        orig_median_scalar = float(np.median(orig_median)) # single float
+
+        # initial patch‐based neutralization
         patch_size = 10
-        h, w = base_float.shape[:2]
-        patch_h = h // patch_size
-        patch_w = w // patch_size
+        h, w = base.shape[:2]
+        ph, pw = h//patch_size, w//patch_size
 
-        min_median_sum = float("inf")
-        best_patch = None
-
+        min_sum = np.inf
+        best_med = None
         for i in range(patch_size):
             for j in range(patch_size):
-                y0 = i * patch_h
-                x0 = j * patch_w
-                y1 = min(y0 + patch_h, h)
-                x1 = min(x0 + patch_w, w)
+                y0, x0 = i*ph, j*pw
+                y1, x1 = min(y0+ph, h), min(x0+pw, w)
+                patch = base[y0:y1, x0:x1, :]
+                meds  = np.median(patch, axis=(0,1))   # [R_med, G_med, B_med]
+                s     = meds.sum()
+                if s < min_sum:
+                    min_sum, best_med = s, meds
 
-                patch = base_float[y0:y1, x0:x1, :]
-                medians = np.median(patch, axis=(0, 1))  # [R_med, G_med, B_med]
-                if np.sum(medians) < min_median_sum:
-                    min_median_sum = np.sum(medians)
-                    best_patch = medians
-
-        if best_patch is not None:
-            avg_median = np.mean(best_patch)
+        if best_med is not None:
+            avg = best_med.mean()
             for c in range(3):
-                diff = best_patch[c] - avg_median
-                denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
-                base_float[:, :, c] = np.clip((base_float[:, :, c] - diff) / denom, 0.0, 1.0)
+                diff  = best_med[c] - avg
+                denom = 1.0 - diff if abs(1.0-diff)>1e-8 else 1e-8
+                base[:,:,c] = np.clip((base[:,:,c] - diff)/denom, 0.0, 1.0)
+
+        # — subtract the new minima so darkest pixels go back to zero —
+        new_min = np.min(base, axis=(0,1))
+        base -= new_min  # broadcast subtract per-channel
+
+        # — restore the original median via your stretch helper —
+        # assumes you have a method stretch_color_image(img, target_median, linked=True)
+        base = stretch_color_image(base, orig_median_scalar, linked=False)
 
 
-        # ——— Step 1: SEP extraction (one pass on the grayscale image) ———
-        img = base_float
-        H, W, C = img.shape
-        if C != 3:
-            QMessageBox.critical(self, "Error", "Current image is not RGB (3 channels).")
-            return
-
-        gray = np.mean(img.astype(np.float32), axis=2)
+        # — Step 1B: SEP extraction on grayscale image —
+        gray = np.mean(base, axis=2)
         self.count_label.setText("Detecting stars (SEP)…")
         QApplication.processEvents()
-
         bkg = sep.Background(gray)
         data_sub = gray - bkg.back()
-        err_val = bkg.globalrms
-
-        thresh = 5.0
-        sources = sep.extract(data_sub, thresh, err=err_val)
+        err = bkg.globalrms
+        sources = sep.extract(data_sub, 5.0, err=err)
         if sources.size == 0:
             QMessageBox.critical(self, "SEP Error", "SEP found no sources in the image.")
             return
 
-        r_fluxrad, r_fluxrad_err = sep.flux_radius(
+        r_fluxrad, _ = sep.flux_radius(
             gray,
             sources["x"], sources["y"],
             2.0 * sources["a"], 0.5,
             normflux=sources["flux"],
             subpix=5
         )
-        print("SEP flux radii:", r_fluxrad)
-        sys.stdout.flush()
         mask = (r_fluxrad > .2) & (r_fluxrad <= 10)
         sources = sources[mask]
-        r_fluxrad = r_fluxrad[mask]
         if sources.size == 0:
-            QMessageBox.critical(self, "SEP Error", "All SEP‐detected sources were rejected by radius filter.")
+            QMessageBox.critical(self, "SEP Error",
+                                 "All SEP‐detected sources were rejected by radius filter.")
             return
 
-        # ——— Step 2: Match Simbad stars (self.star_list) to SEP centroids ———
-        if not hasattr(self, "star_list") or len(self.star_list) == 0:
-            QMessageBox.warning(self, "Error", "You must Fetch Stars (and plate‐solve) before running SFCC.")
+        # — Step 2: Match Simbad stars to SEP centroids —
+        if not getattr(self, "star_list", None):
+            QMessageBox.warning(self, "Error",
+                                "You must Fetch Stars (and plate‐solve) before running SFCC.")
             return
-
-        matched = []
+        raw_matches = []
         for i, star in enumerate(self.star_list):
-            x_sim = star["x"]
-            y_sim = star["y"]
-            dx = sources["x"] - x_sim
-            dy = sources["y"] - y_sim
-            dist2 = dx * dx + dy * dy
-            j = np.argmin(dist2)
-            if dist2[j] < (3.0 ** 2):
-                xi = int(round(sources["x"][j]))
-                yi = int(round(sources["y"][j]))
-                if not (0 <= xi < W and 0 <= yi < H):
-                    continue
-                matched.append({
-                    "sim_index": i,
-                    "letter":    star["letter"],
-                    "ra":        star["ra"],
-                    "dec":       star["dec"],
-                    "x_pix":     xi,
-                    "y_pix":     yi
-                })
-
-        if len(matched) == 0:
-            QMessageBox.warning(self, "No Matches", "Could not match any Simbad star to SEP detections.")
+            dx = sources["x"] - star["x"]
+            dy = sources["y"] - star["y"]
+            j = np.argmin(dx*dx + dy*dy)
+            if (dx[j]**2 + dy[j]**2) < 3.0**2:
+                xi, yi = int(round(sources["x"][j])), int(round(sources["y"][j]))
+                if 0 <= xi < W and 0 <= yi < H:
+                    raw_matches.append({
+                        "sim_index": i,
+                        # Use the exact Pickles template if we have one,
+                        # else fall back to the full SIMBAD string.
+                        "template":  star.get("pickles_match") or star["sp_clean"],
+                        "ra":        star["ra"],
+                        "dec":       star["dec"],
+                        "x_pix":     xi,
+                        "y_pix":     yi
+                    })
+        if not raw_matches:
+            QMessageBox.warning(self, "No Matches",
+                                "Could not match any Simbad star to SEP detections.")
             return
 
-        # ——— Step 3: Build throughput curves and compute expected bandpasses ———
-        # ——— Step 3: Build throughput curves and load reference SED ———
+        # — Step 3: Build throughput curves & reference SED —
         wl_min, wl_max = 3000, 11000
-        wl_grid = np.arange(wl_min, wl_max + 1, 1.0)
+        wl_grid = np.arange(wl_min, wl_max+1)
 
-        # helper: first look in user file, then in base file
-        # helper: open each FITS (user first, then base) and grab filter/sensor data
-        def load_curve(extname):
-            for path in (self.user_custom_path, self.sasp_data_path):
-                with fits.open(path, mode="readonly", memmap=False) as hdul:
-                    if extname in hdul:
-                        d = hdul[extname].data
+        def load_curve(ext):
+            for p in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(p) as hd:
+                    if ext in hd:
+                        d = hd[ext].data
                         return d["WAVELENGTH"], d["THROUGHPUT"]
-            raise KeyError(f"Curve '{extname}' not found in any FITS")
+            raise KeyError(f"Curve '{ext}' not found")
 
-        def load_sed(extname):
-            for path in (self.user_custom_path, self.sasp_data_path):
-                with fits.open(path, mode="readonly", memmap=False) as hdul:
-                    if extname in hdul:
-                        d = hdul[extname].data
+        def load_sed(ext):
+            for p in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(p) as hd:
+                    if ext in hd:
+                        d = hd[ext].data
                         return d["WAVELENGTH"], d["FLUX"]
-            raise KeyError(f"SED '{extname}' not found in any FITS")
+            raise KeyError(f"SED '{ext}' not found")
 
-        def interp_curve(wl_orig, tp_orig):
-            return np.interp(wl_grid, wl_orig, tp_orig, left=0.0, right=0.0)
+        def interp(wl_o, tp_o):
+            return np.interp(wl_grid, wl_o, tp_o, left=0., right=0.)
 
-        # system throughput for each band
-        if r_filt != "(None)":
-            wl_Rf, tp_Rf = load_curve(r_filt)
-            T_R = interp_curve(wl_Rf, tp_Rf)
-        else:
-            T_R = np.ones_like(wl_grid)
+        # system throughput
+        T_R = interp(*load_curve(r_filt)) if r_filt!="(None)" else np.ones_like(wl_grid)
+        T_G = interp(*load_curve(g_filt)) if g_filt!="(None)" else np.ones_like(wl_grid)
+        T_B = interp(*load_curve(b_filt)) if b_filt!="(None)" else np.ones_like(wl_grid)
+        QE  = interp(*load_curve(sens_name)) if sens_name!="(None)" else np.ones_like(wl_grid)
+        LP  = interp(*load_curve(lp_filt))   if lp_filt!="(None)"   else np.ones_like(wl_grid)
+        T_sys_R = T_R * QE * LP
+        T_sys_G = T_G * QE * LP
+        T_sys_B = T_B * QE * LP
 
-        if g_filt != "(None)":
-            wl_Gf, tp_Gf = load_curve(g_filt)
-            T_G = interp_curve(wl_Gf, tp_Gf)
-        else:
-            T_G = np.ones_like(wl_grid)
-
-        if b_filt != "(None)":
-            wl_Bf, tp_Bf = load_curve(b_filt)
-            T_B = interp_curve(wl_Bf, tp_Bf)
-        else:
-            T_B = np.ones_like(wl_grid)
-
-        if sens_name != "(None)":
-            wl_Q, tp_Q = load_curve(sens_name)
-            QE = interp_curve(wl_Q, tp_Q)
-        else:
-            QE = np.ones_like(wl_grid)
-
-        # Stacked LP/Cut filter
-        if lp_filt != "(None)":
-            wl_LP, tp_LP = load_curve(lp_filt)
-            T_LP = interp_curve(wl_LP, tp_LP)
-        else:
-            T_LP = np.ones_like(wl_grid)
-
-        # include LP/Cut filter in the system throughput
-        T_sys_R = T_R * QE * T_LP
-        T_sys_G = T_G * QE * T_LP
-        T_sys_B = T_B * QE * T_LP
-
-        # reference SED
+        # reference SED integrals
         wl_ref, fl_ref = load_sed(ref_sed_name)
-        fl_ref_interp = np.interp(wl_grid, wl_ref, fl_ref, left=0.0, right=0.0)
-        S_ref_R = np.trapz(fl_ref_interp * T_sys_R, x=wl_grid)
-        S_ref_G = np.trapz(fl_ref_interp * T_sys_G, x=wl_grid)
-        S_ref_B = np.trapz(fl_ref_interp * T_sys_B, x=wl_grid)
+        fr_i = np.interp(wl_grid, wl_ref, fl_ref, left=0., right=0.)
+        S_ref_R = np.trapz(fr_i * T_sys_R, x=wl_grid)
+        S_ref_G = np.trapz(fr_i * T_sys_G, x=wl_grid)
+        S_ref_B = np.trapz(fr_i * T_sys_B, x=wl_grid)
 
-        # ——— Step 4: For each matched star, measure (R_meas, G_meas, B_meas) & compute expected ratios ———
-        def pickles_match_for_simbad(sp_string, sed_list):
-            sp = sp_string.upper()
-            return sorted([ext for ext in sed_list if ext.upper().startswith(sp)])
+        # ——— Step 4: Measure each star, compute expected ratios & collect diagnostics ———
+        diag_meas_RG = []; diag_exp_RG = []
+        diag_meas_BG = []; diag_exp_BG = []
+        enriched     = []
 
-        diag_meas_RG = []
-        diag_exp_RG = []
-        diag_meas_BG = []
-        diag_exp_BG = []
 
-        for entry in matched:
-            letter = entry["letter"]
-            x_pix = entry["x_pix"]
-            y_pix = entry["y_pix"]
-
+        # (you should already have S_ref_G from your reference‐SED integration)
+        # …
+        for m in raw_matches:
+            xi, yi, sp = m["x_pix"], m["y_pix"], m["template"]
+            star_src = self.star_list[m["sim_index"]]
             if img.dtype == np.uint8:
-                R_meas = float(img[y_pix, x_pix, 0]) / 255.0
-                G_meas = float(img[y_pix, x_pix, 1]) / 255.0
-                B_meas = float(img[y_pix, x_pix, 2]) / 255.0
+                Rm = img[yi, xi, 0] / 255.0
+                Gm = img[yi, xi, 1] / 255.0
+                Bm = img[yi, xi, 2] / 255.0
             else:
-                R_meas = float(img[y_pix, x_pix, 0])
-                G_meas = float(img[y_pix, x_pix, 1])
-                B_meas = float(img[y_pix, x_pix, 2])
-
-            if G_meas <= 0:
+                Rm = float(base[yi, xi, 0])
+                Gm = float(base[yi, xi, 1])
+                Bm = float(base[yi, xi, 2])
+            if Gm <= 0:
                 continue
 
-            matched_exts = pickles_match_for_simbad(letter, self.sed_list)
-            if not matched_exts:
+            cands = pickles_match_for_simbad(sp, self.pickles_templates)
+            if not cands:
+                continue
+            wl_s, fl_s = load_sed(cands[0])
+            fs_i = np.interp(wl_grid, wl_s, fl_s, left=0., right=0.)
+            S_sr = np.trapz(fs_i * T_sys_R, x=wl_grid)
+            S_sg = np.trapz(fs_i * T_sys_G, x=wl_grid)
+            S_sb = np.trapz(fs_i * T_sys_B, x=wl_grid)
+            if S_sg <= 0:
                 continue
 
-            ext_star = matched_exts[0]
-            try:
-                wl_star, fl_star = load_sed(ext_star)
-            except KeyError:
-                # extension not found in either custom or base HDULists
-                continue
-            fl_star_interp = np.interp(wl_grid, wl_star, fl_star, left=0.0, right=0.0)
+            exp_RG = S_sr / S_sg
+            exp_BG = S_sb / S_sg
 
-            S_star_R = np.trapz(fl_star_interp * T_sys_R, x=wl_grid)
-            S_star_G = np.trapz(fl_star_interp * T_sys_G, x=wl_grid)
-            S_star_B = np.trapz(fl_star_interp * T_sys_B, x=wl_grid)
-
-            if S_star_G <= 0:
-                continue
-
-            exp_RG = S_star_R / S_star_G
-            exp_BG = S_star_B / S_star_G
-
-            meas_RG = R_meas / G_meas
-            meas_BG = B_meas / G_meas
+            meas_RG = Rm / Gm
+            meas_BG = Bm / Gm
 
             diag_meas_RG.append(meas_RG)
-            diag_exp_RG.append(exp_RG)
+            diag_exp_RG .append(exp_RG)
             diag_meas_BG.append(meas_BG)
-            diag_exp_BG.append(exp_BG)
+            diag_exp_BG .append(exp_BG)
 
+            enriched.append({
+                **m,
+                "R_meas":   Rm,
+                "G_meas":   Gm,
+                "B_meas":   Bm,
+                "S_star_R": S_sr,
+                "S_star_G": S_sg,
+                "S_star_B": S_sb,
+                "exp_RG":   exp_RG,
+                "exp_BG":   exp_BG,
+                "R_mag":    star_src.get("Rmag"),
+                "V_mag":    star_src.get("Vmag"),
+                "B_mag":    star_src.get("Bmag"),                
+            })
+
+        # convert diagnostics to arrays and bail if none
         diag_meas_RG = np.array(diag_meas_RG)
-        diag_exp_RG = np.array(diag_exp_RG)
+        diag_exp_RG  = np.array(diag_exp_RG)
         diag_meas_BG = np.array(diag_meas_BG)
-        diag_exp_BG = np.array(diag_exp_BG)
-
+        diag_exp_BG  = np.array(diag_exp_BG)
         if diag_meas_RG.size == 0 or diag_meas_BG.size == 0:
             QMessageBox.information(self, "No Valid Stars",
-                                    "Could not find any stars with valid measured and expected ratios.")
+                                    "Could not find any stars with valid measured vs expected.")
             return
 
+        # how many stars?
         n_stars = diag_meas_RG.size
+
+        # compute median of all G_meas
+        all_G = np.array([e["G_meas"] for e in enriched])
+        medG  = np.median(all_G)
+
+        # now compute per‐channel delta‐flux
+        for e in enriched:
+            # expected G ratio relative to reference SED
+            exp_GG = e["S_star_G"] / S_ref_G
+
+            e["delta_R"] = e["R_meas"] - (e["exp_RG"] * e["G_meas"])
+            e["delta_G"] = (e["G_meas"] - (exp_GG * e["G_meas"])) * exp_GG
+            e["delta_B"] = e["B_meas"] - (e["exp_BG"] * e["G_meas"])
+
+        self._last_matched = enriched
 
         # ——— Step 5: Fit a best‐fit line y = m·x + b for both R/G and B/G ———
         # R/G fit
@@ -30131,37 +30252,42 @@ class SFCCDialog(QDialog):
         # ——— Step 8: Final background neutralization (so the “sky” is truly gray) ———
         # We look for the darkest patch in a 10×10 grid, compute its channel medians,
         # then shift each channel so that patch median → the same average.
+        # —— record the channel minima & medians pre-neutralization ——
+        orig_min    = np.min(calibrated, axis=(0,1))   # shape (3,)
+        orig_median = np.median(calibrated, axis=(0,1))  # shape (3,)
+        orig_median_scalar = float(np.median(orig_median)) # single float
+
+        # —— your existing patch based neutralization ——
         patch_size = 10
         h, w = calibrated.shape[:2]
-        patch_h = h // patch_size
-        patch_w = w // patch_size
+        ph, pw = h//patch_size, w//patch_size
 
-        min_median_sum = float("inf")
-        best_patch = None
-
+        min_msum = np.inf
+        best_med = None
         for i in range(patch_size):
             for j in range(patch_size):
-                y0 = i * patch_h
-                x0 = j * patch_w
-                y1 = min(y0 + patch_h, h)
-                x1 = min(x0 + patch_w, w)
-
+                y0, x0 = i*ph, j*pw
+                y1, x1 = min(y0+ph, h), min(x0+pw, w)
                 patch = calibrated[y0:y1, x0:x1, :]
-                medians = np.median(patch, axis=(0, 1))  # [R_med, G_med, B_med]
-                if np.sum(medians) < min_median_sum:
-                    min_median_sum = np.sum(medians)
-                    best_patch = medians
+                meds  = np.median(patch, axis=(0,1))  # [R_med, G_med, B_med]
+                msum  = meds.sum()
+                if msum < min_msum:
+                    min_msum = msum
+                    best_med  = meds
 
-        if best_patch is not None:
-            avg_median = np.mean(best_patch)
+        if best_med is not None:
+            avg_med = best_med.mean()
             for c in range(3):
-                diff = best_patch[c] - avg_median
-                denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
-                calibrated[:, :, c] = np.clip((calibrated[:, :, c] - diff) / denom, 0.0, 1.0)
+                diff  = best_med[c] - avg_med
+                denom = 1.0 - diff if abs(1.0-diff)>1e-8 else 1e-8
+                calibrated[:,:,c] = np.clip((calibrated[:,:,c] - diff)/denom,
+                                            0.0, 1.0)
+
 
         # ——— Convert back to uint8 if needed and push calibrated image onward ———
         if img.dtype == np.uint8:
             calibrated = (calibrated * 255.0).astype(np.uint8)
+        print(img.dtype)    
 
         # ——— Step 9: Push the calibrated (and neutralized) image back into the current slot ———
         if not hasattr(self, "main_win") or self.main_win is None:
@@ -30196,6 +30322,209 @@ class SFCCDialog(QDialog):
             "Background neutralization complete."
         )
 
+    def run_gradient_extraction(self):
+        """
+        1) Re‐measure stars on the calibrated image.
+        2) Use catalog B, V, R magnitudes and measured fluxes to compute magnitude residuals.
+        3) Sigma‐clip and fit 3rd-order polynomial surfaces to per-channel residuals.
+        4) Convert those magnitude residuals to flux corrections and subtract from each channel.
+        """
+        if not getattr(self, "_last_matched", None):
+            QMessageBox.warning(self, "No Star Matches",
+                                "Run Fetch Stars first.")
+            return
+
+        img, old_meta = self.main_win.image_manager.get_current_image_and_metadata()
+        if img is None or img.shape[2] != 3:
+            QMessageBox.critical(self, "Error", "Current image must be RGB.")
+            return
+
+        img_f = img.astype(np.float32)
+        H, W, _ = img.shape
+
+        self.count_label.setText("Extracting Stellar Magnitudes...")
+        QApplication.processEvents()
+
+        gray = np.mean(img_f, axis=2)
+        bkg = sep.Background(gray)
+        sources = sep.extract(gray - bkg.back(), 5.0, err=bkg.globalrms)
+
+        if sources is None or len(sources) == 0:
+            QMessageBox.critical(self, "Error", "No sources found for gradient extraction.")
+            return
+
+        # Match to known catalog stars (must include G_meas and catalog magnitudes)
+        print(f"[grad] _last_matched: {len(self._last_matched)} stars")
+        print("   keys in first star:", list(self._last_matched[0].keys()) if self._last_matched else "n/a")
+
+        # Match to SEP detections
+        enriched = []
+        MISS_DIST2 = []    # record the min-dist² for stars we skip
+        for s in self._last_matched:
+            x = s.get("x", s.get("x_pix"))
+            y = s.get("y", s.get("y_pix"))
+            if x is None or y is None:
+                continue
+
+            dx = sources["x"] - x
+            dy = sources["y"] - y
+            dist2 = dx*dx + dy*dy
+            j = np.argmin(dist2)
+            if dist2[j] < 5.0**2:               # ← bump from 3.0 to 5.0 px
+                enriched.append({
+                    "x": int(round(x)),
+                    "y": int(round(y)),
+                    "R_meas": float(img_f[int(round(y)), int(round(x)), 0]),
+                    "G_meas": float(img_f[int(round(y)), int(round(x)), 1]),
+                    "B_meas": float(img_f[int(round(y)), int(round(x)), 2]),
+                    "R_mag":  s.get("R_mag"),
+                    "V_mag":  s.get("V_mag"),
+                    "B_mag":  s.get("B_mag"),
+                })
+            else:
+                MISS_DIST2.append(np.sqrt(dist2[j]))
+
+        print(f"[grad] matched {len(enriched)} / {len(self._last_matched)}   "
+            f"(median miss = {np.median(MISS_DIST2) if MISS_DIST2 else 'n/a'} px)")
+
+        if len(enriched) < 3:
+            QMessageBox.warning(self, "Too Few Matches", "Not enough matched stars for gradient modeling.")
+            return
+
+        # Normalize G_mag to a common scale and compute expected fluxes
+        G_meas_all = np.array([s["G_meas"] for s in enriched])
+        G_med       = np.median(G_meas_all)
+
+        self.count_label.setText("Calculating Δs....")
+        QApplication.processEvents()
+
+        # ─── Compute expected fluxes and Δ-magnitudes ────────────────────
+        eps = 1e-8      # avoid log(0)
+
+        for s in enriched:
+            if None in (s["R_mag"], s["V_mag"], s["B_mag"]):
+                continue
+
+            V_ref                = np.median([e["V_mag"] for e in enriched if e["V_mag"] is not None])
+            s["scale_flux"]      = s["G_meas"] / 10**(-0.4*(s["V_mag"] - V_ref))
+
+            s["R_exp"]           = s["scale_flux"] * 10**(-0.4*(s["R_mag"] - s["V_mag"]))
+            s["G_exp"]           = s["scale_flux"]                       # by construction
+            s["B_exp"]           = s["scale_flux"] * 10**(-0.4*(s["B_mag"] - s["V_mag"]))
+
+            # --- residuals expressed in magnitudes (small numbers, ±0.2) ---
+            s["delta_mR"] = -2.5 * np.log10( (s["R_meas"]+eps) / (s["R_exp"]+eps) )
+            s["delta_mG"] = -2.5 * np.log10( (s["G_meas"]+eps) / (s["G_exp"]+eps) )
+            s["delta_mB"] = -2.5 * np.log10( (s["B_meas"]+eps) / (s["B_exp"]+eps) )
+
+        # ─── Gather points & residuals ────────────────────────────────────
+        pts, dR, dG, dB = [], [], [], []
+        for s in enriched:
+            if any(k not in s or np.isnan(s[k]) for k in ("delta_mR", "delta_mG", "delta_mB")):
+                continue
+            pts.append([s["x"], s["y"]])
+            dR.append(s["delta_mR"])
+            dG.append(s["delta_mG"])
+            dB.append(s["delta_mB"])
+
+        pts = np.asarray(pts)
+        dR, dG, dB = map(np.asarray, (dR, dG, dB))
+        if len(pts) < 3:
+            QMessageBox.warning(self, "Too Few Stars", "Not enough usable stars for surface fitting.")
+            return
+
+        # ─── σ-clip & fit 3rd-order poly surfaces (still in mag space) ───
+        def sigma_clip(δ, pts, σ=2.0):
+            m, s = np.median(δ), np.std(δ)
+            mask = np.abs(δ - m) < σ*s
+            return pts[mask], δ[mask]
+
+        ptsR, dR = sigma_clip(dR, pts)
+        ptsG, dG = sigma_clip(dG, pts)
+        ptsB, dB = sigma_clip(dB, pts)
+        mth = getattr(self, "grad_method", "poly2")
+        bgmR = compute_gradient_map(ptsR, dR, shape=(H, W), method=mth)  # Δmag maps
+        bgmG = compute_gradient_map(ptsG, dG, shape=(H, W), method=mth)
+        bgmB = compute_gradient_map(ptsB, dB, shape=(H, W), method=mth)
+
+
+
+        # ---- Convert Δmag → multiplicative scale maps --------------------
+        # 1) zero-centre each Δm surface
+        bgmR -= np.median(bgmR)
+        bgmG -= np.median(bgmG)
+        bgmB -= np.median(bgmB)
+
+        # --- measure how big a gradient is physically allowable -----------
+        def allowed_delta_mag(chan_plane):
+            chan_plane = np.ascontiguousarray(chan_plane)
+            bk   = sep.Background(chan_plane)
+            med  = np.median(chan_plane)
+            span = np.percentile(bk.back() / (med), [2.5, 97.5])
+            frac = span[1] - span[0]
+            return 2.5 * np.log10(1 + frac)   # ≈ ±Δm permitted
+
+
+        limR = allowed_delta_mag(img_f[...,0])
+        limG = allowed_delta_mag(img_f[...,1])
+        limB = allowed_delta_mag(img_f[...,2])
+
+        # 2) optional – weight by channel medians to keep Δm values
+        #    expressed “per median‐flux” (your current approach)
+        #medR = np.median(img_f[...,0])
+        #medG = np.median(img_f[...,1])
+        #medB = np.median(img_f[...,2])
+
+        #bgmR *= medR
+        #bgmG *= medG
+        #bgmB *= medB
+
+        # --- scale (not clip) each surface to stay within that limit ------
+        def rescale_to_limit(bgm, Δlim):
+            peak = np.max(np.abs(bgm))
+            if peak > Δlim:                       # only shrink, never boost
+                bgm = bgm * (Δlim / peak)
+            return bgm
+
+        bgmR = rescale_to_limit(bgmR, limR)
+        bgmG = rescale_to_limit(bgmG, limG)
+        bgmB = rescale_to_limit(bgmB, limB)
+
+        # 3) Δm  →  scale factor  (flux multiplier)
+        scale_R = 10**(-0.4 * bgmR)
+        scale_G = 10**(-0.4 * bgmG)
+        scale_B = 10**(-0.4 * bgmB)
+
+        # Optional: visualise the Δmag surfaces
+        self.figure.clf()
+        for i, (bg, lbl) in enumerate(zip((bgmR, bgmG, bgmB), ("Δm_R", "Δm_G", "Δm_B"))):
+            ax = self.figure.add_subplot(1, 3, i+1)
+            im = ax.imshow(bg, origin="lower", cmap="RdBu")
+            ax.set_title(lbl); ax.set_ylim(H, 0)
+            self.figure.colorbar(im, ax=ax)
+        self.canvas.setVisible(True)
+        self.figure.tight_layout(); self.canvas.draw()
+
+        # ---- Apply correction -------------------------------------------
+        corrected = img_f.copy()
+        corrected[...,0] = np.clip(corrected[...,0] / scale_R, 0.0, 1.0)
+        corrected[...,1] = np.clip(corrected[...,1] / scale_G, 0.0, 1.0)
+        corrected[...,2] = np.clip(corrected[...,2] / scale_B, 0.0, 1.0)
+
+        if img.dtype == np.uint8:
+            corrected = (corrected * 255.0).astype(np.uint8)
+
+        new_meta = (old_meta or {}).copy()
+        new_meta["Gradient_removed"] = True
+        self.main_win.image_manager.set_image(
+            corrected,
+            new_meta,
+            step_name="Gradient Correction (Catalog-based)"
+        )
+        self.count_label.setText("Additive gradient removed ✓")
+        QApplication.processEvents()
+
+
     def open_sasp_viewer(self):
         """
         Called when the “Open SASP Viewer” button is clicked.
@@ -30220,38 +30549,20 @@ class SFCCDialog(QDialog):
 
     def reset_sfcc(self):
         """
-        Wipe out any fetched‐star data, reload the current image/header,
-        and reset the UI so the user can start fresh.
+        Close & delete this dialog, clear the parent’s pointer, 
+        then call SFCC_show() to build an entirely new one.
         """
-        # 0) Re-fetch the active slot image & header
-        if self.main_win is not None and hasattr(self.main_win, "image_manager"):
-            img, meta = self.main_win.image_manager.get_current_image_and_metadata()
-            self.current_image = img
-            self.current_header = meta.get("original_header", None)
+        parent = self.main_win
+        # 1) Close and schedule this dialog for deletion
+        self.close()
+        self.deleteLater()
 
-        # 1) Clear any fetched‐star list
-        self.star_list.clear()
+        # 2) Clear the parent’s reference so SFCC_show will make a fresh one
+        parent.SFCC_window = None
 
-        # 2) Reset combo-boxes to defaults:
-        #    • White Reference → Vega (A0V)
-        #idx_a0v = self.star_combo.findData("A0V")
-        #if idx_a0v >= 0:
-        #    self.star_combo.setCurrentIndex(idx_a0v)
+        # 3) Call the same show method you use to open it initially
+        parent.SFCC_show()
 
-        #    • R/G/B filters → “(None)”
-        #self.r_filter_combo.setCurrentIndex(0)
-        #self.g_filter_combo.setCurrentIndex(0)
-        #self.b_filter_combo.setCurrentIndex(0)
-
-        #    • Sensor → “(None)”
-        #self.sens_combo.setCurrentIndex(0)
-
-        # 3) Hide & clear plots/labels
-        self.canvas.setVisible(False)
-        self.figure.clf()
-        self.canvas.draw()
-        self.count_label.setText("")
-        self.orientation_label.setText("Orientation: N/A")
 
     def _on_sasp_closed(self, obj):
         # Called when the SaspViewer window is closed
