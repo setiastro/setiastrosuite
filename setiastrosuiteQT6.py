@@ -13846,9 +13846,18 @@ class LiveStackWindow(QDialog):
         Composite filters into an RGB preview according to self.narrowband_mapping:
 
         • "Natural":
-            R = 0.5*(Ha + SII)
-            G = 0.5*(SII + OIII)
-            B = OIII
+            – If SII present:
+                R = 0.5*(Ha + SII)
+                G = 0.5*(SII + OIII)
+                B = OIII
+            – Elif any R/G/B loaded:
+                R = R_filter
+                G = G_filter + OIII
+                B = B_filter + OIII
+            – Else (no SII, no R/G/B):
+                R = Ha
+                G = OIII
+                B = OIII
 
         • Any 3-letter code (e.g. "SHO", "OHS"):
             R = filter_stacks[mapping[0]]
@@ -13866,7 +13875,7 @@ class LiveStackWindow(QDialog):
         else:
             return None
 
-        # Helper: get stack or zeros
+        # helper: get stack or zeros
         def getf(k):
             return self.filter_stacks.get(k, np.zeros((H, W), np.float32))
 
@@ -13875,22 +13884,35 @@ class LiveStackWindow(QDialog):
             Ha = getf('H')
             O3 = getf('O')
             S2 = self.filter_stacks.get('S', None)
-            if S2 is None:
-                # fallback HOO if no SII
+            Rf = self.filter_stacks.get('R', None)
+            Gf = self.filter_stacks.get('G', None)
+            Bf = self.filter_stacks.get('B', None)
+
+            if S2 is not None:
+                # narrowband SII branch
+                R = 0.5 * (Ha + S2)
+                G = 0.5 * (S2 + O3)
+                B = O3.copy()
+
+            elif any(x is not None for x in (Rf, Gf, Bf)):
+                # broadband branch: Rf/Gf/Bf with OIII boost
+                R = Rf if Rf is not None else np.zeros((H, W), np.float32)
+                G = (Gf if Gf is not None else np.zeros((H, W), np.float32)) + O3
+                B = (Bf if Bf is not None else np.zeros((H, W), np.float32)) + O3
+
+            else:
+                # fallback HOO
                 R = Ha
                 G = O3
                 B = O3
-            else:
-                R = 0.25 * (3*Ha + S2)
-                G = 0.5 * (S2 + O3)
-                B = O3.copy()
+
         else:
             # direct mapping: e.g. "SHO" → R=S, G=H, B=O
-            # ensure mode length==3 and letters in {S,H,O}
             letters = list(mode)
-            # fallback to NATURAL if bad string
             if len(letters) != 3 or any(l not in ("S","H","O") for l in letters):
-                return self._build_color_composite.__wrapped__(self)  # call original natural
+                # invalid code → fallback to natural
+                return self._build_color_composite.__wrapped__(self)
+
             R = getf(letters[0])
             G = getf(letters[1])
             B = getf(letters[2])
