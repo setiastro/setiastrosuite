@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.3"
+VERSION = "2.18.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13220,6 +13220,15 @@ class LiveStackSettingsDialog(QDialog):
         form.addRow("Max Eccentricity:", self.ecc_spin)
         form.addRow("Min Star Count:", self.star_spin)
 
+        self.mapping_combo = QComboBox()
+        opts = ["Natural", "SHO", "HSO", "OSH", "SOH", "HOS", "OHS"]
+        self.mapping_combo.addItems(opts)
+        # preselect current
+        idx = opts.index(parent.narrowband_mapping) \
+              if parent.narrowband_mapping in opts else 0
+        self.mapping_combo.setCurrentIndex(idx)
+        form.addRow("Narrowband Mapping:", self.mapping_combo)
+
         # OK / Cancel buttons
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -13244,7 +13253,8 @@ class LiveStackSettingsDialog(QDialog):
         fwhm    = self.fwhm_spin.value()
         ecc     = self.ecc_spin.value()
         stars   = self.star_spin.value
-        return bs, sigma, fwhm, ecc, stars
+        mapping = self.mapping_combo.currentText()
+        return bs, sigma, fwhm, ecc, stars, mapping
 
 
 
@@ -13472,6 +13482,11 @@ class LiveStackWindow(QDialog):
         self.processed_files = set()
         self.master_dark = None
         self.master_flat = None
+        self.master_flats  = {}
+        self.narrowband_mapping = "Natural"
+
+        self.filter_stacks = {}       # key → np.ndarray (float32)
+        self.filter_counts = {}       # key → int
 
         self.cull_folder = None
         # Default thresholds:
@@ -13508,6 +13523,8 @@ class LiveStackWindow(QDialog):
         self.load_darks_btn.clicked.connect(self.load_masters)
         self.load_flats_btn = QPushButton("Load Master Flat…")
         self.load_flats_btn.clicked.connect(self.load_masters)
+        self.load_filter_flats_btn = QPushButton("Load MonoFilter Flats…")
+        self.load_filter_flats_btn.clicked.connect(self.load_filter_flats)        
 
         # 2b) Cull folder selection
         self.cull_folder_label = QLabel("Cull Folder: (none)")
@@ -13519,6 +13536,13 @@ class LiveStackWindow(QDialog):
         for lbl in (self.dark_status_label, self.flat_status_label):
             lbl.setStyleSheet("color: #cccccc; font-weight: bold;")
         # 3) “Process & Monitor” / “Monitor Only” / “Stop” / “Reset”
+        self.mono_color_checkbox = QCheckBox("Mono → Color Stacking")
+        self.mono_color_checkbox.setToolTip(
+            "When checked, bucket mono frames by FILTER and composite R, G, B, Ha, OIII, SII."
+        )
+        # **Connect the toggled(bool) signal** before we ever call it
+        self.mono_color_checkbox.toggled.connect(self._on_mono_color_toggled)
+
         self.process_and_monitor_btn = QPushButton("Process && Monitor")
         self.process_and_monitor_btn.clicked.connect(self.start_and_process)
         self.monitor_only_btn = QPushButton("Monitor Only")
@@ -13617,8 +13641,10 @@ class LiveStackWindow(QDialog):
         controls.addWidget(self.select_folder_btn)
         controls.addWidget(self.load_darks_btn)
         controls.addWidget(self.load_flats_btn)
+        controls.addWidget(self.load_filter_flats_btn)
         controls.addWidget(self.select_cull_btn)
         controls.addStretch()
+        controls.addWidget(self.mono_color_checkbox)
         controls.addWidget(self.process_and_monitor_btn)
         controls.addWidget(self.monitor_only_btn)
         controls.addWidget(self.stop_btn)
@@ -13663,9 +13689,18 @@ class LiveStackWindow(QDialog):
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(1500)
         self.poll_timer.timeout.connect(self.check_for_new_frames)
+        self._on_mono_color_toggled(self.mono_color_checkbox.isChecked())
 
 
     # ─────────────────────────────────────────────────────────────────────────
+    def _on_mono_color_toggled(self, checked: bool):
+        self.mono_color_mode = checked
+        self.filter_stacks.clear()
+        self.filter_counts.clear()
+
+        msg = "Enabled" if checked else "Disabled"
+        self.status_label.setText(f"Mono→Color Mode {msg}")
+
     def show_metrics_window(self):
         """Pop up the separate metrics window (never embed it here)."""
         self.metrics_window.show()
@@ -13682,7 +13717,7 @@ class LiveStackWindow(QDialog):
     def open_settings(self):
         dlg = LiveStackSettingsDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            bs, sigma, fwhm, ecc, stars = dlg.getValues()
+            bs, sigma, fwhm, ecc, stars, mapping = dlg.getValues()
             # Update live‐stack params
             self.bootstrap_frames = bs
             self.clip_threshold  = sigma
@@ -13690,9 +13725,11 @@ class LiveStackWindow(QDialog):
             self.max_fwhm        = fwhm
             self.max_ecc         = ecc
             self.min_star_count  = stars
+            self.narrowband_mapping = mapping
             self.status_label.setText(
                 f"↺ Settings updated with CutOver={bs}, σ={sigma:.1f}, "
-                f"FWHM≤{fwhm:.1f}, ECC≤{ecc:.2f}, Stars≥{stars}"
+                f"FWHM≤{fwhm:.1f}, ECC≤{ecc:.2f}, Stars≥{stars}, "
+                f"Mapping={mapping}"
             )
             QApplication.processEvents()
 
@@ -13707,15 +13744,28 @@ class LiveStackWindow(QDialog):
 
     # — Brightness / Contrast —
 
+    def _refresh_preview(self):
+        """
+        Recompute the current preview array (stack vs. composite)
+        and call update_preview on it.
+        """
+        if self.mono_color_mode:
+            # build the composite from filter_stacks
+            preview = self._build_color_composite()
+        else:
+            # use the normal running stack
+            preview = self.current_stack
+
+        if preview is not None:
+            self.update_preview(preview)
+
     def on_brightness_changed(self, val: int):
         self.brightness = val / 100.0  # map to [-1,1]
-        if self.current_stack is not None:
-            self.update_preview(self.current_stack)
+        self._refresh_preview()
 
     def on_contrast_changed(self, val: int):
-        self.contrast = val / 100.0  # map to [0.1,10.0]
-        if self.current_stack is not None:
-            self.update_preview(self.current_stack)
+        self.contrast = val / 100.0   # map to [0.1,10.0]
+        self._refresh_preview()
 
     # — Sending out —
 
@@ -13752,6 +13802,101 @@ class LiveStackWindow(QDialog):
             mgr.set_current_slot(slot_index)
 
         self.status_label.setText(f"Sent to slot {slot_index}")
+
+    # ── New helper: map header["FILTER"] to a single letter key
+    def _get_filter_key(self, header):
+        fn = header.get('FILTER','').upper()
+        if fn.startswith(('R','RED')):    return 'R'
+        if fn.startswith(('G','GREEN')):  return 'G'
+        if fn.startswith(('B','BLUE')):   return 'B'
+        if fn.startswith(('L','LUMINANCE')): return 'L'
+        if fn.startswith('HA'):           return 'H'
+        if fn.startswith(('OIII','O3')): return 'O'
+        if fn.startswith(('SII','S2')):  return 'S'
+        return None
+
+    # ── New helper: stack a single mono frame under filter key
+    def _stack_mono_channel(self, key, img, delta=None):
+        # img: 2D or 3D array; we convert to 2D mono always
+        mono = img if img.ndim==2 else np.mean(img,axis=2)
+        # align if you need (use same logic as color branch)
+        if hasattr(self, 'reference_image_2d'):
+            d = delta or StarRegistrationWorker.compute_affine_transform_astroalign(
+                        mono, self.reference_image_2d)
+            if d is not None:
+                mono = StarRegistrationThread.apply_affine_transform_static(mono, d)
+        # normalize
+        norm = stretch_mono_image(mono, target_median=0.3)
+        # first frame?
+        if key not in self.filter_stacks:
+            self.filter_stacks[key] = norm.copy()
+            self.filter_counts[key] = 1
+            # set reference on first good channel frame
+            if not hasattr(self, 'reference_image_2d'):
+                self.reference_image_2d = norm.copy()
+        else:
+            cnt = self.filter_counts[key]
+            self.filter_stacks[key] = (cnt/self.filter_counts[key]+1)*self.filter_stacks[key] \
+                                      + (1.0/(cnt+1))*norm
+            self.filter_counts[key] += 1
+
+    # ── New helper: build an RGB preview from whatever channels we have
+    def _build_color_composite(self):
+        """
+        Composite filters into an RGB preview according to self.narrowband_mapping:
+
+        • "Natural":
+            R = 0.5*(Ha + SII)
+            G = 0.5*(SII + OIII)
+            B = OIII
+
+        • Any 3-letter code (e.g. "SHO", "OHS"):
+            R = filter_stacks[mapping[0]]
+            G = filter_stacks[mapping[1]]
+            B = filter_stacks[mapping[2]]
+
+        Missing channels default to zero.
+        """
+        # 1) Determine H, W
+        if self.filter_stacks:
+            first = next(iter(self.filter_stacks.values()))
+            H, W = first.shape
+        elif getattr(self, 'current_stack', None) is not None:
+            H, W = self.current_stack.shape[:2]
+        else:
+            return None
+
+        # Helper: get stack or zeros
+        def getf(k):
+            return self.filter_stacks.get(k, np.zeros((H, W), np.float32))
+
+        mode = self.narrowband_mapping.upper()
+        if mode == "NATURAL":
+            Ha = getf('H')
+            O3 = getf('O')
+            S2 = self.filter_stacks.get('S', None)
+            if S2 is None:
+                # fallback HOO if no SII
+                R = Ha
+                G = O3
+                B = O3
+            else:
+                R = 0.25 * (3*Ha + S2)
+                G = 0.5 * (S2 + O3)
+                B = O3.copy()
+        else:
+            # direct mapping: e.g. "SHO" → R=S, G=H, B=O
+            # ensure mode length==3 and letters in {S,H,O}
+            letters = list(mode)
+            # fallback to NATURAL if bad string
+            if len(letters) != 3 or any(l not in ("S","H","O") for l in letters):
+                return self._build_color_composite.__wrapped__(self)  # call original natural
+            R = getf(letters[0])
+            G = getf(letters[1])
+            B = getf(letters[2])
+
+        return np.stack([R, G, B], axis=2)
+
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder to Watch")
@@ -13819,6 +13964,49 @@ class LiveStackWindow(QDialog):
                 self, "Master Flat Loaded",
                 f"Loaded master flat:\n{os.path.basename(chosen)}"
             )
+
+    def load_filter_flats(self):
+        """
+        Let the user pick one or more flat files.
+        We try to read the FITS header FILTER key to decide which filter
+        each flat belongs to; otherwise fall back to the filename.
+        """
+        dlg = QFileDialog(self, "Select Filter Flats",
+                          filter="FITS or TIFF (*.fit *.fits *.tif *.tiff)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        if not dlg.exec():
+            return
+
+        files = dlg.selectedFiles()
+        loaded = []
+        for path in files:
+            img, hdr, bit_depth, is_mono = load_image(path)
+            if img is None:
+                continue
+            # guess filter key from header, else from filename
+            key = None
+            if hdr and hdr.get("FILTER"):
+                key = self._get_filter_key(hdr)
+            if not key:
+                # fallback: basename before extension
+                key = os.path.splitext(os.path.basename(path))[0]
+
+            # store it
+            self.master_flats[key] = img.astype(np.float32)
+            loaded.append(key)
+
+        # update the flat status label to list loaded filters
+        if loaded:
+            names = ", ".join(loaded)
+            self.flat_status_label.setText(f"Flats: {names}")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+            QMessageBox.information(
+                self, "Filter Flats Loaded",
+                f"Loaded flats for filters: {names}"
+            )
+        else:
+            QMessageBox.warning(self, "No Flats Loaded",
+                                "No flats could be loaded.")
 
     def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
         """
@@ -13911,6 +14099,12 @@ class LiveStackWindow(QDialog):
         self.frame_count = 0
         self.current_stack = None
 
+        self.filter_stacks.clear()
+        self.filter_counts.clear()
+
+        if hasattr(self, 'reference_image_2d'):
+            del self.reference_image_2d
+
         # Re-initialize bootstrapping stats
         self._buffer = []
         self._mu = None
@@ -13929,12 +14123,12 @@ class LiveStackWindow(QDialog):
 
         # Reset zoom/pan fit flag
         self._did_initial_fit = False
-        self.master_dark = None
-        self.master_flat = None
-        self.dark_status_label.setText("Dark: ❌")
-        self.flat_status_label.setText("Flat: ❌")
-        self.dark_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")
-        self.flat_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")        
+        #self.master_dark = None
+        #self.master_flat = None
+        #self.dark_status_label.setText("Dark: ❌")
+        #self.flat_status_label.setText("Flat: ❌")
+        #self.dark_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+        #self.flat_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")        
 
 
 
@@ -13965,8 +14159,6 @@ class LiveStackWindow(QDialog):
         for path in new:
             self.processed_files.add(path)
             self.process_frame(path)
-
-
 
     def process_frame(self, path):
         # 1) Load
@@ -14040,136 +14232,153 @@ class LiveStackWindow(QDialog):
                 QApplication.processEvents()
                 return
 
+        # ——— 2) CALIBRATION (once) ————————————————————————
+        # ——— 2a) DETECT MONO→COLOR MODE ————————————————————
+        mono_key = None
+        if self.mono_color_mode and is_mono and header.get('FILTER') and 'BAYERPAT' not in header:
+            mono_key = self._get_filter_key(header)
 
-        # 2) Calibration
+        # ——— 2b) CALIBRATION (once) ————————————————————————
         if self.master_dark is not None:
-            self.status_label.setText(f"Applying master dark to {os.path.basename(path)}")
-            QApplication.processEvents()
             img = img.astype(np.float32) - self.master_dark
-        if self.master_flat is not None:
-            self.status_label.setText(f"Applying master flat to {os.path.basename(path)}")
-            QApplication.processEvents()
+        # prefer per-filter flat if we’re in mono→color and have one
+        if mono_key and mono_key in self.master_flats:
+            img = apply_flat_division_numba(img, self.master_flats[mono_key])
+        elif self.master_flat is not None:
             img = apply_flat_division_numba(img, self.master_flat)
 
-        # 3) Debayer **always before stacking**, if BAYERPAT present
-        if is_mono and header and 'BAYERPAT' in header:
-            pattern = header['BAYERPAT'][0] if isinstance(header['BAYERPAT'], tuple) else header['BAYERPAT']
-            img = debayer_fits_fast(img, pattern)
+        # ——— 3) DEBAYER if BAYERPAT ——————————————————————
+        if is_mono and header.get('BAYERPAT'):
+            pat = header['BAYERPAT'][0] if isinstance(header['BAYERPAT'], tuple) else header['BAYERPAT']
+            img = debayer_fits_fast(img, pat)
             is_mono = False
 
-        # 4) Promote pure mono to 3-channel
-        if img.ndim == 2:
+        # ——— 5) PROMOTION TO 3-CHANNEL if NOT in mono-mode —————
+        if mono_key is None and img.ndim == 2:
             img = np.stack([img, img, img], axis=2)
 
-        # 5) ALIGN & NORMALIZE this frame (but do not yet update the stack)
-        if self.current_stack is None:
-            norm = stretch_color_image(img, target_median=0.3, linked=False)
-            aligned = norm.copy()
-        else:
-            mono_img = np.mean(img, axis=2)
+        # ——— 6) BUILD PLANE for alignment & metrics —————————
+        plane = img if (mono_key and img.ndim == 2) else np.mean(img, axis=2)
+
+        # ——— 7) ALIGN to reference_image_2d ——————————————————
+        if hasattr(self, 'reference_image_2d'):
             delta = StarRegistrationWorker.compute_affine_transform_astroalign(
-                        mono_img, self.reference_image_2d
-                    )
+                plane, self.reference_image_2d
+            )
             if delta is None:
                 delta = IDENTITY_2x3
-            aligned = StarRegistrationThread.apply_affine_transform_static(img, delta)
-            norm = stretch_color_image(aligned, target_median=0.3, linked=False)
+            # apply to full img (if color) and to plane
+            if mono_key is None:
+                img = StarRegistrationThread.apply_affine_transform_static(img, delta)
+            plane = StarRegistrationThread.apply_affine_transform_static(
+                plane if plane.ndim == 2 else plane[:, :, None], delta
+            ).squeeze()
 
-        # ─── Compute per-frame metrics BEFORE stacking ─────────────────────
-        mono_for_metrics = np.mean(norm, axis=2)
-        sc, fwhm, ecc = compute_frame_star_metrics(mono_for_metrics)
-        snr_val = estimate_global_snr(self.current_stack if self.current_stack is not None else norm)
+        # ——— 8) NORMALIZE —————————————————————————————
+        if mono_key:
+            norm_plane = stretch_mono_image(plane, target_median=0.3)
+            norm_color = None
+        else:
+            norm_color = stretch_color_image(img, target_median=0.3, linked=False)
+            norm_plane = np.mean(norm_color, axis=2)
 
-        # Determine if this frame should be culled
-        flagged = False
-        if hasattr(self, 'max_fwhm') and fwhm > self.max_fwhm:
-            flagged = True
-        if hasattr(self, 'max_ecc') and ecc > self.max_ecc:
-            flagged = True
-        if hasattr(self, 'min_star_count') and sc < self.min_star_count:
-            flagged = True
+        # ——— 9) METRICS & SNR —————————————————————————
+        sc, fwhm, ecc = compute_frame_star_metrics(norm_plane)
+        snr_val       = estimate_global_snr(norm_plane if mono_key else norm_color)
 
+        # ——— 10) CULLING? ————————————————————————————
+        flagged = (
+            (fwhm > self.max_fwhm) or
+            (ecc > self.max_ecc)     or
+            (sc < self.min_star_count)
+        )
         if flagged:
-            # Move to cull folder if configured
-            if self.cull_folder:
-                try:
-                    os.makedirs(self.cull_folder, exist_ok=True)
-                    dst = os.path.join(self.cull_folder, os.path.basename(path))
-                    shutil.move(path, dst)
-                    self.status_label.setText(f"⚠ Culled {os.path.basename(path)} → {self.cull_folder}")
-                except Exception:
-                    self.status_label.setText(f"⚠ Failed to cull {os.path.basename(path)}")
-            else:
-                self.status_label.setText(f"⚠ Flagged (not stacked): {os.path.basename(path)}")
-
-            # Update metrics panel with flagged=True (red dot)
+            self._cull_frame(path)
             self.metrics_window.metrics_panel.add_point(
                 self.frame_count + 1, fwhm, ecc, sc, snr_val, True
             )
-            QApplication.processEvents()
             return
 
-        # ─── If not flagged, now update the running‐average stack ─────────
-        if self.current_stack is None:
-            # First good frame
-            self.current_stack = norm.copy()
-            self.reference_image_2d = np.mean(self.current_stack, axis=2)
+        # ——— 11) FIRST-FRAME INITIALIZATION —————————————————
+        if self.frame_count == 0:
+            # set reference on the very first good frame
+            self.reference_image_2d = norm_plane.copy()
             self.frame_count = 1
+            self.frame_count_label.setText("Frames: 1")
             self.mode_label.setText("Mode: Linear Average")
-            self._buffer.append(norm.copy())
-            self.status_label.setText(f"Processed {os.path.basename(path)}")
             QApplication.processEvents()
-        else:
-            if self.frame_count < self.bootstrap_frames:
-                n = self.frame_count + 1
-                self.current_stack = ((self.frame_count / n) * self.current_stack
-                                     + (1.0 / n) * norm)
-                self.frame_count = n
-                self._buffer.append(norm.copy())
-                self.status_label.setText(f"Processed {os.path.basename(path)}")
-                QApplication.processEvents()
 
-                if self.frame_count == self.bootstrap_frames:
-                    buf = np.stack(self._buffer, axis=0)
-                    self._mu = np.mean(buf, axis=0)
-                    diffs = buf - self._mu[np.newaxis, ...]
-                    self._m2 = np.sum(diffs * diffs, axis=0)
-                    self._buffer = None
-                    self.mode_label.setText("Mode: μ-σ Clipping Average")
-                    QApplication.processEvents()
+            if mono_key:
+                # start the filter stack
+                self.filter_stacks[mono_key] = norm_plane.copy()
+                self.filter_counts[mono_key] = 1
             else:
-                sigma = np.sqrt(self._m2 / (self.frame_count - 1))
-                mask = np.abs(norm - self._mu) <= (self.clip_threshold * sigma)
-                clipped = np.where(mask, norm, self._mu)
+                # start the normal running stack
+                self.current_stack = norm_color.copy()
+                self._buffer = [norm_color.copy()]
 
+        else:
+            # ——— 12) RUNNING–AVERAGE or CLIP-σ UPDATE ————————
+            if self.frame_count < self.bootstrap_frames and mono_key is None:
+                # linear bootstrap for color
                 n = self.frame_count + 1
-                self.current_stack = ((self.frame_count / n) * self.current_stack
-                                     + (1.0 / n) * clipped)
+                self.current_stack = (
+                    (self.frame_count / n) * self.current_stack
+                    + (1.0 / n) * norm_color
+                )
+                self._buffer.append(norm_color.copy())
 
+            elif mono_key is None:
+                # μ-σ clipping for color
+                sigma = np.sqrt(self._m2 / (self.frame_count - 1))
+                mask = np.abs(norm_color - self._mu) <= (self.clip_threshold * sigma)
+                clipped = np.where(mask, norm_color, self._mu)
+                n = self.frame_count + 1
+                self.current_stack = (
+                    (self.frame_count / n) * self.current_stack
+                    + (1.0 / n) * clipped
+                )
                 # Welford update
                 delta_mu = clipped - self._mu
                 self._mu += delta_mu / n
                 delta2 = clipped - self._mu
                 self._m2 += delta_mu * delta2
 
-                self.frame_count = n
-                self.status_label.setText(f"Processed {os.path.basename(path)}")
-                self.mode_label.setText("Mode: μ-σ Clipping Average")
-                QApplication.processEvents()
+            else:
+                # **Mono-to-color** running average per filter
+                # initialize if needed
+                if mono_key not in self.filter_counts:
+                    self.filter_counts[mono_key] = 0
+                    self.filter_stacks[mono_key] = np.zeros_like(norm_plane)
+                cnt = self.filter_counts[mono_key]
+                self.filter_stacks[mono_key] = (
+                    (cnt / (cnt + 1)) * self.filter_stacks[mono_key]
+                    + (1.0 / (cnt + 1)) * norm_plane
+                )
+                self.filter_counts[mono_key] += 1
 
-            # Refresh alignment reference
-            self.reference_image_2d = np.mean(self.current_stack, axis=2)
+            self.frame_count += 1
+            self.frame_count_label.setText(f"Frames: {self.frame_count}")
+            QApplication.processEvents()
 
-        # ─── Update metrics panel for this good frame ────────────────────
+        # ——— 13) METRICS PANEL for good frame —————————————
         self.metrics_window.metrics_panel.add_point(
             self.frame_count, fwhm, ecc, sc, snr_val, False
         )
 
-        # 6) UI update (preview + labels)
-        self.frame_count_label.setText(f"Frames: {self.frame_count}")
-        self.status_label.setText(f"✔ processed {os.path.basename(path)}")
-        self.update_preview(self.current_stack)
+        # ——— 14) PREVIEW & STATUS LABEL —————————————————————
+        if mono_key:
+            preview = self._build_color_composite()
+            self.status_label.setText(f"Stacked {mono_key}-filter frame {os.path.basename(path)}")
+            QApplication.processEvents()
+        else:
+            preview = self.current_stack
+            self.status_label.setText(f"✔ processed {os.path.basename(path)}")
+            QApplication.processEvents()
+
+        self.update_preview(preview)
         QApplication.processEvents()
+
 
 
 
