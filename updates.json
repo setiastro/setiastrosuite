@@ -1,9 +1,9 @@
 {
-  "version": "2.18.3",
+  "version": "2.18.4",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.3/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.3/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.3/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Ability to add filters and sensor via csv: 2 columns needed, 1 for wavelength data and 1 for response data. Improved Spectral type parsing."
+  "notes": "Live stacking now supports Mono to Color images. Capture R, G, B, even H, S, or O and have the live stack determine the color and add it to the stack generating realtime color images as your mono data comes in!"
 }
