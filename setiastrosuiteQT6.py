@@ -13790,24 +13790,21 @@ class LiveStackWindow(QDialog):
     # — Sending out —
 
     def send_to_slot(self):
-        # Choose the right image to send
+        # 1) Pick the image to send
         if self.mono_color_mode:
             img = self._build_color_composite()
-            if img is None:
-                self.status_label.setText("⚠ Nothing to send")
-                return
         else:
             img = self.current_stack
-            if img is None:
-                self.status_label.setText("⚠ Nothing to send")
-                return
 
+        # 2) Bail if there's nothing ready
+        if img is None:
+            self.status_label.setText("⚠ Nothing to send")
+            return
+
+        # 3) Ask the user which slot
         mgr = self.parent.image_manager
-        # Build a list of slot labels "0", "1", ..., up to max_slots-1
         slots = [str(i) for i in range(mgr.max_slots)]
-        # Preselect the current slot
         current = str(mgr.current_slot)
-
         slot_str, ok = QInputDialog.getItem(
             self, "Select Slot", "Slot:", slots,
             current=slots.index(current),
@@ -13815,20 +13812,25 @@ class LiveStackWindow(QDialog):
         )
         if not ok:
             return
-
         slot_index = int(slot_str)
+
+        # 4) Send the image (make a copy so LiveStack can keep running)
         metadata = {
             "source": "LiveStack",
             "frames_stacked": self.frame_count
         }
-
-        # Add image and switch to it
-        mgr.set_image_for_slot(slot_index, self.current_stack.copy(), metadata, step_name="Live Stack")
+        mgr.set_image_for_slot(
+            slot_index,
+            img.copy(),
+            metadata,
+            step_name="Live Stack"
+        )
         if hasattr(self.parent, "set_active_slot"):
             self.parent.set_active_slot(slot_index)
         else:
             mgr.set_current_slot(slot_index)
 
+        # 5) Update status
         self.status_label.setText(f"Sent to slot {slot_index}")
 
     # ── New helper: map header["FILTER"] to a single letter key
