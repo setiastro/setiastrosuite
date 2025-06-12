@@ -1,9 +1,9 @@
 {
-  "version": "2.18.4",
+  "version": "2.18.5",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.4/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Live stacking now supports Mono to Color images. Capture R, G, B, even H, S, or O and have the live stack determine the color and add it to the stack generating realtime color images as your mono data comes in!"
+  "notes": "Bug fixes in Mono to Color.  Live stacking now supports Mono to Color images. Capture R, G, B, even H, S, or O and have the live stack determine the color and add it to the stack generating realtime color images as your mono data comes in!"
 }
