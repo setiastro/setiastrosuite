@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.4"
+VERSION = "2.18.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13487,6 +13487,9 @@ class LiveStackWindow(QDialog):
 
         self.filter_stacks = {}       # key → np.ndarray (float32)
         self.filter_counts = {}       # key → int
+        self.filter_buffers  = {}  # key → list of bootstrap frames [H×W arrays]
+        self.filter_mus      = {}  # key → µ array after bootstrap (H×W)
+        self.filter_m2s      = {}  # key → M2 array after bootstrap (H×W)
 
         self.cull_folder = None
         # Default thresholds:
@@ -13713,6 +13716,23 @@ class LiveStackWindow(QDialog):
             self.cull_folder = folder
             self.cull_folder_label.setText(f"Cull: {os.path.basename(folder)}")
 
+    def _cull_frame(self, path: str):
+        """
+        Move a flagged frame into the cull folder (if set), 
+        or just update the status label if not.
+        """
+        name = os.path.basename(path)
+        if self.cull_folder:
+            try:
+                os.makedirs(self.cull_folder, exist_ok=True)
+                dst = os.path.join(self.cull_folder, name)
+                shutil.move(path, dst)
+                self.status_label.setText(f"⚠ Culled {name} → {self.cull_folder}")
+            except Exception:
+                self.status_label.setText(f"⚠ Failed to cull {name}")
+        else:
+            self.status_label.setText(f"⚠ Flagged (not stacked): {name}")
+        QApplication.processEvents()
 
     def open_settings(self):
         dlg = LiveStackSettingsDialog(self)
@@ -13770,9 +13790,17 @@ class LiveStackWindow(QDialog):
     # — Sending out —
 
     def send_to_slot(self):
-        if self.current_stack is None:
-            self.status_label.setText("⚠ Nothing to send")
-            return
+        # Choose the right image to send
+        if self.mono_color_mode:
+            img = self._build_color_composite()
+            if img is None:
+                self.status_label.setText("⚠ Nothing to send")
+                return
+        else:
+            img = self.current_stack
+            if img is None:
+                self.status_label.setText("⚠ Nothing to send")
+                return
 
         mgr = self.parent.image_manager
         # Build a list of slot labels "0", "1", ..., up to max_slots-1
@@ -14123,6 +14151,9 @@ class LiveStackWindow(QDialog):
 
         self.filter_stacks.clear()
         self.filter_counts.clear()
+        self.filter_buffers.clear()
+        self.filter_mus.clear()
+        self.filter_m2s.clear()
 
         if hasattr(self, 'reference_image_2d'):
             del self.reference_image_2d
@@ -14332,8 +14363,9 @@ class LiveStackWindow(QDialog):
 
             if mono_key:
                 # start the filter stack
-                self.filter_stacks[mono_key] = norm_plane.copy()
-                self.filter_counts[mono_key] = 1
+                self.filter_stacks[mono_key]  = norm_plane.copy()
+                self.filter_counts[mono_key]  = 1
+                self.filter_buffers[mono_key] = [norm_plane.copy()]
             else:
                 # start the normal running stack
                 self.current_stack = norm_color.copy()
@@ -14367,16 +14399,62 @@ class LiveStackWindow(QDialog):
                 self._m2 += delta_mu * delta2
 
             else:
-                # **Mono-to-color** running average per filter
-                # initialize if needed
+                # Mono→color update for filter = mono_key
+                # init if needed
                 if mono_key not in self.filter_counts:
-                    self.filter_counts[mono_key] = 0
-                    self.filter_stacks[mono_key] = np.zeros_like(norm_plane)
-                cnt = self.filter_counts[mono_key]
-                self.filter_stacks[mono_key] = (
-                    (cnt / (cnt + 1)) * self.filter_stacks[mono_key]
-                    + (1.0 / (cnt + 1)) * norm_plane
-                )
+                    self.filter_counts[mono_key]  = 0
+                    self.filter_stacks[mono_key]  = None
+                    self.filter_buffers[mono_key] = []
+                    # no µ or m2 yet until bootstrap completes
+
+                n = self.filter_counts[mono_key]
+                buf = self.filter_buffers[mono_key]
+
+                if n < self.bootstrap_frames:
+                    # 1) bootstrap linear average
+                    if n == 0:
+                        self.filter_stacks[mono_key] = norm_plane.copy()
+                    else:
+                        self.filter_stacks[mono_key] = (
+                            (n / (n+1)) * self.filter_stacks[mono_key]
+                            + (1/(n+1)) * norm_plane
+                        )
+                    buf.append(norm_plane.copy())
+
+                    # when we hit bootstrap_frames, compute µ & m2
+                    if n+1 == self.bootstrap_frames:
+                        stacked = np.stack(buf, axis=0)
+                        mu    = np.mean(stacked, axis=0)
+                        diffs = stacked - mu[np.newaxis,...]
+                        m2    = np.sum(diffs * diffs, axis=0)
+                        self.filter_mus[mono_key] = mu
+                        self.filter_m2s[mono_key] = m2
+                        # you might also want to delete buf to save memory:
+                        # del self.filter_buffers[mono_key]
+
+                else:
+                    # 2) μ–σ clipping average
+                    mu = self.filter_mus[mono_key]
+                    m2 = self.filter_m2s[mono_key]
+                    sigma = np.sqrt(m2 / (n - 1))
+                    mask  = np.abs(norm_plane - mu) <= (self.clip_threshold * sigma)
+                    clipped = np.where(mask, norm_plane, mu)
+
+                    # update running stack
+                    self.filter_stacks[mono_key] = (
+                        (n / (n+1)) * self.filter_stacks[mono_key]
+                        + (1/(n+1)) * clipped
+                    )
+
+                    # Welford update on µ and m2
+                    delta   = clipped - mu
+                    new_mu  = mu + delta / (n+1)
+                    delta2  = clipped - new_mu
+                    new_m2  = m2 + delta * delta2
+                    self.filter_mus[mono_key]  = new_mu
+                    self.filter_m2s[mono_key]  = new_m2
+
+                # increment count
                 self.filter_counts[mono_key] += 1
 
             self.frame_count += 1
