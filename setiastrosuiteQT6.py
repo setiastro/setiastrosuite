@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.5"
+VERSION = "2.18.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13835,14 +13835,42 @@ class LiveStackWindow(QDialog):
 
     # ── New helper: map header["FILTER"] to a single letter key
     def _get_filter_key(self, header):
-        fn = header.get('FILTER','').upper()
-        if fn.startswith(('R','RED')):    return 'R'
-        if fn.startswith(('G','GREEN')):  return 'G'
-        if fn.startswith(('B','BLUE')):   return 'B'
-        if fn.startswith(('L','LUMINANCE')): return 'L'
-        if fn.startswith('HA'):           return 'H'
-        if fn.startswith(('OIII','O3')): return 'O'
-        if fn.startswith(('SII','S2')):  return 'S'
+        """
+        Map a FITS header FILTER string to one of:
+        'L' (luminance),
+        'R','G','B',
+        'H' (H-alpha),
+        'O' (OIII),
+        'S' (SII),
+        or return None if it doesn’t match.
+        """
+        raw = header.get('FILTER', '')
+        fn = raw.strip().upper()
+        if not fn:
+            return None
+
+        # H-alpha
+        if fn in ('H', 'HA', 'HALPHA', 'H-ALPHA'):
+            return 'H'
+        # OIII
+        if fn in ('O', 'O3', 'OIII'):
+            return 'O'
+        # SII
+        if fn in ('S', 'S2', 'SII'):
+            return 'S'
+        # Red
+        if fn in ('R', 'RED', 'RD'):
+            return 'R'
+        # Green
+        if fn in ('G', 'GREEN', 'GRN'):
+            return 'G'
+        # Blue
+        if fn in ('B', 'BLUE', 'BL'):
+            return 'B'
+        # Luminance
+        if fn in ('L', 'LUM', 'LUMI', 'LUMINANCE'):
+            return 'L'
+
         return None
 
     # ── New helper: stack a single mono frame under filter key
@@ -29310,6 +29338,10 @@ class SFCCDialog(QDialog):
         self.run_spcc_btn.setFont(font2)
         row4.addWidget(self.run_spcc_btn)
 
+        self.neutralize_chk = QCheckBox("Background Neutralization")
+        self.neutralize_chk.setChecked(True)          # default = ON  (pick what you like)
+        row4.addWidget(self.neutralize_chk)
+
         # NEW: Run Gradient Extraction
         self.run_grad_btn = QPushButton("Run Gradient Extraction (Beta)")
         font3 = self.run_grad_btn.font()
@@ -30039,6 +30071,36 @@ class SFCCDialog(QDialog):
         degree_symbol = "\u00B0"
         return f"{sign}{degrees:02d}{degree_symbol}{minutes:02d}m{seconds:05.2f}s"
 
+    def _neutralize_background(self, rgb_img, patch_size: int = 10) -> np.ndarray:
+        """
+        Shift / stretch each channel so the darkest patch in the image
+        has equal R, G, B medians ( → “neutral gray sky” ).
+        """
+        img = rgb_img.copy()
+        h, w = img.shape[:2]
+        ph, pw = h // patch_size, w // patch_size
+
+        # ── find the darkest patch ─────────────────────────────
+        min_sum, best_med = np.inf, None
+        for i in range(patch_size):
+            for j in range(patch_size):
+                y0, x0 = i * ph, j * pw
+                patch = img[y0 : min(y0 + ph, h), x0 : min(x0 + pw, w), :]
+                meds  = np.median(patch, axis=(0, 1))
+                s     = meds.sum()
+                if s < min_sum:
+                    min_sum, best_med = s, meds
+
+        # ── shift / scale so that patch → neutral  ──────────────
+        if best_med is not None:
+            target = best_med.mean()
+            for c in range(3):
+                diff  = best_med[c] - target
+                denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
+                img[:, :, c] = np.clip((img[:, :, c] - diff) / denom, 0.0, 1.0)
+
+        return img
+
     def fetch_stars(self):
         """
         1) Ensure plate-solved header & image exist.
@@ -30257,7 +30319,10 @@ class SFCCDialog(QDialog):
             return
 
         # — Step 1A: Convert to float [0..1] & neutralize large pedestals —
-        img = self.current_image
+        img, _ = self.main_win.image_manager.get_current_image_and_metadata()
+        if img is None:
+            QMessageBox.critical(self, "Error", "No active image in the current slot.")
+            return
         H, W, C = img.shape
         if C != 3:
             QMessageBox.critical(self, "Error", "Current image is not RGB (3 channels).")
@@ -30266,6 +30331,9 @@ class SFCCDialog(QDialog):
             base = img.astype(np.float32) / 255.0
         else:
             base = img.astype(np.float32)
+
+        ch_min = np.min(base, axis=(0, 1))       # shape = (3,)
+        base   = np.clip(base - ch_min, 0.0, None)
 
         # — record per-channel minima & medians before neutralization —
         orig_min    = np.min(base, axis=(0,1))    # shape (3,)
@@ -30296,9 +30364,6 @@ class SFCCDialog(QDialog):
                 denom = 1.0 - diff if abs(1.0-diff)>1e-8 else 1e-8
                 base[:,:,c] = np.clip((base[:,:,c] - diff)/denom, 0.0, 1.0)
 
-        # — subtract the new minima so darkest pixels go back to zero —
-        new_min = np.min(base, axis=(0,1))
-        base -= new_min  # broadcast subtract per-channel
 
         # — restore the original median via your stretch helper —
         # assumes you have a method stretch_color_image(img, target_median, linked=True)
@@ -30486,60 +30551,138 @@ class SFCCDialog(QDialog):
 
         self._last_matched = enriched
 
-        # ——— Step 5: Fit a best‐fit line y = m·x + b for both R/G and B/G ———
-        # R/G fit
-        # R/G fit (force intercept = 0)
-        m_R = np.sum(diag_meas_RG * diag_exp_RG) / np.sum(diag_meas_RG**2)
-        b_R = 0.0
+        # ---------- Step-5 : choose best colour-ratio model --------------------
+        def rms_frac(pred, exp):
+            """Fractional RMS of (pred/exp – 1)."""
+            return np.sqrt(np.mean(((pred/exp) - 1.0) ** 2))
 
-        # B/G fit (force intercept = 0)
-        m_B = np.sum(diag_meas_BG * diag_exp_BG) / np.sum(diag_meas_BG**2)
-        b_B = 0.0
+        # helpers ---------------------------------------------------------------
+        slope_only = lambda x, m:            m*x
+        affine     = lambda x, m, b:         m*x + b
+        quad       = lambda x, a, b, c:      a*x**2 + b*x + c
 
-        # ——— Use the “white reference” SED to force that star to be neutral ———
-        # (S_ref_R, S_ref_G, S_ref_B were computed back in Step 3 when loading the reference SED)
-        exp_ref_RG = S_ref_R / S_ref_G
-        exp_ref_BG = S_ref_B / S_ref_G
+        # --- candidate-1 : slope-only  (b = 0)
+        mR_s = np.sum(diag_meas_RG * diag_exp_RG) / np.sum(diag_meas_RG**2)
+        mB_s = np.sum(diag_meas_BG * diag_exp_BG) / np.sum(diag_meas_BG**2)
 
-        # Divide each slope by the reference’s expected ratio so that R/G_ref → 1 and B/G_ref → 1
-        m_R = m_R / exp_ref_RG
-        m_B = m_B / exp_ref_BG
+        rms_s = rms_frac(slope_only(diag_meas_RG, mR_s), diag_exp_RG) + \
+                rms_frac(slope_only(diag_meas_BG, mB_s), diag_exp_BG)
 
-        # ——— Step 6: Draw diagnostics on the Matplotlib canvas ———
+        # --- candidate-2 : affine  y = m·x + b
+        mR_a, bR_a = np.linalg.lstsq(
+                        np.vstack([diag_meas_RG, np.ones_like(diag_meas_RG)]).T,
+                        diag_exp_RG, rcond=None)[0]
+        mB_a, bB_a = np.linalg.lstsq(
+                        np.vstack([diag_meas_BG, np.ones_like(diag_meas_BG)]).T,
+                        diag_exp_BG, rcond=None)[0]
+
+        rms_a = rms_frac(affine(diag_meas_RG, mR_a, bR_a), diag_exp_RG) + \
+                rms_frac(affine(diag_meas_BG, mB_a, bB_a), diag_exp_BG)
+
+        # --- candidate-3 : quadratic  y = a·x² + b·x + c
+        aR_q, bR_q, cR_q = np.polyfit(diag_meas_RG, diag_exp_RG, 2)
+        aB_q, bB_q, cB_q = np.polyfit(diag_meas_BG, diag_exp_BG, 2)
+
+        rms_q = rms_frac(quad(diag_meas_RG, aR_q, bR_q, cR_q), diag_exp_RG) + \
+                rms_frac(quad(diag_meas_BG, aB_q, bB_q, cB_q), diag_exp_BG)
+
+        # --- pick the winner ---------------------------------------------------
+        idx = np.argmin([rms_s, rms_a, rms_q])
+        if idx == 0:              # slope-only
+            coeff_R, coeff_B = (0, mR_s, 0), (0, mB_s, 0)   # (a,b,c)
+            model_choice = "slope-only"
+        elif idx == 1:            # affine
+            coeff_R, coeff_B = (0, mR_a, bR_a), (0, mB_a, bB_a)
+            model_choice = "affine"
+        else:                     # quadratic
+            coeff_R, coeff_B = (aR_q, bR_q, cR_q), (aB_q, bB_q, cB_q)
+            model_choice = "quadratic"
+
+        print(f"SFCC picked {model_choice}   →  RMS = {min(rms_s, rms_a, rms_q):.3f}")
+
+        poly = lambda c, x: c[0]*x**2 + c[1]*x + c[2]        # universal evaluator
+
+        # ─── 6 · Diagnostics ────────────────────────────────────────────────
         self.figure.clf()
 
-        ax1 = self.figure.add_subplot(1, 2, 1)
+        # ---------------- panel 1 : histograms -----------------------------
+        ax1 = self.figure.add_subplot(1, 3, 1)
         bins = 20
-        ax1.hist(diag_meas_RG, bins=bins, alpha=0.6, label="meas R/G", color="darkred", edgecolor="black")
-        ax1.hist(diag_exp_RG, bins=bins, alpha=0.6, label="exp R/G", color="lightcoral", edgecolor="black")
-        ax1.hist(diag_meas_BG, bins=bins, alpha=0.6, label="meas B/G", color="navy", edgecolor="black")
-        ax1.hist(diag_exp_BG, bins=bins, alpha=0.6, label="exp B/G", color="cornflowerblue", edgecolor="black")
-        ax1.set_xlabel("Ratio (band/G)")
-        ax1.set_ylabel("Number of Stars")
-        ax1.set_title("Measured vs Expected Color Ratios")
-        ax1.legend(loc="upper right")
+        ax1.hist(diag_meas_RG, bins=bins, alpha=.65,
+                 label="meas R/G", color="firebrick", edgecolor="black")
+        ax1.hist(diag_exp_RG,  bins=bins, alpha=.55,
+                 label="exp R/G", color="salmon", edgecolor="black")
+        ax1.hist(diag_meas_BG, bins=bins, alpha=.65,
+                 label="meas B/G", color="royalblue", edgecolor="black")
+        ax1.hist(diag_exp_BG,  bins=bins, alpha=.55,
+                 label="exp B/G", color="lightskyblue", edgecolor="black")
+        ax1.set_xlabel("Ratio  (band / G)")
+        ax1.set_ylabel("Number of stars")
+        ax1.set_title("Measured vs expected")
+        ax1.legend(fontsize=7, frameon=False)
 
-        ax2 = self.figure.add_subplot(1, 2, 2)
-        ax2.scatter(diag_meas_RG, diag_exp_RG, c="firebrick", label="R/G", alpha=0.5, edgecolors="none")
-        ax2.scatter(diag_meas_BG, diag_exp_BG, c="darkblue", label="B/G", alpha=0.5, edgecolors="none")
+        # ---------------- convenience -------------------------------------
+        res0_RG = (diag_meas_RG / diag_exp_RG) - 1.0
+        res0_BG = (diag_meas_BG / diag_exp_BG) - 1.0
+        res1_RG = (poly(coeff_R, diag_meas_RG) / diag_exp_RG) - 1.0
+        res1_BG = (poly(coeff_B, diag_meas_BG) / diag_exp_BG) - 1.0
 
-        # Plot fitted lines:
-        xvals_R = np.linspace(0, diag_meas_RG.max(), 200)
-        yvals_R = m_R * xvals_R + b_R
-        ax2.plot(xvals_R, yvals_R, "--", color="red", linewidth=1, label=f"R Ratio{m_R:.3f}")
+        def rms(a): return np.sqrt(np.mean(a**2))
 
-        xvals_B = np.linspace(0, diag_meas_BG.max(), 200)
-        yvals_B = m_B * xvals_B + b_B
-        ax2.plot(xvals_B, yvals_B, "--", color="blue", linewidth=1, label=f"B Ratio{m_B:.3f}")
+        #  full vertical span from *un-corrected* residuals -----------------
+        ymin = np.min(np.concatenate([res0_RG, res0_BG]))
+        ymax = np.max(np.concatenate([res0_RG, res0_BG]))
+        pad  = 0.05 * (ymax - ymin) if ymax > ymin else 0.02
+        y_lim = (ymin - pad, ymax + pad)
 
-        ax2.set_xlabel("measured ratio")
-        ax2.set_ylabel("expected ratio")
-        ax2.set_title("meas vs exp (band/G) with fits")
-        ax2.legend(loc="lower right")
+        # helper: horizontal IQR shading -----------------------------------
+        def shade_iqr_y(ax, y_vals, color):
+            q1, q3 = np.percentile(y_vals, [25, 75])
+            ax.axhspan(q1, q3, color=color, alpha=.10, zorder=0)
 
+        # --------------- panel 2 : BEFORE fit ------------------------------
+        ax2 = self.figure.add_subplot(1, 3, 2)
+        ax2.axhline(0, color="0.65", ls="--", lw=1)
+        shade_iqr_y(ax2, res0_RG, "firebrick")
+        shade_iqr_y(ax2, res0_BG, "royalblue")
+        ax2.scatter(diag_exp_RG, res0_RG,
+                    c="firebrick",  marker="o", alpha=.7, label="R/G residual")
+        ax2.scatter(diag_exp_BG, res0_BG,
+                    c="royalblue", marker="s", alpha=.7, label="B/G residual")
+        ax2.set_ylim(*y_lim)                      # auto-range from residuals
+        ax2.set_xlabel("Expected ratio  (band / G)")
+        ax2.set_ylabel("Fractional residual  (meas/exp − 1)")
+        ax2.set_title("Residuals  •  BEFORE fit", pad=10)
+        ax2.legend(frameon=False, fontsize=7, loc="lower right")
+        ax2.text(.04, .95, f"σ(R/G) = {rms(res0_RG)*100:.1f} %",
+                 transform=ax2.transAxes, va="top", color="firebrick")
+        ax2.text(.04, .88, f"σ(B/G) = {rms(res0_BG)*100:.1f} %",
+                 transform=ax2.transAxes, va="top", color="royalblue")
+
+        # --------------- panel 3 : AFTER fit -------------------------------
+        ax3 = self.figure.add_subplot(1, 3, 3)
+        ax3.axhline(0, color="0.65", ls="--", lw=1)
+        shade_iqr_y(ax3, res1_RG, "firebrick")
+        shade_iqr_y(ax3, res1_BG, "royalblue")
+        ax3.scatter(diag_exp_RG, res1_RG,
+                    c="firebrick",  marker="o", alpha=.7, label="R/G residual")
+        ax3.scatter(diag_exp_BG, res1_BG,
+                    c="royalblue", marker="s", alpha=.7, label="B/G residual")
+        ax3.set_ylim(*y_lim)                      # same scale as BEFORE panel
+        ax3.set_xlabel("Expected ratio  (band / G)")
+        ax3.set_ylabel("Fractional residual  (corrected/exp − 1)")
+        ax3.set_title("Residuals  •  AFTER fit", pad=10)
+        ax3.legend(frameon=False, fontsize=7, loc="lower right")
+        ax3.text(.04, .95, f"σ(R/G) = {rms(res1_RG)*100:.1f} %",
+                 transform=ax3.transAxes, va="top", color="firebrick")
+        ax3.text(.04, .88, f"σ(B/G) = {rms(res1_BG)*100:.1f} %",
+                 transform=ax3.transAxes, va="top", color="royalblue")
+
+        # -------------------------------------------------------------------
         self.canvas.setVisible(True)
-        self.figure.tight_layout()
+        self.figure.tight_layout(w_pad=2.)
         self.canvas.draw()
+
 
         # ——— Step 7: Apply the color‐ratio fit to the entire image ———
         self.count_label.setText("Applying SFCC color scales to image…")
@@ -30550,50 +30693,24 @@ class SFCCDialog(QDialog):
         else:
             img_float = img.astype(np.float32).copy()
 
+        # ratios in the raw image
+        RG = img_float[..., 0] / np.maximum(img_float[..., 1], 1e-8)
+        BG = img_float[..., 2] / np.maximum(img_float[..., 1], 1e-8)
+
+        # predicted correct ratios from the chosen model
+        aR, bR, cR = coeff_R
+        aB, bB, cB = coeff_B
+        RG_corr = aR*RG**2 + bR*RG + cR
+        BG_corr = aB*BG**2 + bB*BG + cB
+
         calibrated = img_float.copy()
-        # R_corrected = m_R·R + b_R·G
-        calibrated[..., 0] = (m_R * img_float[..., 0]) + (b_R * img_float[..., 1])
-        # G remains unchanged
-        # B_corrected = m_B·B + b_B·G
-        calibrated[..., 2] = (m_B * img_float[..., 2]) + (b_B * img_float[..., 1])
+        calibrated[..., 0] = RG_corr * img_float[..., 1]   # R = (R/G)_corr × G
+        calibrated[..., 2] = BG_corr * img_float[..., 1]   # B = (B/G)_corr × G
+        calibrated = np.clip(calibrated, 0, 1)
 
-        # Clip to [0,1] before doing background neutralization
-        calibrated = np.clip(calibrated, 0.0, 1.0)
-
-        # ——— Step 8: Final background neutralization (so the “sky” is truly gray) ———
-        # We look for the darkest patch in a 10×10 grid, compute its channel medians,
-        # then shift each channel so that patch median → the same average.
-        # —— record the channel minima & medians pre-neutralization ——
-        orig_min    = np.min(calibrated, axis=(0,1))   # shape (3,)
-        orig_median = np.median(calibrated, axis=(0,1))  # shape (3,)
-        orig_median_scalar = float(np.median(orig_median)) # single float
-
-        # —— your existing patch based neutralization ——
-        patch_size = 10
-        h, w = calibrated.shape[:2]
-        ph, pw = h//patch_size, w//patch_size
-
-        min_msum = np.inf
-        best_med = None
-        for i in range(patch_size):
-            for j in range(patch_size):
-                y0, x0 = i*ph, j*pw
-                y1, x1 = min(y0+ph, h), min(x0+pw, w)
-                patch = calibrated[y0:y1, x0:x1, :]
-                meds  = np.median(patch, axis=(0,1))  # [R_med, G_med, B_med]
-                msum  = meds.sum()
-                if msum < min_msum:
-                    min_msum = msum
-                    best_med  = meds
-
-        if best_med is not None:
-            avg_med = best_med.mean()
-            for c in range(3):
-                diff  = best_med[c] - avg_med
-                denom = 1.0 - diff if abs(1.0-diff)>1e-8 else 1e-8
-                calibrated[:,:,c] = np.clip((calibrated[:,:,c] - diff)/denom,
-                                            0.0, 1.0)
-
+        # ─── Step 8: optional background neutralization ───────────────
+        if self.neutralize_chk.isChecked():
+            calibrated = self._neutralize_background(calibrated, patch_size=10)
 
         # ——— Convert back to uint8 if needed and push calibrated image onward ———
         if img.dtype == np.uint8:
@@ -30606,235 +30723,168 @@ class SFCCDialog(QDialog):
             return
 
         _, old_meta = self.main_win.image_manager.get_current_image_and_metadata()
-        new_meta = old_meta.copy() if old_meta is not None else {}
-        new_meta["SFCC_applied"] = True
+        new_meta = (old_meta or {}).copy()
+        new_meta["SFCC_applied"]   = True
         new_meta["SFCC_timestamp"] = datetime.now().isoformat()
-        new_meta["SFCC_slope_R"] = float(m_R)
-        new_meta["SFCC_intercept_R"] = float(b_R)
-        new_meta["SFCC_slope_B"] = float(m_B)
-        new_meta["SFCC_intercept_B"] = float(b_B)
+        new_meta["SFCC_model"]     = model_choice
+        new_meta["SFCC_coeff_R"]   = [float(v) for v in coeff_R]   # (a,b,c)
+        new_meta["SFCC_coeff_B"]   = [float(v) for v in coeff_B]
 
         self.main_win.image_manager.set_image(
             calibrated,
             new_meta,
-            step_name="SFCC Calibration with Free Intercept"
+            step_name="SFCC Calibrated"
         )
 
         self.count_label.setText(f"Applied SFCC color calibration using {n_stars} stars")
         QApplication.processEvents()
 
         # ——— Step 10: Final summary dialog ———
+        # ---------- final summary dialog ---------------------------------------
+        def pretty(coeff):
+            """return y at x=1  (easy-to-interpret overall scale)"""
+            return coeff[0] + coeff[1] + coeff[2]          # a*1² + b*1 + c
+
+        ratio_R = pretty(coeff_R)
+        ratio_B = pretty(coeff_B)
+
         QMessageBox.information(
             self, "SFCC Complete",
-            f"Applied SFCC color calibration using {n_stars} stars:\n"
-            f"  R: Ratio = {m_R:.4f}\n"
-            f"  B: Ratio = {m_B:.4f}\n"
+            f"Applied SFCC colour calibration using {n_stars} stars\n"
+            f"  Model chosen : {model_choice}\n"
+            f"  R ratio (at x=1) = {ratio_R:.4f}\n"
+            f"  B ratio (at x=1) = {ratio_B:.4f}\n"
             "\n"
-            "Background neutralization complete."
+            "Background neutralisation " +
+            ("ENABLED" if self.neutralize_chk.isChecked() else "skipped") + "."
         )
+        self.current_image = calibrated
 
     def run_gradient_extraction(self):
         """
-        1) Re‐measure stars on the calibrated image.
-        2) Use catalog B, V, R magnitudes and measured fluxes to compute magnitude residuals.
-        3) Sigma‐clip and fit 3rd-order polynomial surfaces to per-channel residuals.
-        4) Convert those magnitude residuals to flux corrections and subtract from each channel.
+        Chromatic-gradient removal using only Pickles-based colour ratios.
+        * No catalog magnitudes
+        * No sky probes
+        * Work on ¼-res copy for speed, upscale the result.
         """
+        # ─── 0. prerequisites ───────────────────────────────────────────────
         if not getattr(self, "_last_matched", None):
             QMessageBox.warning(self, "No Star Matches",
-                                "Run Fetch Stars first.")
+                                "Run colour calibration first.")
             return
 
-        img, old_meta = self.main_win.image_manager.get_current_image_and_metadata()
-        if img is None or img.shape[2] != 3:
+        img, meta = self.main_win.image_manager.get_current_image_and_metadata()
+        if img is None or img.ndim != 3 or img.shape[2] != 3:
             QMessageBox.critical(self, "Error", "Current image must be RGB.")
             return
 
-        img_f = img.astype(np.float32)
-        H, W, _ = img.shape
+        is_u8  = img.dtype == np.uint8
+        img_f  = img.astype(np.float32) / (255. if is_u8 else 1.)
+        H, W   = img_f.shape[:2]
 
-        self.count_label.setText("Extracting Stellar Magnitudes...")
-        QApplication.processEvents()
+        # ─── 1. down-sample working copy ────────────────────────────────────
+        down_fact = 4                                     # <— tweak if needed
+        Hs, Ws    = H // down_fact, W // down_fact
+        small     = cv2.resize(img_f, (Ws, Hs), interpolation=cv2.INTER_AREA)
 
-        gray = np.mean(img_f, axis=2)
-        bkg = sep.Background(gray)
-        sources = sep.extract(gray - bkg.back(), 5.0, err=bkg.globalrms)
+        # helper → convert star’s full-res coords to small
+        def to_small(x, y): return x / down_fact, y / down_fact
 
-        if sources is None or len(sources) == 0:
-            QMessageBox.critical(self, "Error", "No sources found for gradient extraction.")
-            return
+        # quick luminance for σ-clipping later
+        gray_s = np.mean(small, axis=2)
 
-        # Match to known catalog stars (must include G_meas and catalog magnitudes)
-        print(f"[grad] _last_matched: {len(self._last_matched)} stars")
-        print("   keys in first star:", list(self._last_matched[0].keys()) if self._last_matched else "n/a")
+        # ─── 2. re-measure every star’s colour ratios ───────────────────────
+        pts, dRG, dBG = [], [], []
+        eps, box = 1e-8, 3                       # box → 7×7 median @ ¼-res
 
-        # Match to SEP detections
-        enriched = []
-        MISS_DIST2 = []    # record the min-dist² for stars we skip
-        for s in self._last_matched:
-            x = s.get("x", s.get("x_pix"))
-            y = s.get("y", s.get("y_pix"))
-            if x is None or y is None:
+        for st in self._last_matched:
+            xs_full, ys_full = st["x_pix"], st["y_pix"]
+            xs, ys           = to_small(xs_full, ys_full)
+            xs_c, ys_c       = int(round(xs)), int(round(ys))
+            if not (0 <= xs_c < Ws and 0 <= ys_c < Hs):   # off-frame?
                 continue
 
-            dx = sources["x"] - x
-            dy = sources["y"] - y
-            dist2 = dx*dx + dy*dy
-            j = np.argmin(dist2)
-            if dist2[j] < 5.0**2:               # ← bump from 3.0 to 5.0 px
-                enriched.append({
-                    "x": int(round(x)),
-                    "y": int(round(y)),
-                    "R_meas": float(img_f[int(round(y)), int(round(x)), 0]),
-                    "G_meas": float(img_f[int(round(y)), int(round(x)), 1]),
-                    "B_meas": float(img_f[int(round(y)), int(round(x)), 2]),
-                    "R_mag":  s.get("R_mag"),
-                    "V_mag":  s.get("V_mag"),
-                    "B_mag":  s.get("B_mag"),
-                })
-            else:
-                MISS_DIST2.append(np.sqrt(dist2[j]))
+            # median in 7×7 patch (clamped to edges)
+            xsl = slice(max(0, xs_c-box), min(Ws, xs_c+box+1))
+            ysl = slice(max(0, ys_c-box), min(Hs, ys_c+box+1))
+            Rm  = np.median(small[ysl, xsl, 0])
+            Gm  = np.median(small[ysl, xsl, 1])
+            Bm  = np.median(small[ysl, xsl, 2])
+            if Gm <= 0: continue
 
-        print(f"[grad] matched {len(enriched)} / {len(self._last_matched)}   "
-            f"(median miss = {np.median(MISS_DIST2) if MISS_DIST2 else 'n/a'} px)")
-
-        if len(enriched) < 3:
-            QMessageBox.warning(self, "Too Few Matches", "Not enough matched stars for gradient modeling.")
-            return
-
-        # Normalize G_mag to a common scale and compute expected fluxes
-        G_meas_all = np.array([s["G_meas"] for s in enriched])
-        G_med       = np.median(G_meas_all)
-
-        self.count_label.setText("Calculating Δs....")
-        QApplication.processEvents()
-
-        # ─── Compute expected fluxes and Δ-magnitudes ────────────────────
-        eps = 1e-8      # avoid log(0)
-
-        for s in enriched:
-            if None in (s["R_mag"], s["V_mag"], s["B_mag"]):
+            exp_RG = st["exp_RG"];   exp_BG = st["exp_BG"]
+            if exp_RG is None or exp_BG is None:   # shouldn’t happen
                 continue
 
-            V_ref                = np.median([e["V_mag"] for e in enriched if e["V_mag"] is not None])
-            s["scale_flux"]      = s["G_meas"] / 10**(-0.4*(s["V_mag"] - V_ref))
+            meas_RG = Rm / Gm
+            meas_BG = Bm / Gm
 
-            s["R_exp"]           = s["scale_flux"] * 10**(-0.4*(s["R_mag"] - s["V_mag"]))
-            s["G_exp"]           = s["scale_flux"]                       # by construction
-            s["B_exp"]           = s["scale_flux"] * 10**(-0.4*(s["B_mag"] - s["V_mag"]))
+            dm_RG = -2.5 * np.log10((meas_RG+eps)/(exp_RG+eps))
+            dm_BG = -2.5 * np.log10((meas_BG+eps)/(exp_BG+eps))
 
-            # --- residuals expressed in magnitudes (small numbers, ±0.2) ---
-            s["delta_mR"] = -2.5 * np.log10( (s["R_meas"]+eps) / (s["R_exp"]+eps) )
-            s["delta_mG"] = -2.5 * np.log10( (s["G_meas"]+eps) / (s["G_exp"]+eps) )
-            s["delta_mB"] = -2.5 * np.log10( (s["B_meas"]+eps) / (s["B_exp"]+eps) )
+            pts.append([xs, ys])
+            dRG.append(dm_RG)
+            dBG.append(dm_BG)
 
-        # ─── Gather points & residuals ────────────────────────────────────
-        pts, dR, dG, dB = [], [], [], []
-        for s in enriched:
-            if any(k not in s or np.isnan(s[k]) for k in ("delta_mR", "delta_mG", "delta_mB")):
-                continue
-            pts.append([s["x"], s["y"]])
-            dR.append(s["delta_mR"])
-            dG.append(s["delta_mG"])
-            dB.append(s["delta_mB"])
-
-        pts = np.asarray(pts)
-        dR, dG, dB = map(np.asarray, (dR, dG, dB))
-        if len(pts) < 3:
-            QMessageBox.warning(self, "Too Few Stars", "Not enough usable stars for surface fitting.")
+        pts  = np.asarray(pts);   dRG = np.asarray(dRG);   dBG = np.asarray(dBG)
+        if pts.shape[0] < 5:
+            QMessageBox.warning(self, "Too Few Stars",
+                                "Need ≥5 stars after clipping.")
             return
 
-        # ─── σ-clip & fit 3rd-order poly surfaces (still in mag space) ───
-        def sigma_clip(δ, pts, σ=2.0):
-            m, s = np.median(δ), np.std(δ)
-            mask = np.abs(δ - m) < σ*s
-            return pts[mask], δ[mask]
+        # σ-clip
+        def sclip(arr, p, s=2.5):
+            m, sd = np.median(arr), np.std(arr)
+            keep  = np.abs(arr-m) < s*sd
+            return p[keep], arr[keep]
 
-        ptsR, dR = sigma_clip(dR, pts)
-        ptsG, dG = sigma_clip(dG, pts)
-        ptsB, dB = sigma_clip(dB, pts)
-        mth = getattr(self, "grad_method", "poly2")
-        bgmR = compute_gradient_map(ptsR, dR, shape=(H, W), method=mth)  # Δmag maps
-        bgmG = compute_gradient_map(ptsG, dG, shape=(H, W), method=mth)
-        bgmB = compute_gradient_map(ptsB, dB, shape=(H, W), method=mth)
+        ptsRG, dRG = sclip(dRG, pts)
+        ptsBG, dBG = sclip(dBG, pts)
 
+        # ─── 3. fit 2-D surfaces (¼-res) ────────────────────────────────────
+        mode = getattr(self, "grad_method", "poly2")      # poly2/poly3/rbf
+        bgRG_s = compute_gradient_map(ptsRG, dRG, (Hs, Ws), method=mode)
+        bgBG_s = compute_gradient_map(ptsBG, dBG, (Hs, Ws), method=mode)
 
+        # centre & clamp to ±0.2 mag
+        for bg in (bgRG_s, bgBG_s):
+            bg -= np.median(bg)
+            peak = np.max(np.abs(bg))
+            if peak > 0.2: bg *= 0.2/peak
 
-        # ---- Convert Δmag → multiplicative scale maps --------------------
-        # 1) zero-centre each Δm surface
-        bgmR -= np.median(bgmR)
-        bgmG -= np.median(bgmG)
-        bgmB -= np.median(bgmB)
+        # ─── 4. upscale to full res ─────────────────────────────────────────
+        bgRG = cv2.resize(bgRG_s, (W, H), interpolation=cv2.INTER_CUBIC)
+        bgBG = cv2.resize(bgBG_s, (W, H), interpolation=cv2.INTER_CUBIC)
 
-        # --- measure how big a gradient is physically allowable -----------
-        def allowed_delta_mag(chan_plane):
-            chan_plane = np.ascontiguousarray(chan_plane)
-            bk   = sep.Background(chan_plane)
-            med  = np.median(chan_plane)
-            span = np.percentile(bk.back() / (med), [2.5, 97.5])
-            frac = span[1] - span[0]
-            return 2.5 * np.log10(1 + frac)   # ≈ ±Δm permitted
+        scale_R = 10**(-0.4*bgRG)
+        scale_B = 10**(-0.4*bgBG)
 
-
-        limR = allowed_delta_mag(img_f[...,0])
-        limG = allowed_delta_mag(img_f[...,1])
-        limB = allowed_delta_mag(img_f[...,2])
-
-        # 2) optional – weight by channel medians to keep Δm values
-        #    expressed “per median‐flux” (your current approach)
-        #medR = np.median(img_f[...,0])
-        #medG = np.median(img_f[...,1])
-        #medB = np.median(img_f[...,2])
-
-        #bgmR *= medR
-        #bgmG *= medG
-        #bgmB *= medB
-
-        # --- scale (not clip) each surface to stay within that limit ------
-        def rescale_to_limit(bgm, Δlim):
-            peak = np.max(np.abs(bgm))
-            if peak > Δlim:                       # only shrink, never boost
-                bgm = bgm * (Δlim / peak)
-            return bgm
-
-        bgmR = rescale_to_limit(bgmR, limR)
-        bgmG = rescale_to_limit(bgmG, limG)
-        bgmB = rescale_to_limit(bgmB, limB)
-
-        # 3) Δm  →  scale factor  (flux multiplier)
-        scale_R = 10**(-0.4 * bgmR)
-        scale_G = 10**(-0.4 * bgmG)
-        scale_B = 10**(-0.4 * bgmB)
-
-        # Optional: visualise the Δmag surfaces
+        # ─── 5. visualisation ───────────────────────────────────────────────
         self.figure.clf()
-        for i, (bg, lbl) in enumerate(zip((bgmR, bgmG, bgmB), ("Δm_R", "Δm_G", "Δm_B"))):
-            ax = self.figure.add_subplot(1, 3, i+1)
-            im = ax.imshow(bg, origin="lower", cmap="RdBu")
-            ax.set_title(lbl); ax.set_ylim(H, 0)
+        for i,(surf,lbl) in enumerate(((bgRG,"Δm R/G"),(bgBG,"Δm B/G"))):
+            ax  = self.figure.add_subplot(1,2,i+1)
+            im  = ax.imshow(surf, origin="lower", cmap="RdBu")
+            ax.scatter(pts[:,0]*down_fact, pts[:,1]*down_fact,
+                    s=25, facecolors='none', edgecolors='k', lw=.6)
+            ax.set_title(lbl); ax.set_ylim(H,0)
             self.figure.colorbar(im, ax=ax)
         self.canvas.setVisible(True)
         self.figure.tight_layout(); self.canvas.draw()
 
-        # ---- Apply correction -------------------------------------------
-        corrected = img_f.copy()
-        corrected[...,0] = np.clip(corrected[...,0] / scale_R, 0.0, 1.0)
-        corrected[...,1] = np.clip(corrected[...,1] / scale_G, 0.0, 1.0)
-        corrected[...,2] = np.clip(corrected[...,2] / scale_B, 0.0, 1.0)
+        # ─── 6. apply correction (only R & B) ───────────────────────────────
+        corrected        = img_f.copy()
+        corrected[...,0] = np.clip(corrected[...,0] / scale_R, 0, 1.0)
+        corrected[...,2] = np.clip(corrected[...,2] / scale_B, 0, 1.0)
+        if is_u8: corrected = (corrected*255.).astype(np.uint8)
 
-        if img.dtype == np.uint8:
-            corrected = (corrected * 255.0).astype(np.uint8)
-
-        new_meta = (old_meta or {}).copy()
-        new_meta["Gradient_removed"] = True
+        meta = meta.copy() if meta else {}
+        meta["ColourGradRemoved"] = True
         self.main_win.image_manager.set_image(
-            corrected,
-            new_meta,
-            step_name="Gradient Correction (Catalog-based)"
+            corrected, meta,
+            step_name="Colour-Gradient (star spectra, ¼-res fit)"
         )
-        self.count_label.setText("Additive gradient removed ✓")
+        self.count_label.setText("Chromatic gradient removed ✓")
         QApplication.processEvents()
-
 
     def open_sasp_viewer(self):
         """
