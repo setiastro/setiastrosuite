@@ -29893,8 +29893,8 @@ class SFCCDialog(QDialog):
     def remove_custom_curve(self):
         """
         1) Offer the user a list of all current FILTER+SENSOR names.
-        2) If they pick one, rebuild SASP_data.fits without that EXTNAME.
-        3) Reopen and refresh in-memory lists/combos.
+        2) If they pick one, rebuild the FITS without that EXTNAME.
+        3) Atomically replace the old file, then reload.
         """
         all_curves = self.filter_list + self.sensor_list
         if not all_curves:
@@ -29919,21 +29919,40 @@ class SFCCDialog(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 1) close existing handle
+        temp_path = self.user_custom_path + ".tmp"
         try:
-            with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
-                # find the matching EXTNAME BinTableHDU, pop it, then:
-                hdul.flush()
+            # 1) Read entire file into memory
+            with fits.open(self.user_custom_path, memmap=False) as old_hdul:
+                # 2) Build a fresh list of HDUs we want to keep
+                new_hdus = []
+                for hdu in old_hdul:
+                    # always keep primary HDU
+                    if hdu is old_hdul[0]:
+                        new_hdus.append(hdu.copy())
+                    else:
+                        # drop only the one whose EXTNAME matches `curve`
+                        if hdu.header.get("EXTNAME") != curve:
+                            new_hdus.append(hdu.copy())
+
+            # 3) Write to a temp file
+            fits.HDUList(new_hdus).writeto(temp_path, overwrite=True)
+            # 4) Atomically replace the original
+            os.replace(temp_path, self.user_custom_path)
+
         except Exception as e:
+            # cleanup temp file if something went wrong
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
             QMessageBox.critical(self, "Write Error", f"Could not remove curve:\n{e}")
             return
 
-        # rebuild
+        # 5) Reload and refresh
         self._reload_hdu_lists()
-
-        # 5) refresh
         self.refresh_filter_sensor_lists()
         QMessageBox.information(self, "Removed", f"Deleted curve '{curve}'.")
+
+
+
 
     def refresh_filter_sensor_lists(self):
         """
