@@ -1,9 +1,9 @@
 {
-  "version": "2.18.5",
+  "version": "2.18.6",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Bug fixes in Mono to Color.  Live stacking now supports Mono to Color images. Capture R, G, B, even H, S, or O and have the live stack determine the color and add it to the stack generating realtime color images as your mono data comes in!"
+  "notes": "Bug Fix in Live stack color to allow more filter names to be recognized as different colors.  SFCC better residual fitting and plots showing inner quartile and fit residuals."
 }
