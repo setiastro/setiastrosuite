@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.6"
+VERSION = "2.18.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -14382,13 +14382,19 @@ class LiveStackWindow(QDialog):
             )
             return
 
-        # ——— 11) FIRST-FRAME INITIALIZATION —————————————————
+        # ─── 11) FIRST-FRAME INITIALIZATION ──────────────────────────────
         if self.frame_count == 0:
             # set reference on the very first good frame
             self.reference_image_2d = norm_plane.copy()
             self.frame_count = 1
             self.frame_count_label.setText("Frames: 1")
-            self.mode_label.setText("Mode: Linear Average")
+            # always start in linear‐average mode
+            if mono_key:
+                self.mode_label.setText(f"Mode: Linear Average ({mono_key})")
+                self.status_label.setText(f"Started {mono_key}-filter linear stack")
+            else:
+                self.mode_label.setText("Mode: Linear Average")
+                self.status_label.setText("Started linear stack")
             QApplication.processEvents()
 
             if mono_key:
@@ -14402,92 +14408,135 @@ class LiveStackWindow(QDialog):
                 self._buffer = [norm_color.copy()]
 
         else:
-            # ——— 12) RUNNING–AVERAGE or CLIP-σ UPDATE ————————
-            if self.frame_count < self.bootstrap_frames and mono_key is None:
-                # linear bootstrap for color
-                n = self.frame_count + 1
-                self.current_stack = (
-                    (self.frame_count / n) * self.current_stack
-                    + (1.0 / n) * norm_color
-                )
-                self._buffer.append(norm_color.copy())
+            # ─── 12) RUNNING–AVERAGE or CLIP-σ UPDATE ────────────────────
+            if mono_key is None:
+                # — Color-only stacking —
+                if self.frame_count < self.bootstrap_frames:
+                    # 12a) Linear bootstrap
+                    n = self.frame_count + 1
+                    self.current_stack = (
+                        (self.frame_count / n) * self.current_stack
+                        + (1.0 / n) * norm_color
+                    )
+                    self._buffer.append(norm_color.copy())
 
-            elif mono_key is None:
-                # μ-σ clipping for color
-                sigma = np.sqrt(self._m2 / (self.frame_count - 1))
-                mask = np.abs(norm_color - self._mu) <= (self.clip_threshold * sigma)
-                clipped = np.where(mask, norm_color, self._mu)
-                n = self.frame_count + 1
-                self.current_stack = (
-                    (self.frame_count / n) * self.current_stack
-                    + (1.0 / n) * clipped
-                )
-                # Welford update
-                delta_mu = clipped - self._mu
-                self._mu += delta_mu / n
-                delta2 = clipped - self._mu
-                self._m2 += delta_mu * delta2
+                    # hit the bootstrap threshold?
+                    if n == self.bootstrap_frames:
+                        # init Welford stats
+                        buf = np.stack(self._buffer, axis=0)
+                        self._mu = np.mean(buf, axis=0)
+                        diffs = buf - self._mu[np.newaxis, ...]
+                        self._m2 = np.sum(diffs * diffs, axis=0)
+                        self._buffer = None
+
+                        # switch to clipping mode
+                        self.mode_label.setText("Mode: μ-σ Clipping Average")
+                        self.status_label.setText("Switched to μ–σ clipping (color)")
+                        QApplication.processEvents()
+                    else:
+                        # still linear
+                        self.mode_label.setText("Mode: Linear Average")
+                        self.status_label.setText(f"Processed color frame #{n} (linear)")
+                        QApplication.processEvents()
+                else:
+                    # 12b) μ–σ clipping
+                    sigma = np.sqrt(self._m2 / (self.frame_count - 1))
+                    mask = np.abs(norm_color - self._mu) <= (self.clip_threshold * sigma)
+                    clipped = np.where(mask, norm_color, self._mu)
+
+                    n = self.frame_count + 1
+                    self.current_stack = (
+                        (self.frame_count / n) * self.current_stack
+                        + (1.0 / n) * clipped
+                    )
+
+                    # Welford update
+                    delta_mu = clipped - self._mu
+                    self._mu += delta_mu / n
+                    delta2 = clipped - self._mu
+                    self._m2 += delta_mu * delta2
+
+                    # stay in clipping mode
+                    self.mode_label.setText("Mode: μ-σ Clipping Average")
+                    self.status_label.setText(f"Processed color frame #{n} (clipped)")
+                    QApplication.processEvents()
+
+                # bump global frame count
+                self.frame_count = n
 
             else:
-                # Mono→color update for filter = mono_key
-                # init if needed
-                if mono_key not in self.filter_counts:
-                    self.filter_counts[mono_key]  = 0
-                    self.filter_stacks[mono_key]  = None
-                    self.filter_buffers[mono_key] = []
-                    # no µ or m2 yet until bootstrap completes
+                # — Mono→color (per-filter) stacking —
+                count = self.filter_counts.get(mono_key, 0)
+                buf   = self.filter_buffers.setdefault(mono_key, [])
 
-                n = self.filter_counts[mono_key]
-                buf = self.filter_buffers[mono_key]
-
-                if n < self.bootstrap_frames:
-                    # 1) bootstrap linear average
-                    if n == 0:
+                if count < self.bootstrap_frames:
+                    # 12c) Linear bootstrap per-filter
+                    new_count = count + 1
+                    if count == 0:
                         self.filter_stacks[mono_key] = norm_plane.copy()
                     else:
                         self.filter_stacks[mono_key] = (
-                            (n / (n+1)) * self.filter_stacks[mono_key]
-                            + (1/(n+1)) * norm_plane
+                            (count / new_count) * self.filter_stacks[mono_key]
+                            + (1.0 / new_count) * norm_plane
                         )
                     buf.append(norm_plane.copy())
+                    self.filter_counts[mono_key] = new_count
 
-                    # when we hit bootstrap_frames, compute µ & m2
-                    if n+1 == self.bootstrap_frames:
+                    if new_count == self.bootstrap_frames:
+                        # init Welford
                         stacked = np.stack(buf, axis=0)
                         mu    = np.mean(stacked, axis=0)
-                        diffs = stacked - mu[np.newaxis,...]
+                        diffs = stacked - mu[np.newaxis, ...]
                         m2    = np.sum(diffs * diffs, axis=0)
                         self.filter_mus[mono_key] = mu
                         self.filter_m2s[mono_key] = m2
-                        # you might also want to delete buf to save memory:
-                        # del self.filter_buffers[mono_key]
+
+                        self.mode_label.setText(f"Mode: μ-σ Clipping Average ({mono_key})")
+                        self.status_label.setText(f"Switched to μ–σ clipping ({mono_key})")
+                        QApplication.processEvents()
+                    else:
+                        # still linear
+                        self.mode_label.setText(f"Mode: Linear Average ({mono_key})")
+                        self.status_label.setText(
+                            f"Processed {mono_key}-filter frame #{new_count} (linear)"
+                        )
+                        QApplication.processEvents()
 
                 else:
-                    # 2) μ–σ clipping average
+                    # 12d) μ–σ clipping per-filter
                     mu = self.filter_mus[mono_key]
                     m2 = self.filter_m2s[mono_key]
-                    sigma = np.sqrt(m2 / (n - 1))
-                    mask  = np.abs(norm_plane - mu) <= (self.clip_threshold * sigma)
+                    sigma = np.sqrt(m2 / (count - 1))
+                    mask   = np.abs(norm_plane - mu) <= (self.clip_threshold * sigma)
                     clipped = np.where(mask, norm_plane, mu)
 
-                    # update running stack
+                    new_count = count + 1
                     self.filter_stacks[mono_key] = (
-                        (n / (n+1)) * self.filter_stacks[mono_key]
-                        + (1/(n+1)) * clipped
+                        (count / new_count) * self.filter_stacks[mono_key]
+                        + (1.0 / new_count) * clipped
                     )
 
                     # Welford update on µ and m2
                     delta   = clipped - mu
-                    new_mu  = mu + delta / (n+1)
+                    new_mu  = mu + delta / new_count
                     delta2  = clipped - new_mu
                     new_m2  = m2 + delta * delta2
-                    self.filter_mus[mono_key]  = new_mu
-                    self.filter_m2s[mono_key]  = new_m2
+                    self.filter_mus[mono_key] = new_mu
+                    self.filter_m2s[mono_key] = new_m2
+                    self.filter_counts[mono_key] = new_count
 
-                # increment count
-                self.filter_counts[mono_key] += 1
+                    self.mode_label.setText(f"Mode: μ-σ Clipping Average ({mono_key})")
+                    self.status_label.setText(
+                        f"Processed {mono_key}-filter frame #{new_count} (clipped)"
+                    )
+                    QApplication.processEvents()
 
-            self.frame_count += 1
+                # bump global frame count
+                self.frame_count += 1
+                self.frame_count_label.setText(f"Frames: {self.frame_count}")
+
+
+            # ─── 13) Update UI ─────────────────────────────────────────
             self.frame_count_label.setText(f"Frames: {self.frame_count}")
             QApplication.processEvents()
 
