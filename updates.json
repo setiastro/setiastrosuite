@@ -1,9 +1,9 @@
 {
-  "version": "2.18.6",
+  "version": "2.18.7",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.6/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.7/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.7/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.7/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Bug Fix in Live stack color to allow more filter names to be recognized as different colors.  SFCC better residual fitting and plots showing inner quartile and fit residuals."
+  "notes": "Live stacking bug fix.  mu-sigma clipping correctly engages now in all modes.  NOTE: there will be no apple intel version for any updates this week."
 }
