@@ -28841,10 +28841,15 @@ class SaspViewer(QMainWindow):
         row2 = QHBoxLayout()
         vbox.addLayout(row2)
 
-        row2.addWidget(QLabel("LP/Cut Filter:"))
+        row2.addWidget(QLabel("LP/Cut Filter1:"))
         self.lp_filter_combo = QComboBox()
         self.lp_filter_combo.addItems(self.rgb_filter_choices)
         row2.addWidget(self.lp_filter_combo)
+
+        row2.addWidget(QLabel("LP/Cut Filter2:"))
+        self.lp_filter_combo2 = QComboBox()
+        self.lp_filter_combo2.addItems(self.rgb_filter_choices)
+        row2.addWidget(self.lp_filter_combo2)
 
         row2.addSpacing(20)
         row2.addWidget(QLabel("Sensor (QE):"))
@@ -28881,7 +28886,8 @@ class SaspViewer(QMainWindow):
         g_filt   = self.g_filter_combo.currentText()
         b_filt   = self.b_filter_combo.currentText()
         sens_ext = self.sens_combo.currentText()
-        lp_ext   = self.lp_filter_combo.currentText()
+        lp_ext1  = self.lp_filter_combo.currentText()      # ① first LP
+        lp_ext2  = self.lp_filter_combo2.currentText()     # ② second LP  (NEW)
 
         # -- Load star SED --
 
@@ -28908,42 +28914,42 @@ class SaspViewer(QMainWindow):
         # -- For each of R, G, B, load filter if selected and build filter×QE×LP & response --
         rgb_data = {}
         for color, filt_name in (("red",   r_filt),
-                                 ("green", g_filt),
-                                 ("blue",  b_filt)):
-            if filt_name != "(None)":
-                wl_filt = self.load_any(filt_name, "WAVELENGTH")
-                tr_filt = self.load_any(filt_name, "THROUGHPUT")
+                                ("green", g_filt),
+                                ("blue",  b_filt)):
 
-                filt_interp = interp1d(wl_filt, tr_filt, kind="linear",
-                                       bounds_error=False, fill_value=0.0)
-                filt_common = filt_interp(common_wl)
-
-                # throughput for this channel
-                # include sensor QE and LP/Cut filter
-                if lp_ext != "(None)":
-                    wl_lp  = self.load_any(lp_ext, "WAVELENGTH")
-                    tr_lp  = self.load_any(lp_ext, "THROUGHPUT")
-                    lp_interp = interp1d(wl_lp, tr_lp, kind="linear",
-                                         bounds_error=False, fill_value=0.0)
-                    T_LP = lp_interp(common_wl)
-                else:
-                    T_LP = np.ones_like(common_wl)
-
-                # system throughput for this channel
-                T_sys_rgb = filt_common * sens_common * T_LP
-                # response = SED × (filter×QE)
-                resp_rgb = fl_common * T_sys_rgb
-
-                # **<--- Add "filter_name" here so we can retrieve it later ---**
-                rgb_data[color] = {
-                    "filter_name": filt_name,    # store the actual filter name
-                    "wl_filter":   wl_filt,
-                    "tr_filter":   tr_filt,
-                    "T_sys":       T_sys_rgb,
-                    "response":    resp_rgb
-                }
-            else:
+            if filt_name == "(None)":
                 rgb_data[color] = None
+                continue
+
+            # ---- channel filter -------------------------------------------------
+            wl_filt = self.load_any(filt_name, "WAVELENGTH")
+            tr_filt = self.load_any(filt_name, "THROUGHPUT")
+            filt_interp = interp1d(wl_filt, tr_filt, bounds_error=False,
+                                fill_value=0.0)
+            filt_common = filt_interp(common_wl)
+
+            # ---- LP / Cut filters (may be zero, one or two) ---------------------
+            def lp_curve(ext):
+                if ext == "(None)":
+                    return np.ones_like(common_wl)
+                wl_lp  = self.load_any(ext, "WAVELENGTH")
+                tr_lp  = self.load_any(ext, "THROUGHPUT")
+                return interp1d(wl_lp, tr_lp, bounds_error=False,
+                                fill_value=0.0)(common_wl)
+
+            T_LP = lp_curve(lp_ext1) * lp_curve(lp_ext2)    # ③ cascade the two curves
+
+            # ---- system throughput & response -----------------------------------
+            T_sys = filt_common * sens_common * T_LP
+            resp  = fl_common * T_sys
+
+            rgb_data[color] = {
+                "filter_name": filt_name,
+                "wl_filter":   wl_filt,
+                "tr_filter":   tr_filt,
+                "T_sys":       T_sys,
+                "response":    resp
+            }
 
         # -- Compute synthetic magnitudes for each channel relative to A0V --
         mag_texts = []
@@ -29287,6 +29293,7 @@ class SFCCDialog(QDialog):
         self.g_filter_combo.currentIndexChanged.connect(self.save_g_filter_setting)
         self.b_filter_combo.currentIndexChanged.connect(self.save_b_filter_setting)
         self.lp_filter_combo.currentIndexChanged.connect(self.save_lp_setting)
+        self.lp_filter_combo2.currentIndexChanged.connect(self.save_lp2_setting)
         self.sens_combo.currentIndexChanged.connect(self.save_sensor_setting)
         # (If you also want to remember which “White Reference” star was chosen, connect star_combo as well)
         self.star_combo.currentIndexChanged.connect(self.save_star_setting)
@@ -29367,11 +29374,17 @@ class SFCCDialog(QDialog):
 
         # ——— Stacked LP/Cut filter dropdown ———
         row3.addSpacing(20)
-        row3.addWidget(QLabel("LP/Cut Filter:"))
+        row3.addWidget(QLabel("LP/Cut Filter1:"))
         self.lp_filter_combo = QComboBox()
         self.lp_filter_combo.addItem("(None)")
         self.lp_filter_combo.addItems(self.filter_list)
         row3.addWidget(self.lp_filter_combo)
+        row3.addSpacing(20)
+        row3.addWidget(QLabel("LP/Cut Filter2:"))
+        self.lp_filter_combo2 = QComboBox()
+        self.lp_filter_combo2.addItem("(None)")
+        self.lp_filter_combo2.addItems(self.filter_list)
+        row3.addWidget(self.lp_filter_combo2)        
         row3.addStretch()
 
 
@@ -29517,10 +29530,21 @@ class SFCCDialog(QDialog):
             if idx != -1:
                 self.lp_filter_combo.setCurrentIndex(idx)
 
+        saved_lp2 = settings.value("SFCC/LPFilter2", "")
+        if saved_lp2:
+            idx = self.lp_filter_combo2.findText(saved_lp2)
+            if idx != -1:
+                self.lp_filter_combo2.setCurrentIndex(idx)
+
     def save_lp_setting(self, index):
         """Write the currently selected LP/Cut filter into QSettings."""
         current = self.lp_filter_combo.currentText()
         QSettings().setValue("SFCC/LPFilter", current)
+
+    def save_lp2_setting(self, index):
+        """Write the currently selected LP/Cut filter into QSettings."""
+        current = self.lp_filter_combo2.currentText()
+        QSettings().setValue("SFCC/LPFilter2", current)
 
     def save_star_setting(self, index):
         """
@@ -30018,6 +30042,8 @@ class SFCCDialog(QDialog):
         current_g = self.g_filter_combo.currentText()
         current_b = self.b_filter_combo.currentText()
         current_s = self.sens_combo.currentText()
+        current_lp  = self.lp_filter_combo.currentText()
+        current_lp2 = self.lp_filter_combo2.currentText()
 
         for cb, lst, prev in [
             (self.r_filter_combo, self.filter_list, current_r),
@@ -30027,6 +30053,15 @@ class SFCCDialog(QDialog):
             cb.clear()
             cb.addItem("(None)")
             cb.addItems(lst)
+            idx = cb.findText(prev)
+            if idx != -1:
+                cb.setCurrentIndex(idx)
+
+        for cb, prev in [(self.lp_filter_combo,  current_lp),
+                            (self.lp_filter_combo2, current_lp2)]:
+            cb.clear()
+            cb.addItem("(None)")
+            cb.addItems(self.filter_list)
             idx = cb.findText(prev)
             if idx != -1:
                 cb.setCurrentIndex(idx)
@@ -30139,33 +30174,53 @@ class SFCCDialog(QDialog):
         degree_symbol = "\u00B0"
         return f"{sign}{degrees:02d}{degree_symbol}{minutes:02d}m{seconds:05.2f}s"
 
-    def _neutralize_background(self, rgb_img, patch_size: int = 10) -> np.ndarray:
+    def _neutralize_background(self,
+                            rgb_img: np.ndarray,
+                            patch_size: int = 50) -> np.ndarray:
         """
-        Shift / stretch each channel so the darkest patch in the image
-        has equal R, G, B medians ( → “neutral gray sky” ).
+        Linear background-neutralisation:
+        1. Split the image into a patch_size×patch_size grid.
+        2. Pick the patch with the *lowest* sum of RGB medians
+            (≈ darkest, least signal).
+        3. Let  best_med = [mR, mG, mB]  for that patch and
+            target      = mean(best_med).
+        4. For every channel           new = (old – diff) / (1 – diff)
+            with diff = mC – target.
+        5. Clip to [0,1] and return.
+
+        The transform is linear, therefore
+        old = 0   ⇒   new = 0
+        old = 1   ⇒   new = 1
+        so neither the black- nor white-point is touched; only the
+        *colour* of the background drifts toward neutral gray.
         """
         img = rgb_img.copy()
         h, w = img.shape[:2]
         ph, pw = h // patch_size, w // patch_size
 
-        # ── find the darkest patch ─────────────────────────────
+        # ── 1 · locate darkest patch ─────────────────────────────────────────
         min_sum, best_med = np.inf, None
         for i in range(patch_size):
             for j in range(patch_size):
                 y0, x0 = i * ph, j * pw
-                patch = img[y0 : min(y0 + ph, h), x0 : min(x0 + pw, w), :]
-                meds  = np.median(patch, axis=(0, 1))
-                s     = meds.sum()
+                patch = img[y0:min(y0+ph, h), x0:min(x0+pw, w), :]
+                med   = np.median(patch, axis=(0, 1))        # [R,G,B]
+                s     = med.sum()
                 if s < min_sum:
-                    min_sum, best_med = s, meds
+                    min_sum, best_med = s, med
 
-        # ── shift / scale so that patch → neutral  ──────────────
-        if best_med is not None:
-            target = best_med.mean()
-            for c in range(3):
-                diff  = best_med[c] - target
-                denom = 1.0 - diff if abs(1.0 - diff) > 1e-8 else 1e-8
-                img[:, :, c] = np.clip((img[:, :, c] - diff) / denom, 0.0, 1.0)
+        if best_med is None:          # shouldn’t happen, but be safe
+            return img
+
+        # ── 2 · linear shift/scale per channel ──────────────────────────────
+        target = float(best_med.mean())
+        eps    = 1e-8
+        for c in range(3):
+            diff = float(best_med[c] - target)
+            if abs(diff) < eps:
+                continue                           # already on target
+            img[..., c] = np.clip((img[..., c] - diff) / (1.0 - diff),
+                                0.0, 1.0)
 
         return img
 
@@ -30375,6 +30430,7 @@ class SFCCDialog(QDialog):
         b_filt = self.b_filter_combo.currentText()
         sens_name = self.sens_combo.currentText()
         lp_filt = self.lp_filter_combo.currentText()
+        lp_filt2 = self.lp_filter_combo2.currentText()
 
         if not ref_sed_name:
             QMessageBox.warning(self, "Error", "Please select a reference spectral type (e.g. “A0V”).")
@@ -30435,7 +30491,7 @@ class SFCCDialog(QDialog):
 
         # — restore the original median via your stretch helper —
         # assumes you have a method stretch_color_image(img, target_median, linked=True)
-        base = stretch_color_image(base, orig_median_scalar, linked=False)
+        #base = stretch_color_image(base, orig_median_scalar, linked=False)
 
 
         # — Step 1B: SEP extraction on grayscale image —
@@ -30520,7 +30576,10 @@ class SFCCDialog(QDialog):
         T_G = interp(*load_curve(g_filt)) if g_filt!="(None)" else np.ones_like(wl_grid)
         T_B = interp(*load_curve(b_filt)) if b_filt!="(None)" else np.ones_like(wl_grid)
         QE  = interp(*load_curve(sens_name)) if sens_name!="(None)" else np.ones_like(wl_grid)
-        LP  = interp(*load_curve(lp_filt))   if lp_filt!="(None)"   else np.ones_like(wl_grid)
+        LP1 = interp(*load_curve(lp_filt))   if lp_filt != "(None)"  else np.ones_like(wl_grid)
+        LP2 = interp(*load_curve(lp_filt2))  if lp_filt2!= "(None)"  else np.ones_like(wl_grid)
+        LP  = LP1 * LP2
+
         T_sys_R = T_R * QE * LP
         T_sys_G = T_G * QE * LP
         T_sys_B = T_B * QE * LP
