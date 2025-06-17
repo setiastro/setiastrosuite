@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.7"
+VERSION = "2.18.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1239,7 +1239,8 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
-        self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
+        self.curves_tab = FullCurvesTab(image_manager=self.image_manager)
+        self.tabs.addTab(self.curves_tab, "Curves Utility")
         self.tabs.addTab(PerfectPalettePickerTab(image_manager=self.image_manager, parent=self), "Perfect Palette Picker")
         self.tabs.addTab(NBtoRGBstarsTab(image_manager=self.image_manager, parent=self), "NB to RGB Stars")
         self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
@@ -1250,6 +1251,18 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(MainWindow(), "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        self.curveDock = QDockWidget("Curves Editor", self)
+        # let it live on either side
+        self.curveDock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea |
+            Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        # put the actual CurveEditor widget into the dock
+        
+        self.curveDock.setWidget(self.curves_tab.curveDialog)
+        # default dock on the right
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.curveDock)
 
         # Set the layout for the main window
         central_widget = QWidget(self)  # Create a central widget
@@ -1314,6 +1327,7 @@ class AstroEditingSuite(QMainWindow):
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+        self.curveDock.hide()
 
     def show_history_dialog(self):
         slot = self.image_manager.current_slot
@@ -1718,6 +1732,11 @@ class AstroEditingSuite(QMainWindow):
     def on_tab_changed(self, index):
         current_tab = self.tabs.widget(index)
         # Check if the tab has a 'refresh' method.
+        if current_tab is self.curves_tab:
+            self.curveDock.show()
+        else:
+            self.curveDock.hide()
+
         if hasattr(current_tab, "refresh"):
             current_tab.refresh()
 
@@ -41737,13 +41756,13 @@ class FullCurvesTab(QWidget):
         self.ghsParams["γ"] = value
         self.updateGhsCurve()
 
-    def showEvent(self, e):
-        super().showEvent(e)
-        self.curveDialog.show()
+    #def showEvent(self, e):
+    #    super().showEvent(e)
+    #    self.curveDialog.show()
 
-    def hideEvent(self, e):
-        super().hideEvent(e)
-        self.curveDialog.hide()
+    #def hideEvent(self, e):
+    #    super().hideEvent(e)
+    #    self.curveDialog.hide()
 
 
     def onStretchTypeChanged(self, btn, checked):
