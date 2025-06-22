@@ -1,9 +1,9 @@
 {
-  "version": "2.18.8",
+  "version": "2.18.9",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.8/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.8/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.8/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.9/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.9/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.9/setiastrosuite_linux.tar.xz"
   },
-  "notes": "MacOS Intel Version Available! Dockable Curves Widget for curves tab (move it around or pop it out) and added a second stackable filter field in SFCC"
+  "notes": "MacOS Intel Version available again! Blink Comparator bug fixes. Especially when trying to load a large number of large MPx images. Huge thank you to James for the code contribution to make it possible!"
 }
