@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.8"
+VERSION = "2.18.9"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -36167,6 +36167,7 @@ class BlinkTab(QWidget):
         self.thresholds_by_group: dict[str, list[float|None]] = {}
         self.aggressive_stretch_enabled = False
         self.current_sigma = 3.7
+        self.current_pixmap = None
 
         self.initUI()
         self.init_shortcuts()
@@ -36652,7 +36653,7 @@ class BlinkTab(QWidget):
         file_paths = sorted(file_paths, key=lambda p: self._natural_key(os.path.basename(p)))
 
         # 1) pick dtype based on RAM
-        mem   = psutil.virtual_memory()
+        mem = psutil.virtual_memory()
         avail = mem.available / (1024**3)
         if avail <= 16:
             target_dtype = np.uint8
@@ -36662,62 +36663,82 @@ class BlinkTab(QWidget):
             target_dtype = np.float32
 
         total = len(file_paths)
-        self.progress_bar.setRange(0,100)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         QApplication.processEvents()
 
-        # clear old data & tree
         self.image_paths.clear()
         self.loaded_images.clear()
         self.fileTree.clear()
 
-        # 2) fire off all loads in parallel
-        futures    = {}
-        max_workers = min((os.cpu_count() or 1), 60)
-        with ProcessPoolExecutor(max_workers=max_workers) as exe:
-            for p in file_paths:
-                futures[exe.submit(self._load_one_image, p, target_dtype)] = p
+        # ---------- NEW: Retry-aware parallel load ----------
+        MAX_RETRIES = 2
+        RETRY_DELAY = 2
+        remaining = list(file_paths)
+        completed = []
+        attempt = 0
 
-            done = 0
-            for fut in as_completed(futures):
-                try:
-                    path, header, bit_depth, is_mono, stored, back = fut.result()
-                except Exception as e:
-                    print(f"[WARN] {futures[fut]} load failed: {e}")
-                    continue
+        while remaining and attempt <= MAX_RETRIES:
+            
+            total_cpus = os.cpu_count() or 1
+            reserved_cpus = min(4, max(1, int(total_cpus * 0.25)))
+            max_workers = max(1, min(total_cpus - reserved_cpus, 60))
 
-                header = header or {}
+            futures = {}
+            failed = []
 
-                self.image_paths.append(path)
-                self.loaded_images.append({
-                    'file_path':      path,
-                    'image_data':     stored,
-                    'header':         header,
-                    'bit_depth':      bit_depth,
-                    'is_mono':        is_mono,
-                    'flagged':        False,
-                    'orig_background': back
-                })
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                for path in remaining:
+                    futures[executor.submit(self._load_one_image, path, target_dtype)] = path
 
-                done += 1
-                self.progress_bar.setValue(int(100 * done / total))
-                QApplication.processEvents()
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    try:
+                        result = fut.result()
+                        completed.append(result)
+                        done = len(completed)
+                        self.progress_bar.setValue(int(100 * done / total))
+                        QApplication.processEvents()
+                    except Exception as e:
+                        print(f"[WARN][Attempt {attempt}] Failed to load {path}: {e}")
+                        failed.append(path)
 
-        # 3) (optional) reorder to input order — in this case file_paths is already sorted
-        #    so image_paths/loaded_images follow that same sorted order
+            remaining = failed
+            attempt += 1
+            if remaining:
+                print(f"[Retry] {len(remaining)} images will be retried after {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
 
-        # 4) build a nested grouping: Object -> Filter -> Exposure -> [paths]
+        if remaining:
+            print(f"[FAILURE] These files failed to load after {MAX_RETRIES} retries:")
+            for path in remaining:
+                print(f"  - {path}")
+
+        # ---------- Unpack completed results ----------
+        for path, header, bit_depth, is_mono, stored, back in completed:
+            header = header or {}
+            self.image_paths.append(path)
+            self.loaded_images.append({
+                'file_path':      path,
+                'image_data':     stored,
+                'header':         header,
+                'bit_depth':      bit_depth,
+                'is_mono':        is_mono,
+                'flagged':        False,
+                'orig_background': back
+            })
+
+        # 3) rebuild object/filter/exposure tree
         grouped = defaultdict(list)
         for entry in self.loaded_images:
-            hdr  = entry['header']
-            obj  = hdr.get('OBJECT',   'Unknown')
-            filt = hdr.get('FILTER',   'Unknown')
-            exp  = hdr.get('EXPOSURE', 'Unknown')
+            hdr = entry['header']
+            obj = hdr.get('OBJECT', 'Unknown')
+            filt = hdr.get('FILTER', 'Unknown')
+            exp = hdr.get('EXPOSURE', 'Unknown')
             grouped[(obj, filt, exp)].append(entry['file_path'])
-        # ——— NEW: for each group, sort the file list by natural filename order ———
+
         for key, paths in grouped.items():
             paths.sort(key=lambda p: self._natural_key(os.path.basename(p)))
-        # 5) rebuild the tree in sorted key order:
         by_object = defaultdict(lambda: defaultdict(dict))
         for (obj, filt, exp), paths in grouped.items():
             by_object[obj][filt][exp] = paths
@@ -36737,12 +36758,10 @@ class BlinkTab(QWidget):
                     filt_item.addChild(exp_item)
                     exp_item.setExpanded(True)
 
-                    # leaves: these were already sorted via file_paths/natural sort
                     for p in by_object[obj][filt][exp]:
                         leaf = QTreeWidgetItem([os.path.basename(p)])
                         exp_item.addChild(leaf)
 
-        # 6) final UI touch-ups
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
         self.progress_bar.setValue(100)
         if self.metrics_window and self.metrics_window.isVisible():
