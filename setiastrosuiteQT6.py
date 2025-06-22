@@ -36167,6 +36167,7 @@ class BlinkTab(QWidget):
         self.thresholds_by_group: dict[str, list[float|None]] = {}
         self.aggressive_stretch_enabled = False
         self.current_sigma = 3.7
+        self.current_pixmap = None  # **New Attribute**
 
         self.initUI()
         self.init_shortcuts()
