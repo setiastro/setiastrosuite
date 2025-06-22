@@ -36679,7 +36679,9 @@ class BlinkTab(QWidget):
 
         while remaining and attempt <= MAX_RETRIES:
             
-            max_workers = min((os.cpu_count() or 1), 60)
+            total_cpus = os.cpu_count() or 1
+            reserved_cpus = min(4, max(1, int(total_cpus * 0.25)))
+            max_workers = max(1, min(total_cpus - reserved_cpus, 60))
 
             futures = {}
             failed = []
