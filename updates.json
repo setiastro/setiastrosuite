@@ -5,5 +5,5 @@
     "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.8/setiastrosuite_mac.tar.gz",
     "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.8/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Dockable Curves Widget for curves tab (move it around or pop it out) and added a second stackable filter field in SFCC"
+  "notes": "MacOS Intel Version Available! Dockable Curves Widget for curves tab (move it around or pop it out) and added a second stackable filter field in SFCC"
 }
