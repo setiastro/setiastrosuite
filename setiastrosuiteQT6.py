@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.9"
+VERSION = "2.18.10"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13520,6 +13520,10 @@ class LiveStackWindow(QDialog):
         self.frame_count = 0
         self.current_stack = None
 
+        self.total_exposure = 0.0  # seconds
+        self.exposure_label = QLabel("Total Exp: 00:00:00")
+        self.exposure_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+
         self.brightness = 0.0   # [-1.0..+1.0]
         self.contrast   = 1.0   # [0.1..3.0]
         self.clip_threshold = 3.5
@@ -13681,6 +13685,7 @@ class LiveStackWindow(QDialog):
         status_line.addWidget(self.cull_folder_label)
         status_line.addStretch()        
         status_line.addWidget(self.frame_count_label)
+        status_line.addWidget(self.exposure_label)
         main_layout.addLayout(status_line)
 
         # C) Zoom toolbar
@@ -14198,6 +14203,9 @@ class LiveStackWindow(QDialog):
         self.frame_count = 0
         self.current_stack = None
 
+        self.total_exposure = 0.0
+        self.exposure_label.setText("Total Exp: 00:00:00")
+
         self.filter_stacks.clear()
         self.filter_counts.clear()
         self.filter_buffers.clear()
@@ -14386,7 +14394,22 @@ class LiveStackWindow(QDialog):
 
         # ——— 9) METRICS & SNR —————————————————————————
         sc, fwhm, ecc = compute_frame_star_metrics(norm_plane)
-        snr_val       = estimate_global_snr(norm_plane if mono_key else norm_color)
+        # instead, use the cumulative stack (or composite) for SNR:
+        if mono_key:
+            # once we have any filter_stacks, build the composite;
+            # fall back to this frame’s plane if it’s the first one
+            if self.filter_stacks:
+                stack_img = self._build_color_composite()
+            else:
+                stack_img = norm_plane
+        else:
+            # for color‐only, use the running‐average stack once it exists,
+            # else fall back to this frame’s normalized color
+            if self.current_stack is not None:
+                stack_img = self.current_stack
+            else:
+                stack_img = norm_color
+        snr_val = estimate_global_snr(stack_img)
 
         # ——— 10) CULLING? ————————————————————————————
         flagged = (
@@ -14425,6 +14448,22 @@ class LiveStackWindow(QDialog):
                 # start the normal running stack
                 self.current_stack = norm_color.copy()
                 self._buffer = [norm_color.copy()]
+            # ─── accumulate exposure ─────────────────────
+            exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+            if exp_val is not None:
+                try:
+                    secs = float(exp_val)
+                    self.total_exposure += secs
+                    hrs  = int(self.total_exposure // 3600)
+                    mins = int((self.total_exposure % 3600) // 60)
+                    secs_rem = int(self.total_exposure % 60)
+                    self.exposure_label.setText(
+                        f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                    )
+                except:
+                    pass
+            QApplication.processEvents()
+
 
         else:
             # ─── 12) RUNNING–AVERAGE or CLIP-σ UPDATE ────────────────────
@@ -14482,6 +14521,22 @@ class LiveStackWindow(QDialog):
 
                 # bump global frame count
                 self.frame_count = n
+                # ─── accumulate exposure ─────────────────────
+                exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+                if exp_val is not None:
+                    try:
+                        secs = float(exp_val)
+                        self.total_exposure += secs
+                        hrs  = int(self.total_exposure // 3600)
+                        mins = int((self.total_exposure % 3600) // 60)
+                        secs_rem = int(self.total_exposure % 60)
+                        self.exposure_label.setText(
+                            f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                        )
+                    except:
+                        pass
+                QApplication.processEvents()
+
 
             else:
                 # — Mono→color (per-filter) stacking —
@@ -14553,7 +14608,21 @@ class LiveStackWindow(QDialog):
                 # bump global frame count
                 self.frame_count += 1
                 self.frame_count_label.setText(f"Frames: {self.frame_count}")
-
+                # ─── accumulate exposure ─────────────────────
+                exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+                if exp_val is not None:
+                    try:
+                        secs = float(exp_val)
+                        self.total_exposure += secs
+                        hrs  = int(self.total_exposure // 3600)
+                        mins = int((self.total_exposure % 3600) // 60)
+                        secs_rem = int(self.total_exposure % 60)
+                        self.exposure_label.setText(
+                            f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                        )
+                    except:
+                        pass
+                QApplication.processEvents()
 
             # ─── 13) Update UI ─────────────────────────────────────────
             self.frame_count_label.setText(f"Frames: {self.frame_count}")
