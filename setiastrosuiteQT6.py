@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.10"
+VERSION = "2.18.11"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -5359,6 +5359,13 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
     """
     def __init__(self, rect: QRectF, parent=None):
         super().__init__(rect, parent)
+        # ── make the rectangle’s pen cosmetic ────────────────────
+        pen = QPen(Qt.GlobalColor.green, 2)   # 2px wide
+        pen.setCosmetic(True)                # stays 2px no matter the zoom
+        self.setPen(pen)
+
+        # no fill
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))        
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
@@ -5375,7 +5382,8 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
         self.setTransformOriginPoint(self.rect().center())
 
     def _initHandles(self):
-        pen = QPen(Qt.GlobalColor.black)
+        pen = QPen(Qt.GlobalColor.green,2)
+        pen.setCosmetic(True)  # Make pen size independent of zoom level
         brush = QBrush(Qt.GlobalColor.white)
         for pos in ("tl","tr","br","bl"):
             h = QGraphicsEllipseItem(0,0, HANDLE_SIZE, HANDLE_SIZE, self)
@@ -5606,7 +5614,8 @@ class CropTool(QDialog):
                     r = QRectF(self.origin, scene_pt).normalized()
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
-                    pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                    pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.DashLine)
+                    pen.setCosmetic(True) 
                     self.selection_rect_item = self.scene.addRect(r, pen)
                     return True
                 if ev.type() == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton and getattr(self, "drawing", False):
@@ -13502,7 +13511,6 @@ class LiveStackWindow(QDialog):
         self.master_dark = None
         self.master_flat = None
         self.master_flats  = {}
-        self.narrowband_mapping = "Natural"
 
         self.filter_stacks = {}       # key → np.ndarray (float32)
         self.filter_counts = {}       # key → int
@@ -13511,14 +13519,20 @@ class LiveStackWindow(QDialog):
         self.filter_m2s      = {}  # key → M2 array after bootstrap (H×W)
 
         self.cull_folder = None
-        # Default thresholds:
-        self.max_fwhm       = 15.0    # pixels
-        self.max_ecc        = 0.9     # dimensionless
-        self.min_star_count = 5      # number of stars
 
         self.is_running = False
         self.frame_count = 0
         self.current_stack = None
+
+        # ── Load persisted settings ───────────────────────────────
+        s = QSettings()
+        self.bootstrap_frames    = s.value("LiveStack/bootstrap_frames",    24,     type=int)
+        self.clip_threshold      = s.value("LiveStack/clip_threshold",      3.5,    type=float)
+        self.max_fwhm            = s.value("LiveStack/max_fwhm",            15.0,   type=float)
+        self.max_ecc             = s.value("LiveStack/max_ecc",             0.9,    type=float)
+        self.min_star_count      = s.value("LiveStack/min_star_count",      5,      type=int)
+        self.narrowband_mapping  = s.value("LiveStack/narrowband_mapping",  "Natural", type=str)
+
 
         self.total_exposure = 0.0  # seconds
         self.exposure_label = QLabel("Total Exp: 00:00:00")
@@ -13526,8 +13540,7 @@ class LiveStackWindow(QDialog):
 
         self.brightness = 0.0   # [-1.0..+1.0]
         self.contrast   = 1.0   # [0.1..3.0]
-        self.clip_threshold = 3.5
-        self.bootstrap_frames = 24
+
 
         self._buffer = []    # store up to bootstrap_frames normalized frames
         self._mu = None      # per-pixel mean (after bootstrap)
@@ -13762,16 +13775,26 @@ class LiveStackWindow(QDialog):
         dlg = LiveStackSettingsDialog(self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             bs, sigma, fwhm, ecc, stars, mapping = dlg.getValues()
-            # Update live‐stack params
-            self.bootstrap_frames = bs
-            self.clip_threshold  = sigma
-            # Update culling thresholds
-            self.max_fwhm        = fwhm
-            self.max_ecc         = ecc
-            self.min_star_count  = stars
+
+            # 1) Persist into QSettings
+            s = QSettings()
+            s.setValue("LiveStack/bootstrap_frames",   bs)
+            s.setValue("LiveStack/clip_threshold",     sigma)
+            s.setValue("LiveStack/max_fwhm",           fwhm)
+            s.setValue("LiveStack/max_ecc",            ecc)
+            s.setValue("LiveStack/min_star_count",     stars)
+            s.setValue("LiveStack/narrowband_mapping", mapping)
+
+            # 2) Apply to this live‐stack session
+            self.bootstrap_frames   = bs
+            self.clip_threshold     = sigma
+            self.max_fwhm           = fwhm
+            self.max_ecc            = ecc
+            self.min_star_count     = stars
             self.narrowband_mapping = mapping
+
             self.status_label.setText(
-                f"↺ Settings updated with CutOver={bs}, σ={sigma:.1f}, "
+                f"↺ Settings saved: BS={bs}, σ={sigma:.1f}, "
                 f"FWHM≤{fwhm:.1f}, ECC≤{ecc:.2f}, Stars≥{stars}, "
                 f"Mapping={mapping}"
             )
