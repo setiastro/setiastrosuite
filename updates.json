@@ -1,9 +1,9 @@
 {
-  "version": "2.18.10",
+  "version": "2.18.11",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.10/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.10/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.10/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Total Exposure added to Live Stacking and SNR bug fix."
+  "notes": "Crop rectangle now much more visible. Live Stacking settings have permanence."
 }
