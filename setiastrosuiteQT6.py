@@ -49952,6 +49952,11 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     # ---------------------------------------------------------------------
                     image = np.squeeze(image)
 
+                    if image.dtype == np.float32:
+                        max_val = image.max()
+                        if max_val > 1.0:
+                            print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                            image = image / max_val
                     # ---------------------------------------------------------------------
                     # 3) Interpret final shape to decide if mono or color
                     # ---------------------------------------------------------------------
@@ -49993,6 +49998,12 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     image = image_data
                 else:
                     raise ValueError("Unsupported TIFF format!")
+
+                if image.dtype == np.float32:
+                    max_val = image.max()
+                    if max_val > 1.0:
+                        print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                        image = image / max_val
 
                 # Handle mono or RGB TIFFs
                 if image_data.ndim == 2:  # Mono
@@ -50068,6 +50079,12 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     "file_meta": file_meta,
                     "image_meta": image_meta
                 }
+
+                if image.dtype == np.float32:
+                    max_val = image.max()
+                    if max_val > 1.0:
+                        print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                        image = image / max_val
 
                 print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                 return image, original_header, bit_depth, is_mono
