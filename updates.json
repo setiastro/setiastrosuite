@@ -1,9 +1,9 @@
 {
-  "version": "2.18.11",
+  "version": "2.18.12",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.11/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.12/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.12/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.18.12/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Crop rectangle now much more visible. Live Stacking settings have permanence."
+  "notes": "Updated for full cosmic clarity color compatibility and re arranged the hyperbolic curves sliders to give mac users more room with them"
 }
