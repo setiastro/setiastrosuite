@@ -267,7 +267,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.11"
+VERSION = "2.18.12"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -37841,6 +37841,13 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.denoise_mode_label)
         left_layout.addWidget(self.denoise_mode_dropdown)
 
+        self.denoise_separate_checkbox = QCheckBox("Process RGB channels separately")
+        self.denoise_separate_checkbox.setToolTip(
+            "Run the mono model on each of R, G, B independently instead of the full‐color model"
+        )
+        self.denoise_separate_checkbox.setChecked(False)
+        left_layout.addWidget(self.denoise_separate_checkbox)
+
         # Scale factor dropdown (initially hidden)
         self.scale_label = QLabel("Scale Factor:")
         self.scale_dropdown = QComboBox()
@@ -38486,12 +38493,14 @@ class CosmicClarityTab(QWidget):
         self.denoise_strength_slider.show()
         self.denoise_mode_label.show()
         self.denoise_mode_dropdown.show()
+        self.denoise_separate_checkbox.show()
 
     def hide_denoise_controls(self):
         self.denoise_strength_label.hide()
         self.denoise_strength_slider.hide()
         self.denoise_mode_label.hide()
         self.denoise_mode_dropdown.hide()
+        self.denoise_separate_checkbox.hide()
 
     def show_superres_controls(self):
         self.scale_label.show()
@@ -39185,6 +39194,8 @@ class CosmicClarityTab(QWidget):
                 "--denoise_strength", f"{self.denoise_strength_slider.value() / 100:.2f}",
                 "--denoise_mode", self.denoise_mode_dropdown.currentText()
             ]
+            if self.denoise_separate_checkbox.isChecked():
+                cmd.append("--separate_channels")            
 
         # GPU option
         if self.gpu_dropdown.currentText() == "No":
@@ -41613,49 +41624,65 @@ class FullCurvesTab(QWidget):
         self.ghsChannelCombo.currentTextChanged.connect(self._onGhsChannelChanged)
         self.currentGhsChannel = "K (Brightness)"
 
-        # ——— α/β controls —————————————————————
-        alpha_beta_row = QHBoxLayout()
 
-        # α
-        alpha_beta_row.addWidget(QLabel("α"))
+        # ——— α/β controls —————————————————————
+        alpha_beta_group = QVBoxLayout()
+
+        # α row
+        alpha_row = QHBoxLayout()
+        alpha_row.addWidget(QLabel("α"))
+
         self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.alphaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.alphaSlider.setRange(1, 500)
-        self.alphaSlider.setValue(50)
-        alpha_beta_row.addWidget(self.alphaSlider)
+        self.alphaSlider.setValue(50)            # ← put this back!
+        alpha_row.addWidget(self.alphaSlider, 1)
 
         self.alphaSpin = CustomDoubleSpinBox(
             minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
         )
-        alpha_beta_row.addWidget(self.alphaSpin)
+        self.alphaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        alpha_row.addWidget(self.alphaSpin, 0)
 
-        # β
-        alpha_beta_row.addWidget(QLabel("β"))
+        alpha_beta_group.addLayout(alpha_row)
+
+        # β row
+        beta_row = QHBoxLayout()
+        beta_row.addWidget(QLabel("β"))
+
         self.betaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.betaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.betaSlider.setRange(1, 500)
-        self.betaSlider.setValue(50)
-        alpha_beta_row.addWidget(self.betaSlider)
+        self.betaSlider.setValue(50)             # ← and this back
+        beta_row.addWidget(self.betaSlider, 1)
 
         self.betaSpin = CustomDoubleSpinBox(
             minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
         )
-        alpha_beta_row.addWidget(self.betaSpin)
+        self.betaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        beta_row.addWidget(self.betaSpin, 0)
 
-        vbox.addLayout(alpha_beta_row)
+        alpha_beta_group.addLayout(beta_row)
 
+        vbox.addLayout(alpha_beta_group)
 
         # ——— γ + help row —————————————————————
         gamma_row = QHBoxLayout()
 
         gamma_row.addWidget(QLabel("γ"))
+
         self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
         self.gammaSlider.setRange(1, 500)
-        self.gammaSlider.setValue(100)
-        gamma_row.addWidget(self.gammaSlider)
+        self.gammaSlider.setValue(100)                              # keep your default
+        # give the slider room to expand
+        self.gammaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        gamma_row.addWidget(self.gammaSlider, 1)                    # stretch factor 1
 
         self.gammaSpin = CustomDoubleSpinBox(
             minimum=0.01, maximum=10.0, initial=1.0, step=0.01, parent=self
         )
-        gamma_row.addWidget(self.gammaSpin)
+        self.gammaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        gamma_row.addWidget(self.gammaSpin, 0)                       # no stretch
 
         # help button
         self.ghsHelpBtn = QToolButton(self)
@@ -41663,7 +41690,7 @@ class FullCurvesTab(QWidget):
         self.ghsHelpBtn.setToolTip("GHS instructions")
         self.ghsHelpBtn.setFixedSize(20, 20)
         self.ghsHelpBtn.clicked.connect(self.showGhsHelp)
-        gamma_row.addWidget(self.ghsHelpBtn)
+        gamma_row.addWidget(self.ghsHelpBtn, 0)
 
         vbox.addLayout(gamma_row)
 
