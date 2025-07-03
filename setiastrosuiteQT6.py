@@ -61,6 +61,7 @@ if sys.stdout is not None:
 
 from astropy.stats import sigma_clipped_stats
 from astropy.io.votable import parse_single_table
+from astropy.timeseries import LombScargle, BoxLeastSquares
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
@@ -206,7 +207,8 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QSplashScreen,
     QProgressDialog, 
-    QDockWidget
+    QDockWidget,
+    QAbstractItemView
 )
 
 # ----- QtGui -----
@@ -267,7 +269,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.18.12"
+VERSION = "2.19.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -333,6 +335,7 @@ if hasattr(sys, '_MEIPASS'):
     convoicon_path = os.path.join(sys._MEIPASS, 'convo.png')
     spcc_icon_path = os.path.join(sys._MEIPASS, 'spcc.png')
     sasp_data_path = os.path.join(sys._MEIPASS, 'SASP_data.fits')
+    exoicon_path = os.path.join(sys._MEIPASS, 'exoicon.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -396,6 +399,7 @@ else:
     convoicon_path = 'convo.png'
     spcc_icon_path = 'spcc.png'
     sasp_data_path = 'SASP_data.fits'
+    exoicon_path = 'exoicon.png'
 
 
 def announce_zoom(method):
@@ -957,6 +961,12 @@ class AstroEditingSuite(QMainWindow):
         star_spike_action.triggered.connect(self.starspiketool)  # connects to the method below
         mosaic_menu.addAction(star_spike_action)
 
+        exo_action = QAction(QIcon(exoicon_path), "Exoplanet Detector", self)
+        exo_action.setStatusTip("Detect exoplanet transits from a series of images")
+        exo_action.triggered.connect(self.exoplanet_detect)
+        mosaic_menu.addAction(exo_action)
+
+
         # --------------------
         # Toolbar
         # --------------------
@@ -1121,6 +1131,7 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar.addAction(psf_viewer_action)     
         mosaictoolbar.addAction(supernova_action)   
         mosaictoolbar.addAction(star_spike_action)
+        mosaictoolbar.addAction(exo_action)
         
         # --------------------
         # Mask Toolbar
@@ -1248,7 +1259,8 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(HaloBGonTab(image_manager=self.image_manager), "Halo-B-Gon")
         self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager, parent=self), "Continuum Subtraction")
         self.tabs.addTab(ImageCombineTab(image_manager=self.image_manager), "Image Combination")
-        self.tabs.addTab(MainWindow(), "What's In My Image")
+        self.wimi_tab = MainWindow()
+        self.tabs.addTab(self.wimi_tab, "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
@@ -1358,6 +1370,41 @@ class AstroEditingSuite(QMainWindow):
     def starspiketool(self):
         dialog = StarSpikeTool(self.image_manager, self.mask_manager, parent=self)
         dialog.exec()
+
+    def exoplanet_detect(self):
+        win = ExoPlanetWindow(parent=self)
+        # force this to be queued → never block the emitter
+        win.referenceSelected.connect(
+            self._on_reference_selected,
+            Qt.ConnectionType.QueuedConnection
+        )
+        win.show()
+        self.exoplanet_detect_window = win
+
+    def _on_reference_selected(self, path):
+        # switch to WIMI tab
+        self.tabs.setCurrentWidget(self.wimi_tab)
+        self.wimi_tab.load_image_path(path)
+
+        # define the background task
+        def do_blind_solve():
+            self.wimi_tab.perform_blind_solve2()
+
+        # fire it off
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(do_blind_solve)
+
+        # when it’s done, schedule a popup on the main thread
+        def _notify(_):
+            # QTimer.singleShot with 0ms delays execution back onto the GUI thread
+            QTimer.singleShot(0, 
+                lambda: QMessageBox.information(
+                    self, 
+                    "Blind Solve", 
+                    "Blind-solve is complete!"
+                )
+            )
+        future.add_done_callback(_notify)
 
     def convo_deconvo_show(self):
         """
@@ -13387,7 +13434,7 @@ def compute_frame_star_metrics(image_2d):
 
     try:
         # 2) run SEP extract (threshold = 5σ)
-        objects = sep.extract(data, thresh=6.0, 
+        objects = sep.extract(data, thresh=5.0, 
                               err=std, 
                               minarea=16,   # adjust if needed
                               deblend_nthresh=32,
@@ -27332,7 +27379,1595 @@ class StarSpikeTool(QDialog):
 
         return (r_ratio, g_ratio, b_ratio)
 
+def aperture_sum(image: np.ndarray, x: float, y: float, radius: float) -> float:
+    """
+    Sum pixel values within a circular aperture.
 
+    Parameters
+    ----------
+    image : 2D numpy array
+        Grayscale image (H×W).
+    x, y : float
+        Subpixel center of aperture (in image coordinates).
+    radius : float
+        Radius of aperture in pixels.
+
+    Returns
+    -------
+    float
+        Sum of image pixels whose centers are within radius of (x,y).
+    """
+    H, W = image.shape[:2]
+    # Define integer bounds for the square containing the circle
+    x0 = max(int(np.floor(x - radius)), 0)
+    x1 = min(int(np.ceil (x + radius)), W - 1)
+    y0 = max(int(np.floor(y - radius)), 0)
+    y1 = min(int(np.ceil (y + radius)), H - 1)
+
+    # Create a grid of coordinates within that box
+    yy, xx = np.ogrid[y0:y1+1, x0:x1+1]
+    dist2 = (yy - y)**2 + (xx - x)**2
+
+    # Mask of points inside the circle
+    mask = dist2 <= (radius**2)
+
+    # Extract the sub-image and sum only the masked points
+    sub = image[y0:y1+1, x0:x1+1]
+    return float(np.sum(sub[mask]))
+
+class OverlayView(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # disable built-in hand drag
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        # always arrow cursor
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self._panning = False
+        self._last_pos = QPoint()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.pos())
+            # if we clicked an ellipse, let it handle the event
+            for it in self.scene().items(scene_pt):
+                if isinstance(it, ClickableEllipseItem):
+                    super().mousePressEvent(event)
+                    return
+            # else: start panning
+            self._panning = True
+            self._last_pos = event.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.pos() - self._last_pos
+            self._last_pos = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._panning:
+            self._panning = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+class ClickableEllipseItem(QGraphicsEllipseItem):
+    def __init__(self, rect: QRectF, index: int, callback):
+        super().__init__(rect)
+        self.index = index
+        self.callback = callback
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        self.setAcceptHoverEvents(True)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.callback(self.index, shift)
+        super().mousePressEvent(ev)
+
+
+class ReferenceOverlayDialog(QDialog):
+    def __init__(self, plane: np.ndarray, positions: list[tuple], target_median: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reference Frame: Stars Overlay")
+        self.plane = plane.astype(np.float32)
+        self.positions = positions
+        self.target_median = target_median
+        self.autostretch = True
+
+        # pens for normal vs selected
+        self._normal_pen   = QPen(QColor('lightblue'), 3)  # for normal state
+        self._dip_pen      = QPen(QColor('yellow'),    3)  # flagged by threshold
+        self._selected_pen = QPen(QColor('red'),       4)  # when selected
+
+        # store ellipses here
+        self.ellipse_items: dict[int, ClickableEllipseItem] = {}
+        self.flagged_stars: set[int] = set()  # updated by apply_threshold
+
+        self._build_ui()
+        self._init_graphics()
+
+        # wire up list‐clicks in the parent to recolor
+        if parent and hasattr(parent, 'star_list'):
+            parent.star_list.itemSelectionChanged.connect(self._update_highlights)
+
+        # after show, reset zoom so 1px == 1screen-px
+        QTimer.singleShot(0, self._fit_to_100pct)
+
+    def _build_ui(self):
+        self.view = OverlayView(self)
+        self.view.setRenderHints(
+            QPainter.RenderHint.Antialiasing |
+            QPainter.RenderHint.SmoothPixmapTransform
+        )
+        self.scene = QGraphicsScene(self)
+        self.view.setScene(self.scene)
+
+        btns = QHBoxLayout()
+        for txt, slot in [
+            ("Zoom In",        lambda: self.view.scale(1.2, 1.2)),
+            ("Zoom Out",       lambda: self.view.scale(1/1.2, 1/1.2)),
+            ("Reset Zoom",     self._fit_to_100pct),
+            ("Fit to Window",  self._fit_to_window),
+            ("Toggle Stretch", self._toggle_autostretch),
+        ]:
+            b = QPushButton(txt)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        btns.addStretch()
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.view)
+        lay.addLayout(btns)
+        self.resize(800, 600)
+
+    def _init_graphics(self):
+        # draw the image...
+        img = self.plane if not self.autostretch else stretch_mono_image(self.plane, target_median=0.3)
+        arr8 = (np.clip(img,0,1) * 255).astype(np.uint8)
+        h, w = img.shape
+        qimg = QImage(arr8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        pix  = QPixmap.fromImage(qimg)
+
+        self.scene.clear()
+        self.ellipse_items.clear()
+        self.scene.addItem(QGraphicsPixmapItem(pix))
+
+        # add one ellipse per star
+        radius = max(2, int(math.ceil(1.2*self.target_median)))
+        for idx, (x, y) in enumerate(self.positions):
+            r = QRectF(x-radius, y-radius, 2*radius, 2*radius)
+            ell = ClickableEllipseItem(r, idx, self._on_star_clicked)
+            ell.setPen(self._normal_pen)
+            ell.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self.scene.addItem(ell)
+            self.ellipse_items[idx] = ell
+
+    def _fit_to_100pct(self):
+        self.view.resetTransform()
+        rect = self.scene.itemsBoundingRect()
+        self.view.setSceneRect(rect)
+        # scroll so that scene center ends up in the view’s center
+        self.view.centerOn(rect.center())
+
+    def _fit_to_window(self):
+        rect = self.scene.itemsBoundingRect()
+        self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _toggle_autostretch(self):
+        self.autostretch = not self.autostretch
+        self._init_graphics()
+
+    def _on_star_clicked(self, index: int, shift: bool):
+        """Star‐circle was clicked; update list selection then recolor."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'star_list'):
+            return
+
+        lst = parent.star_list
+        item = lst.item(index)
+        if not item:
+            return
+
+        if shift:
+            item.setSelected(not item.isSelected())
+        else:
+            lst.clearSelection()
+            item.setSelected(True)
+
+        lst.scrollToItem(item)
+        self._update_highlights()
+
+    def _update_highlights(self):
+        """Recolor all ellipses according to star_list selection and dip flags."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'star_list'):
+            return
+
+        sel = {item.data(Qt.ItemDataRole.UserRole)
+            for item in parent.star_list.selectedItems()}
+        
+        for idx, ell in self.ellipse_items.items():
+            if idx in sel:
+                ell.setPen(self._selected_pen)
+            elif idx in self.flagged_stars:
+                ell.setPen(self._dip_pen)
+            else:
+                ell.setPen(self._normal_pen)
+
+    def update_dip_flags(self, flagged_indices: set[int]):
+        """Update the visual color of stars flagged by threshold dips."""
+        self.flagged_stars = flagged_indices
+        self._update_highlights()
+
+
+class ExoPlanetWindow(QDialog):
+    referenceSelected = pyqtSignal(str)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Exoplanet Transit Detector")
+        self.resize(900, 600)
+
+        # State
+        self.image_paths    = []
+        self._cached_images = []
+        self._cached_headers = []   # parallel to _cached_images
+        self.times = None           # will become a 1D array of astropy Time        
+        self.star_positions = []
+        self.fluxes         = None   # stars × frames
+        self.flags          = None
+        self.median_fwhm    = None
+        self.master_dark    = None
+        self.master_flat    = None
+        # ------------ new settings ------------
+        # SEP detection threshold in σ
+        self.sep_threshold  = 5.0
+        # fraction of image border to ignore [0–0.5]
+        self.border_fraction = 0.10
+        # number of companion stars in ensemble model
+        self.ensemble_k          = 10
+
+        # ——— Analysis settings ——————————————————
+        self.ls_min_frequency     = 0.01
+        self.ls_max_frequency     = 10.0
+        self.ls_samples_per_peak  = 10
+
+        self.bls_min_period       = 0.05
+        self.bls_max_period       = 2.0
+        self.bls_n_periods        = 5000
+        self.bls_duration_min_frac= 0.005
+        self.bls_duration_max_frac= 0.5
+        self.bls_n_durations      = 50
+        # ------------------------------------------   
+              
+        # — Mode selector —
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Mode:"))
+        self.aligned_mode_rb = QRadioButton("Aligned Subs")
+        self.raw_mode_rb     = QRadioButton("Raw Subs")
+        self.aligned_mode_rb.setChecked(True)
+        mg = QButtonGroup(self)
+        mg.addButton(self.aligned_mode_rb); mg.addButton(self.raw_mode_rb)
+        mg.buttonToggled.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.aligned_mode_rb)
+        mode_layout.addWidget(self.raw_mode_rb)
+        mode_layout.addStretch()
+        self.wrench_button = QToolButton()
+        self.wrench_button.setIcon(QIcon(wrench_path))
+        self.wrench_button.setToolTip("Settings…")
+        self.wrench_button.setStyleSheet("""
+            QToolButton {
+                background-color: #FF4500;
+                color: white;
+                padding: 4px;
+                border-radius: 4px;
+            }
+            QToolButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        self.wrench_button.clicked.connect(self.open_settings)    
+        mode_layout.addWidget(self.wrench_button)    
+
+        # — Calibration controls (hidden in Aligned) —
+        cal_layout = QHBoxLayout()
+        self.load_darks_btn = QPushButton("Load Master Dark…")
+        self.load_flats_btn = QPushButton("Load Master Flat…")
+        for w in (self.load_darks_btn, self.load_flats_btn):
+            w.clicked.connect(self.load_masters)
+            w.hide()
+            cal_layout.addWidget(w)
+        self.dark_status_label = QLabel("Dark: ❌");  self.dark_status_label.hide()
+        self.flat_status_label = QLabel("Flat: ❌");  self.flat_status_label.hide()
+        cal_layout.addWidget(self.dark_status_label)
+        cal_layout.addWidget(self.flat_status_label)
+        cal_layout.addStretch()
+
+        # — Status & Progress —
+        self.status_label = QLabel("Ready")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+
+        # — Top controls: load vs measure —
+        top_layout = QHBoxLayout()
+        self.load_raw_btn     = QPushButton("1: Load Raw Subs…")
+        self.load_aligned_btn = QPushButton("1: Load Aligned Subs…")
+        self.calibrate_btn       = QPushButton("1a: Calibrate && Align Subs")
+        self.measure_btn      = QPushButton("2: Measure && Photometry")
+        self.load_raw_btn.    clicked.connect(self.load_raw_subs)
+        self.load_aligned_btn.clicked.connect(self.load_aligned_subs)
+        self.calibrate_btn.clicked.connect(self.calibrate_and_align)
+        self.measure_btn.     clicked.connect(self.detect_stars)
+        self.detrend_combo = QComboBox()
+        self.detrend_combo.addItems(["No Detrend", "Linear", "Quadratic"])
+        self.save_aligned_btn = QPushButton("Save Aligned Frames…")
+        self.save_aligned_btn.clicked.connect(self.save_aligned_frames)
+       
+        
+        top_layout.addWidget(self.load_raw_btn)
+        top_layout.addWidget(self.load_aligned_btn)
+        top_layout.addWidget(self.calibrate_btn)
+        top_layout.addWidget(self.measure_btn)
+        top_layout.addStretch()
+        top_layout.addWidget(QLabel("Detrend:"))
+        top_layout.addWidget(self.detrend_combo)
+        top_layout.addWidget(self.save_aligned_btn)        
+
+        # — Star list & Plot —
+        middle = QHBoxLayout()
+        self.star_list  = QListWidget()
+        self.star_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.star_list.itemSelectionChanged.connect(self.update_plot_for_selection)
+        self.star_list.setStyleSheet("""
+            QListWidget::item:selected {
+                background: #3399ff; 
+                color: white;
+            }
+        """)
+        middle.addWidget(self.star_list, 2)
+        self.plot_widget = pg.PlotWidget(title="Light Curves")
+        self.plot_widget.addLegend()
+        middle.addWidget(self.plot_widget, 5)
+
+        # — Bottom: export & threshold —
+        bottom = QHBoxLayout()
+        bottom.addWidget(QLabel("Dip threshold (ppt):"))
+
+        # slider
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider.setRange(0, 100)
+        self.threshold_slider.setValue(20)
+        bottom.addWidget(self.threshold_slider)
+
+        # dynamically-updated label
+        self.threshold_value_label = QLabel(f"{self.threshold_slider.value()} ppt")
+        bottom.addWidget(self.threshold_value_label)
+
+        bottom.addStretch()
+
+        # detrend combo, export button, etc.
+
+        self.analyze_btn = QPushButton("Analyze Star…")
+        self.analyze_btn.clicked.connect(self.on_analyze)
+        bottom.addWidget(self.analyze_btn)
+        self.export_btn = QPushButton("Export CSV/FITS")
+        bottom.addWidget(self.export_btn)
+
+        # — Assemble —
+        main = QVBoxLayout(self)
+        main.addLayout(mode_layout)
+        main.addLayout(cal_layout)
+        main.addLayout(top_layout)
+        main.addLayout(middle)
+        main.addLayout(bottom)
+        # status at very bottom
+        statlay = QHBoxLayout()
+        statlay.addWidget(self.status_label)
+        statlay.addWidget(self.progress_bar)
+        main.addLayout(statlay)
+
+        # initialize
+        self.on_mode_changed(self.aligned_mode_rb, True)
+        self.detrend_combo.setCurrentIndex(2)
+        # And in case setCurrentIndex doesn’t auto‐fire, call it manually:
+        self.on_detrend_changed(2)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
+        self.analyze_btn.setEnabled(False)
+        self.calibrate_btn.hide()
+
+    def _on_threshold_changed(self, v: int):
+        # update the little “20 ppt” label
+        self.threshold_value_label.setText(f"{v} ppt")
+        # now re-apply your dip-detection
+        self.apply_threshold(v)
+        if hasattr(self, '_ref_overlay'):
+            self._ref_overlay._update_highlights()      
+
+    def open_settings(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Photometry & Analysis Settings")
+        layout = QVBoxLayout(dlg)
+
+        # — Photometry settings —
+        photo_box = QGroupBox("Photometry")
+        fb = QFormLayout(photo_box)
+        self.sep_spin = QDoubleSpinBox()
+        self.sep_spin.setRange(1.0, 20.0)
+        self.sep_spin.setSingleStep(0.5)
+        self.sep_spin.setValue(self.sep_threshold)
+        fb.addRow("SEP detection σ:", self.sep_spin)
+
+        self.border_spin = QDoubleSpinBox()
+        self.border_spin.setRange(0.0, 0.5)
+        self.border_spin.setSingleStep(0.01)
+        self.border_spin.setValue(self.border_fraction)
+        fb.addRow("Border fraction:", self.border_spin)
+        layout.addWidget(photo_box)
+
+        ens_box = QGroupBox("Ensemble Normalization")
+        ef = QFormLayout(ens_box)
+        self.ensemble_spin = QSpinBox()
+        self.ensemble_spin.setRange(1, 50)
+        self.ensemble_spin.setValue(self.ensemble_k)
+        ef.addRow("Comparison stars (k):", self.ensemble_spin)
+        layout.addWidget(ens_box)
+
+        # — Analysis settings —  
+        ana_box = QGroupBox("Analysis (period search)")
+        form = QFormLayout(ana_box)
+
+        # LS samples-per-peak only
+        self.ls_samp_spin = QSpinBox()
+        self.ls_samp_spin.setRange(1, 100)
+        self.ls_samp_spin.setValue(self.ls_samples_per_peak)
+        form.addRow("LS samples / peak:", self.ls_samp_spin)
+
+        # BLS period range
+        self.bls_min_spin = QDoubleSpinBox()
+        self.bls_min_spin.setRange(0.01, 10.0)
+        self.bls_min_spin.setValue(self.bls_min_period)
+        form.addRow("BLS min period [d]:", self.bls_min_spin)
+
+        self.bls_max_spin = QDoubleSpinBox()
+        self.bls_max_spin.setRange(0.01, 10.0)
+        self.bls_max_spin.setValue(self.bls_max_period)
+        form.addRow("BLS max period [d]:", self.bls_max_spin)
+
+        # BLS min duration (days)
+        self.bls_min_dur_spin = QDoubleSpinBox()
+        self.bls_min_dur_spin.setRange(0.0001, 1.0)
+        # if you haven’t yet stored a flat minimum-duration, fall back to fraction  
+        bls_min_dur = getattr(self, "bls_min_duration_days", 
+                              getattr(self, "bls_duration_min_frac", 0.005))
+        self.bls_min_dur_spin.setValue(bls_min_dur)
+        form.addRow("BLS min dur [d]:", self.bls_min_dur_spin)
+
+        # BLS max duration fraction
+        self.bls_max_frac_spin = QDoubleSpinBox()
+        self.bls_max_frac_spin.setRange(0.01, 1.0)
+        self.bls_max_frac_spin.setSingleStep(0.01)
+        self.bls_max_frac_spin.setValue(self.bls_duration_max_frac)
+        form.addRow("BLS max dur frac:", self.bls_max_frac_spin)
+
+        # BLS # durations
+        self.bls_ndur_spin = QSpinBox()
+        self.bls_ndur_spin.setRange(1, 200)
+        self.bls_ndur_spin.setValue(self.bls_n_durations)
+        form.addRow("BLS # durations:", self.bls_ndur_spin)
+
+        layout.addWidget(ana_box)
+
+        # OK/Cancel
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Photometry
+            self.sep_threshold   = self.sep_spin.value()
+            self.border_fraction = self.border_spin.value()
+            self.ensemble_k          = self.ensemble_spin.value()
+
+            # Lomb–Scargle
+            self.ls_samples_per_peak = self.ls_samp_spin.value()
+
+            # Box–Least–Squares
+            self.bls_min_period        = self.bls_min_spin.value()
+            self.bls_max_period        = self.bls_max_spin.value()
+            self.bls_min_duration_days = self.bls_min_dur_spin.value()
+            self.bls_duration_max_frac = self.bls_max_frac_spin.value()
+            self.bls_n_durations       = self.bls_ndur_spin.value()
+
+
+    def on_mode_changed(self, button, checked):
+        is_raw = checked and (button is self.raw_mode_rb)
+
+        # show/hide the Raw‐mode loaders + calibrate button
+        for w in (
+            self.load_raw_btn,
+            self.load_darks_btn,
+            self.load_flats_btn,
+            self.dark_status_label,
+            self.flat_status_label,
+            self.calibrate_btn,
+        ):
+            w.setVisible(is_raw)
+
+        # in Aligned mode only allow the aligned loader
+        self.load_aligned_btn.setVisible(not is_raw)
+
+        # Measure always stays visible
+        self.measure_btn.setVisible(True)
+
+    def load_raw_subs(self):
+        settings = QSettings()
+        start_dir = settings.value(
+            "ExoPlanet/lastRawFolder",
+            os.path.expanduser("~"),
+            type=str
+        )
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Raw Frames",
+            start_dir,
+            "FITS TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)"
+        )
+        if not paths:
+            return
+
+        # — remember for next time —
+        settings.setValue("ExoPlanet/lastRawFolder", os.path.dirname(paths[0]))
+
+        # ——— 1) HEADER PASS: extract DATE-OBS (with progress) ———
+        self.status_label.setText("Reading headers…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        datelist = []
+        for i, p in enumerate(paths, start=1):
+            ext = os.path.splitext(p)[1].lower()
+            ds = None
+
+            if ext == '.xisf':
+                try:
+                    xisf = XISF(p)
+                    img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
+                    if 'DATE-OBS' in img_meta:
+                        ds = img_meta['DATE-OBS'][0]['value']
+                except Exception:
+                    ds = None
+
+            elif ext in ('.fit', '.fits', '.fz'):
+                try:
+                    hdr, _ = get_valid_header(p)
+                    ds = hdr.get('DATE-OBS', None)
+                except Exception:
+                    ds = None
+
+            # parse into an astropy Time or leave None
+            t = None
+            if isinstance(ds, str):
+                try:
+                    t = Time(ds, format='isot', scale='utc')
+                except Exception as e:
+                    print(f"[DEBUG]   → parse error for {p}: {e}")
+                    t = None
+
+            datelist.append((p, t))
+
+            # update progress bar
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— 2) sort by timestamp (None last) or filename ———
+        # (False < True, so entries with real time come first)
+        datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
+        paths = [p for p, _ in datelist]
+
+        # ——— 3) IMAGE PASS: load, bin & stash headers (with progress) ———
+        self.image_paths     = paths
+        self._cached_images  = []
+        self._cached_headers = []
+        self.star_list.clear()
+        self.plot_widget.clear()
+
+        self.status_label.setText("Loading raw frames…")
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        for i, p in enumerate(paths, start=1):
+            self.status_label.setText(f"Loading raw frame {i}/{len(paths)}…")
+            QApplication.processEvents()
+
+            img, hdr, bit_depth, is_mono = load_image(p)
+            if img is None:
+                QMessageBox.warning(
+                    self, "Load Error",
+                    f"Failed to load raw frame:\n{os.path.basename(p)}"
+                )
+                self._cached_headers.append(None)
+            else:
+                # fast 2×2 binning
+                img_binned = bin2x2_numba(img)
+                self._cached_images.append(img_binned)
+
+                # stash header (FITS or XISF keywords dict)
+                ext = os.path.splitext(p)[1].lower()
+                if ext == '.xisf':
+                    try:
+                        xisf = XISF(p)
+                        img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
+                        self._cached_headers.append(img_meta)
+                    except Exception:
+                        self._cached_headers.append(None)
+                elif ext in ('.fit', '.fits', '.fz'):
+                    self._cached_headers.append(hdr)
+                else:
+                    # no header metadata on TIFF/others
+                    self._cached_headers.append(None)
+
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— 4) build Time array (masked where none) ———
+        strs = []
+        mask = []
+        for hdr in self._cached_headers:
+            if isinstance(hdr, dict) and 'DATE-OBS' in hdr:
+                val = hdr['DATE-OBS'][0]['value']
+                strs.append(val)
+                mask.append(False)
+            elif isinstance(hdr, Header) and 'DATE-OBS' in hdr:
+                strs.append(hdr['DATE-OBS'])
+                mask.append(False)
+            else:
+                strs.append('')
+                mask.append(True)
+
+        ma_strs = np.ma.MaskedArray(strs, mask=mask)
+        # masked entries turn into NaT automatically
+        self.times = Time(ma_strs, format='isot', scale='utc', out_subfmt='date')
+
+        # — done —
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"Loaded {len(self._cached_images)}/{len(paths)} raw frames"
+        )
+
+    def load_aligned_subs(self):
+        settings = QSettings()
+        start_dir = settings.value("ExoPlanet/lastAlignedFolder",
+                                os.path.expanduser("~"),
+                                type=str)
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Aligned Frames",
+            start_dir,
+            "FITS or TIFF (*.fit *.fits *.tif *.tiff *.xisf)"
+        )
+        if not paths:
+            return
+
+        # remember for next time
+        settings.setValue("ExoPlanet/lastAlignedFolder", os.path.dirname(paths[0]))
+
+        # ——— PASS 1: read headers & extract DATE-OBS with progress ———
+        self.status_label.setText("Reading metadata from aligned frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        datelist = []
+        for i, p in enumerate(paths, start=1):
+            ext = os.path.splitext(p)[1].lower()
+            ds = None
+
+            if ext == '.xisf':
+                try:
+                    xisf     = XISF(p)
+                    img_meta = xisf.get_images_metadata()[0]
+                    kw       = img_meta.get('FITSKeywords', {})
+                    if 'DATE-OBS' in kw:
+                        ds = kw['DATE-OBS'][0]['value']
+                except Exception:
+                    ds = None
+
+            elif ext in ('.fit', '.fits', '.fz'):
+                try:
+                    hdr, _ = get_valid_header(p)
+                    ds      = hdr.get('DATE-OBS', None)
+                except Exception:
+                    ds = None
+
+            # parse into astropy Time or None
+            t = None
+            if isinstance(ds, str):
+                try:
+                    t = Time(ds, format='isot', scale='utc')
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse DATE-OBS for {p}: {e}")
+                    t = None
+
+            datelist.append((p, t))
+
+            # update progress
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— sort by (has_time, then time or filename) ———
+        datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
+        sorted_paths = [p for p, _ in datelist]
+
+        # ——— PASS 2: load & bin images in sorted order ———
+        self.image_paths     = sorted_paths
+        self._cached_images  = []
+        self._cached_headers = []
+
+        self.status_label.setText("Loading aligned frames…")
+        self.progress_bar.setMaximum(len(sorted_paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        for i, p in enumerate(sorted_paths, start=1):
+            self.status_label.setText(f"Loading frame {i}/{len(sorted_paths)}…")
+            QApplication.processEvents()
+
+            img, hdr, bit_depth, is_mono = load_image(p)
+            if img is None:
+                QMessageBox.warning(
+                    self, "Load Error",
+                    f"Failed to load aligned frame:\n{os.path.basename(p)}"
+                )
+                self._cached_headers.append(None)
+            else:
+                img_binned = bin2x2_numba(img)
+                self._cached_images.append(img_binned)
+                self._cached_headers.append(hdr)
+
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— build Time array from our first‐pass times ———
+        iso_strs = []
+        mask     = []
+        for _, t in datelist:
+            if t is not None:
+                iso_strs.append(t.isot)
+                mask.append(False)
+            else:
+                iso_strs.append('')
+                mask.append(True)
+
+        ma_strs = np.ma.MaskedArray(iso_strs, mask=mask)
+        self.times = Time(
+            ma_strs,
+            format='isot',
+            scale='utc',
+            out_subfmt='date'
+        )
+
+        # ——— done! ———
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"Loaded {len(self._cached_images)}/{len(sorted_paths)} aligned frames"
+        )
+
+    def load_masters(self):
+        """
+        Load a single master dark or flat, 2×2 bin it immediately,
+        then check compatibility against any already‐loaded master.
+        Remembers the last‐used folder in QSettings.
+        """
+        # — pull last folder from QSettings —
+        settings = QSettings()
+        last_master_dir = settings.value(
+            "ExoPlanet/lastMasterFolder",
+            os.path.expanduser("~"),
+            type=str
+        )
+
+        # — configure file dialog —
+        sender = self.sender()
+        dlg = QFileDialog(self, "Select Master File",
+                        last_master_dir,
+                        "FITS, TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+        if not dlg.exec():
+            return
+
+        path = dlg.selectedFiles()[0]
+
+        settings.setValue("ExoPlanet/lastMasterFolder", os.path.dirname(path))
+
+        img, hdr, bit_depth, is_mono = load_image(path)
+        if img is None:
+            QMessageBox.warning(self, "Load Error", f"Failed to load master file:\n{path}")
+            return
+
+        # normalize dtype and bin
+        img = img.astype(np.float32)
+        binned = bin2x2_numba(img)
+
+        # decide dark vs flat
+        if "Dark" in sender.text():
+            # if there's already a flat, ensure shapes match
+            if self.master_flat is not None:
+                if not self._shapes_compatible(binned, self.master_flat):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "This master dark (binned) doesn’t match your existing flat."
+                    )
+                    return
+
+            self.master_dark = binned
+            self.dark_status_label.setText("Dark: ✅")
+            self.dark_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+            QMessageBox.information(self, "Master Dark Loaded", os.path.basename(path))
+
+        else:
+            # flat
+            if self.master_dark is not None:
+                if not self._shapes_compatible(self.master_dark, binned):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "This master flat (binned) doesn’t match your existing dark."
+                    )
+                    return
+
+            self.master_flat = binned
+            self.flat_status_label.setText("Flat: ✅")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+            QMessageBox.information(self, "Master Flat Loaded", os.path.basename(path))
+
+    def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
+        """
+        Return True if `master` and `other` can be used together in calibration:
+          - Exactly the same shape, OR
+          - master is 2D (H×W) and other is 3D (H×W×3), OR
+          - vice versa.
+        """
+        if master.shape == other.shape:
+            return True
+
+        # If one is 2D and the other is H×W×3, check the first two dims
+        if master.ndim == 2 and other.ndim == 3 and other.shape[:2] == master.shape:
+            return True
+        if other.ndim == 2 and master.ndim == 3 and master.shape[:2] == other.shape:
+            return True
+
+        return False
+
+    def calibrate_and_align(self):
+        """
+        Apply master dark/flat to each raw frame, then align them to the first frame.
+        """
+        if not self._cached_images:
+            QMessageBox.warning(self, "Calibrate", "Load raw subs first.")
+            return
+
+        self.status_label.setText("Calibrating & aligning frames…")
+        self.progress_bar.setVisible(True)
+        n = len(self._cached_images)
+        self.progress_bar.setMaximum(n)
+
+        reference_image_2d = None
+
+        for i, (img, hdr) in enumerate(zip(self._cached_images, self._cached_headers), start=1):
+            # 1) subtract master dark
+            if self.master_dark is not None:
+                img = img.astype(np.float32) - self.master_dark
+
+            # 2) divide by master flat
+            if self.master_flat is not None:
+                img = apply_flat_division_numba(img, self.master_flat)
+
+            # 3) debayer if needed
+            bayer = None
+            if hdr and isinstance(hdr, dict):
+                bayer = hdr.get('BAYERPAT')
+            elif hdr and hasattr(hdr, 'get'):
+                bayer = hdr.get('BAYERPAT', None)
+            if bayer:
+                img = debayer_fits_fast(img, bayer)
+            
+            # 4) promote to 3-channel if still mono
+            if img.ndim == 2:
+                img = np.stack([img, img, img], axis=2)
+
+            # 5) build mono “plane” for star registration
+            plane = img if img.ndim == 2 else img.mean(axis=2)
+
+            # 6) on first frame, set reference
+            if reference_image_2d is None:
+                reference_image_2d = plane.copy()
+
+            # 7) compute transform & apply
+            delta = StarRegistrationWorker.compute_affine_transform_astroalign(
+                plane, reference_image_2d
+            )
+            if delta is None:
+                delta = IDENTITY_2x3
+
+            # apply to full image
+            img_aligned = StarRegistrationThread.apply_affine_transform_static(img, delta)
+            # update our cache
+            self._cached_images[i-1] = img_aligned
+
+            # update progress
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Calibration & alignment complete")
+
+    def save_aligned_frames(self):
+        """Save out each image in self._cached_images using our global save_image()."""
+        if not self._cached_images:
+            QMessageBox.warning(self, "Save Aligned Frames", "No images to save. Run Calibrate & Align first.")
+            return
+
+        # pick a folder
+        out_dir = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
+        if not out_dir:
+            return
+
+        for i, orig_path in enumerate(self.image_paths):
+            img = self._cached_images[i]
+            # derive extension & format
+            ext = os.path.splitext(orig_path)[1].lstrip(".").lower()
+            fmt = ext if ext in ("fits","fit","tiff","tif","xisf","png","jpg","jpeg") else "fits"
+
+            # pull back the original header block if we saved it
+            hdr = None
+            if hasattr(self, "_cached_headers") and i < len(self._cached_headers):
+                hdr = self._cached_headers[i]
+
+            # choose an output name
+            base = os.path.splitext(os.path.basename(orig_path))[0]
+            out_name = f"{base}_aligned.{fmt}"
+            out_path = os.path.join(out_dir, out_name)
+
+            # call your global helper
+            # note: bit_depth, is_mono, image_meta, file_meta can all be None or defaulted
+            save_image(
+                img_array=img,
+                filename=out_path,
+                original_format=fmt,
+                bit_depth=None,
+                original_header=hdr,
+                is_mono=(img.ndim==2),
+                image_meta=None,
+                file_meta=None
+            )
+
+        QMessageBox.information(
+            self, "Save Complete",
+            f"Saved {len(self._cached_images)} aligned frames to:\n{out_dir}"
+        )
+
+    def detect_stars(self):
+        #print("=== detect_stars file order ===")
+        #for i, path in enumerate(self.image_paths, start=1):
+        #    print(f"{i:3d}: {path}")
+        #print("===============================")        
+        # — build & reset UI —
+        self.status_label.setText("Measuring frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(self.image_paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        # 0) make sure all the images are in memory
+        if not hasattr(self, "_cached_images") or len(self._cached_images) != len(self.image_paths):
+            self._cached_images = [load_image(p)[0] for p in self.image_paths]
+
+        n_frames = len(self._cached_images)
+        self.status_label.setText("Measuring frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(n_frames)
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        # 1) prepare a frame‐processing helper
+        def _process_frame(idx, img):
+            # mono-plane
+            plane = img.mean(axis=2) if img.ndim == 3 else img
+            mean, med, std = sigma_clipped_stats(plane)
+            zeroed = plane - med
+
+            # background
+            bkg    = sep.Background(zeroed)
+            bkgmap = bkg.back()
+            rmsmap = bkg.rms()
+            data_sub = zeroed - bkgmap
+
+            # SEP extract
+            try:
+                objs = sep.extract(
+                    data_sub,
+                    thresh=self.sep_threshold, err=rmsmap,
+                    minarea=16, deblend_nthresh=32, clean=True
+                )
+            except Exception:
+                objs = None
+
+            # compute FWHM/ecc if we got stars
+            if objs is None or len(objs)==0:
+                sc = 0; avg_fwhm = 0.0; avg_ecc = 0.0
+            else:
+                sc = len(objs)
+                a = np.clip(objs['a'],1e-3,None)
+                b = np.clip(objs['b'],1e-3,None)
+                fwhm_vals = 2.3548 * np.sqrt(a*b)
+                ecc_vals  = np.sqrt(1.0 - np.clip(b/a,0,1)**2)
+                avg_fwhm = float(np.nanmean(fwhm_vals))
+                avg_ecc   = float(np.nanmean(ecc_vals))
+
+            stats = {
+                "star_count":   sc,
+                "eccentricity": avg_ecc,
+                "mean":         float(np.mean(plane)),
+                "fwhm":         avg_fwhm
+            }
+            return idx, data_sub, objs, rmsmap, stats
+
+        # decide how many threads to spin up
+        cpu_cnt = multiprocessing.cpu_count()
+        n_workers = max(1, int(cpu_cnt * 0.8))
+
+        frame_data = {}
+        stats_map  = {}
+        # 2) fire off the jobs
+        with ThreadPoolExecutor(max_workers=n_workers) as exe:
+            futures = [
+                exe.submit(_process_frame, idx, img)
+                for idx, img in enumerate(self._cached_images)
+            ]
+            done = 0
+            for fut in as_completed(futures):
+                idx, data_sub, objs, rmsmap, stats = fut.result()
+                frame_data[idx] = (data_sub, objs, rmsmap)
+                stats_map[idx]  = stats
+
+                # update progress
+                done += 1
+                self.progress_bar.setValue(done)
+                self.status_label.setText(f"Measured frame {done}/{n_frames}")
+                QApplication.processEvents()
+
+        # 2) pick best reference by star_count/(FWHM * mean)
+        def quality(i):
+            s = stats_map[i]
+            return s["star_count"] / (s["fwhm"] * s["mean"] + 1e-8)
+
+        ref_idx   = max(stats_map.keys(), key=quality)
+        ref_stats = stats_map[ref_idx]
+
+        # 3) let user review that reference
+        #self.status_label.setText("Reviewing reference…")
+        #QApplication.processEvents()
+        #dlg = ReferenceFrameReviewDialog(self.image_paths[ref_idx], ref_stats, parent=self)
+        #if dlg.exec() != QDialog.DialogCode.Accepted or dlg.getUserChoice() != "use":
+        #    self.status_label.setText("Reference selection cancelled")
+        #    self.progress_bar.setVisible(False)
+        #    return
+
+        self.ref_idx = ref_idx
+        ref_path = self.image_paths[ref_idx]
+        self._emit_reference_later(ref_path)
+
+        # 4) pull the SEP catalog for reference
+        data_ref, objs_ref, rms_ref = frame_data[ref_idx]
+        if objs_ref is None or len(objs_ref) == 0:
+            QMessageBox.warning(self, "No Stars", "No stars found in reference frame.")
+            self.progress_bar.setVisible(False)
+            return
+
+        xs = objs_ref['x']
+        ys = objs_ref['y']
+
+        # --- drop detections too close to the edge ---
+        h, w = data_ref.shape
+        bf = self.border_fraction
+        keep_border = (
+            (xs > w*bf) & (xs < w*(1-bf)) &
+            (ys > h*bf) & (ys < h*(1-bf))
+        )
+        xs = xs[keep_border]
+        ys = ys[keep_border]
+
+        self.median_fwhm = ref_stats["fwhm"]
+        aper_r = max(2, 1.2 * self.median_fwhm)
+
+        # 5) vectorized aperture sums on *all* frames
+        n_stars  = len(xs)
+        n_frames = len(self._cached_images)
+        raw_flux = np.zeros((n_stars, n_frames), float)
+        flags    = np.zeros((n_stars, n_frames), int)
+
+        self.status_label.setText("Computing aperture sums…")
+        self.progress_bar.setMaximum(n_frames)
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        for t, img in enumerate(self._cached_images):
+            self.status_label.setText(f"Running Photometry frame {t+1}/{n_frames}…")
+            QApplication.processEvents()
+
+            plane = img.mean(axis=2) if img.ndim == 3 else img
+            if self.raw_mode_rb.isChecked():
+                if self.master_dark is not None:
+                    plane = plane.astype(np.float32) - self.master_dark
+                if self.master_flat is not None:
+                    plane = apply_flat_division_numba(plane, self.master_flat)
+
+            bkg    = sep.Background(plane - np.median(plane))
+            rmsmap = bkg.rms()
+            data_sub = plane - bkg.back()
+
+            fl, ferr, flg = sep.sum_circle(
+                data_sub, xs, ys, aper_r, err=rmsmap
+            )
+            raw_flux[:, t] = fl
+            flags[:, t]    = flg
+
+            self.progress_bar.setValue(t+1)
+            QApplication.processEvents()
+
+        # ——— 6) ENSEMBLE NORMALIZATION ———
+        # first compute each star’s “reference brightness” (e.g. median over all frames)
+        star_refs = np.nanmedian(raw_flux, axis=1)      # shape (n_stars,)
+        # we’ll build rel_flux star-by-star
+        rel_flux = np.zeros_like(raw_flux)
+
+        # decide how many neighbors to use
+        k = 10
+        n_stars = raw_flux.shape[0]
+
+        # for each star i...
+        for i in range(n_stars):
+            # 1) find the k stars whose reference brightness is closest to star_refs[i], excluding self
+            diffs = np.abs(star_refs - star_refs[i])
+            diffs[i] = np.inf
+            idxs = np.argpartition(diffs, k)[:k]   # indices of the k nearest
+            # 2) build ensemble median curve
+            ensemble = np.nanmedian(raw_flux[idxs, :], axis=0)  # length n_frames
+            # 3) normalize star i by that ensemble
+            #    guard against zero:
+            ensemble[ensemble == 0] = np.nan
+            rel_flux[i, :] = raw_flux[i, :] / ensemble
+
+        # — 6.5) detrend each star if requested —
+        if self.detrend_degree is not None:
+            n_stars = rel_flux.shape[0]
+
+            self.status_label.setText("Detrending curves…")
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setMaximum(n_stars)
+            self.progress_bar.setValue(0)
+            QApplication.processEvents()
+
+            for i in range(n_stars):
+                curve = rel_flux[i].copy()
+                # mask = only those frames where we actually _have_ a measurement
+                good = np.isfinite(curve) & (curve > 0)
+
+
+                # do the fit _without_ excluding flagged points
+                detrended = self._detrend_curve(curve, self.detrend_degree, mask=good)
+                rel_flux[i] = detrended
+
+                self.progress_bar.setValue(i+1)
+                QApplication.processEvents()
+
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("Detrending complete")  
+
+        # ——— 7) flag per‐star 3σ outliers, but don’t drop the star entirely ———
+        for i in range(n_stars):
+            curve = rel_flux[i, :]
+            med_i = np.nanmedian(curve)
+            mad_i = np.nanmedian(np.abs(curve - med_i))
+            # robust σ estimate
+            sigma_i = 1.4826 * mad_i if mad_i > 0 else np.nanstd(curve)
+            if sigma_i > 0:
+                outlier_mask = np.abs(curve - med_i) > 2 * sigma_i
+                flags[i, outlier_mask] = 1
+
+        # ——— 8) now drop only stars that are flagged in ≥ 75% of frames ———
+        good_counts = np.sum(flags == 0, axis=1)
+        keep       = good_counts >= (0.75 * n_frames)
+
+        xs       = xs[keep]
+        ys       = ys[keep]
+        rel_flux = rel_flux[keep, :]
+        flags    = flags[keep, :]
+
+        self.star_positions = list(zip(xs, ys))
+        self.fluxes         = rel_flux.copy()
+        self.flags          = flags
+
+        # ——— 9) populate list with survivors ———
+        self.star_list.clear()
+        for i, (x, y) in enumerate(self.star_positions):
+            item = QListWidgetItem(
+                f"#{i}: x={x:.1f}, y={y:.1f}   RelFlux={rel_flux[i,0]:.3f}   FWHM={self.median_fwhm:.2f}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.star_list.addItem(item)
+
+        # ——— 10) overlay & finish ———
+        self._show_reference_with_circles(data_ref, self.star_positions)
+
+        self.status_label.setText("Ready")
+        self.progress_bar.setVisible(False)
+        self.analyze_btn.setEnabled(True)
+        self._on_threshold_changed(self.threshold_slider.value())
+
+    def on_detrend_changed(self, idx: int):
+        # idx==0 → quadratic, 1 → linear, 2 → none
+        mapping = {0:None, 1:1, 2:2}
+        self.detrend_degree = mapping[idx]
+        # if we already have fluxes, replot immediately
+        if getattr(self, 'fluxes', None) is not None:
+            self.update_plot_for_selection()
+
+    def _emit_reference_later(self, path: str):
+        # wrap the actual emit in a singleShot so it always posts back to the event loop
+        QTimer.singleShot(0, lambda: self.referenceSelected.emit(path))
+
+    @staticmethod
+    def _detrend_curve(curve: np.ndarray, deg: int, mask: np.ndarray | None = None) -> np.ndarray:
+        """
+        Fit up to a degree‐`deg` polynomial to the curve vs frame index and divide it out,
+        using only the points where mask==True.  If you don't have enough points for `deg`,
+        it will automatically degrade to a lower degree (down to linear).
+        """
+        x = np.arange(curve.size)
+
+        # default mask = “finite, positive, unflagged”
+        if mask is None:
+            mask = np.isfinite(curve) & (curve > 0)
+
+        n_good = int(mask.sum())
+        # need at least 2 points to fit *anything*
+        if n_good < 2:
+            return curve
+
+        # pick the highest degree we can actually fit
+        fit_deg = min(deg, n_good - 1)
+        if fit_deg < 1:
+            return curve
+
+        # perform the fit *only* on the good points
+        try:
+            coeffs = np.polyfit(x[mask], curve[mask], fit_deg)
+
+        except Exception:
+            # e.g. singular matrix
+
+            return curve
+
+        trend = np.polyval(coeffs, x)
+        # avoid divide-by-zero
+        trend[trend == 0] = 1.0
+        return curve / trend
+
+    def _show_reference_with_circles(self, plane, positions):
+        dlg = ReferenceOverlayDialog(
+            plane=plane,
+            positions=positions,
+            target_median=self.median_fwhm,
+            parent=self
+        )
+        # keep a reference so it doesn’t get garbage‐collected
+        self._ref_overlay = dlg
+        dlg.show()
+
+
+    def update_plot_for_selection(self):
+        # 1) Sanity check
+        if not hasattr(self, 'fluxes') or self.fluxes is None:
+            QMessageBox.warning(
+                self, "No Photometry",
+                "Please run photometry before selecting a star."
+            )
+            return
+
+        # 2) Build the X axis: hours since first exposure, or frame index fallback
+        try:
+            import astropy.units as u
+            delta = (self.times - self.times[0]).to(u.hour).value  # array of hours
+            x_all = delta
+            bottom_label = "Hours since start"
+        except Exception:
+            # If self.times isn't set or parsing fails
+            x_all = np.arange(self.fluxes.shape[1])
+            bottom_label = "Frame"
+
+        # 3) Clear plot and relabel axes
+        self.plot_widget.clear()
+        self.plot_widget.addLegend()
+        self.plot_widget.setLabel('bottom', bottom_label)
+        self.plot_widget.setLabel('left',   'Relative Flux')
+
+        n_stars = self.fluxes.shape[0]
+
+        # 4) Compute each star’s median flux once (for normalization)
+        medians = np.nanmedian(self.fluxes, axis=1)
+
+        # 5) Which stars to draw?
+        inds = [item.data(Qt.ItemDataRole.UserRole)
+                for item in self.star_list.selectedItems()]
+
+        # 6) Plot each star’s relative flux curve
+        for idx in inds:
+            f = self.fluxes[idx]  # 1D array of length n_frames
+
+            # pull out this star’s flags (or assume none)
+            if hasattr(self, 'flags'):
+                flags_star = self.flags[idx]
+            else:
+                flags_star = np.zeros_like(f, dtype=int)
+
+            # only good, finite, positive, unflagged points
+            mask = (np.isfinite(f) & (f > 0) & (flags_star == 0))
+            if mask.sum() < 2:
+                continue
+
+            rel = f[mask] / medians[idx]
+            x   = x_all[mask]
+
+            color = pg.intColor(idx, hues=n_stars)
+            pen   = pg.mkPen(color=color, width=2)
+            brush = pg.mkBrush(color=color)
+
+            self.plot_widget.plot(
+                x, rel,
+                pen=pen,
+                symbol='o',
+                symbolBrush=brush,
+                name=f"Star #{idx}"
+            )
+
+    def apply_threshold(self, ppt_threshold: int):
+        """
+        Highlight any star whose light curve dips deeper than ppt_threshold parts-per-thousand.
+        """
+        if not hasattr(self, 'fluxes') or self.fluxes is None:
+            return
+
+        # compute dips in ppt: (1 – rel_flux) * 1000, but only where rel_flux < 1
+        dips = np.maximum((1.0 - self.fluxes) * 1000.0, 0.0)
+
+        # per-star maximum dip
+        max_dips = np.nanmax(dips, axis=1)
+
+        # find which stars exceed the threshold
+        flagged = set(np.nonzero(max_dips >= ppt_threshold)[0])
+
+        # clear any prior highlighting
+        for row in range(self.star_list.count()):
+            item = self.star_list.item(row)
+            item.setBackground(QBrush())
+
+        # highlight the offending ones
+        for idx in flagged:
+            item = self.star_list.item(idx)
+            if item is not None:
+                item.setBackground(QBrush(QColor('yellow')))
+
+        for sel_item in self.star_list.selectedItems():
+            sel_item.setBackground(QBrush(QColor('#3399ff')))
+            sel_item.setForeground(QBrush(Qt.GlobalColor.white))
+
+        # update status
+        if flagged:
+            self.status_label.setText(
+                f"{len(flagged)} star(s) dip ≥ {ppt_threshold} ppt")
+        else:
+            self.status_label.setText("No stars exceed dip threshold")
+
+        # also update any open overlay
+        for w in self.findChildren(ReferenceOverlayDialog):
+            w.update_dip_flags(flagged)      
+
+    def on_analyze(self):
+        sel = self.star_list.selectedItems()
+        if len(sel) != 1:
+            QMessageBox.information(self, "Analyze", "Please select exactly one star.")
+            return
+        idx = sel[0].data(Qt.ItemDataRole.UserRole)
+
+        # 1) Time + flux + mask
+        t_all = self.times.mjd
+        t_rel = t_all - t_all[0]
+        f_all = self.fluxes[idx]
+        good  = np.isfinite(f_all) & (self.flags[idx]==0)
+        t0, f0 = t_rel[good], f_all[good]
+        if len(t0) < 10:
+            QMessageBox.warning(self, "Analyze", "Not enough good points to analyze.")
+            return
+
+        # 2) Lomb–Scargle (data-driven bounds)
+        ls = LombScargle(t0, f0)
+        Tspan = np.ptp(t0)
+        dt    = np.median(np.diff(np.sort(t0)))
+        min_f = 1.0 / Tspan
+        max_f = 0.5  / dt
+        freq, power_ls = ls.autopower(
+            minimum_frequency    = min_f,
+            maximum_frequency    = max_f,
+            samples_per_peak     = self.ls_samples_per_peak
+        )
+        mask = (freq>0) & np.isfinite(power_ls)
+        freq, power_ls = freq[mask], power_ls[mask]
+        periods = 1.0/freq
+        order   = np.argsort(periods)
+        periods, power_ls = periods[order], power_ls[order]
+        best_period = periods[np.argmax(power_ls)]
+
+        # 3) Box–Least–Squares (absolute min duration)
+        bls = BoxLeastSquares(t0 * u.day, f0)
+        per_grid = np.linspace(
+            self.bls_min_period,
+            self.bls_max_period,
+            self.bls_n_periods
+        ) * u.day
+        min_p = per_grid.min().value
+        durations = np.linspace(
+            self.bls_min_duration_days,
+            0.5 * min_p,
+            self.bls_n_durations
+        ) * u.day
+
+        res      = bls.power(per_grid, durations)
+        power    = res.power
+        flat_idx = np.nanargmax(power)
+        if power.ndim == 2:
+            pi, di = np.unravel_index(flat_idx, power.shape)
+            P_bls  = res.period[pi]
+            D_bls  = durations[di]
+            T0_bls = res.transit_time[pi, di]
+        else:
+            pi, di = flat_idx, 0
+            P_bls  = res.period[pi]
+            D_bls  = durations[0]
+            T0_bls = res.transit_time[pi]
+
+        # 4) Phase‐fold & model
+        phase = (((t0*u.day) - T0_bls)/P_bls) % 1
+        phase = phase.value
+        model = bls.model(t0*u.day, P_bls, D_bls, T0_bls)
+
+        # 5) show in a dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Analysis: Star #{idx}")
+        layout = QVBoxLayout(dlg)
+
+        # LS plot
+        pg_ls = pg.PlotWidget(title="Lomb–Scargle")
+        pg_ls.plot(1/freq, power_ls, pen='w')
+        pg_ls.addLine(x=best_period, pen=pg.mkPen('y', style=Qt.PenStyle.DashLine))
+        pg_ls.setLabel('bottom','Period [d]')
+        pg_ls.showGrid(True,True)
+        layout.addWidget(pg_ls)
+
+        # BLS plot (pick the slice at dur_idx)
+        pg_bls = pg.PlotWidget(title="BLS Periodogram")
+        # if power is 2D, pick out the fixed-duration slice, otherwise plot the whole 1D
+        bls_power = res.power
+        if bls_power.ndim == 2:
+            y = bls_power[:, dur_idx]
+        else:
+            y = bls_power
+        pg_bls.plot(res.period.value, y, pen='w')
+        pg_bls.addLine(x=P_bls.value, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
+        pg_bls.setLabel('bottom','Period [d]')
+        pg_bls.showGrid(True,True)
+        layout.addWidget(pg_bls)
+
+        # Phase‐fold + box model
+        pg_fold = pg.PlotWidget(title=f"Phase‐Folded (P={P_bls.value:.4f} d)")
+        pg_fold.plot(phase, f0, pen=None, symbol='o', symbolBrush='c')
+        ord = np.argsort(phase)
+        pg_fold.plot(phase[ord], model[ord], pen=pg.mkPen('y',width=2))
+        pg_fold.setLabel('bottom','Phase')
+        pg_fold.showGrid(True,True)
+        layout.addWidget(pg_fold)
+
+        dlg.resize(900,600)
+        dlg.exec()
+
+    def export_data(self):
+        if self.fluxes is None or self.times is None:
+            QMessageBox.warning(self, "Export", "No photometry to export. Run Measure & Photometry first.")
+            return
+
+        # ask CSV vs FITS
+        dlg = QFileDialog(self, "Export Light Curves")
+        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        dlg.setNameFilters(["CSV files (*.csv)", "FITS files (*.fits)"])
+        if not dlg.exec():
+            return
+        path = dlg.selectedFiles()[0]
+        fmt = dlg.selectedNameFilter()
+
+        # assemble time & flux arrays
+        times_mjd = self.times.mjd              # float days
+        n_stars   = self.fluxes.shape[0]
+
+        # CSV path?
+        if fmt.startswith("CSV") or path.lower().endswith(".csv"):
+            df = pd.DataFrame({"MJD": times_mjd})
+            for i in range(n_stars):
+                df[f"STAR_{i}"] = self.fluxes[i]
+                df[f"FLAG_{i}"] = self.flags[i]
+            df.to_csv(path, index=False)
+            QMessageBox.information(self, "Export CSV", f"Wrote CSV →\n{path}")
+            return
+
+        # — otherwise we do FITS —  
+        # 1) build a header from the reference‐frame FITS/XISF header
+        hdr_out = fits.Header()
+        orig_hdr = None
+        if hasattr(self, "_cached_headers") and 0 <= self.ref_idx < len(self._cached_headers):
+            orig_hdr = self._cached_headers[self.ref_idx]
+
+        if isinstance(orig_hdr, fits.Header):
+            # copy a whitelist of keys
+            for key in ("OBJECT","TELESCOP","INSTRUME","OBSERVER",
+                        "DATE-OBS","EXPTIME","FILTER",
+                        "CRVAL1","CRVAL2","CRPIX1","CRPIX2",
+                        "CDELT1","CDELT2","CTYPE1","CTYPE2"):
+                if key in orig_hdr:
+                    hdr_out[key] = orig_hdr[key]
+        elif isinstance(orig_hdr, dict):
+            # XISF case: FITSKeywords dict → list of dicts
+            for key in ("OBJECT","TELESCOP","INSTRUME","DATE-OBS","EXPTIME","FILTER"):
+                if key in orig_hdr:
+                    val = orig_hdr[key][0].get("value")
+                    if val is not None:
+                        hdr_out[key] = val
+
+        # 2) add your reduction metadata
+        hdr_out["SEPTHR"]  = (self.sep_threshold,  "SEP detection threshold (σ)")
+        hdr_out["BFRAC"]   = (self.border_fraction, "Border‐ignore fraction")
+        hdr_out["REFIDX"]  = (self.ref_idx,         "Reference frame index")
+        hdr_out["MEDFWHM"] = (self.median_fwhm,     "Median FWHM of reference")
+
+        hdr_out["HISTORY"] = "Exported by ExoPlanetWindow.export_data()"
+
+        # 3) build table columns
+        cols = []
+        # TIME in MJD, double precision
+        cols.append(fits.Column(name="MJD", format="D", array=times_mjd))
+        for i in range(n_stars):
+            cols.append(fits.Column(name=f"STAR_{i}", format="E", array=self.fluxes[i]))
+            cols.append(fits.Column(name=f"FLAG_{i}", format="I", array=self.flags[i]))
+
+        tbl = fits.BinTableHDU.from_columns(cols, header=hdr_out, name="LIGHTCURVE")
+
+        # 4) write out
+        hdul = fits.HDUList([fits.PrimaryHDU(header=hdr_out), tbl])
+        hdul.writeto(path, overwrite=True)
+        QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
 
 class BackgroundNeutralizationDialog(QDialog):
     def __init__(self, image_manager, parent=None):
@@ -28328,7 +29963,7 @@ class MorphologyDialog(QDialog):
         self.preview_view.setScene(self.preview_scene)
 
         self.preview_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Enable panning
-        self.preview_view.setFixedSize(780, 400)  # Adjusted size to fit layout
+        #self.preview_view.setFixedSize(780, 400)  # Adjusted size to fit layout
 
         # Initialize QGraphicsPixmapItem
         self.pixmap_item = QGraphicsPixmapItem()
@@ -54543,109 +56178,123 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Copied", "Current RA/Dec copied to clipboard!")
     
 
+    @pyqtSlot()
     def open_image(self):
-        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)")
-        if self.image_path:
-            img_array, original_header, bit_depth, is_mono = load_image(self.image_path)
-            if img_array is not None:
+        """Slot for the “Load...” button — always pops up the file dialog."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "", 
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)"
+        )
+        if path:
+            self._load_image(path)
 
-                self.image_data = img_array
-                self.original_header = original_header
-                self.bit_depth = bit_depth
-                self.is_mono = is_mono
+    def load_image_path(self, path: str):
+        """Call this when you already know the filename."""
+        if path:
+            self._load_image(path)
 
-                # Prepare image for display
-                if img_array.ndim == 2:  # Single-channel image
-                    img_array = np.stack([img_array] * 3, axis=-1)  # Expand to 3 channels
+    def _load_image(self, path: str):
+        img_array, original_header, bit_depth, is_mono = load_image(path)
+        self.image_path = path
+        if img_array is not None:
+
+            self.image_data = img_array
+            self.original_header = original_header
+            self.bit_depth = bit_depth
+            self.is_mono = is_mono
+
+            # Prepare image for display
+            if img_array.ndim == 2:  # Single-channel image
+                img_array = np.stack([img_array] * 3, axis=-1)  # Expand to 3 channels
 
 
-                # Prepare image for display
-                img = (img_array * 255).astype(np.uint8)
-                height, width, _ = img.shape
-                bytes_per_line = 3 * width
-                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                pixmap = QPixmap.fromImage(qimg)
+            # Prepare image for display
+            img = (img_array * 255).astype(np.uint8)
+            height, width, _ = img.shape
+            bytes_per_line = 3 * width
+            qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
 
-                self.main_image = pixmap
-                scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self.mini_preview.setPixmap(scaled_pixmap)
+            self.main_image = pixmap
+            scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.mini_preview.setPixmap(scaled_pixmap)
 
-                self.main_scene.clear()
-                self.main_scene.addPixmap(pixmap)
-                self.main_preview.setSceneRect(QRectF(pixmap.rect()))
-                self.zoom_level = 1.0
-                self.main_preview.resetTransform()
-                self.main_preview.centerOn(self.main_scene.sceneRect().center())
-                self.update_green_box()
+            self.main_scene.clear()
+            self.main_scene.addPixmap(pixmap)
+            self.main_preview.setSceneRect(QRectF(pixmap.rect()))
+            self.zoom_level = 1.0
+            self.main_preview.resetTransform()
+            self.main_preview.centerOn(self.main_scene.sceneRect().center())
+            self.update_green_box()
 
-                # Initialize WCS from FITS header if it is a FITS file
-                if self.image_path.lower().endswith(('.fits', '.fit')):
-                    with fits.open(self.image_path) as hdul:
-                        self.header = hdul[0].header
+            # Initialize WCS from FITS header if it is a FITS file
+            if self.image_path.lower().endswith(('.fits', '.fit')):
+                with fits.open(self.image_path) as hdul:
+                    self.header = hdul[0].header
+                    
+                    try:
+                        # Use only the first two dimensions for WCS
+                        self.wcs = WCS(self.header, naxis=2, relax=True)
                         
-                        try:
-                            # Use only the first two dimensions for WCS
-                            self.wcs = WCS(self.header, naxis=2, relax=True)
-                            
-                            # Calculate and set pixel scale
-                            pixel_scale_matrix = self.wcs.pixel_scale_matrix
-                            self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
-                            self.center_ra, self.center_dec = self.wcs.wcs.crval
-                            self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
-                            self.print_corner_coordinates()
-                            
-                            print(f"Header CROTA2 Value: {self.header.get('CROTA2', 'Not Found')}")
+                        # Calculate and set pixel scale
+                        pixel_scale_matrix = self.wcs.pixel_scale_matrix
+                        self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
+                        self.center_ra, self.center_dec = self.wcs.wcs.crval
+                        self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
+                        self.print_corner_coordinates()
+                        
+                        print(f"Header CROTA2 Value: {self.header.get('CROTA2', 'Not Found')}")
 
-                            # Display WCS information
-                            # Set orientation based on WCS data if available
-                            if 'CROTA2' in self.header:
-                                try:
-                                    self.orientation = float(self.header['CROTA2'])  # Convert to float
-                                except (ValueError, TypeError):
-                                    self.orientation = None
-                                    print("CROTA2 found, but could not convert to float.")
-                            else:
-                                # Use calculate_orientation if CROTA2 is not present
-                                self.orientation = calculate_orientation(self.header)
-                                if self.orientation is None:
-                                    print("Orientation: CD matrix elements not found in WCS header.")
+                        # Display WCS information
+                        # Set orientation based on WCS data if available
+                        if 'CROTA2' in self.header:
+                            try:
+                                self.orientation = float(self.header['CROTA2'])  # Convert to float
+                            except (ValueError, TypeError):
+                                self.orientation = None
+                                print("CROTA2 found, but could not convert to float.")
+                        else:
+                            # Use calculate_orientation if CROTA2 is not present
+                            self.orientation = calculate_orientation(self.header)
+                            if self.orientation is None:
+                                print("Orientation: CD matrix elements not found in WCS header.")
 
-                            # --- ✅ Ensure `self.orientation` is a float before using it ---
-                            if self.orientation is not None:
-                                try:
-                                    self.orientation = float(self.orientation)  # Final conversion check
-                                    print(f"Orientation: {self.orientation:.2f}°")
-                                    self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
-                                except (ValueError, TypeError):
-                                    print(f"Failed to format orientation: {self.orientation}")
-                                    self.orientation_label.setText("Orientation: N/A")
-                            else:
+                        # --- ✅ Ensure `self.orientation` is a float before using it ---
+                        if self.orientation is not None:
+                            try:
+                                self.orientation = float(self.orientation)  # Final conversion check
+                                print(f"Orientation: {self.orientation:.2f}°")
+                                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                            except (ValueError, TypeError):
+                                print(f"Failed to format orientation: {self.orientation}")
                                 self.orientation_label.setText("Orientation: N/A")
+                        else:
+                            self.orientation_label.setText("Orientation: N/A")
 
 
-                            print(f"WCS data loaded from FITS header: RA={self.center_ra}, Dec={self.center_dec}, "
-                                f"Pixel Scale={self.pixscale} arcsec/px")
-                            
-                            
-                        except ValueError as e:
-                            print("Error initializing WCS:", e)
-                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
-                elif self.image_path.lower().endswith('.xisf'):
-                    # Load WCS from XISF properties
-                    xisf_meta = self.extract_xisf_metadata(self.image_path)
-                    self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
+                        print(f"WCS data loaded from FITS header: RA={self.center_ra}, Dec={self.center_dec}, "
+                            f"Pixel Scale={self.pixscale} arcsec/px")
+                        
+                        
+                    except ValueError as e:
+                        print("Error initializing WCS:", e)
+                        QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
+            elif self.image_path.lower().endswith('.xisf'):
+                # Load WCS from XISF properties
+                xisf_meta = self.extract_xisf_metadata(self.image_path)
+                self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
 
-                    # Construct WCS header from XISF properties
-                    header = self.construct_fits_header_from_xisf(xisf_meta)
-                    if header:
-                        try:
-                            self.initialize_wcs_from_header(header)
-                        except ValueError as e:
-                            print("Error initializing WCS from XISF:", e)
-                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
-                else:
-                    # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
-                    self.prompt_blind_solve()
+                # Construct WCS header from XISF properties
+                header = self.construct_fits_header_from_xisf(xisf_meta)
+                if header:
+                    try:
+                        self.initialize_wcs_from_header(header)
+                    except ValueError as e:
+                        print("Error initializing WCS from XISF:", e)
+                        QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
+            else:
+                # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
+                self.prompt_blind_solve()
 
     def extract_xisf_metadata(self, xisf_path):
         """
@@ -54713,24 +56362,32 @@ class MainWindow(QMainWindow):
         """ Convert XISF metadata to a FITS header compatible with WCS """
         header = fits.Header()
 
-        # Define WCS keywords to populate
-        wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", 
-                        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+        # numeric‐only keys (everything except CTYPE1/2)
+        numeric_keys = {
+            "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+            "CDELT1", "CDELT2", "A_ORDER", "B_ORDER",
+            "AP_ORDER", "BP_ORDER"
+        }
 
-        # Populate WCS and FITS keywords
-        if 'FITSKeywords' in xisf_meta:
-            for keyword, values in xisf_meta['FITSKeywords'].items():
-                for entry in values:
-                    if 'value' in entry:
-                        value = entry['value']
-                        if keyword in wcs_keywords:
-                            try:
-                                value = int(value)
-                            except ValueError:
-                                value = float(value)
-                        header[keyword] = value
+        for keyword, entries in xisf_meta.get('FITSKeywords', {}).items():
+            for entry in entries:
+                if 'value' not in entry:
+                    continue
+                val = entry['value']
+                if keyword in ("CTYPE1", "CTYPE2"):
+                    # always a string
+                    header[keyword] = val
+                elif keyword in numeric_keys:
+                    # try integer, then float
+                    try:
+                        header[keyword] = int(val)
+                    except (ValueError, TypeError):
+                        header[keyword] = float(val)
+                else:
+                    # anything else just store raw
+                    header[keyword] = val
 
-        # Manually add WCS information if missing
+        # ensure CTYPEs exist
         header.setdefault('CTYPE1', 'RA---TAN')
         header.setdefault('CTYPE2', 'DEC--TAN')
 
@@ -54888,6 +56545,90 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.perform_blind_solve()
 
+    def perform_blind_solve2(self):
+        """
+        First attempts to plate-solve the loaded image using ASTAP.
+        If that fails, falls back to performing a blind solve via Astrometry.net.
+        Updates the WCS (self.wcs) and header (self.header) accordingly.
+        """
+        # --- First, try ASTAP plate solve ---
+        self.status_label.setText("Status: Attempting ASTAP plate solve...")
+        QApplication.processEvents()
+        solved_header = self.plate_solve_image()  # This method should try to solve via ASTAP and return a header (or None).
+        if solved_header is not None:
+            self.status_label.setText("ASTAP plate solve succeeded.")
+            # instead of manually doing header.update + WCS(...)
+            self.apply_wcs_header(solved_header)
+            #QMessageBox.information(self, "Plate Solve", 
+            #                        "ASTAP plate solve succeeded. WCS, orientation, and pixscale updated.")
+            return
+
+        # --- If ASTAP plate solve failed, fall back to blind solve via Astrometry.net ---
+        self.status_label.setText("Status: ASTAP failed. Proceeding with blind solve via Astrometry.net...")
+        QApplication.processEvents()
+
+        # Load or prompt for API key
+        api_key = load_api_key()
+        if not api_key:
+            api_key, ok = QInputDialog.getText(self, "Enter API Key", "Please enter your Astrometry.net API key:")
+            if ok and api_key:
+                save_api_key(api_key)
+            else:
+                self.status_label.setText("API Key Required: Blind solve cannot proceed without an API key.")
+                QApplication.processEvents()
+                return
+
+        try:
+            self.status_label.setText("Status: Logging in to Astrometry.net...")
+            QApplication.processEvents()
+
+            # Step 1: Login to Astrometry.net
+            session_key = self.login_to_astrometry(api_key)
+
+            self.status_label.setText("Status: Uploading image to Astrometry.net...")
+            QApplication.processEvents()
+            
+            # Step 2: Upload the image and get submission ID
+            subid = self.upload_image_to_astrometry(self.image_path, session_key)
+
+            self.status_label.setText("Status: Waiting for job ID...")
+            QApplication.processEvents()
+            
+            # Step 3: Poll for the job ID until it's available
+            job_id = self.poll_submission_status(subid)
+            if not job_id:
+                raise TimeoutError("Failed to retrieve job ID from Astrometry.net after multiple attempts.")
+            
+            self.status_label.setText("Status: Job ID found, processing image...")
+            QApplication.processEvents()
+
+            # Step 4a: Poll for the calibration data, ensuring RA/Dec are available
+            calibration_data = self.poll_calibration_data(job_id)
+            if not calibration_data:
+                raise TimeoutError("Calibration data did not complete in the expected timeframe.")
+            
+            # Set pixscale and other necessary attributes from calibration data
+            self.pixscale = calibration_data.get('pixscale')
+
+            self.status_label.setText("Status: Calibration complete, downloading WCS file...")
+            QApplication.processEvents()
+
+            # Step 4b: Download the WCS FITS file for complete calibration data
+            wcs_header = self.retrieve_and_apply_wcs(job_id)
+            if not wcs_header:
+                raise TimeoutError("Failed to retrieve WCS FITS file from Astrometry.net.")
+
+            self.status_label.setText("Status: Applying astrometric solution to the image...")
+            QApplication.processEvents()
+
+            # Apply calibration data to the WCS
+            self.apply_wcs_header(wcs_header)
+            self.status_label.setText("Status: Blind Solve Complete.")
+            #QMessageBox.information(self, "Blind Solve Complete", "Astrometric solution applied successfully.")
+        except Exception as e:
+            self.status_label.setText("Status: Blind Solve Failed.")
+            #QMessageBox.critical(self, "Blind Solve Failed", f"An error occurred: {str(e)}")
+
     def perform_blind_solve(self):
         """
         First attempts to plate-solve the loaded image using ASTAP.
@@ -54917,7 +56658,8 @@ class MainWindow(QMainWindow):
             if ok and api_key:
                 save_api_key(api_key)
             else:
-                QMessageBox.warning(self, "API Key Required", "Blind solve cannot proceed without an API key.")
+                self.status_label.setText("API Key Required: Blind solve cannot proceed without an API key.")
+                QApplication.processEvents()
                 return
 
         try:
@@ -54979,7 +56721,7 @@ class MainWindow(QMainWindow):
         On success, the method updates self.header and initializes self.wcs.
         """
         if not hasattr(self, 'image_path') or not self.image_path:
-            QMessageBox.warning(self, "Plate Solve", "No image loaded.")
+            #QMessageBox.warning(self, "Plate Solve", "No image loaded.")
             return
 
         # Check if the ASTAP executable is set in settings.
@@ -54995,9 +56737,9 @@ class MainWindow(QMainWindow):
             if new_path:
                 astap_exe = new_path
                 self.settings.setValue("astap/exe_path", astap_exe)
-                QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
+                #QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
             else:
-                QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
+                #QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
                 return None
 
         # Normalize the loaded image.
@@ -55007,7 +56749,7 @@ class MainWindow(QMainWindow):
         try:
             tmp_path = self.save_temp_fits_image(normalized, self.image_path)
         except Exception as e:
-            QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
+            #QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
             return
 
         # Run ASTAP on the temporary file.
@@ -55016,12 +56758,12 @@ class MainWindow(QMainWindow):
         print("Running ASTAP with arguments:", args)
         process.start(astap_exe, args)
         if not process.waitForStarted(5000):
-            QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
+            #QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
             os.remove(tmp_path)
             self.blind_solve_image()
             return
         if not process.waitForFinished(300000):
-            QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
+            #QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
             os.remove(tmp_path)
             self.blind_solve_image()
             return
@@ -55035,7 +56777,7 @@ class MainWindow(QMainWindow):
         
         if exit_code != 0:
             os.remove(tmp_path)
-            QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
+            #QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
             self.blind_solve_image()
             return
 
@@ -55130,9 +56872,9 @@ class MainWindow(QMainWindow):
         self.header.update(solved_header)
         try:
             self.wcs = WCS(self.header, naxis=2, relax=True)
-            QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
+            #QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
         except Exception as e:
-            QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
+            #QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
             return
 
         return solved_header
@@ -56217,7 +57959,7 @@ class MainWindow(QMainWindow):
     def force_blind_solve(self, dialog):
         """Force a blind solve on the currently loaded image."""
         dialog.accept()  # Close the settings dialog
-        self.prompt_blind_solve()  # Call the blind solve function
+        self.perform_blind_solve()  # Call the blind solve function
 
 
 def extract_wcs_data(file_path):
