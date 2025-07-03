@@ -27640,10 +27640,10 @@ class ExoPlanetWindow(QDialog):
 
         self.bls_min_period       = 0.05
         self.bls_max_period       = 2.0
-        self.bls_n_periods        = 5000
-        self.bls_duration_min_frac= 0.005
+        self.bls_n_periods        = 1000
+        self.bls_duration_min_frac= 0.01
         self.bls_duration_max_frac= 0.5
-        self.bls_n_durations      = 50
+        self.bls_n_durations      = 20
         # ------------------------------------------   
               
         # — Mode selector —
@@ -27828,27 +27828,28 @@ class ExoPlanetWindow(QDialog):
         self.ls_samp_spin.setValue(self.ls_samples_per_peak)
         form.addRow("LS samples / peak:", self.ls_samp_spin)
 
-        # BLS period range
-        self.bls_min_spin = QDoubleSpinBox()
-        self.bls_min_spin.setRange(0.01, 10.0)
+        # BLS min/max period
+        self.bls_min_spin = QDoubleSpinBox(); self.bls_min_spin.setRange(0.01, 10.0)
         self.bls_min_spin.setValue(self.bls_min_period)
         form.addRow("BLS min period [d]:", self.bls_min_spin)
 
-        self.bls_max_spin = QDoubleSpinBox()
-        self.bls_max_spin.setRange(0.01, 10.0)
+        self.bls_max_spin = QDoubleSpinBox(); self.bls_max_spin.setRange(0.01, 10.0)
         self.bls_max_spin.setValue(self.bls_max_period)
         form.addRow("BLS max period [d]:", self.bls_max_spin)
 
-        # BLS min duration (days)
-        self.bls_min_dur_spin = QDoubleSpinBox()
-        self.bls_min_dur_spin.setRange(0.0001, 1.0)
-        # if you haven’t yet stored a flat minimum-duration, fall back to fraction  
-        bls_min_dur = getattr(self, "bls_min_duration_days", 
-                              getattr(self, "bls_duration_min_frac", 0.005))
-        self.bls_min_dur_spin.setValue(bls_min_dur)
-        form.addRow("BLS min dur [d]:", self.bls_min_dur_spin)
+        # BLS # periods
+        self.bls_nper_spin = QSpinBox()
+        self.bls_nper_spin.setRange(10, 20000)
+        self.bls_nper_spin.setValue(self.bls_n_periods)
+        form.addRow("BLS # periods:", self.bls_nper_spin)
 
-        # BLS max duration fraction
+        # BLS min/max duration fraction
+        self.bls_min_frac_spin = QDoubleSpinBox()
+        self.bls_min_frac_spin.setRange(0.0001, 1.0)
+        self.bls_min_frac_spin.setSingleStep(0.001)
+        self.bls_min_frac_spin.setValue(self.bls_duration_min_frac)
+        form.addRow("BLS min dur frac:", self.bls_min_frac_spin)
+
         self.bls_max_frac_spin = QDoubleSpinBox()
         self.bls_max_frac_spin.setRange(0.01, 1.0)
         self.bls_max_frac_spin.setSingleStep(0.01)
@@ -27860,6 +27861,7 @@ class ExoPlanetWindow(QDialog):
         self.bls_ndur_spin.setRange(1, 200)
         self.bls_ndur_spin.setValue(self.bls_n_durations)
         form.addRow("BLS # durations:", self.bls_ndur_spin)
+
 
         layout.addWidget(ana_box)
 
@@ -27884,7 +27886,8 @@ class ExoPlanetWindow(QDialog):
             # Box–Least–Squares
             self.bls_min_period        = self.bls_min_spin.value()
             self.bls_max_period        = self.bls_max_spin.value()
-            self.bls_min_duration_days = self.bls_min_dur_spin.value()
+            self.bls_n_periods         = self.bls_nper_spin.value()
+            self.bls_duration_min_frac = self.bls_min_frac_spin.value()
             self.bls_duration_max_frac = self.bls_max_frac_spin.value()
             self.bls_n_durations       = self.bls_ndur_spin.value()
 
