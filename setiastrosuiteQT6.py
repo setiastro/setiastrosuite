@@ -27757,6 +27757,7 @@ class ExoPlanetWindow(QDialog):
         self.analyze_btn.clicked.connect(self.on_analyze)
         bottom.addWidget(self.analyze_btn)
         self.export_btn = QPushButton("Export CSV/FITS")
+        self.export_btn.clicked.connect(self.export_data)
         bottom.addWidget(self.export_btn)
 
         # — Assemble —
@@ -28905,7 +28906,7 @@ class ExoPlanetWindow(QDialog):
 
         # ask CSV vs FITS
         dlg = QFileDialog(self, "Export Light Curves")
-        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         dlg.setNameFilters(["CSV files (*.csv)", "FITS files (*.fits)"])
         if not dlg.exec():
             return
