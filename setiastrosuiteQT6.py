@@ -28832,8 +28832,8 @@ class ExoPlanetWindow(QDialog):
         ) * u.day
         min_p = per_grid.min().value
         durations = np.linspace(
-            self.bls_min_duration_days,
-            0.5 * min_p,
+            self.bls_duration_min_frac * min_p,
+            self.bls_duration_max_frac * min_p,
             self.bls_n_durations
         ) * u.day
 
@@ -42626,11 +42626,11 @@ class StarStretchTab(QWidget):
         self.scnrCheckBox = QCheckBox("Remove Green via SCNR (Optional)", self)
         left_layout.addWidget(self.scnrCheckBox)
 
-        # **Create a horizontal layout for Refresh Preview, Undo, and Redo buttons**
+        # **Create a horizontal layout for Apply, Undo, and Redo buttons**
         action_buttons_layout = QHBoxLayout()
 
-        # Refresh Preview button
-        self.refreshButton = QPushButton("Refresh Preview", self)
+        # Apply button
+        self.refreshButton = QPushButton("Apply", self)
         self.refreshButton.clicked.connect(self.generatePreview)
         action_buttons_layout.addWidget(self.refreshButton)
 
