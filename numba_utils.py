@@ -167,6 +167,41 @@ def rescale_image_numba(image, factor):
                                        image[y1, x1, c] * dx * dy)
         return output
 
+@njit(parallel=True, fastmath=True)
+def bin2x2_numba(image):
+    """
+    Downsample the image by 2×2 via simple averaging (“integer binning”).
+    Works on 2D (H×W) or 3D (H×W×C) arrays.  If dimensions aren’t even,
+    the last row/column is dropped.
+    """
+    h, w = image.shape[:2]
+    h2 = h // 2
+    w2 = w // 2
+
+    # allocate output
+    if image.ndim == 2:
+        out = np.empty((h2, w2), dtype=np.float32)
+        for i in prange(h2):
+            for j in prange(w2):
+                # average 2×2 block
+                s = image[2*i  , 2*j  ] \
+                  + image[2*i+1, 2*j  ] \
+                  + image[2*i  , 2*j+1] \
+                  + image[2*i+1, 2*j+1]
+                out[i, j] = s * 0.25
+    else:
+        c = image.shape[2]
+        out = np.empty((h2, w2, c), dtype=np.float32)
+        for i in prange(h2):
+            for j in prange(w2):
+                for k in range(c):
+                    s = image[2*i  , 2*j  , k] \
+                      + image[2*i+1, 2*j  , k] \
+                      + image[2*i  , 2*j+1, k] \
+                      + image[2*i+1, 2*j+1, k]
+                    out[i, j, k] = s * 0.25
+
+    return out
 
 @njit(parallel=True, fastmath=True)
 def flip_horizontal_numba(image):
