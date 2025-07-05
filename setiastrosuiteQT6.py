@@ -73,6 +73,9 @@ import astroalign
 import gzip
 import traceback
 import sep
+from astroquery.mast import Tesscut
+from lightkurve import TessTargetPixelFile
+import oktopus
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -269,7 +272,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.0"
+VERSION = "2.19.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1396,14 +1399,14 @@ class AstroEditingSuite(QMainWindow):
 
         # when it’s done, schedule a popup on the main thread
         def _notify(_):
-            # QTimer.singleShot with 0ms delays execution back onto the GUI thread
-            QTimer.singleShot(0, 
-                lambda: QMessageBox.information(
-                    self, 
-                    "Blind Solve", 
-                    "Blind-solve is complete!"
-                )
-            )
+            QTimer.singleShot(0, lambda: QMessageBox.information(self, "Blind Solve", "Blind-solve is complete!"))
+
+            # Forward RA/Dec from WIMI → ExoPlanetWindow
+            if hasattr(self, 'exoplanet_detect_window') and self.exoplanet_detect_window:
+                ra  = getattr(self.wimi_tab, "center_ra", None)
+                dec = getattr(self.wimi_tab, "center_dec", None)
+                if ra is not None and dec is not None:
+                    self.exoplanet_detect_window.receive_wcs_coordinates(ra, dec)
         future.add_done_callback(_notify)
 
     def convo_deconvo_show(self):
@@ -27645,7 +27648,11 @@ class ExoPlanetWindow(QDialog):
         self.bls_duration_max_frac= 0.5
         self.bls_n_durations      = 20
         # ------------------------------------------   
-              
+
+        # — WCS coordinates —
+        self.wcs_ra = None
+        self.wcs_dec = None
+
         # — Mode selector —
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("Mode:"))
@@ -27697,11 +27704,11 @@ class ExoPlanetWindow(QDialog):
         # — Top controls: load vs measure —
         top_layout = QHBoxLayout()
         self.load_raw_btn     = QPushButton("1: Load Raw Subs…")
-        self.load_aligned_btn = QPushButton("1: Load Aligned Subs…")
+        self.load_aligned_btn = QPushButton("Load, Measure && Photometry…")
         self.calibrate_btn       = QPushButton("1a: Calibrate && Align Subs")
         self.measure_btn      = QPushButton("2: Measure && Photometry")
         self.load_raw_btn.    clicked.connect(self.load_raw_subs)
-        self.load_aligned_btn.clicked.connect(self.load_aligned_subs)
+        self.load_aligned_btn.clicked.connect(self.load_and_measure_subs)
         self.calibrate_btn.clicked.connect(self.calibrate_and_align)
         self.measure_btn.     clicked.connect(self.detect_stars)
         self.detrend_combo = QComboBox()
@@ -27752,10 +27759,16 @@ class ExoPlanetWindow(QDialog):
         bottom.addStretch()
 
         # detrend combo, export button, etc.
-
+        self.identify_btn = QPushButton("Identify Star…")
+        self.identify_btn.clicked.connect(self.on_identify_star)
+        bottom.addWidget(self.identify_btn)
         self.analyze_btn = QPushButton("Analyze Star…")
         self.analyze_btn.clicked.connect(self.on_analyze)
         bottom.addWidget(self.analyze_btn)
+        self.fetch_tesscut_btn = QPushButton("Query TESScut Light Curve")
+        self.fetch_tesscut_btn.setEnabled(False)
+        self.fetch_tesscut_btn.clicked.connect(self.query_tesscut)
+        bottom.addWidget(self.fetch_tesscut_btn)        
         self.export_btn = QPushButton("Export CSV/FITS")
         self.export_btn.clicked.connect(self.export_data)
         bottom.addWidget(self.export_btn)
@@ -27909,9 +27922,14 @@ class ExoPlanetWindow(QDialog):
 
         # in Aligned mode only allow the aligned loader
         self.load_aligned_btn.setVisible(not is_raw)
+        self.measure_btn.setVisible(is_raw)
 
-        # Measure always stays visible
-        self.measure_btn.setVisible(True)
+
+    def load_and_measure_subs(self):
+        # 1) load & sort
+        self.load_aligned_subs()
+        # 2) once loaded, immediately run photometry
+        self.detect_stars()
 
     def load_raw_subs(self):
         settings = QSettings()
@@ -28280,16 +28298,7 @@ class ExoPlanetWindow(QDialog):
             # 2) divide by master flat
             if self.master_flat is not None:
                 img = apply_flat_division_numba(img, self.master_flat)
-
-            # 3) debayer if needed
-            bayer = None
-            if hdr and isinstance(hdr, dict):
-                bayer = hdr.get('BAYERPAT')
-            elif hdr and hasattr(hdr, 'get'):
-                bayer = hdr.get('BAYERPAT', None)
-            if bayer:
-                img = debayer_fits_fast(img, bayer)
-            
+           
             # 4) promote to 3-channel if still mono
             if img.ndim == 2:
                 img = np.stack([img, img, img], axis=2)
@@ -28463,18 +28472,21 @@ class ExoPlanetWindow(QDialog):
         ref_idx   = max(stats_map.keys(), key=quality)
         ref_stats = stats_map[ref_idx]
 
-        # 3) let user review that reference
-        #self.status_label.setText("Reviewing reference…")
-        #QApplication.processEvents()
-        #dlg = ReferenceFrameReviewDialog(self.image_paths[ref_idx], ref_stats, parent=self)
-        #if dlg.exec() != QDialog.DialogCode.Accepted or dlg.getUserChoice() != "use":
-        #    self.status_label.setText("Reference selection cancelled")
-        #    self.progress_bar.setVisible(False)
-        #    return
-
+        # 3) fire off Whats In My Image and plate solving
         self.ref_idx = ref_idx
-        ref_path = self.image_paths[ref_idx]
-        self._emit_reference_later(ref_path)
+
+        # grab the binned image & its header
+        plane = self._cached_images[ref_idx]
+        hdr   = self._cached_headers[ref_idx]
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp.name
+        # write the binned plane with its header
+        fits.PrimaryHDU(data=plane).writeto(tmp_path, overwrite=True)
+        tmp.close()
+
+        # now plate‐solve that binned FITS
+        self._emit_reference_later(tmp_path)
 
         # 4) pull the SEP catalog for reference
         data_ref, objs_ref, rms_ref = frame_data[ref_idx]
@@ -28721,76 +28733,112 @@ class ExoPlanetWindow(QDialog):
                 for item in self.star_list.selectedItems()]
 
         # 6) Plot each star’s relative flux curve
+        max_gap = 1.0
         for idx in inds:
-            f = self.fluxes[idx]  # 1D array of length n_frames
+                # build rel flux & time
+                f = self.fluxes[idx]
+                flags_star = (self.flags[idx] if hasattr(self, 'flags') 
+                            else np.zeros_like(f, int))
+                mask = (np.isfinite(f) & (f > 0) & (flags_star == 0))
+                if mask.sum() < 2:
+                    continue
 
-            # pull out this star’s flags (or assume none)
-            if hasattr(self, 'flags'):
-                flags_star = self.flags[idx]
-            else:
-                flags_star = np.zeros_like(f, dtype=int)
+                rel = f[mask] / medians[idx]
+                x   = x_all[mask]
+                ma  = self.moving_average(rel, window=5)
 
-            # only good, finite, positive, unflagged points
-            mask = (np.isfinite(f) & (f > 0) & (flags_star == 0))
-            if mask.sum() < 2:
-                continue
+                # find where gaps exceed max_gap
+                dt = np.diff(x)
+                breaks = np.where(dt > max_gap)[0]
+                segments = np.split(np.arange(len(x)), breaks+1)
 
-            rel = f[mask] / medians[idx]
-            x   = x_all[mask]
+                color = pg.intColor(idx, hues=n_stars)
+                pen   = pg.mkPen(color=color, width=2)
+                dash  = pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine)
+                brush = pg.mkBrush(color=color)
 
-            color = pg.intColor(idx, hues=n_stars)
-            pen   = pg.mkPen(color=color, width=2)
-            brush = pg.mkBrush(color=color)
+                dull_color = QColor(color)
+                dull_color.setAlpha(60)            # out of 255, lower → more transparent
+                dull_pen   = pg.mkPen(color=dull_color, width=1)
+                dull_brush = pg.mkBrush(color=dull_color)
 
-            self.plot_widget.plot(
-                x, rel,
-                pen=pen,
-                symbol='o',
-                symbolBrush=brush,
-                name=f"Star #{idx}"
-            )
+                for seg in segments:
+                    xs, ys, mas = x[seg], rel[seg], ma[seg]
+                    # raw points (dimmer!)
+                    self.plot_widget.plot(
+                        xs, ys,
+                        pen=dull_pen,
+                        symbol='o',
+                        symbolBrush=dull_brush,
+                        name=f"Star #{idx}"
+                    )
+                    # moving average (full strength)
+                    self.plot_widget.plot(
+                        xs, mas,
+                        pen=dash,
+                        name=f"MA (w=5)"
+                    )
 
-    def apply_threshold(self, ppt_threshold: int):
+    def apply_threshold(self, ppt_threshold: int, sigma_upper: float=3.0):
         """
-        Highlight any star whose light curve dips deeper than ppt_threshold parts-per-thousand.
+        Flag dips below `ppt_threshold` ppt *and* clip any spikes > `sigma_upper` above the moving average.
         """
         if not hasattr(self, 'fluxes') or self.fluxes is None:
             return
 
-        # compute dips in ppt: (1 – rel_flux) * 1000, but only where rel_flux < 1
-        dips = np.maximum((1.0 - self.fluxes) * 1000.0, 0.0)
+        # relative flux and compute MA & sigma per star
+        rel = self.fluxes  # stars × frames
+        n_stars, n_frames = rel.shape
 
-        # per-star maximum dip
-        max_dips = np.nanmax(dips, axis=1)
+        # build moving averages star-by-star
+        ma = np.array([self.moving_average(rel[i], window=5) for i in range(n_stars)])
+        # robust σ estimate of the *upper* side
+        diffs = rel - ma
+        # only consider diffs > 0 for σ
+        pos = diffs.copy()
+        pos[pos < 0] = np.nan
+        sigma_up = 1.4826 * np.nanmedian(np.abs(pos - np.nanmedian(pos, axis=1)[:,None]), axis=1)
 
-        # find which stars exceed the threshold
-        flagged = set(np.nonzero(max_dips >= ppt_threshold)[0])
+        # compute dips (ppt) relative to MA
+        dips = np.maximum((ma - rel)*1000, 0)  # bigger if rel << ma
 
-        # clear any prior highlighting
+        # per-star flags:  
+        #  (a) dips ≥ ppt_threshold  
+        #  (b) remove any timepoints where rel > ma + sigma_upper*sigma_up 
+        flagged = set()
+        for i in range(n_stars):
+            dip_mask = dips[i] >= ppt_threshold
+            spike_mask = rel[i] > (ma[i] + sigma_upper*sigma_up[i])
+            # apply hysteresis: require at least 2 consecutive dip points to count
+            consec = np.convolve(dip_mask.astype(int), [1,1], mode='valid') == 2
+            dip_hyst = np.concatenate([[False], consec, [False]])
+            if np.any(dip_hyst):
+                flagged.add(i)
+            # zero out the spiky points so they don’t get highlighted
+            if np.any(spike_mask):
+                self.flags[i, spike_mask] = 1
+
+        # highlight in the star list
         for row in range(self.star_list.count()):
             item = self.star_list.item(row)
             item.setBackground(QBrush())
-
-        # highlight the offending ones
         for idx in flagged:
             item = self.star_list.item(idx)
-            if item is not None:
-                item.setBackground(QBrush(QColor('yellow')))
+            if item: item.setBackground(QBrush(QColor('yellow')))
+        self.status_label.setText(f"{len(flagged)} star(s) dip ≥ {ppt_threshold} ppt")   
 
-        for sel_item in self.star_list.selectedItems():
-            sel_item.setBackground(QBrush(QColor('#3399ff')))
-            sel_item.setForeground(QBrush(Qt.GlobalColor.white))
+    def moving_average(self, curve, window=5):
+        """
+        Return a centered moving average of `curve` with length `window`.
+        5→ average of points [i-2..i+2], etc.
+        """
+        import numpy as np
+        pad = window//2
+        ext = np.pad(curve, pad, mode="edge")
+        kernel = np.ones(window)/window
+        ma = np.convolve(ext, kernel, mode="valid")
+        return ma
 
-        # update status
-        if flagged:
-            self.status_label.setText(
-                f"{len(flagged)} star(s) dip ≥ {ppt_threshold} ppt")
-        else:
-            self.status_label.setText("No stars exceed dip threshold")
-
-        # also update any open overlay
-        for w in self.findChildren(ReferenceOverlayDialog):
-            w.update_dip_flags(flagged)      
 
     def on_analyze(self):
         sel = self.star_list.selectedItems()
@@ -28855,6 +28903,8 @@ class ExoPlanetWindow(QDialog):
             D_bls  = durations[0]
             T0_bls = res.transit_time[pi]
 
+        dur_idx = di
+
         # 4) Phase‐fold & model
         phase = (((t0*u.day) - T0_bls)/P_bls) % 1
         phase = phase.value
@@ -28899,6 +28949,115 @@ class ExoPlanetWindow(QDialog):
         dlg.resize(900,600)
         dlg.exec()
 
+    def on_identify_star(self):
+        # 1) Get the RA/Dec
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(self, "Identify Star", "Please select exactly one star first.")
+            return
+        ra, dec = radec
+        coord = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, frame='icrs')
+
+        # 2) Configure SIMBAD: clear everything, then ask for otype + V-flux
+        custom_simbad = Simbad()
+        custom_simbad.reset_votable_fields()          # clear defaults
+        custom_simbad.add_votable_fields("otype")     # object type
+        custom_simbad.add_votable_fields("flux(V)")   # V-band magnitude
+
+        # 3) Retry up to 5×
+        result = None
+        for attempt in range(1, 6):
+            try:
+                result = custom_simbad.query_region(coord, radius=5*u.arcsec)
+                break
+            except Exception as e:
+                print(f"[DEBUG] SIMBAD attempt {attempt} failed: {e}")
+                if attempt == 5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return
+                time.sleep(1)
+
+        # 4) Debug: show which columns we got
+        if result is not None:
+            print("SIMBAD column names:", result.colnames)
+            print("=== SIMBAD raw result ===")
+            result.pprint()
+            print("=========================")
+
+        # 5) No hits?
+        if result is None or len(result) == 0:
+            QMessageBox.information(
+                self, "No SIMBAD Matches",
+                f"No objects found within 5″ of {ra:.6f}, {dec:.6f}."
+            )
+            return
+
+        # 6) Pick out the first row & dynamically find the right keys
+        row = result[0]
+        cols = [c.lower() for c in result.colnames]
+
+        # find the columns
+        id_col    = next(c for c in result.colnames if c.lower()=="main_id")
+        ra_col    = next(c for c in result.colnames if c.lower()=="ra")
+        dec_col   = next(c for c in result.colnames if c.lower()=="dec")
+        otype_col = next((c for c in result.colnames if c.lower()=="otype"), None)
+        flux_col  = next((c for c in result.colnames if c.upper()=="V" or c.upper()=="FLUX_V"), None)
+
+        # extract & decode
+        main_id = row[id_col]
+        if isinstance(main_id, bytes):
+            main_id = main_id.decode("utf-8")
+
+        ra_val  = float(row[ra_col])
+        dec_val = float(row[dec_col])
+        match_coord = SkyCoord(ra=ra_val*u.deg, dec=dec_val*u.deg, frame='icrs')
+        offset = coord.separation(match_coord).arcsec
+
+        obj_type = None
+        if otype_col:
+            obj_type = row[otype_col]
+            if isinstance(obj_type, bytes):
+                obj_type = obj_type.decode("utf-8")
+        obj_type = obj_type or "n/a"
+
+        vmag = None
+        if flux_col:
+            raw = row[flux_col]
+            try:
+                vmag = float(raw)
+            except Exception:
+                vmag = None
+        vmag_str = f"{vmag:.3f}" if vmag is not None else "n/a"
+
+        # 7) Show results
+        simbad_url = (
+            "https://simbad.cds.unistra.fr/simbad/sim-id"
+            f"?Ident={quote(main_id)}"
+        )
+
+        # Create a QMessageBox with two buttons: “OK” and “Open in SIMBAD”
+        msg = QMessageBox(self)
+        msg.setWindowTitle("SIMBAD Lookup")
+        msg.setText(
+            f"Nearest object:\n"
+            f"  ID:     {main_id}\n"
+            f"  Type:   {obj_type}\n"
+            f"  V mag:  {vmag_str}\n"
+            f"  Offset: {offset:.2f}″"
+        )
+        # add Open‐in‐Simbad as an ActionRole so it shows up beside the standard buttons
+        open_btn = msg.addButton("Open in SIMBAD", QMessageBox.ButtonRole.ActionRole)
+        ok_btn   = msg.addButton(QMessageBox.StandardButton.Ok)
+        # run the dialog
+        msg.exec()
+
+        # if they clicked our button, open the URL in the default browser
+        if msg.clickedButton() == open_btn:
+            webbrowser.open(simbad_url)
+
     def export_data(self):
         if self.fluxes is None or self.times is None:
             QMessageBox.warning(self, "Export", "No photometry to export. Run Measure & Photometry first.")
@@ -28911,31 +29070,45 @@ class ExoPlanetWindow(QDialog):
         if not dlg.exec():
             return
         path = dlg.selectedFiles()[0]
-        fmt = dlg.selectedNameFilter()
+        fmt  = dlg.selectedNameFilter()
 
         # assemble time & flux arrays
         times_mjd = self.times.mjd              # float days
         n_stars   = self.fluxes.shape[0]
 
-        # CSV path?
+        # --- compute per-star RA/Dec from WCS + pixel positions ---
+        # self.star_positions is list of (x,y) in pixels
+        # pull the solved WCS from the WIMI tab in the main window
+        wimi_tab = self.parent().wimi_tab
+        wcs      = wimi_tab.wcs
+        xs = np.array([xy[0] for xy in self.star_positions])
+        ys = np.array([xy[1] for xy in self.star_positions])
+        sky = wcs.pixel_to_world(xs, ys)
+        ras = sky.ra.deg
+        decs = sky.dec.deg
+
+        # CSV export: add STAR_i_RA and STAR_i_DEC columns
         if fmt.startswith("CSV") or path.lower().endswith(".csv"):
             df = pd.DataFrame({"MJD": times_mjd})
             for i in range(n_stars):
-                df[f"STAR_{i}"] = self.fluxes[i]
-                df[f"FLAG_{i}"] = self.flags[i]
+                df[f"STAR_{i}"]     = self.fluxes[i]
+                df[f"FLAG_{i}"]     = self.flags[i]
+                df[f"STAR_{i}_RA"]  = ras[i]
+                df[f"STAR_{i}_DEC"] = decs[i]
             df.to_csv(path, index=False)
             QMessageBox.information(self, "Export CSV", f"Wrote CSV →\n{path}")
             return
 
-        # — otherwise we do FITS —  
-        # 1) build a header from the reference‐frame FITS/XISF header
+        # — otherwise FITS export —
+
+        # 1) build a header from reference‐frame metadata
         hdr_out = fits.Header()
         orig_hdr = None
         if hasattr(self, "_cached_headers") and 0 <= self.ref_idx < len(self._cached_headers):
             orig_hdr = self._cached_headers[self.ref_idx]
 
+        # copy whitelist from orig_hdr if available
         if isinstance(orig_hdr, fits.Header):
-            # copy a whitelist of keys
             for key in ("OBJECT","TELESCOP","INSTRUME","OBSERVER",
                         "DATE-OBS","EXPTIME","FILTER",
                         "CRVAL1","CRVAL2","CRPIX1","CRPIX2",
@@ -28943,35 +29116,191 @@ class ExoPlanetWindow(QDialog):
                 if key in orig_hdr:
                     hdr_out[key] = orig_hdr[key]
         elif isinstance(orig_hdr, dict):
-            # XISF case: FITSKeywords dict → list of dicts
             for key in ("OBJECT","TELESCOP","INSTRUME","DATE-OBS","EXPTIME","FILTER"):
-                if key in orig_hdr:
-                    val = orig_hdr[key][0].get("value")
-                    if val is not None:
-                        hdr_out[key] = val
+                val = orig_hdr.get(key, [{}])[0].get("value")
+                if val is not None:
+                    hdr_out[key] = val
 
-        # 2) add your reduction metadata
-        hdr_out["SEPTHR"]  = (self.sep_threshold,  "SEP detection threshold (σ)")
-        hdr_out["BFRAC"]   = (self.border_fraction, "Border‐ignore fraction")
+        # 2) reduction metadata
+        hdr_out["SEPTHR"]  = (self.sep_threshold,  "SEP detection threshold (sigma)")
+        hdr_out["BFRAC"]   = (self.border_fraction, "Border ignore fraction")
         hdr_out["REFIDX"]  = (self.ref_idx,         "Reference frame index")
         hdr_out["MEDFWHM"] = (self.median_fwhm,     "Median FWHM of reference")
+        hdr_out.add_history("Exported by Seti Astro Suite")
 
-        hdr_out["HISTORY"] = "Exported by ExoPlanetWindow.export_data()"
-
-        # 3) build table columns
-        cols = []
-        # TIME in MJD, double precision
-        cols.append(fits.Column(name="MJD", format="D", array=times_mjd))
+        # 3) light curve table
+        cols = [fits.Column(name="MJD",  format="D", array=times_mjd)]
         for i in range(n_stars):
-            cols.append(fits.Column(name=f"STAR_{i}", format="E", array=self.fluxes[i]))
-            cols.append(fits.Column(name=f"FLAG_{i}", format="I", array=self.flags[i]))
+            cols.append(fits.Column(name=f"STAR_{i}",      format="E", array=self.fluxes[i]))
+            cols.append(fits.Column(name=f"FLAG_{i}",      format="I", array=self.flags[i]))
+        lc_hdu = fits.BinTableHDU.from_columns(cols, header=hdr_out, name="LIGHTCURVE")
 
-        tbl = fits.BinTableHDU.from_columns(cols, header=hdr_out, name="LIGHTCURVE")
+        # 4) star‐metadata table (per‐star x,y,RA,Dec)
+        star_idx = np.arange(n_stars, dtype=int)
+        cols2 = [
+            fits.Column(name="INDEX", format="I", array=star_idx),
+            fits.Column(name="X",     format="E", array=xs),
+            fits.Column(name="Y",     format="E", array=ys),
+            fits.Column(name="RA",    format="D", array=ras),
+            fits.Column(name="DEC",   format="D", array=decs),
+        ]
+        stars_hdu = fits.BinTableHDU.from_columns(cols2, name="STARS")
 
-        # 4) write out
-        hdul = fits.HDUList([fits.PrimaryHDU(header=hdr_out), tbl])
+        # 5) write out
+        primary = fits.PrimaryHDU(header=hdr_out)
+        hdul    = fits.HDUList([primary, lc_hdu, stars_hdu])
         hdul.writeto(path, overwrite=True)
         QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
+
+    @pyqtSlot(float, float)
+    def receive_wcs_coordinates(self, ra, dec):
+        """
+        Accepts RA/Dec from WIMI after plate solve.
+        Stores coordinates and enables TESScut button.
+        """
+        self.wcs_ra = ra
+        self.wcs_dec = dec
+        self.status_label.setText(f"WCS received: RA={ra:.5f}, Dec={dec:.5f}")
+        self.fetch_tesscut_btn.setEnabled(True)  
+
+    def query_tesscut(self):
+        # 1) Get the RA/Dec of the selected star
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(
+                self, "No Star Selected",
+                "Please select a star from the list to fetch TESScut data."
+            )
+            return
+        ra, dec = radec
+        print(f"[DEBUG] TESScut Query Requested for RA={ra:.6f}, Dec={dec:.6f}")
+        coord = SkyCoord(ra=ra, dec=dec, unit="deg")
+
+        size = 10         # cutout size in pixels
+        MAX_RETRIES = 5
+
+        # ─── Manifest retry loop ───
+        manifest = None
+        for mtry in range(1, MAX_RETRIES+1):
+            try:
+                print(f"[DEBUG] Manifest attempt {mtry}/{MAX_RETRIES}…")
+                manifest = Tesscut.get_cutouts(coordinates=coord, size=size)
+                if manifest:
+                    print(f"[DEBUG] Manifest OK: {len(manifest)} sector(s).")
+                    break
+                else:
+                    raise RuntimeError("Empty manifest")
+            except Exception as me:
+                print(f"[DEBUG] Manifest attempt {mtry} failed: {me}")
+                if mtry == MAX_RETRIES:
+                    QMessageBox.information(
+                        self, "No TESS Data",
+                        "There are no TESS cutouts available at that position."
+                    )
+                    self.status_label.setText("No TESScut data found.")
+                    return
+                time.sleep(2)
+
+        # ─── Download retry loop ───
+        self.status_label.setText("Querying TESScut…")
+        QApplication.processEvents()
+        cache_dir = os.path.join(os.path.expanduser("~"), ".setiastro", "tesscut_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        for dtry in range(1, MAX_RETRIES+1):
+            try:
+                print(f"[DEBUG] Download attempt {dtry}/{MAX_RETRIES}…")
+                cutouts = Tesscut.download_cutouts(
+                    coordinates=coord, size=size, path=cache_dir
+                )
+                if not cutouts:
+                    raise RuntimeError("No cutouts downloaded")
+                print(f"[DEBUG] Downloaded {len(cutouts)} cutout(s).")
+
+                for cutout in cutouts:
+                    original_path = cutout['Local Path']
+                    print(f"[DEBUG] Processing: {original_path}")
+
+                    # Read sector from header
+                    with fits.open(original_path, mode='readonly') as hdul:
+                        sector = hdul[1].header.get('SECTOR', 'unknown')
+
+                    # Cache filename
+                    ext = os.path.splitext(original_path)[1]
+                    cache_key = (
+                        f"tess_sector{sector}_"
+                        f"ra{int(round(ra*10000))}_"
+                        f"dec{int(round(dec*10000))}{ext}"
+                    )
+                    cached_path = os.path.join(cache_dir, cache_key)
+
+                    if not os.path.exists(cached_path):
+                        print(f"[DEBUG] Caching as: {cached_path}")
+                        shutil.move(original_path, cached_path)
+                    else:
+                        print(f"[DEBUG] Already cached: {cached_path}")
+                        os.remove(original_path)
+
+                    # Open with Lightkurve
+                    tpf = TessTargetPixelFile(cached_path)
+
+                    # Custom circular aperture on selected star
+                    xpix, ypix = tpf.wcs.world_to_pixel(coord)
+                    ny, nx = tpf.flux.shape[1], tpf.flux.shape[2]
+                    Y, X = np.mgrid[:ny, :nx]
+                    r_pix = 2.5
+                    aper_mask = ((X - xpix)**2 + (Y - ypix)**2) <= r_pix**2
+
+                    lc = (
+                        tpf.to_lightcurve(aperture_mask=aper_mask)
+                        .remove_nans()
+                        .normalize()
+                    )
+                    # Clip both ends: no points > 5× or < –1×
+                    upper, lower = 5.0, -1.0
+                    mask = (lc.flux < upper) & (lc.flux > lower)
+                    n_clipped = np.sum(~mask)
+                    print(f"[DEBUG] Clipping {n_clipped} points outside [{lower}, {upper}]×")
+                    lc = lc[mask]
+
+                    # then plot the cleaned curve
+                    lc.plot(label=f"Sector {tpf.sector} (clipped)")
+                    plt.title(f"TESS Light Curve - Sector {tpf.sector}")
+                    plt.tight_layout()
+                    plt.show()
+
+                self.status_label.setText("TESScut fetch complete.")
+                return
+
+            except Exception as de:
+                print(f"[ERROR] Download attempt {dtry} failed: {de}")
+                self.status_label.setText(
+                    f"TESScut attempt {dtry}/{MAX_RETRIES} failed."
+                )
+                QApplication.processEvents()
+                if dtry == MAX_RETRIES:
+                    QMessageBox.critical(
+                        self, "TESScut Error",
+                        f"TESScut failed after {MAX_RETRIES} attempts.\n\n{de}"
+                    )
+                    self.status_label.setText("TESScut fetch failed.")
+                else:
+                    time.sleep(2)
+
+    def get_selected_star_radec(self):
+        selected_items = self.star_list.selectedItems()
+        if not selected_items:
+            return None
+
+        selected_index = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        x, y = self.star_positions[selected_index]
+
+        # Need WCS to convert
+        if hasattr(self.parent().wimi_tab, 'wcs'):
+            wcs = self.parent().wimi_tab.wcs
+            sky = wcs.pixel_to_world(x, y)
+            return sky.ra.degree, sky.dec.degree
+        return None                         
 
 class BackgroundNeutralizationDialog(QDialog):
     def __init__(self, image_manager, parent=None):
@@ -57126,6 +57455,15 @@ class MainWindow(QMainWindow):
 
         print(f" -> pixscale = {self.pixscale} arcsec/pixel")
         print(f" -> orientation = {self.orientation}°")
+        try:
+            cr1 = wcs_header.get('CRVAL1')
+            cr2 = wcs_header.get('CRVAL2')
+            if cr1 is not None and cr2 is not None:
+                self.center_ra  = float(cr1)
+                self.center_dec = float(cr2)
+                print(f" -> center RA/Dec = {self.center_ra:.6f}, {self.center_dec:.6f}")
+        except Exception:
+            print("Warning: could not extract CRVAL1/CRVAL2")        
 
 
     def calculate_pixel_from_ra_dec(self, ra, dec):
