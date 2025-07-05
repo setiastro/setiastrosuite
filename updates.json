@@ -1,9 +1,9 @@
 {
-  "version": "2.19.0",
+  "version": "2.19.1",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.0/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.0/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Exoplanet Transit Detector!  Also supports xisf formats!! See release notes for more details."
+  "notes": "Exoplanet Transit Detector updates!  Be sure to check out the release notes for all the details."
 }
