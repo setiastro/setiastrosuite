@@ -1,9 +1,9 @@
 {
-  "version": "2.19.1",
+  "version": "2.19.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Exoplanet Transit Detector updates!  Be sure to check out the release notes for all the details."
+  "notes": "Bug Fix for missing style in the compiled version when trying to use TESScut in Exoplanet detectors"
 }
