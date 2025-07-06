@@ -7,6 +7,7 @@ from tifffile import imwrite
 
 import pickle
 import os
+os.environ['LIGHTKURVE_STYLE'] = 'default'
 import tempfile
 import time
 import json
@@ -76,6 +77,9 @@ import sep
 from astroquery.mast import Tesscut
 from lightkurve import TessTargetPixelFile
 import oktopus
+import lightkurve as lk
+
+lk.MPLSTYLE = None
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -272,7 +276,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.1"
+VERSION = "2.19.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -28817,6 +28821,8 @@ class ExoPlanetWindow(QDialog):
             # zero out the spiky points so they don’t get highlighted
             if np.any(spike_mask):
                 self.flags[i, spike_mask] = 1
+        for dlg in self.findChildren(ReferenceOverlayDialog):
+            dlg.update_dip_flags(flagged)                
 
         # highlight in the star list
         for row in range(self.star_list.count()):
@@ -28832,7 +28838,7 @@ class ExoPlanetWindow(QDialog):
         Return a centered moving average of `curve` with length `window`.
         5→ average of points [i-2..i+2], etc.
         """
-        import numpy as np
+
         pad = window//2
         ext = np.pad(curve, pad, mode="edge")
         kernel = np.ones(window)/window
