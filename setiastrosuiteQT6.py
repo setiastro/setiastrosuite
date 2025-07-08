@@ -276,7 +276,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.2"
+VERSION = "2.19.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -27632,6 +27632,7 @@ class ExoPlanetWindow(QDialog):
         self.median_fwhm    = None
         self.master_dark    = None
         self.master_flat    = None
+        self.exposure_time = None
         # ------------ new settings ------------
         # SEP detection threshold in σ
         self.sep_threshold  = 5.0
@@ -27776,6 +27777,9 @@ class ExoPlanetWindow(QDialog):
         self.export_btn = QPushButton("Export CSV/FITS")
         self.export_btn.clicked.connect(self.export_data)
         bottom.addWidget(self.export_btn)
+        self.export_aavso_btn = QPushButton("Export → AAVSO")
+        self.export_aavso_btn.clicked.connect(self.export_to_aavso)
+        bottom.addWidget(self.export_aavso_btn)
 
         # — Assemble —
         main = QVBoxLayout(self)
@@ -28046,6 +28050,32 @@ class ExoPlanetWindow(QDialog):
                     # no header metadata on TIFF/others
                     self._cached_headers.append(None)
 
+            if self.exposure_time is None:
+                # ——— FITS files ———
+                if isinstance(hdr, fits.Header):
+                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
+                    self.exposure_time = hdr.get('EXPOSURE',
+                                                hdr.get('EXPTIME', None))
+
+                # ——— XISF files ———
+                elif isinstance(hdr, dict):
+                    # you already do this for DATE-OBS; same here:
+                    # XISF metadata dict has 'file_meta' and 'image_meta'
+                    img_meta = hdr.get('image_meta', {}) or {}
+                    fits_kw  = img_meta.get('FITSKeywords', {})
+                    val = None
+                    if 'EXPOSURE' in fits_kw:
+                        val = fits_kw['EXPOSURE'][0].get('value')
+                    elif 'EXPTIME' in fits_kw:
+                        val = fits_kw['EXPTIME'][0].get('value')
+                    try:
+                        self.exposure_time = float(val)
+                    except Exception:
+                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                        self.exposure_time = None
+
+                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
+
             self.progress_bar.setValue(i)
             QApplication.processEvents()
 
@@ -28165,6 +28195,32 @@ class ExoPlanetWindow(QDialog):
                 img_binned = bin2x2_numba(img)
                 self._cached_images.append(img_binned)
                 self._cached_headers.append(hdr)
+
+            if self.exposure_time is None:
+                # ——— FITS files ———
+                if isinstance(hdr, fits.Header):
+                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
+                    self.exposure_time = hdr.get('EXPOSURE',
+                                                hdr.get('EXPTIME', None))
+
+                # ——— XISF files ———
+                elif isinstance(hdr, dict):
+                    # you already do this for DATE-OBS; same here:
+                    # XISF metadata dict has 'file_meta' and 'image_meta'
+                    img_meta = hdr.get('image_meta', {}) or {}
+                    fits_kw  = img_meta.get('FITSKeywords', {})
+                    val = None
+                    if 'EXPOSURE' in fits_kw:
+                        val = fits_kw['EXPOSURE'][0].get('value')
+                    elif 'EXPTIME' in fits_kw:
+                        val = fits_kw['EXPTIME'][0].get('value')
+                    try:
+                        self.exposure_time = float(val)
+                    except Exception:
+                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                        self.exposure_time = None
+
+                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
 
             self.progress_bar.setValue(i)
             QApplication.processEvents()
@@ -29157,6 +29213,180 @@ class ExoPlanetWindow(QDialog):
         hdul    = fits.HDUList([primary, lc_hdu, stars_hdu])
         hdul.writeto(path, overwrite=True)
         QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
+
+    def export_to_aavso(self):
+        """
+        Export the measured light curve in AAVSO Extended WebObs format,
+        supporting both Exoplanet Report and Variable-Star Photometry.
+        """
+        # 0) Make sure we have photometry
+        if self.fluxes is None or self.times is None:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "No photometry available. Run Measure & Photometry first.")
+            return
+
+        # 0.5) Exactly one star selected?
+        sels = self.star_list.selectedItems()
+        if len(sels) != 1:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "Please select exactly one star before exporting.")
+            return
+        idx = sels[0].data(Qt.ItemDataRole.UserRole)
+
+        # 1) Ensure exposure time
+        if self.exposure_time is None:
+            exp, ok = QInputDialog.getDouble(
+                self, "Exposure Time",
+                "No EXPOSURE found in headers. Please enter exposure time (s):",
+                decimals=1
+            )
+            if not ok:
+                return
+            self.exposure_time = exp
+
+        # 1.5) Prompt for observer code (saved in QSettings)
+        settings = QSettings()
+        prev_code = settings.value("AAVSO/observer_code", "", type=str)
+        code, ok = QInputDialog.getText(
+            self, "Observer Code",
+            "Enter your AAVSO observer code:",
+            QLineEdit.EchoMode.Normal,
+            prev_code
+        )
+        if not ok:
+            return
+        code = code.strip().upper()
+        settings.setValue("AAVSO/observer_code", code)
+
+        # 2) Choose which kind of file
+        fmt, ok = QInputDialog.getItem(
+            self, "AAVSO Format",
+            "Choose submission format:",
+            ["Exoplanet Report", "Variable-Star Photometry"],
+            0, False
+        )
+        if not ok:
+            return
+
+        # 3) Get output filename
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save AAVSO File", "", "Text files (*.txt *.dat *.csv)"
+        )
+        if not path:
+            return
+
+        # 4) Build the six required parameters
+        hdr = [
+            "#TYPE=EXTENDED",
+            f"#OBSCODE={code}",
+            f"#SOFTWARE=Seti Astro Suite v{VERSION}",
+            "#DELIM=,",
+            "#DATE=JD",
+            "#OBSTYPE=CCD",
+        ]
+
+        # 4a) Insert RA/Dec of the selected star
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "Could not determine RA/Dec of selected star.")
+            return
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        ra_deg, dec_deg = radec
+        c = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame='icrs')
+        ra_str  = c.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)
+        dec_str = c.dec.to_string(unit=u.degree, sep=':', pad=True, alwayssign=True, precision=1)
+        hdr += [f"#RA={ra_str}", f"#DEC={dec_str}"]
+
+        # 4b) Commented column‐name line (ignored by AAVSO parser)
+        hdr.append("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES")
+
+        # 5) Gather any format‐specific metadata
+        if fmt == "Exoplanet Report":
+            starname, ok1 = QInputDialog.getText(
+                self, "Host Star Name", "Enter host star name (in VSX):",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            if not ok1 or not starname.strip():
+                return
+            planet, ok2 = QInputDialog.getText(
+                self, "Exoplanet Name",
+                "Enter exoplanet designation (e.g. WASP-12b):",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            if not ok2 or not planet.strip():
+                return
+            # you can record them in NOTES if you like:
+            note_header = f"Planet={planet.strip()}"
+            star_id = starname.strip()
+        else:
+            starname, ok1 = QInputDialog.getText(
+                self, "Variable-Star Name",
+                "Enter variable star name (e.g. R Lyr):",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            if not ok1 or not starname.strip():
+                return
+            comp, _ = QInputDialog.getText(
+                self, "Comparison Star",
+                "Enter comparison star (GSC ID), or leave blank:",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            star_id = starname.strip()
+            # you could put comp in NOTES, or ignore:
+            note_header = ""
+            if comp.strip():
+                note_header = f"Comp={comp.strip()}"
+
+        # 6) Write out the file
+        try:
+            with open(path, "w") as f:
+                # write header lines
+                for line in hdr:
+                    f.write(line + "\n")
+                f.write("\n")
+                # write each observation with 15 fields
+                jd = self.times.utc.jd
+                for j, t in enumerate(jd):
+                    # magnitude = relative flux (if you want to convert to mag do so here)
+                    mag = self.fluxes[idx, j]
+                    fields = [
+                        star_id,                          # STARID
+                        f"{t:.5f}",                       # DATE (JD)
+                        f"{mag:.5f}",                     # MAG
+                        "na",                             # MAGERR
+                        getattr(self, 'aavso_filter', 'V'), # FILT
+                        "NO",                             # TRANS
+                        "STD",                            # MTYPE
+                        "na",                             # CNAME
+                        "na",                             # CMAG
+                        "na",                             # KNAME
+                        "na",                             # KMAG
+                        "na",                             # AMASS
+                        "na",                             # GROUP
+                        "na",                             # CHART
+                        note_header or "na"              # NOTES
+                    ]
+                    f.write(",".join(fields) + "\n")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export AAVSO", f"Failed to write file:\n{e}")
+            return
+
+        # 7) Offer to open the AAVSO upload page
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Export AAVSO")
+        msg.setText(f"Wrote {fmt} →\n{path}\n\nOpen AAVSO WebObs upload page now?")
+        yes = msg.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("No", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == yes:
+            import webbrowser
+            webbrowser.open("https://www.aavso.org/webobs/file")
+
+
+
 
     @pyqtSlot(float, float)
     def receive_wcs_coordinates(self, ra, dec):
