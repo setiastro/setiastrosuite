@@ -1,9 +1,9 @@
 {
-  "version": "2.19.4",
+  "version": "2.19.5",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.4/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.4/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.4/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Feature under Star Stuff: Image Peeker. It is like Aberration Inspector but can do so much more including Tilt Analysis, Focal Plane Analysis, and Astrometric Distortion Analysis. Stacking Suite Update: Dynamically adjusts the chunk size based on available ram. This should greatly reduce the errors where individuals could run out of memory, especially those stacking hundreds and thousands of sub exposures!"
+  "notes": "Bug fixes and full astrometric distortion WCS across SAS Added progress during actual integration in stacking suite."
 }
