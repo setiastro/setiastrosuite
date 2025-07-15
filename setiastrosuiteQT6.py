@@ -278,7 +278,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.4"
+VERSION = "2.19.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -9617,8 +9617,6 @@ def plate_solve_current_image(image_manager, settings, parent=None):
     Plate-solve the current slot image *including* SIP terms,
     and return the updated metadata dict (with all the A_*, B_* SIP cards).
     """
-    import tempfile, os
-    from astropy.io import fits
 
     # 1) grab pixel data + original header
     arr, meta = image_manager.get_current_image_and_metadata()
@@ -9649,7 +9647,7 @@ def plate_solve_current_image(image_manager, settings, parent=None):
 class ImagePeekerDialog(QDialog):
     def __init__(self, parent=None, image_manager=None, settings=None):
         super().__init__(parent)
-        self.setWindowTitle("Image Peeker")
+        self.setWindowTitle("Image Peaker")
         self.image_manager = image_manager
         self.settings = settings
 
@@ -9854,25 +9852,43 @@ class ImagePeekerDialog(QDialog):
             ).show()
 
         elif mode == "Astrometric Distortion Analysis":
-            sm = meta
-            if "A_0_0" not in sm:
-                sm = plate_solve_current_image(self.image_manager,
-                                               self.settings,
-                                               parent=self)
+            arr, meta = self.image_manager.get_current_image_and_metadata()
+            hdr = meta.get("original_header", None)
 
-            # 2) Compute the overlays directly from the ASTAP-injected SIP
-            ov = distortion_vectors(arr, sm, pixel_size_um=ps)
+            # if we don’t already have SIP in original_header, plate‑solve
+            if hdr is None or "A_0_0" not in hdr:
+                wcs = plate_solve_current_image(
+                    self.image_manager,
+                    self.settings,
+                    parent=self
+                )
+                # after solving, re‑grab the updated header
+                _, meta = self.image_manager.get_current_image_and_metadata()
+                hdr = meta.get("original_header", None)
 
-            # 3) Show your new dialog (which also takes sm rather than WCS)
+            if hdr is None or "A_0_0" not in hdr:
+                QMessageBox.warning(
+                    self,
+                    "No Distortion Data",
+                    "Plate solve completed, but no SIP distortion matrices were found.\n\n"
+                    "For best results please install ASTAP with the D80 catalog, then retry."
+                )
+                return
+
+            # 2) Compute the overlays directly from the ASTAP‑injected SIP
+            
+
+            # 3) Show your new dialog
             dlg = DistortionGridDialog(
-                img            = arr,
-                sip_meta       = sm,
-                pixel_size_um  = ps,
-                n_grid_lines   = 10,
-                amplify        = 100.0,
-                parent         = self
+                img           = arr,
+                sip_meta      = hdr,               # pass the Header right into your extractor
+                pixel_size_um = hdr["CDELT1"]*3600, # or your old value
+                n_grid_lines  = 10,
+                amplify       = 60.0,
+                parent        = self
             )
             dlg.show()
+    
         else:
             self._refresh_mosaic()
             
@@ -9968,24 +9984,38 @@ class ImagePeekerDialog(QDialog):
 
     def _to_qimage(self, arr: np.ndarray) -> QImage:
         """
-        Convert a 2D or 3-channel H×W numpy array in [0..1] or [0..255] to a QImage.
+        Convert a 2D or 3-channel H×W numpy array in [0..1] or [0..255]
+        to a QImage.  Keeps the underlying buffer alive on self.
         """
-        # if float, assume 0..1 → scale to 0..255
-        if arr.dtype == np.float32 or arr.dtype == np.float64:
-            arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
+        # 1) normalize dtype
+        if arr.dtype in (np.float32, np.float64):
+            arr8 = np.clip(arr * 255, 0, 255).astype(np.uint8)
         elif arr.dtype != np.uint8:
-            arr = arr.astype(np.uint8)
+            arr8 = arr.astype(np.uint8)
+        else:
+            arr8 = arr
 
-        h, w = arr.shape[:2]
-        if arr.ndim == 2:
+        h, w = arr8.shape[:2]
+
+        # 2) dump to bytes so QImage() sees a bytes object, not a memoryview
+        buf = arr8.tobytes()
+        # keep a reference so Python doesn’t free it
+        self._last_qimage_buffer = buf
+
+        # 3) construct the QImage
+        if arr8.ndim == 2:
             # grayscale
-            return QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8)
-        elif arr.ndim == 3 and arr.shape[2] == 3:
+            bytes_per_line = w
+            return QImage(buf, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+
+        elif arr8.ndim == 3 and arr8.shape[2] == 3:
             # RGB
             bytes_per_line = 3 * w
-            return QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            return QImage(buf, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
         else:
             raise ValueError(f"Cannot convert array of shape {arr.shape} to QImage")
+
 
 # --------------------------------------------------
 # Stacking Suite
@@ -14622,16 +14652,21 @@ class StackingSuiteDialog(QDialog):
         """
         Performs chunked stacking integration of aligned (_n_r) images using the current
         rejection algorithm. Returns:
-        integrated_image: Final integrated (stacked) image as a NumPy array.
-        per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y) 
-                            coordinates that were rejected for THAT file only.
-        ref_header: the header from the reference file (or a new one if missing)
+        - integrated_image: Final integrated (stacked) image as a NumPy array.
+        - per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y)
+            coordinates that were rejected for THAT file only.
+        - ref_header: the header from the reference file (or a new one if missing)
         """
+        # 0) Initial status
         self.update_status(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
+        QApplication.processEvents()
+
+        # 1) Sanity checks
         if not file_list:
             self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
             return None, {}, None
-        # 1) Load a reference image to determine dimensions and channels
+
+        # 2) Load a reference image to determine dimensions and channels
         ref_file = file_list[0]
         if not os.path.exists(ref_file):
             self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
@@ -14640,85 +14675,92 @@ class StackingSuiteDialog(QDialog):
         if ref_data is None:
             self.update_status(f"⚠️ Could not load reference '{ref_file}' for group '{group_key}'.")
             return None, {}, None
-
         if ref_header is None:
-            ref_header = fits.Header()  # fallback if no header was present
+            ref_header = fits.Header()
 
         is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
         height, width = ref_data.shape[:2]
         channels = 3 if is_color else 1
+
         self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
         QApplication.processEvents()
+
+        # 3) Allocate output and rejections dict
         N = len(file_list)
-        DTYPE = np.float64
-        # 2) Allocate final integrated image and set up a dictionary for rejections
         integrated_image = np.zeros((height, width, channels), dtype=np.float64)
         per_file_rejections = {f: [] for f in file_list}
 
-        # 3) Define tile dimensions
-        DTYPE    = np.float64
-        pref_h   = self.chunk_height
-        pref_w   = self.chunk_width
-
-        # 3) Compute a safe chunk size once, up front
+        # 4) Compute chunk size
+        DTYPE  = np.float64
+        pref_h = self.chunk_height
+        pref_w = self.chunk_width
         try:
             chunk_h, chunk_w = compute_safe_chunk(
                 height, width, N, channels, DTYPE, pref_h, pref_w
             )
             self.update_status(f"🔧 Using chunk size {chunk_h}×{chunk_w} for float64")
+            QApplication.processEvents()
         except MemoryError as e:
             self.update_status(f"⚠️ {e}")
             return None, {}, None
 
-        # 4) Process the image tile by tile
+        # 5) Precompute total tile count for progress
+        n_rows     = math.ceil(height / chunk_h)
+        n_cols     = math.ceil(width  / chunk_w)
+        total_tiles = n_rows * n_cols
+        tile_idx    = 0
+
+        # 6) Loop over tiles
         for y_start in range(0, height, chunk_h):
-            y_end = min(y_start + chunk_h, height)
+            y_end  = min(y_start + chunk_h, height)
             tile_h = y_end - y_start
 
             for x_start in range(0, width, chunk_w):
-                x_end = min(x_start + chunk_w, width)
+                x_end  = min(x_start + chunk_w, width)
                 tile_w = x_end - x_start
 
-                # Build a tile stack: shape (N, tile_h, tile_w, channels)
-                N = len(file_list)              
-                tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
-                weights_list = []
-                num_cores = os.cpu_count() or 4
+                # --- Update progress ---
+                tile_idx += 1
+                self.update_status(f"Integrating tile {tile_idx}/{total_tiles}...")
+                QApplication.processEvents()
+
+                # 6a) Build tile stack
+                tile_stack    = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
+                weights_list  = []
+                num_cores     = os.cpu_count() or 4
 
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
-                    future_to_index = {}
+                    future_to_i = {}
                     for i, fpath in enumerate(file_list):
-                        
                         future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
-                        future_to_index[future] = i
+                        future_to_i[future] = i
                         weights_list.append(frame_weights.get(fpath, 1.0))
 
-                    for future in as_completed(future_to_index):
-                        i = future_to_index[future]
-                        sub_img = future.result()
+                    for fut in as_completed(future_to_i):
+                        i       = future_to_i[fut]
+                        sub_img = fut.result()
                         if sub_img is None:
                             self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
                             continue
-                        # Ensure shape => (tile_h, tile_w, channels)
+                        # Normalize shape → (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
                             sub_img = sub_img[:, :, np.newaxis]
                             if channels == 3:
                                 sub_img = np.repeat(sub_img, 3, axis=2)
                         elif sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
                             sub_img = sub_img.transpose(1, 2, 0)
-                        sub_img = sub_img.astype(np.float32, copy=False)
-                        tile_stack[i] = sub_img
+                        tile_stack[i] = sub_img.astype(np.float32, copy=False)
 
                 weights_array = np.array(weights_list, dtype=np.float32)
 
-                # 5) Run your chosen rejection algorithm => (tile_result, tile_rej_map)
+                # 6b) Apply rejection algorithm
                 algo = self.rejection_algorithm
                 if algo == "Simple Median (No Rejection)":
-                    tile_result = np.median(tile_stack, axis=0)
-                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                    tile_result  = np.median(tile_stack, axis=0)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=bool)
                 elif algo == "Simple Average (No Rejection)":
-                    tile_result = np.average(tile_stack, axis=0, weights=weights_array)
-                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                    tile_result  = np.average(tile_stack, axis=0, weights=weights_array)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=bool)
                 elif algo == "Weighted Windsorized Sigma Clipping":
                     tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
                         tile_stack, weights_array,
@@ -14755,30 +14797,27 @@ class StackingSuiteDialog(QDialog):
                         lower=self.sigma_low, upper=self.sigma_high
                     )
 
-                # 6) Place the integrated tile into the final image
+                # 7) Place the integrated tile into the final image
                 integrated_image[y_start:y_end, x_start:x_end, :] = tile_result
 
-                # 7) For color, tile_rej_map is shape (N, tile_h, tile_w, C). Combine channels if needed.
+                # 8) Record per-file rejections
                 if tile_rej_map.ndim == 4:
-                    # shape => (N, tile_h, tile_w, channels)
-                    # reduce across channels => (N, tile_h, tile_w)
                     tile_rej_map = np.any(tile_rej_map, axis=-1)
-
-                # 8) Now tile_rej_map is shape (N, tile_h, tile_w). Record the rejections per file
                 for i, fpath in enumerate(file_list):
-                    frame_mask = tile_rej_map[i]  # shape (tile_h, tile_w)
-                    ys_tile, xs_tile = np.where(frame_mask)
-                    for dx, dy in zip(xs_tile, ys_tile):
-                        global_x = x_start + dx
-                        global_y = y_start + dy
-                        per_file_rejections[fpath].append((global_x, global_y))
+                    ys, xs = np.where(tile_rej_map[i])
+                    for dy, dx in zip(ys, xs):
+                        per_file_rejections[fpath].append((x_start + dx, y_start + dy))
 
-        # 9) Squeeze if mono
+        # 9) If mono, squeeze away channel axis
         if channels == 1:
             integrated_image = integrated_image[..., 0]
 
-        # Return integrated_image, the per-file rejection dictionary, and the reference header
+        # 10) Final status
+        self.update_status(f"Integration complete for group '{group_key}'.")
+        QApplication.processEvents()
+
         return integrated_image, per_file_rejections, ref_header
+
 
 
     def outlier_rejection_with_mask(self, tile_stack, weights_array):
@@ -21771,19 +21810,56 @@ class PlateSolver(QDialog):
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
+
         # --- Directly update the metadata dictionary for the current slot ---
-        if update_manager:
-            if self.parent() and hasattr(self.parent(), "image_manager"):
-                try:
-                    current_slot = self.parent().image_manager.current_slot
-                    self.parent().image_manager._metadata[current_slot].update(solved_header)
-                    print("ImageManager metadata for slot", current_slot, "updated with solved header.")
-                except Exception as e:
-                    print("Error updating ImageManager metadata with solved data:", e)
-                    return False
-            else:
-                print("No parent ImageManager found; cannot update solved metadata.")
-                return False
+        # --- Directly update the metadata dictionary for the current slot ---
+        # inside run_astap(), after you’ve built solved_header:
+        if update_manager and getattr(self, "_from_slot", False):
+            img_mgr = self.parent().image_manager
+            slot    = img_mgr.current_slot
+
+            # ensure we have both A_ORDER and B_ORDER
+            if "B_ORDER" in solved_header and "A_ORDER" not in solved_header:
+                solved_header["A_ORDER"] = solved_header["B_ORDER"]
+            if "A_ORDER" in solved_header and "B_ORDER" not in solved_header:
+                solved_header["B_ORDER"] = solved_header["A_ORDER"]
+
+            # Which keywords we actually want
+            int_keys = {"A_ORDER","B_ORDER","AP_ORDER","BP_ORDER","WCSAXES"}
+            sip_coef = re.compile(r"^(?:A|B|AP|BP)_(?:\d+_\d+)$")
+            linear   = re.compile(r"^(?:CRPIX|CRVAL|CDELT|CD|PC)\d?_?\d*$")
+            ctype    = re.compile(r"^(?:CTYPE|CUNIT)\d?$")
+
+            full_hdr = fits.Header()
+            for k, v in solved_header.items():
+                # skip everything but SIP + linear WCS + axis types
+                if k in int_keys:
+                    # grab first integer in the string
+                    m = re.match(r"\s*([+-]?\d+)", str(v))
+                    full_hdr[k] = int(m.group(1)) if m else int(float(v))
+
+                elif sip_coef.match(k):
+                    # floating‐point SIP coefficients
+                    m = re.match(r"\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)", str(v))
+                    full_hdr[k] = float(m.group(1)) if m else float(v)
+
+                elif linear.match(k):
+                    # CRPIX, CRVAL, CDELT, CD, PC
+                    m = re.match(r"\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)", str(v))
+                    full_hdr[k] = float(m.group(1)) if m else float(v)
+
+                elif ctype.match(k):
+                    full_hdr[k] = str(v).strip("'\"")
+
+                else:
+                    # everything else gets dropped
+                    continue
+
+            # stash the cleaned FITS header + SIP‐aware WCS
+            img_mgr._metadata[slot]["original_header"] = full_hdr
+            img_mgr._metadata[slot]["wcs"]             = WCS(full_hdr)
+
+            print(f"✔ stored just the WCS+SIP keywords in slot {slot}")
         else:
             print("Batch mode: Skipping image manager metadata update.")
 
@@ -22022,12 +22098,17 @@ class PlateSolver(QDialog):
         item["wcs"] = WCS(wcs_header)
 
         # --- (Optional) Update the metadata of the slot if applicable ---
-        if getattr(self, "_from_slot", False) and hasattr(self, "_slot_meta"):
-            if "file_path" not in wcs_header and "file_path" in self._slot_meta:
-                wcs_header["file_path"] = self._slot_meta["file_path"]
-            # Directly update the metadata dictionary for the current slot.
-            self.parent().image_manager._metadata[self.parent().image_manager.current_slot].update(wcs_header)
-            print("ImageManager metadata for current slot updated with solved header.")
+        if getattr(self, "_from_slot", False):
+            img_mgr = self.parent().image_manager
+            slot    = img_mgr.current_slot
+
+            # save the blind‐solve header as your new "original_header"
+            img_mgr._metadata[slot]["original_header"] = wcs_header.copy()
+
+            # build & stash the SIP‐aware WCS too
+            img_mgr._metadata[slot]["wcs"] = WCS(wcs_header)
+
+            print(f"✔ saved blind‐solve header + WCS in slot {slot}")
 
         # --- Now prompt the user to save the new plate-solved FITS file ---
         save_path, _ = QFileDialog.getSaveFileName(self, "Save Plate-Solved FITS", "", "FITS files (*.fits *.fit)")
@@ -59017,13 +59098,38 @@ class MainWindow(QMainWindow):
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
-        # Update the main image header and reinitialize WCS.
-        self.header.update(solved_header)
+        # --------------------------------------------------------------------
+        # 1) Make sure A_ORDER/B_ORDER exist in pairs:
+        if "B_ORDER" in solved_header and "A_ORDER" not in solved_header:
+            solved_header["A_ORDER"] = solved_header["B_ORDER"]
+        if "A_ORDER" in solved_header and "B_ORDER" not in solved_header:
+            solved_header["B_ORDER"] = solved_header["A_ORDER"]
+
+        # 2) Convert SIP‐order keywords to ints:
+        for key in ("A_ORDER","B_ORDER","AP_ORDER","BP_ORDER"):
+            if key in solved_header:
+                solved_header[key] = int(float(solved_header[key]))
+
+        # 3) Convert every SIP coefficient to float:
+        for k in list(solved_header):
+            if re.match(r"^(?:A|B|AP|BP)_[0-9]+_[0-9]+$", k):
+                solved_header[k] = float(solved_header[k])
+
+        # --------------------------------------------------------------------
+        # 4) Now rebuild your FITS header from the dict, preserving ordering:
+        new_hdr = fits.Header()
+        for key, val in solved_header.items():
+            # skip any stray non‑FITS metadata
+            if key == "file_path":
+                continue
+            new_hdr[key] = val
+
+        # 5) Finally swap in the new header and re-init WCS (with SIP!)
+        self.header = new_hdr
         try:
             self.wcs = WCS(self.header, naxis=2, relax=True)
-            #QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
         except Exception as e:
-            #QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
+            QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header:\n{e}")
             return
 
         return solved_header
