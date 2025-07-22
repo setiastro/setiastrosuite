@@ -278,7 +278,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.5"
+VERSION = "2.19.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -6887,15 +6887,6 @@ class MaskSlotPreviewDialog(QDialog):
         Inverts the current mask and updates the display and mask slot,
         while preserving the current zoom and scroll positions.
         """
-        reply = QMessageBox.question(
-            self, 
-            "Confirm Inversion", 
-            "Are you sure you want to invert the mask?", 
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-            QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
 
         try:
             # Invert the mask (assuming the mask is normalized between 0 and 1)
@@ -6910,7 +6901,6 @@ class MaskSlotPreviewDialog(QDialog):
             self.update_image()
             print("Mask display updated with inverted mask while preserving zoom and scroll positions.")
             
-            QMessageBox.information(self, "Mask Inverted", "The mask has been successfully inverted.")
             
         except Exception as e:
             QMessageBox.critical(self, "Inversion Failed", f"Failed to invert the mask:\n{e}")
@@ -7833,6 +7823,8 @@ class MaskPreviewDialog(QDialog):
         zoom_out_button.clicked.connect(self.zoom_out)
         fit_to_window_button = QPushButton("Fit to Window")
         fit_to_window_button.clicked.connect(self.fit_to_window)
+        invert_mask_button = QPushButton("Invert Mask")
+        invert_mask_button.clicked.connect(self.invert_mask)        
         save_mask_button = QPushButton("Save Mask")
         save_mask_button.clicked.connect(self.save_mask)
 
@@ -7842,10 +7834,19 @@ class MaskPreviewDialog(QDialog):
 
         # Add zoom buttons to main layout
         main_layout.addLayout(zoom_layout)
+        main_layout.addWidget(invert_mask_button)
         main_layout.addWidget(save_mask_button)
 
         self.setLayout(main_layout)
         self.setMinimumSize(600, 400)
+
+    def invert_mask(self):
+        """
+        Inverts the current mask and updates the display.
+        """
+        self.mask = 1.0 - self.mask
+        self.pixmap = self.convert_to_pixmap(self.mask)
+        self.update_image()
 
     def convert_to_pixmap(self, mask):
         """
@@ -10370,6 +10371,7 @@ class StackingSuiteDialog(QDialog):
 
         # QSettings for your app
         self.settings = QSettings() 
+
         
 
         # Load or default these
@@ -10439,6 +10441,17 @@ class StackingSuiteDialog(QDialog):
         layout.addWidget(self.wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.setup_status_bar(layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
+        self.restore_saved_master_calibrations()
+
+    def restore_saved_master_calibrations(self):
+        saved_darks = self.settings.value("stacking/master_darks", [], type=list)
+        saved_flats = self.settings.value("stacking/master_flats", [], type=list)
+
+        if saved_darks:
+            self.add_master_files(self.master_dark_tree, "DARK", saved_darks)
+
+        if saved_flats:
+            self.add_master_files(self.master_flat_tree, "FLAT", saved_flats)
 
     def create_conversion_tab(self):
         tab = QWidget()
@@ -11055,7 +11068,13 @@ class StackingSuiteDialog(QDialog):
 
         # Add "Clear Selection" button for Master Darks
         self.clear_master_dark_selection_btn = QPushButton("Clear Selection")
-        self.clear_master_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_dark_tree))
+        self.clear_master_dark_selection_btn.clicked.connect(
+            lambda: self.clear_tree_selection(self.master_dark_tree, self.master_files)
+        )
+        self.clear_master_dark_selection_btn.clicked.connect(
+            lambda: (self.clear_tree_selection(self.master_dark_tree, self.master_files),
+                    self.save_master_paths_to_settings())
+        )        
         main_layout.addWidget(self.clear_master_dark_selection_btn)
 
         return tab
@@ -11173,7 +11192,10 @@ class StackingSuiteDialog(QDialog):
         main_layout.addWidget(self.master_flat_btn)
 
         self.clear_master_flat_selection_btn = QPushButton("Clear Selection")
-        self.clear_master_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_flat_tree))
+        self.clear_master_flat_selection_btn.clicked.connect(
+            lambda: (self.clear_tree_selection(self.master_flat_tree, self.master_files),
+                    self.save_master_paths_to_settings())
+        )
         main_layout.addWidget(self.clear_master_flat_selection_btn)
         return tab
 
@@ -11505,6 +11527,32 @@ class StackingSuiteDialog(QDialog):
         if file_path:
             self.reference_frame = file_path
             self.ref_frame_path.setText(os.path.basename(file_path))
+
+    def save_master_paths_to_settings(self):
+        """Save current master dark and flat paths to QSettings using their actual trees."""
+
+        # Master Darks
+        dark_paths = []
+        for i in range(self.master_dark_tree.topLevelItemCount()):
+            group = self.master_dark_tree.topLevelItem(i)
+            for j in range(group.childCount()):
+                fname = group.child(j).text(0)
+                for path in self.master_files.values():
+                    if os.path.basename(path) == fname:
+                        dark_paths.append(path)
+
+        # Master Flats
+        flat_paths = []
+        for i in range(self.master_flat_tree.topLevelItemCount()):
+            group = self.master_flat_tree.topLevelItem(i)
+            for j in range(group.childCount()):
+                fname = group.child(j).text(0)
+                for path in self.master_files.values():
+                    if os.path.basename(path) == fname:
+                        flat_paths.append(path)
+
+        self.settings.setValue("stacking/master_darks", dark_paths)
+        self.settings.setValue("stacking/master_flats", flat_paths)
 
     def clear_tree_selection(self, tree, file_dict):
         """Clears selected items from a simple (non-tuple-keyed) tree like Master Darks or Darks tab."""
@@ -12056,6 +12104,7 @@ class StackingSuiteDialog(QDialog):
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))  # Save last used folder
             self.add_master_files(self.master_dark_tree, "DARK", files)
+            self.save_master_paths_to_settings() 
 
         self.update_override_dark_combo()
         self.assign_best_master_dark()
@@ -12070,6 +12119,7 @@ class StackingSuiteDialog(QDialog):
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
             self.add_master_files(self.master_flat_tree, "FLAT", files)
+            self.save_master_paths_to_settings() 
 
 
     def add_files(self, tree, title, expected_type):
@@ -12504,6 +12554,7 @@ class StackingSuiteDialog(QDialog):
             self.add_master_dark_to_tree(f"{exposure_time}s ({image_size})", master_dark_path)
             self.update_status(f"✅ Master Dark saved: {master_dark_path}")
             self.assign_best_master_files()
+            self.save_master_paths_to_settings()
 
         # Finally, assign best master dark, etc.
         self.assign_best_master_dark()
@@ -12876,6 +12927,7 @@ class StackingSuiteDialog(QDialog):
             self.master_sizes[master_flat_path] = image_size
             self.add_master_flat_to_tree(filter_name, master_flat_path)
             self.update_status(f"✅ Master Flat saved: {master_flat_path}")
+            self.save_master_paths_to_settings()
 
         self.assign_best_master_dark()
         self.assign_best_master_files()
@@ -13713,7 +13765,31 @@ class StackingSuiteDialog(QDialog):
         )
         self.alignment_thread.progress_update.connect(self.update_status)
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
+        self.align_progress = QProgressDialog("Aligning stars…", None, 0, 0, self)
+        self.align_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.align_progress.setMinimumDuration(0)
+        self.align_progress.setCancelButton(None)
+        self.align_progress.setWindowTitle("Stellar Alignment")
+        self.align_progress.setValue(0)
+        self.align_progress.show()
+
+        self.alignment_thread.progress_step.connect(self._on_align_progress)
+        self.alignment_thread.registration_complete.connect(self._on_align_done)        
         self.alignment_thread.start()
+        
+    @pyqtSlot(int, int)
+    def _on_align_progress(self, done, total):
+        self.align_progress.setLabelText(f"Aligning stars… ({done}/{total})")
+        self.align_progress.setMaximum(total)
+        self.align_progress.setValue(done)
+        QApplication.processEvents()
+
+    @pyqtSlot(bool, str)
+    def _on_align_done(self, success, message):
+        if hasattr(self, "align_progress"):
+            self.align_progress.close()
+            del self.align_progress
+        self.update_status(message)
 
     def save_alignment_matrices_sasd(self, transforms_dict):
         out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
@@ -20106,36 +20182,23 @@ class StarRegistrationWorker(QRunnable):
                 use_ref, use_img = self.reference_image, img_for_alignment
 
             # 6) Try astroalign *on the downsampled images* first
+            # 6) Try Astroalign (no fallback)
             transform = None
-            if self.use_astroalign and use_ref is not None and use_ref.ndim == 2:
+            if use_ref is not None and use_ref.ndim == 2:
                 transform = self.compute_affine_transform_astroalign(use_img, use_ref)
-                if transform is not None:
-                    self.signals.progress.emit(f"Astroalign computed delta transform for {os.path.basename(self.file_path)}")
-                else:
-                    self.signals.progress.emit(f"Astroalign failed for {os.path.basename(self.file_path)}")
 
-            # 7) If astroalign didn’t work, fall back to DAO/RANSAC on the downsampled
             if transform is None:
-                self.signals.progress.emit(f"✨ Detecting stars in {os.path.basename(self.file_path)}")
-                img_stars = StarRegistrationThread.detect_grid_stars_static(use_img)
-                if len(img_stars) < 9:
-                    self.signals.error.emit(f"Not enough stars in {self.original_file}")
-                    return
-                self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+                # if Astroalign fails, bail out immediately
+                self.signals.error.emit(
+                    f"Astroalign failed for {os.path.basename(self.file_path)} – skipping"
+                )
+                return
 
-                if self.use_triangle:
-                    transform = StarRegistrationThread.compute_affine_transform_triangle_then_ransac(
-                        img_stars, self.ref_stars, self.ref_triangles
-                    )
-                else:
-                    transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
-                        img_stars, self.ref_stars, self.ref_triangles
-                    )
-
-                if transform is None:
-                    self.signals.error.emit(f"Alignment failed for {self.original_file}")
-                    return
-                self.signals.progress.emit(f"Computed delta transform for {os.path.basename(self.file_path)}")
+            # report success
+            self.signals.progress.emit(
+                f"Astroalign delta for {os.path.basename(self.file_path)}: "
+                f"dx={transform[0,2]:.2f}, dy={transform[1,2]:.2f}"
+            )
 
             # 8) Upscale the small-image translation back to full resolution
             transform = np.array(transform, dtype=np.float64).reshape(2, 3)
@@ -20203,6 +20266,7 @@ IDENTITY_2x3 = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64)
 class StarRegistrationThread(QThread):
     progress_update = pyqtSignal(str)
     registration_complete = pyqtSignal(bool, str)
+    progress_step = pyqtSignal(int, int)  # (done, total)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
                  max_refinement_passes=3, shift_tolerance=0.2):
@@ -20220,6 +20284,8 @@ class StarRegistrationThread(QThread):
         # Store cumulative transforms keyed by the persistent (raw) file path.
         self.alignment_matrices = {}
         self.transform_deltas = []  # List of shift arrays per pass.
+        self._done = 0
+        self._total = len(self.original_files) * self.max_refinement_passes        
 
     def run(self):
         try:
@@ -20315,6 +20381,11 @@ class StarRegistrationThread(QThread):
         except Exception as e:
             self.registration_complete.emit(False, f"Error: {e}")
 
+    def _increment_progress(self):
+        self._done += 1
+        self.progress_step.emit(self._done, self._total)
+
+
     def run_one_registration_pass(self, ref_stars, ref_triangles, pass_index):
         pool = QThreadPool.globalInstance()
         num_cores = os.cpu_count() or 4
@@ -20337,14 +20408,16 @@ class StarRegistrationThread(QThread):
                 ref_stars=ref_stars,
                 ref_triangles=ref_triangles,
                 output_directory=self.output_directory,
-                use_triangle=(pass_index >= 5),
-                use_astroalign=use_astroalign,
+                use_triangle=False,
+                use_astroalign=True,
                 reference_image=self.reference_image_2d,
                 downsample_factor=2
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
+            worker.signals.result.connect(self._increment_progress)
             worker.signals.result_transform.connect(self.on_worker_result_transform)
+
             pool.start(worker)
         
         pool.waitForDone()
@@ -20378,12 +20451,13 @@ class StarRegistrationThread(QThread):
                     is_mono=False
                 )
                 transformed_files[original_file] = transformed_path
+
             else:
                 # Delta is small, so we consider this frame converged.
                 remaining_files[original_file] = current_file
                 aligned_count += 1
                 skipped_files.append(os.path.basename(current_file))  # Log the filename
-
+                
         self.transform_deltas.append(pass_deltas)
         # Update the persistent mapping for the next pass.
         self.file_key_to_current_path = {**transformed_files, **remaining_files}
@@ -45313,11 +45387,13 @@ class CurveDialog(QDialog):
         info_row = QHBoxLayout()
         self.xLabel = QLabel("X:0");    info_row.addWidget(self.xLabel)
         self.yLabel = QLabel("Y:0");    info_row.addWidget(self.yLabel)
+        self.kLabel = QLabel("K:0.000"); info_row.addWidget(self.kLabel)
         self.rLabel = QLabel("R:0.000");info_row.addWidget(self.rLabel)
         self.gLabel = QLabel("G:0.000");info_row.addWidget(self.gLabel)
         self.bLabel = QLabel("B:0.000");info_row.addWidget(self.bLabel)
         info_row.addStretch(1)
         layout.addLayout(info_row)
+        self.kLabel.hide()
 
         # 3) Status-message line
         self.statusMsg = QLabel("", self)
@@ -45351,12 +45427,24 @@ class CurveDialog(QDialog):
                                                parent.currentGhsChannel)
         )
 
-    def updatePixelInfo(self, x, y, r, g, b):
+    def updatePixelInfo(self, x, y, r, g, b, is_mono=False):
         self.xLabel.setText(f"X:{x}")
         self.yLabel.setText(f"Y:{y}")
-        self.rLabel.setText(f"R:{r:.3f}")
-        self.gLabel.setText(f"G:{g:.3f}")
-        self.bLabel.setText(f"B:{b:.3f}")
+
+        if is_mono:
+            self.kLabel.setText(f"K:{r:.3f}")
+            self.kLabel.show()
+            self.rLabel.hide()
+            self.gLabel.hide()
+            self.bLabel.hide()
+        else:
+            self.rLabel.setText(f"R:{r:.3f}")
+            self.gLabel.setText(f"G:{g:.3f}")
+            self.bLabel.setText(f"B:{b:.3f}")
+            self.rLabel.show()
+            self.gLabel.show()
+            self.bLabel.show()
+            self.kLabel.hide()
 
     def updateStatusMessage(self, text: str):
         self.statusMsg.setText(text)
@@ -46505,8 +46593,12 @@ class FullCurvesTab(QWidget):
             if mask.shape[:2] != self.original_image.shape[:2]:
                 QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
                 return
-            if mask.ndim == 2:
+            if mask.ndim == 2 and self.original_image.ndim == 3:
+                # RGB image, need mask shape (H, W, 1) or (H, W, 3)
                 mask = mask[..., None]
+            elif mask.ndim == 3 and self.original_image.ndim == 2:
+                # mono image, but mask is (H, W, 1) — squeeze to (H, W)
+                mask = np.squeeze(mask, axis=2)
             if self.original_image.ndim == 3 and mask.shape[2] == 1:
                 mask = np.repeat(mask, self.original_image.shape[2], axis=2)
 
@@ -46742,14 +46834,17 @@ class FullCurvesTab(QWidget):
             if self.image.ndim == 3:
                 r, g, b = pv
                 self.curveEditor.updateValueLines(r, g, b, grayscale=False)
-                txt = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
+                self.curveDialog.updatePixelInfo(img_x, img_y, r, g, b, is_mono=False)
+
+                self.curveDialog.updateStatusMessage("")  # clear older messages
             else:
                 v = float(pv)
                 self.curveEditor.updateValueLines(v, v, v, grayscale=True)
-                txt = f"X:{img_x} Y:{img_y} Val:{v:.3f}"
+                # fallback r=g=b=v for grayscale
+                self.curveDialog.updatePixelInfo(img_x, img_y, v, v, v, is_mono=True)
+                self.curveDialog.updateStatusMessage("")  # clear older messages
 
-            self.curveDialog.updatePixelInfo(img_x, img_y, r, g, b)
-            self.curveDialog.updateStatusMessage("")  # clear older messages
+
             return True
 
         return super().eventFilter(source, event)
