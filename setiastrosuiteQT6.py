@@ -15796,7 +15796,7 @@ class LiveStackWindow(QDialog):
         """
         sender = self.sender()
         dlg = QFileDialog(self, "Select Master Files",
-                         filter="FITS or TIFF (*.fit *.fits *.tif *.tiff)")
+                         filter="FITS TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)")
         dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
         if not dlg.exec():
             return
@@ -15940,7 +15940,7 @@ class LiveStackWindow(QDialog):
         exts = (
             "*.fit", "*.fits", "*.tif", "*.tiff",
             "*.cr2", "*.cr3", "*.nef", "*.arw",
-            "*.dng", "*.orf", "*.rw2", "*.pef"
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
         )
         all_paths = []
         for ext in exts:
@@ -16030,7 +16030,7 @@ class LiveStackWindow(QDialog):
         exts = (
             "*.fit", "*.fits", "*.tif", "*.tiff",
             "*.cr2", "*.cr3", "*.nef", "*.arw",
-            "*.dng", "*.orf", "*.rw2", "*.pef"
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
         )
         all_paths = []
         for ext in exts:
@@ -17317,6 +17317,37 @@ class MosaicMasterDialog(QDialog):
                             k.startswith("CRVAL3") or k.startswith("CRPIX3") or k.startswith("CDELT3") or
                             k.startswith("CD3_") or k.startswith("PC3_") or k.startswith("PC_3")):
                             del solved_header[k]
+                    for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]:
+                        if key in solved_header:
+                            try:
+                                solved_header[key] = int(solved_header[key])
+                            except ValueError:
+                                print(f"Warning: {key} value '{solved_header[key]}' could not be converted to int.")
+                                del solved_header[key]   
+                    # Fix for malformed SIP distortion headers
+                    sip_keys = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+                    sip_present = {k: k in solved_header for k in sip_keys}
+
+                    # If only one of A_ORDER / B_ORDER is present, remove both
+                    if sip_present["A_ORDER"] != sip_present["B_ORDER"]:
+                        print("Incomplete SIP distortion keywords: removing A_ORDER and B_ORDER.")
+                        solved_header.pop("A_ORDER", None)
+                        solved_header.pop("B_ORDER", None)
+
+                    # If only one of AP_ORDER / BP_ORDER is present, remove both
+                    if sip_present["AP_ORDER"] != sip_present["BP_ORDER"]:
+                        print("Incomplete SIP distortion keywords: removing AP_ORDER and BP_ORDER.")
+                        solved_header.pop("AP_ORDER", None)
+                        solved_header.pop("BP_ORDER", None)
+
+                    # Force SIP orders to be int if still present
+                    for key in sip_keys:
+                        if key in solved_header:
+                            try:
+                                solved_header[key] = int(solved_header[key])
+                            except ValueError:
+                                print(f"Warning: {key} = {solved_header[key]} could not be converted to int. Removing.")
+                                del solved_header[key]                                                         
                     # Ensure mandatory WCS keys are present.
                     solved_header.setdefault("CTYPE1", "RA---TAN")
                     solved_header.setdefault("CTYPE2", "DEC--TAN")
