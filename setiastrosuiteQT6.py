@@ -9474,12 +9474,12 @@ def extract_sip_from_meta(sm: dict):
 
 class DistortionGridDialog(QDialog):
     def __init__(self,
-                 img: np.ndarray,
-                 sip_meta: dict,
-                 pixel_size_um: float,        # still accepted but we derive scale from CDELT1
-                 n_grid_lines: int = 10,
-                 amplify: float    = 20.0,
-                 parent=None):
+                img: np.ndarray,
+                sip_meta: dict,
+                arcsec_per_pix: float,
+                n_grid_lines: int = 10,
+                amplify: float    = 20.0,
+                parent=None):
         super().__init__(parent)
         self.setWindowTitle("Astrometric Distortion & Histogram")
 
@@ -9498,14 +9498,6 @@ class DistortionGridDialog(QDialog):
 
         # — 2) extract SIP A,B and reference pixel from metadata dict —
         A, B, crpix1, crpix2 = extract_sip_from_meta(sip_meta)
-
-        # — 3) compute arcsec/pix from CDELT1 (deg→arcsec) —
-        if "CDELT1" not in sip_meta:
-            QMessageBox.critical(self, "Distortion", "No CDELT1 in WCS metadata!")
-            self.reject()
-            return
-        deg_per_pix    = abs(float(sip_meta["CDELT1"]))
-        arcsec_per_pix = deg_per_pix * 3600.0
 
         # — 4) per-star residuals in pixels → arc-sec —
         u_star = x_pix - crpix1
@@ -9613,6 +9605,7 @@ class DistortionGridDialog(QDialog):
         v = QVBoxLayout(self)
         v.addLayout(hl)
         v.addWidget(btn, 0)
+
 def plate_solve_current_image(image_manager, settings, parent=None):
     """
     Plate-solve the current slot image *including* SIP terms,
@@ -9880,13 +9873,27 @@ class ImagePeekerDialog(QDialog):
             
 
             # 3) Show your new dialog
+            try:
+                arcsec_per_pix = abs(hdr["CDELT1"]) * 3600.0
+            except KeyError:
+                try:
+                    cd11 = hdr["CD1_1"]
+                    cd12 = hdr.get("CD1_2", 0.0)
+                    cd21 = hdr.get("CD2_1", 0.0)
+                    cd22 = hdr["CD2_2"]
+                    scale_deg = np.sqrt(abs(cd11 * cd22 - cd12 * cd21))
+                    arcsec_per_pix = scale_deg * 3600.0
+                except KeyError:
+                    QMessageBox.critical(self, "WCS Error", "Cannot determine pixel scale from FITS header.")
+                    return
+
             dlg = DistortionGridDialog(
-                img           = arr,
-                sip_meta      = hdr,               # pass the Header right into your extractor
-                pixel_size_um = hdr["CDELT1"]*3600, # or your old value
-                n_grid_lines  = 10,
-                amplify       = 60.0,
-                parent        = self
+                img              = arr,
+                sip_meta         = hdr,
+                arcsec_per_pix   = arcsec_per_pix,  # pass this directly
+                n_grid_lines     = 10,
+                amplify          = 60.0,
+                parent           = self
             )
             dlg.show()
     
