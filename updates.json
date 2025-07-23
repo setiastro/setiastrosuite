@@ -1,9 +1,9 @@
 {
-  "version": "2.19.5",
+  "version": "2.19.7",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Bug fixes and full astrometric distortion WCS across SAS Added progress during actual integration in stacking suite."
+  "notes": "Stacking Suite Bug Fixes and Improvements under the hood, faster stellar alignment/registration. Curves mono bug fixes and mask fixes. Mask creation - added an invert button when you create the mask"
 }
