@@ -17325,20 +17325,34 @@ class MosaicMasterDialog(QDialog):
                                 print(f"Warning: {key} value '{solved_header[key]}' could not be converted to int.")
                                 del solved_header[key]   
                     # Fix for malformed SIP distortion headers
+                    # Fix for malformed SIP distortion headers
                     sip_keys = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
-                    sip_present = {k: k in solved_header for k in sip_keys}
+                    sip_orders = {}
 
-                    # If only one of A_ORDER / B_ORDER is present, remove both
-                    if sip_present["A_ORDER"] != sip_present["B_ORDER"]:
-                        print("Incomplete SIP distortion keywords: removing A_ORDER and B_ORDER.")
-                        solved_header.pop("A_ORDER", None)
-                        solved_header.pop("B_ORDER", None)
+                    # Parse and coerce to int
+                    for k in sip_keys:
+                        if k in solved_header:
+                            try:
+                                sip_orders[k] = int(solved_header[k])
+                            except Exception:
+                                print(f"Warning: SIP keyword {k} has invalid value {solved_header[k]}, removing.")
+                                del solved_header[k]
 
-                    # If only one of AP_ORDER / BP_ORDER is present, remove both
-                    if sip_present["AP_ORDER"] != sip_present["BP_ORDER"]:
-                        print("Incomplete SIP distortion keywords: removing AP_ORDER and BP_ORDER.")
-                        solved_header.pop("AP_ORDER", None)
-                        solved_header.pop("BP_ORDER", None)
+                    # Patch missing A/B or AP/BP if needed
+                    if "A_ORDER" in sip_orders and "B_ORDER" not in sip_orders:
+                        solved_header["B_ORDER"] = sip_orders["A_ORDER"]
+                        print("Patched B_ORDER to match A_ORDER:", sip_orders["A_ORDER"])
+                    elif "B_ORDER" in sip_orders and "A_ORDER" not in sip_orders:
+                        solved_header["A_ORDER"] = sip_orders["B_ORDER"]
+                        print("Patched A_ORDER to match B_ORDER:", sip_orders["B_ORDER"])
+
+                    if "AP_ORDER" in sip_orders and "BP_ORDER" not in sip_orders:
+                        solved_header["BP_ORDER"] = sip_orders["AP_ORDER"]
+                        print("Patched BP_ORDER to match AP_ORDER:", sip_orders["AP_ORDER"])
+                    elif "BP_ORDER" in sip_orders and "AP_ORDER" not in sip_orders:
+                        solved_header["AP_ORDER"] = sip_orders["BP_ORDER"]
+                        print("Patched AP_ORDER to match BP_ORDER:", sip_orders["BP_ORDER"])
+
 
                     # Force SIP orders to be int if still present
                     for key in sip_keys:
