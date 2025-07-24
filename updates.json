@@ -1,9 +1,9 @@
 {
-  "version": "2.19.7",
+  "version": "2.19.8",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.7/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.8/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.8/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.19.8/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Stacking Suite Bug Fixes and Improvements under the hood, faster stellar alignment/registration. Curves mono bug fixes and mask fixes. Mask creation - added an invert button when you create the mask"
+  "notes": "Mosaic Master updated to utilize astrometric distortion polynomials for a better fit. Exoplanet Detector updated for AAVSO submissions and fix Mac bug. Live Stacking supports XISF files"
 }
