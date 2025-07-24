@@ -278,7 +278,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.7"
+VERSION = "2.19.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -29535,38 +29535,45 @@ class ExoPlanetWindow(QDialog):
         middle.addWidget(self.plot_widget, 5)
 
         # — Bottom: export & threshold —
-        bottom = QHBoxLayout()
-        bottom.addWidget(QLabel("Dip threshold (ppt):"))
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Dip threshold (ppt):"))
 
         # slider
         self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider.setRange(0, 100)
         self.threshold_slider.setValue(20)
-        bottom.addWidget(self.threshold_slider)
+        row1.addWidget(self.threshold_slider)
 
         # dynamically-updated label
         self.threshold_value_label = QLabel(f"{self.threshold_slider.value()} ppt")
-        bottom.addWidget(self.threshold_value_label)
+        row1.addWidget(self.threshold_value_label)
 
-        bottom.addStretch()
+        row1.addStretch()
 
         # detrend combo, export button, etc.
         self.identify_btn = QPushButton("Identify Star…")
         self.identify_btn.clicked.connect(self.on_identify_star)
-        bottom.addWidget(self.identify_btn)
+        row1.addWidget(self.identify_btn)
+    
+        self.show_ensemble_btn = QPushButton("Show Ensemble Members")
+        self.show_ensemble_btn.clicked.connect(self.show_ensemble_members)
+        row1.addWidget(self.show_ensemble_btn)
+
         self.analyze_btn = QPushButton("Analyze Star…")
         self.analyze_btn.clicked.connect(self.on_analyze)
-        bottom.addWidget(self.analyze_btn)
+        row1.addWidget(self.analyze_btn)
+
+        row2 = QHBoxLayout()
         self.fetch_tesscut_btn = QPushButton("Query TESScut Light Curve")
         self.fetch_tesscut_btn.setEnabled(False)
         self.fetch_tesscut_btn.clicked.connect(self.query_tesscut)
-        bottom.addWidget(self.fetch_tesscut_btn)        
+        row2.addWidget(self.fetch_tesscut_btn)
         self.export_btn = QPushButton("Export CSV/FITS")
         self.export_btn.clicked.connect(self.export_data)
-        bottom.addWidget(self.export_btn)
+        row2.addWidget(self.export_btn)
         self.export_aavso_btn = QPushButton("Export → AAVSO")
         self.export_aavso_btn.clicked.connect(self.export_to_aavso)
-        bottom.addWidget(self.export_aavso_btn)
+        row2.addWidget(self.export_aavso_btn)
 
         # — Assemble —
         main = QVBoxLayout(self)
@@ -29574,7 +29581,8 @@ class ExoPlanetWindow(QDialog):
         main.addLayout(cal_layout)
         main.addLayout(top_layout)
         main.addLayout(middle)
-        main.addLayout(bottom)
+        main.addLayout(row1)
+        main.addLayout(row2)
         # status at very bottom
         statlay = QHBoxLayout()
         statlay.addWidget(self.status_label)
@@ -30231,7 +30239,7 @@ class ExoPlanetWindow(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(self.image_paths))
         self.progress_bar.setValue(0)
-        QApplication.processEvents()
+        #QApplication.processEvents()
 
         # 0) make sure all the images are in memory
         if not hasattr(self, "_cached_images") or len(self._cached_images) != len(self.image_paths):
@@ -30242,7 +30250,7 @@ class ExoPlanetWindow(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(n_frames)
         self.progress_bar.setValue(0)
-        QApplication.processEvents()
+        #QApplication.processEvents()
 
         # 1) prepare a frame‐processing helper
         def _process_frame(idx, img):
@@ -30359,15 +30367,19 @@ class ExoPlanetWindow(QDialog):
         aper_r = max(2, 1.2 * self.median_fwhm)
 
         # 5) vectorized aperture sums on *all* frames
+        # — 5) vectorized aperture sums on *all* frames ——
         n_stars  = len(xs)
         n_frames = len(self._cached_images)
         raw_flux = np.zeros((n_stars, n_frames), float)
         flags    = np.zeros((n_stars, n_frames), int)
 
+        # NEW: array to hold the SEP‐reported errors
+        raw_flux_err = np.zeros((n_stars, n_frames), float)
+
         self.status_label.setText("Computing aperture sums…")
         self.progress_bar.setMaximum(n_frames)
         self.progress_bar.setValue(0)
-        QApplication.processEvents()
+        #QApplication.processEvents()
 
         for t, img in enumerate(self._cached_images):
             self.status_label.setText(f"Running Photometry frame {t+1}/{n_frames}…")
@@ -30384,37 +30396,59 @@ class ExoPlanetWindow(QDialog):
             rmsmap = bkg.rms()
             data_sub = plane - bkg.back()
 
+            # SEP sum circle returns flux, flux_error, flags
             fl, ferr, flg = sep.sum_circle(
                 data_sub, xs, ys, aper_r, err=rmsmap
             )
-            raw_flux[:, t] = fl
-            flags[:, t]    = flg
+            raw_flux[:, t]     = fl
+            raw_flux_err[:, t] = ferr     # <— capture the per‐star error
+            flags[:, t]        = flg
 
             self.progress_bar.setValue(t+1)
             QApplication.processEvents()
 
+
         # ——— 6) ENSEMBLE NORMALIZATION ———
         # first compute each star’s “reference brightness” (e.g. median over all frames)
-        star_refs = np.nanmedian(raw_flux, axis=1)      # shape (n_stars,)
-        # we’ll build rel_flux star-by-star
+        n_stars, n_frames = raw_flux.shape
+
+        # compute each star’s “reference brightness” (for neighbor search)
+        star_refs = np.nanmedian(raw_flux, axis=1)
+
+        # allocate outputs
         rel_flux = np.zeros_like(raw_flux)
+        rel_err  = np.zeros_like(raw_flux_err)
 
-        # decide how many neighbors to use
-        k = 10
-        n_stars = raw_flux.shape[0]
+        k = self.ensemble_k  # e.g. 10 by default
+        self.ensemble_map = {} 
 
-        # for each star i...
         for i in range(n_stars):
-            # 1) find the k stars whose reference brightness is closest to star_refs[i], excluding self
+            # 1) find the k neighbors closest in ref‐brightness
             diffs = np.abs(star_refs - star_refs[i])
             diffs[i] = np.inf
-            idxs = np.argpartition(diffs, k)[:k]   # indices of the k nearest
-            # 2) build ensemble median curve
-            ensemble = np.nanmedian(raw_flux[idxs, :], axis=0)  # length n_frames
-            # 3) normalize star i by that ensemble
-            #    guard against zero:
-            ensemble[ensemble == 0] = np.nan
-            rel_flux[i, :] = raw_flux[i, :] / ensemble
+            neigh = np.argpartition(diffs, k)[:k]
+            self.ensemble_map[i] = list(neigh)
+
+            # 2) build the ensemble curve + estimate its error
+            ens_flux = np.nanmedian(raw_flux[neigh, :], axis=0)  # length n_frames
+            # propagate errors in quadrature, then /sqrt(N)
+            ens_err = np.sqrt(np.nansum(raw_flux_err[neigh, :]**2, axis=0)) / np.sqrt(len(neigh))
+
+            # 3) normalize star i by that ensemble (guard against zeros)
+            mask = ens_flux != 0
+            rel_flux[i, mask] = raw_flux[i, mask] / ens_flux[mask]
+
+            # 4) propagate the two error terms:
+            #    σ_rel = rel_flux * sqrt[ (σ_raw / raw_flux)**2 + (σ_ens / ens_flux)**2 ]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                term1 = np.where(raw_flux[i]  != 0, raw_flux_err[i]  / raw_flux[i], 0)
+                term2 = np.where(ens_flux      != 0, ens_err           / ens_flux,      0)
+                rel_err[i, mask] = rel_flux[i, mask] * np.sqrt(term1[mask]**2 + term2[mask]**2)
+
+        # store for downstream steps & export
+        self.fluxes      = rel_flux
+        self.flux_errors = rel_err
+        self.flags       = flags
 
         # — 6.5) detrend each star if requested —
         if self.detrend_degree is not None:
@@ -30482,6 +30516,20 @@ class ExoPlanetWindow(QDialog):
         self.progress_bar.setVisible(False)
         self.analyze_btn.setEnabled(True)
         self._on_threshold_changed(self.threshold_slider.value())
+
+    def show_ensemble_members(self):
+        sels = self.star_list.selectedItems()
+        if len(sels)!=1: return
+        i = sels[0].data(Qt.ItemDataRole.UserRole)
+        members = self.ensemble_map.get(i, [])
+        # highlight them:
+        for row in range(self.star_list.count()):
+            item = self.star_list.item(row)
+            item.setBackground(QBrush())
+        for idx in members:
+            item = self.star_list.item(idx)
+            if item:
+                item.setBackground(QBrush(QColor('lightblue')))
 
     def on_detrend_changed(self, idx: int):
         # idx==0 → quadratic, 1 → linear, 2 → none
@@ -30907,6 +30955,102 @@ class ExoPlanetWindow(QDialog):
         if msg.clickedButton() == open_btn:
             webbrowser.open(simbad_url)
 
+
+    def _query_simbad_main_id(self):
+        """
+        Try up to 5× to look up the MAIN_ID from SIMBAD for the currently selected star.
+        Returns the name (string) on success, or None on failure/no match.
+        """
+
+        # 1) get the star's sky coord
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            return None
+        coord = SkyCoord(ra=radec[0]*u.deg, dec=radec[1]*u.deg, frame="icrs")
+
+        # 2) retry up to 5×, just like on_identify_star()
+        table = None
+        for attempt in range(1, 6):
+            try:
+                custom = Simbad()
+                custom.reset_votable_fields()
+                custom.add_votable_fields("otype")
+                custom.add_votable_fields("flux(V)")
+                table = custom.query_region(coord, radius=5*u.arcsec)
+                break
+            except Exception as e:
+                print(f"[DEBUG] SIMBAD lookup attempt {attempt} failed: {e}")
+                if attempt == 5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return None
+                time.sleep(1)
+
+        # 3) no results?
+        if table is None or len(table) == 0:
+            return None
+
+        # 4) dynamically find the MAIN_ID column (case‐insensitive)
+        try:
+            id_col = next(c for c in table.colnames if c.lower() == "main_id")
+        except StopIteration:
+            return None
+
+        # 5) extract and decode
+        val = table[0][id_col]
+        if isinstance(val, bytes):
+            val = val.decode("utf-8")
+        return val
+
+    def _query_simbad_name_and_vmag(self, ra_deg, dec_deg, radius=5*u.arcsec):
+        """
+        Return (main_id, vmag) from SIMBAD within `radius` of (ra_deg,dec_deg),
+        retrying up to 5×.  If no valid match, return (None,None).
+        """
+        coord = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame="icrs")
+        table = None
+
+        for attempt in range(1,6):
+            try:
+                custom = Simbad()
+                custom.reset_votable_fields()
+                custom.add_votable_fields("otype","flux(V)")
+                table = custom.query_region(coord, radius=radius)
+                break
+            except Exception as e:
+                if attempt==5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return None, None
+                time.sleep(1)
+
+        if table is None or len(table)==0:
+            return None, None
+
+        # find MAIN_ID column name dynamically
+        try:
+            id_col = next(c for c in table.colnames if c.lower()=="main_id")
+        except StopIteration:
+            return None, None
+
+        raw_id = table[0][id_col]
+        if isinstance(raw_id, bytes):
+            raw_id = raw_id.decode()
+        # find V‑mag column dynamically
+        v_col = next((c for c in table.colnames if c.upper() in ("FLUX_V","V")), None)
+        vmag = None
+        if v_col:
+            try:
+                vmag = float(table[0][v_col])
+            except Exception:
+                vmag = None
+
+        return raw_id, vmag
+
     def export_data(self):
         if self.fluxes is None or self.times is None:
             QMessageBox.warning(self, "Export", "No photometry to export. Run Measure & Photometry first.")
@@ -31002,17 +31146,14 @@ class ExoPlanetWindow(QDialog):
         QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
 
     def export_to_aavso(self):
-        """
-        Export the measured light curve in AAVSO Extended WebObs format,
-        supporting both Exoplanet Report and Variable-Star Photometry.
-        """
-        # 0) Make sure we have photometry
-        if self.fluxes is None or self.times is None:
+        """Export in AAVSO EXTENDED format, converting to apparent magnitudes."""
+        # 0) make sure we have photometry
+        if getattr(self, "fluxes", None) is None or getattr(self, "times", None) is None:
             QMessageBox.warning(self, "Export AAVSO",
                                 "No photometry available. Run Measure & Photometry first.")
             return
 
-        # 0.5) Exactly one star selected?
+        # 1) exactly one star selected
         sels = self.star_list.selectedItems()
         if len(sels) != 1:
             QMessageBox.warning(self, "Export AAVSO",
@@ -31020,8 +31161,20 @@ class ExoPlanetWindow(QDialog):
             return
         idx = sels[0].data(Qt.ItemDataRole.UserRole)
 
-        # 1) Ensure exposure time
-        if self.exposure_time is None:
+        star_id = self._query_simbad_main_id()
+        if star_id is None:
+            # fallback to manual entry
+            star_id, ok = QInputDialog.getText(
+                self, "Target Star Name",
+                "Could not auto‑identify.  Enter target star name for STARID:",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            if not ok or not star_id.strip():
+                return
+            star_id = star_id.strip()
+
+        # 2) exposure time
+        if not hasattr(self, "exposure_time") or self.exposure_time is None:
             exp, ok = QInputDialog.getDouble(
                 self, "Exposure Time",
                 "No EXPOSURE found in headers. Please enter exposure time (s):",
@@ -31031,7 +31184,7 @@ class ExoPlanetWindow(QDialog):
                 return
             self.exposure_time = exp
 
-        # 1.5) Prompt for observer code (saved in QSettings)
+        # 3) observer code
         settings = QSettings()
         prev_code = settings.value("AAVSO/observer_code", "", type=str)
         code, ok = QInputDialog.getText(
@@ -31045,24 +31198,68 @@ class ExoPlanetWindow(QDialog):
         code = code.strip().upper()
         settings.setValue("AAVSO/observer_code", code)
 
-        # 2) Choose which kind of file
+        # 4) submission type
         fmt, ok = QInputDialog.getItem(
             self, "AAVSO Format",
             "Choose submission format:",
-            ["Exoplanet Report", "Variable-Star Photometry"],
+            ["Variable-Star Photometry", "Exoplanet Report"],
             0, False
         )
         if not ok:
             return
 
-        # 3) Get output filename
+        # 5) automatically pick a check star from your ensemble_map
+        #    use the same k you used in detect_stars()
+        from astropy.wcs import WCS
+        wcs = self.parent().wimi_tab.wcs
+
+        members = self.ensemble_map.get(idx, [])
+        kname = None
+        kmag  = None
+
+        for i in members:
+            x, y = self.star_positions[i]
+            sky = wcs.pixel_to_world(x, y)
+            name, v = self._query_simbad_name_and_vmag(sky.ra.deg, sky.dec.deg)
+            if name and (v is not None):
+                kname, kmag = name, v
+                break
+
+        # if none of the ensemble members resolved, fall back to manual entry
+        if kname is None:
+            kname, ok = QInputDialog.getText(
+                self, "Check Star Name",
+                "Could not auto‑identify a check star. Enter check‑star ID:"
+            )
+            if not ok or not kname.strip():
+                return
+            kname = kname.strip()
+            kmag, ok = QInputDialog.getDouble(
+                self, "Check Star Magnitude",
+                f"Enter catalog magnitude for {kname}:",
+                decimals=3
+            )
+            if not ok:
+                return
+
+        # 6) choose filter code
+        filt_choices = ["V","TG","TB","TR"]
+        filt, ok = QInputDialog.getItem(
+            self, "Filter",
+            "Select filter code for this dataset:",
+            filt_choices, 0, False
+        )
+        if not ok:
+            return
+
+        # 7) output filename
         path, _ = QFileDialog.getSaveFileName(
             self, "Save AAVSO File", "", "Text files (*.txt *.dat *.csv)"
         )
         if not path:
             return
 
-        # 4) Build the six required parameters
+        # 8) build header lines
         hdr = [
             "#TYPE=EXTENDED",
             f"#OBSCODE={code}",
@@ -31071,8 +31268,7 @@ class ExoPlanetWindow(QDialog):
             "#DATE=JD",
             "#OBSTYPE=CCD",
         ]
-
-        # 4a) Insert RA/Dec of the selected star
+        # RA/Dec of the selected star
         radec = self.get_selected_star_radec()
         if radec is None:
             QMessageBox.warning(self, "Export AAVSO",
@@ -31080,88 +31276,53 @@ class ExoPlanetWindow(QDialog):
             return
         from astropy.coordinates import SkyCoord
         import astropy.units as u
-        ra_deg, dec_deg = radec
-        c = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame='icrs')
-        ra_str  = c.ra.to_string(unit=u.hour, sep=':', pad=True, precision=2)
-        dec_str = c.dec.to_string(unit=u.degree, sep=':', pad=True, alwayssign=True, precision=1)
-        hdr += [f"#RA={ra_str}", f"#DEC={dec_str}"]
-
-        # 4b) Commented column‐name line (ignored by AAVSO parser)
+        c = SkyCoord(ra=radec[0]*u.deg, dec=radec[1]*u.deg, frame="icrs")
+        hdr += [
+            "#RA="  + c.ra.to_string(unit=u.hour, sep=":", pad=True, precision=2),
+            "#DEC=" + c.dec.to_string(unit=u.degree, sep=":", pad=True,
+                                    alwayssign=True, precision=1),
+        ]
         hdr.append("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES")
 
-        # 5) Gather any format‐specific metadata
-        if fmt == "Exoplanet Report":
-            starname, ok1 = QInputDialog.getText(
-                self, "Host Star Name", "Enter host star name (in VSX):",
-                QLineEdit.EchoMode.Normal, ""
-            )
-            if not ok1 or not starname.strip():
-                return
-            planet, ok2 = QInputDialog.getText(
-                self, "Exoplanet Name",
-                "Enter exoplanet designation (e.g. WASP-12b):",
-                QLineEdit.EchoMode.Normal, ""
-            )
-            if not ok2 or not planet.strip():
-                return
-            # you can record them in NOTES if you like:
-            note_header = f"Planet={planet.strip()}"
-            star_id = starname.strip()
+        # 9) prepare your time & magnitudes
+        jd = self.times.utc.jd
+        rel_flux = self.fluxes[idx, :]           # relative flux per frame
+        # convert to mag:  m = kmag − 2.5 log10(rel_flux)
+        with np.errstate(divide="ignore"):
+            mags = kmag - 2.5 * np.log10(rel_flux)
+        # magnitude errors from flux_errors if you stored them
+        if hasattr(self, "flux_errors"):
+            rel_err = self.flux_errors[idx, :]
+            merr = (2.5/np.log(10)) * (rel_err / rel_flux)
         else:
-            starname, ok1 = QInputDialog.getText(
-                self, "Variable-Star Name",
-                "Enter variable star name (e.g. R Lyr):",
-                QLineEdit.EchoMode.Normal, ""
-            )
-            if not ok1 or not starname.strip():
-                return
-            comp, _ = QInputDialog.getText(
-                self, "Comparison Star",
-                "Enter comparison star (GSC ID), or leave blank:",
-                QLineEdit.EchoMode.Normal, ""
-            )
-            star_id = starname.strip()
-            # you could put comp in NOTES, or ignore:
-            note_header = ""
-            if comp.strip():
-                note_header = f"Comp={comp.strip()}"
+            merr = np.full_like(mags, np.nan)
 
-        # 6) Write out the file
+        # 10) write out
         try:
             with open(path, "w") as f:
-                # write header lines
-                for line in hdr:
-                    f.write(line + "\n")
+                for L in hdr:
+                    f.write(L + "\n")
                 f.write("\n")
-                # write each observation with 15 fields
-                jd = self.times.utc.jd
                 for j, t in enumerate(jd):
-                    # magnitude = relative flux (if you want to convert to mag do so here)
-                    mag = self.fluxes[idx, j]
+                    m   = mags[j]
+                    me  = merr[j]
+                    me_str = f"{me:.3f}" if np.isfinite(me) else "na"
+                    note = "MAG calc via ensemble: m=-2.5 log10(F/Fe)+K"  # short note
                     fields = [
-                        star_id,                          # STARID
-                        f"{t:.5f}",                       # DATE (JD)
-                        f"{mag:.5f}",                     # MAG
-                        "na",                             # MAGERR
-                        getattr(self, 'aavso_filter', 'V'), # FILT
-                        "NO",                             # TRANS
-                        "STD",                            # MTYPE
-                        "na",                             # CNAME
-                        "na",                             # CMAG
-                        "na",                             # KNAME
-                        "na",                             # KMAG
-                        "na",                             # AMASS
-                        "na",                             # GROUP
-                        "na",                             # CHART
-                        note_header or "na"              # NOTES
+                        # STARID, DATE,   MAG,      MERR,  FILT, TRANS, MTYPE,
+                        star_id,  f"{t:.5f}", f"{m:.3f}", me_str,
+                        filt,             "NO",   "STD",
+                        # CNAME,    CMAG,    KNAME,    KMAG,     AMASS, GROUP, CHART, NOTES
+                        "ENSEMBLE", "na",    kname,    f"{kmag:.3f}",
+                        "na",       "na",   "na",   note
                     ]
                     f.write(",".join(fields) + "\n")
-
         except Exception as e:
-            QMessageBox.critical(self, "Export AAVSO", f"Failed to write file:\n{e}")
+            QMessageBox.critical(self, "Export AAVSO",
+                                f"Failed to write file:\n{e}")
             return
 
-        # 7) Offer to open the AAVSO upload page
+        # 11) offer to open the AAVSO upload page
         msg = QMessageBox(self)
         msg.setWindowTitle("Export AAVSO")
         msg.setText(f"Wrote {fmt} →\n{path}\n\nOpen AAVSO WebObs upload page now?")
@@ -31171,6 +31332,7 @@ class ExoPlanetWindow(QDialog):
         if msg.clickedButton() == yes:
             import webbrowser
             webbrowser.open("https://www.aavso.org/webobs/file")
+
 
 
 
