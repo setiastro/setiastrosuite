@@ -29420,6 +29420,7 @@ class ExoPlanetWindow(QDialog):
         self.master_dark    = None
         self.master_flat    = None
         self.exposure_time = None
+        self._last_ensemble = []
         # ------------ new settings ------------
         # SEP detection threshold in σ
         self.sep_threshold  = 5.0
@@ -30317,7 +30318,7 @@ class ExoPlanetWindow(QDialog):
                 done += 1
                 self.progress_bar.setValue(done)
                 self.status_label.setText(f"Measured frame {done}/{n_frames}")
-                QApplication.processEvents()
+                #QApplication.processEvents()
 
         # 2) pick best reference by star_count/(FWHM * mean)
         def quality(i):
@@ -30405,7 +30406,7 @@ class ExoPlanetWindow(QDialog):
             flags[:, t]        = flg
 
             self.progress_bar.setValue(t+1)
-            QApplication.processEvents()
+            #QApplication.processEvents()
 
 
         # ——— 6) ENSEMBLE NORMALIZATION ———
@@ -30458,7 +30459,7 @@ class ExoPlanetWindow(QDialog):
             self.progress_bar.setVisible(True)
             self.progress_bar.setMaximum(n_stars)
             self.progress_bar.setValue(0)
-            QApplication.processEvents()
+            #QApplication.processEvents()
 
             for i in range(n_stars):
                 curve = rel_flux[i].copy()
@@ -30471,7 +30472,7 @@ class ExoPlanetWindow(QDialog):
                 rel_flux[i] = detrended
 
                 self.progress_bar.setValue(i+1)
-                QApplication.processEvents()
+                #QApplication.processEvents()
 
             self.progress_bar.setVisible(False)
             self.status_label.setText("Detrending complete")  
@@ -30519,18 +30520,29 @@ class ExoPlanetWindow(QDialog):
 
     def show_ensemble_members(self):
         sels = self.star_list.selectedItems()
-        if len(sels)!=1: return
-        i = sels[0].data(Qt.ItemDataRole.UserRole)
-        members = self.ensemble_map.get(i, [])
-        # highlight them:
-        for row in range(self.star_list.count()):
-            item = self.star_list.item(row)
-            item.setBackground(QBrush())
+        if len(sels) != 1:
+            return
+        target = sels[0].data(Qt.ItemDataRole.UserRole)
+        members = self.ensemble_map.get(target, [])
+
+        # 1) clear *only* the old ensemble highlights (light‑blue),
+        #    leave any yellow flagged items in place
+        for idx in self._last_ensemble:
+            item = self.star_list.item(idx)
+            if item:
+                color = item.background().color()
+                if color == QColor('lightblue'):
+                    item.setBackground(QBrush())
+
+        # 2) highlight the new ensemble members, but don't override yellow
         for idx in members:
             item = self.star_list.item(idx)
             if item:
-                item.setBackground(QBrush(QColor('lightblue')))
+                if item.background().color() != QColor('yellow'):
+                    item.setBackground(QBrush(QColor('lightblue')))
 
+        # 3) remember for next time
+        self._last_ensemble = members
     def on_detrend_changed(self, idx: int):
         # idx==0 → quadratic, 1 → linear, 2 → none
         mapping = {0:None, 1:1, 2:2}
