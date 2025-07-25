@@ -1610,7 +1610,7 @@ class AstroEditingSuite(QMainWindow):
         if slot in self.mask_slot_actions:
             self.mask_slot_actions[slot].setText(new_name)
             self.mask_slot_actions[slot].setStatusTip(f"Apply or preview mask for {new_name}")
-        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
 
 
     def show_slot_context_menu(self, pos, slot):
@@ -1678,7 +1678,6 @@ class AstroEditingSuite(QMainWindow):
         # Refresh Menubar
         self.menuBar().update()
 
-        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
 
     def clear_slot_contents(self, slot):
         """
@@ -1721,9 +1720,6 @@ class AstroEditingSuite(QMainWindow):
 
         # Emit signal to update the UI and trigger the image refresh
         self.image_manager.image_changed.emit(slot, np.zeros((1, 1), dtype=np.uint8), {})
-
-        # Notify user that the slot was cleared
-        QMessageBox.information(self, "Slot Cleared", f"Slot {slot} has been completely cleared.")
 
 
 
@@ -2116,7 +2112,7 @@ class AstroEditingSuite(QMainWindow):
         # Refresh Menubar
         self.menuBar().update()
 
-        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
+
 
     def rename_mask_slot(self):
         """
@@ -2151,7 +2147,7 @@ class AstroEditingSuite(QMainWindow):
         # if slot in self.mask_preview_windows:
         #     self.mask_preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
 
-        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
 
 
     def open_pixel_math_dialog(self):
@@ -2331,14 +2327,9 @@ class AstroEditingSuite(QMainWindow):
             if ok:
                 # Set the mask in the selected slot using MaskManager
                 self.mask_manager.set_mask(slot_number, mask)
-                QMessageBox.information(
-                    self, 
-                    "Mask Loaded", 
-                    f"Mask loaded from {filename} into slot {slot_number}."
-                )
                 print(f"AstroEditingSuite: Mask loaded from {filename} into slot {slot_number}.")
             else:
-                QMessageBox.information(self, "Load Mask", "Mask loading canceled.")
+
                 print("AstroEditingSuite: Mask loading canceled by the user.")
 
         except Exception as e:
@@ -2517,7 +2508,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Flipped", "The image has been successfully flipped horizontally.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} flipped horizontally successfully.")
 
@@ -2552,7 +2543,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Flipped", "The image has been successfully flipped vertically.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} flipped vertically successfully.")
 
@@ -2587,7 +2578,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Rotated", "The image has been successfully rotated 90° clockwise.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} rotated 90° clockwise successfully.")
 
@@ -2622,7 +2613,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Rotated", "The image has been successfully rotated 90° counterclockwise.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} rotated 90° counterclockwise successfully.")
 
@@ -2662,7 +2653,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, inverted_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Inverted", "The image has been successfully inverted.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} inverted successfully.")
 
@@ -25003,7 +24994,7 @@ class WaveScaleDarkEnhanceDialog(QDialog):
                 self._aspect_ratio = aspect_ratio
 
         self.mask_window = ResizableMaskWindow(self)
-        self.mask_window.setWindowTitle("DSE Mask Preview")
+        self.mask_window.setWindowTitle("Dark Mask Preview")
 
         central_widget = QWidget()
         layout = QVBoxLayout()
@@ -25278,6 +25269,11 @@ class WaveScaleDarkEnhanceDialog(QDialog):
         b = 200.0 * (fy - fz)
 
         return np.stack([L, a, b], axis=-1)
+
+    def closeEvent(self, event):
+        if hasattr(self, "mask_window") and self.mask_window is not None:
+            self.mask_window.close()
+        super().closeEvent(event)
 
 class BlemishBlasterWorkerSignals(QObject):
     finished = pyqtSignal(np.ndarray)  # Emitted when processing is done
@@ -29077,7 +29073,7 @@ class StarSpikePreviewWindow(QDialog):
             # fallback to add_image(...) if you want
             self.image_manager.add_image(slot_idx, self.preview_image, new_metadata)
 
-        QMessageBox.information(self, "Saved", f"Preview image saved to slot {slot_idx}.")
+        print(f"Preview image saved to slot {slot_idx}.")
 
 class AdvancedOptionsDialog(QDialog):
     """
@@ -29546,7 +29542,7 @@ class StarSpikeTool(QDialog):
         # 3) Save the final image to the chosen slot
         self.image_manager.set_image_for_slot(slot_idx, self.final_image, new_metadata, step_name="Star Spike Tool")
 
-        QMessageBox.information(self, "Saved", f"Spiked image saved to slot {slot_idx}.")
+        print(f"Spiked image saved to slot {slot_idx}.")
         self.close()
 
 
@@ -30680,7 +30676,7 @@ class ExoPlanetWindow(QDialog):
             self.master_dark = binned
             self.dark_status_label.setText("Dark: ✅")
             self.dark_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
-            QMessageBox.information(self, "Master Dark Loaded", os.path.basename(path))
+
 
         else:
             # flat
@@ -30695,7 +30691,7 @@ class ExoPlanetWindow(QDialog):
             self.master_flat = binned
             self.flat_status_label.setText("Flat: ✅")
             self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
-            QMessageBox.information(self, "Master Flat Loaded", os.path.basename(path))
+
 
     def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
         """
@@ -32516,7 +32512,7 @@ class BackgroundNeutralizationDialog(QDialog):
         )
 
         # Inform the user
-        QMessageBox.information(self, "Success", "Background neutralization applied successfully.")
+        print("Background neutralization applied successfully.")
 
         # Close the dialog
         self.accept()
@@ -32633,7 +32629,7 @@ class RemoveGreenDialog(QDialog):
                     )
 
                 # Inform the user of the successful operation
-                QMessageBox.information(self, "Success", f"Remove Green applied with amount {amount:.2f}")
+                print(f"Remove Green applied with amount {amount:.2f}")
 
                 # Close the dialog
                 self.accept()
@@ -32978,7 +32974,7 @@ class CLAHEDialog(QDialog):
                 )
 
             # Inform the user of the successful operation
-            QMessageBox.information(self, "Success", "CLAHE applied successfully.")
+            print("CLAHE applied successfully.")
 
             # Close the dialog
             self.accept()
@@ -51788,6 +51784,9 @@ class NBtoRGBstarsTab(QWidget):
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
 
+        self.clearButton = QPushButton("Clear All Inputs", self)
+        self.clearButton.clicked.connect(self.clearInputs)
+        left_layout.addWidget(self.clearButton)
 
         #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
@@ -51833,6 +51832,42 @@ class NBtoRGBstarsTab(QWidget):
         self.setLayout(main_layout)
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
+
+    def clearInputs(self):
+        # 1) Drop all loaded data
+        self.ha_image = None
+        self.oiii_image = None
+        self.sii_image = None
+        self.osc_image = None
+        self.combined_image = None
+
+        # 2) Clear filenames
+        self.ha_filename = None
+        self.oiii_filename = None
+        self.sii_filename = None
+        self.osc_filename = None
+
+        # 3) Reset headers/metadata
+        self.original_header = None
+        self.bit_depth = "Unknown"
+        self.is_mono = False
+
+        # 4) Reset labels
+        self.haLabel.setText("No Ha image selected")
+        self.oiiiLabel.setText("No OIII image selected")
+        self.siiLabel.setText("No SII image selected")
+        self.oscLabel.setText("No OSC stars image selected")
+        self.fileLabel.clear()
+
+        # 5) Clear preview
+        self.imageLabel.clear()
+        self.original_pixmap = None
+
+        # 6) Reset controls to defaults
+        self.haToOiiRatioSlider.setValue(30)
+        self.starStretchCheckBox.setChecked(True)
+        self.stretchSlider.setValue(500)      # assuming default 5.0 → 500
+        self.zoom_factor = 1.0
 
     def refresh(self):
         if self.image_manager:
