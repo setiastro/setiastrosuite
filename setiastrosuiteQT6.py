@@ -268,7 +268,8 @@ from PyQt6.QtCore import (
     QRunnable,
     QThreadPool,
     QSignalBlocker,
-    QStandardPaths
+    QStandardPaths,
+    QMetaObject
 )
 
 
@@ -278,7 +279,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.19.8"
+VERSION = "2.20.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -346,6 +347,7 @@ if hasattr(sys, '_MEIPASS'):
     sasp_data_path = os.path.join(sys._MEIPASS, 'SASP_data.fits')
     exoicon_path = os.path.join(sys._MEIPASS, 'exoicon.png')
     peeker_icon = os.path.join(sys._MEIPASS, 'gridicon.png')
+    dse_icon_path = os.path.join(sys._MEIPASS, 'dse.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -411,6 +413,7 @@ else:
     sasp_data_path = 'SASP_data.fits'
     exoicon_path = 'exoicon.png'
     peeker_icon = 'gridicon.png'
+    dse_icon_path = 'dse.png'
 
 
 def announce_zoom(method):
@@ -707,6 +710,12 @@ class AstroEditingSuite(QMainWindow):
         hdr_action.setStatusTip('Apply WaveScale HDR to the current image')
         hdr_action.triggered.connect(self.open_hdr_dialog)
         functions_menu.addAction(hdr_action)
+
+        dse_action = QAction(QIcon(dse_icon_path), "WaveScale Dark Enhancer", self)
+        dse_action.setShortcut("Ctrl+Shift+D")
+        dse_action.setStatusTip("Enhance dark nebula and voids using wavelets")
+        dse_action.triggered.connect(self.open_dse_dialog)
+        functions_menu.addAction(dse_action)
 
         clahe_action = QAction("CLAHE", self)
         clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
@@ -1105,6 +1114,8 @@ class AstroEditingSuite(QMainWindow):
 
         toolbar.addAction(hdr_action)
 
+        toolbar.addAction(dse_action)
+
         # Add CLAHE Button to Toolbar with Icon
         clahe_icon = QIcon(clahe_path)
         clahe_action.setIcon(clahe_icon)
@@ -1398,6 +1409,7 @@ class AstroEditingSuite(QMainWindow):
         win.show()
         self.exoplanet_detect_window = win
 
+
     def _on_reference_selected(self, path):
         # switch to WIMI tab
         self.tabs.setCurrentWidget(self.wimi_tab)
@@ -1413,7 +1425,7 @@ class AstroEditingSuite(QMainWindow):
 
         # when it’s done, schedule a popup on the main thread
         def _notify(_):
-            QTimer.singleShot(0, lambda: QMessageBox.information(self, "Blind Solve", "Blind-solve is complete!"))
+            #QTimer.singleShot(0, lambda: QMessageBox.information(self, "Blind Solve", "Blind-solve is complete!"))
 
             # Forward RA/Dec from WIMI → ExoPlanetWindow
             if hasattr(self, 'exoplanet_detect_window') and self.exoplanet_detect_window:
@@ -2667,6 +2679,14 @@ class AstroEditingSuite(QMainWindow):
         dialog = WaveScaleHDRDialog(self.image_manager, self)
         dialog.exec()
 
+    def open_dse_dialog(self):
+        """Open the Dark Structure Enhance dialog."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image Loaded", "Please load an image before using Dark Structure Enhance.")
+            return
+
+        dialog = WaveScaleDarkEnhanceDialog(self.image_manager, self)
+        dialog.exec()
 
     def open_blemish_blaster(self):
         """Handler method to open the Blemish Blaster tool."""
@@ -24694,7 +24714,571 @@ class WaveScaleHDRDialog(QDialog):
         rgb_image = np.clip(rgb_image, 0.0, 1.0)
 
         return rgb_image
-            
+
+class DSEWorker(QObject):
+    progress_update = pyqtSignal(str, int)
+    finished = pyqtSignal(np.ndarray, np.ndarray)
+
+    def __init__(self, rgb_image, n_scales, boost_factor, gamma, b3_spline_kernel, iterations=1, is_mono=False):
+        super().__init__()
+        self.rgb_image = rgb_image
+        self.n_scales = n_scales
+        self.boost_factor = boost_factor
+        self.gamma = gamma
+        self.b3_spline_kernel = b3_spline_kernel
+        self.iterations = iterations
+        self.is_mono = is_mono
+
+    def run(self):
+        try:
+            if self.is_mono:
+                self.progress_update.emit("Enhancing mono image...", 10)
+                L = self.rgb_image.squeeze()  # shape HxW
+
+                for iter_idx in range(self.iterations):
+                    if self.iterations > 1:
+                        self.progress_update.emit(f"Iteration {iter_idx+1} of {self.iterations}", 10 + iter_idx * int(70 / self.iterations))
+
+                    self.progress_update.emit("Building darkness mask...", 20)
+                    mask = self.create_darkness_mask(L, self.gamma)
+
+                    self.progress_update.emit("Decomposing via à trous...", 30)
+                    wavelet_planes, residual = self.atrous_wavelet_decompose(L)
+
+                    self.progress_update.emit("Enhancing dark structures...", 50)
+                    decay_rate = 0.5
+                    for i in range(len(wavelet_planes)):
+                        if i == 0:
+                            continue
+                        decay_factor = decay_rate ** i
+                        neg = np.clip(-wavelet_planes[i], 0, None)
+                        enhancement = neg * mask * (self.boost_factor - 1.0) * decay_factor
+                        wavelet_planes[i] -= enhancement
+                        self.progress_update.emit(f"Enhancing scale {i+1}", 50 + int(i / len(wavelet_planes) * 20))
+
+                    self.progress_update.emit("Reconstructing L...", 80)
+                    L = np.clip(self.atrous_wavelet_reconstruct(wavelet_planes + [residual]), 0, 1)
+
+                self.progress_update.emit("Done", 100)
+                output = L[..., np.newaxis] if self.rgb_image.ndim == 3 else L
+                self.finished.emit(output.astype(np.float32), mask)
+
+            else:
+                self.progress_update.emit("Converting to Lab...", 10)
+                lab = self.rgb_to_lab(self.rgb_image)
+                L = lab[..., 0]
+
+                for iter_idx in range(self.iterations):
+                    if self.iterations > 1:
+                        self.progress_update.emit(f"Iteration {iter_idx+1} of {self.iterations}", 10 + iter_idx * int(70 / self.iterations))
+
+                    self.progress_update.emit("Building darkness mask...", 20)
+                    mask = self.create_darkness_mask(L, self.gamma)
+
+                    self.progress_update.emit("Decomposing via à trous...", 30)
+                    wavelet_planes, residual = self.atrous_wavelet_decompose(L)
+
+                    self.progress_update.emit("Enhancing dark structures...", 50)
+                    decay_rate = 0.5
+                    for i in range(len(wavelet_planes)):
+                        if i == 0:
+                            continue
+                        decay_factor = decay_rate ** i
+                        neg = np.clip(-wavelet_planes[i], 0, None)
+                        enhancement = neg * mask * (self.boost_factor - 1.0) * decay_factor
+                        wavelet_planes[i] -= enhancement
+                        self.progress_update.emit(f"Enhancing scale {i+1}", 50 + int(i / len(wavelet_planes) * 20))
+
+                    self.progress_update.emit("Reconstructing L...", 80)
+                    L = np.clip(self.atrous_wavelet_reconstruct(wavelet_planes + [residual]), 0, 100)
+
+                lab[..., 0] = L
+                self.progress_update.emit("Converting back to RGB...", 90)
+                rgb_out = self.lab_to_rgb(lab)
+                self.progress_update.emit("Done", 100)
+                self.finished.emit(rgb_out.astype(np.float32), mask)
+
+        except Exception as e:
+            print(f"Error in DSEWorker: {e}")
+            self.finished.emit(None, None)
+
+    def rgb_to_lab(self, rgb_image):
+        M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+        rgb = np.clip(rgb_image, 0, 1)
+        xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+        xyz[..., 0] /= 0.95047
+        xyz[..., 2] /= 1.08883
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta**3, np.cbrt(t), t / (3 * delta**2) + 4 / 29)
+        fx = f(xyz[..., 0])
+        fy = f(xyz[..., 1])
+        fz = f(xyz[..., 2])
+        L = 116 * fy - 16
+        a = 500 * (fx - fy)
+        b = 200 * (fy - fz)
+        return np.stack([L, a, b], axis=-1)
+
+    def lab_to_rgb(self, lab_image):
+        M_inv = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)
+        fy = (lab_image[..., 0] + 16) / 116
+        fx = fy + lab_image[..., 1] / 500
+        fz = fy - lab_image[..., 2] / 200
+        def f_inv(t):
+            delta = 6 / 29
+            return np.where(t > delta, t**3, 3 * delta**2 * (t - 4/29))
+        X = 0.95047 * f_inv(fx)
+        Y = f_inv(fy)
+        Z = 1.08883 * f_inv(fz)
+        xyz = np.stack([X, Y, Z], axis=-1)
+        rgb = np.dot(xyz.reshape(-1, 3), M_inv.T).reshape(xyz.shape)
+        return np.clip(rgb, 0, 1)
+
+
+    def create_darkness_mask(self, L_channel, gamma):
+        """
+        Builds a dark structure mask by:
+        - Running à trous decomposition
+        - Extracting only the negative parts (dark structures)
+        - Combining key wavelet scales (e.g., 2–4)
+        - Applying a non-linear stretch with gamma
+        - Smoothing to suppress speckle and noise
+        """
+        # Step 1: à trous decomposition
+        wavelet_planes, _ = self.atrous_wavelet_decompose(L_channel)
+
+        # Step 2: Select mid-scales — scales 2, 3, 4 (1:4)
+        selected_scales = wavelet_planes[1:4]
+
+        # Step 3: Extract only dark structures (negative components)
+        dark_masks = [np.clip(-w, 0, None) for w in selected_scales]
+
+        # Step 4: Combine with mean instead of max for smoother map
+        combined = np.mean(dark_masks, axis=0)
+
+        # Step 5: Normalize
+        norm = combined / np.max(combined + 1e-8)
+
+        # Step 6: Apply gamma for user control
+        stretched = np.power(norm, gamma).astype(np.float32)
+
+        # Step 7: Apply Gaussian smoothing to suppress speckle
+        mask = gaussian_filter(stretched, sigma=3)  # sigma=3–5 works well
+        # Step 8: Apply brightening curve to emphasize midrange
+        def curves_brighten(x):
+            # Boosts midtones with a soft S-curve, adjustable
+            return np.clip(1.5 * x - 0.5 * x**2, 0, 1)
+
+        enhanced_mask = curves_brighten(mask)
+
+        return enhanced_mask
+
+
+    def atrous_wavelet_decompose(self, image):
+        current = image.copy()
+        scales = []
+        for scale_idx in range(self.n_scales):
+            kernel = self._spaced_kernel(self.b3_spline_kernel, scale_idx)
+            tmp = convolve(current, kernel.reshape(1, -1), mode='reflect')
+            smooth = convolve(tmp, kernel.reshape(-1, 1), mode='reflect')
+            wavelet = current - smooth
+            scales.append(wavelet)
+            current = smooth
+        return scales, current
+
+    def atrous_wavelet_reconstruct(self, planes):
+        result = planes[-1].copy()
+        for p in planes[:-1]:
+            result += p
+        return result
+
+    def _spaced_kernel(self, kernel, scale_idx):
+        if scale_idx == 0:
+            return kernel
+        step = 2 ** scale_idx
+        spaced = np.zeros((len(kernel) - 1) * step + 1, dtype=kernel.dtype)
+        spaced[::step] = kernel
+        return spaced
+
+
+class WaveScaleDarkEnhanceDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("WaveScale Dark Enhancer")
+        self.setMinimumSize(800, 600)
+        self.image_manager = image_manager
+        self.showing_original = False
+
+        if self.image_manager.image is None:
+            QMessageBox.critical(self, "Error", "No image loaded.")
+            self.reject()
+            return
+
+        img = self.image_manager.image
+        img = img.astype(np.float32)
+        img = np.clip(img, 0, 1)
+
+        self.original_image = img.copy()
+        self.preview_image  = img.copy()
+
+        # Determine mono vs RGB
+        if img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
+            self.is_mono = True
+            self.L_original = img.squeeze()
+        else:
+            self.is_mono = False
+            self.lab_original = self.rgb_to_lab(img)
+            self.L_original  = self.lab_original[..., 0].copy()
+
+        self.b3_spline_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
+
+        self.zoom_factor = 1.0
+        self.zoom_step = 1.25
+        self.zoom_min = 0.1
+        self.zoom_max = 5.0
+
+
+
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        self._create_preview_area()
+        self._create_zoom_area()
+        self._create_controls()
+        self._create_progress_display()
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.scroll_area)
+        layout.addWidget(self.zoom_group_box)
+
+        hbox_layout = QHBoxLayout()
+        hbox_layout.addWidget(self.controls_group, stretch=3)
+        hbox_layout.addWidget(self.progress_group_box, stretch=1)
+
+        layout.addLayout(hbox_layout)
+        self.main_layout.addLayout(layout)
+
+        self._create_bottom_buttons()
+
+        self.gamma_update_timer = QTimer()
+        self.gamma_update_timer.setSingleShot(True)
+        self.gamma_update_timer.timeout.connect(self._update_mask_preview)
+
+        self._create_mask_window()
+        self._update_mask_preview()  # initial mask
+        self.gamma_slider.valueChanged.connect(self._delayed_gamma_update)
+        self._update_preview_pixmap(self.original_image)
+
+    def _delayed_gamma_update(self):
+        self.gamma_update_timer.start(500)  # waits 500 ms after last change
+
+    def _on_gamma_changed(self, value):
+        """Updates the mask when gamma slider is moved."""
+        self._update_mask_preview()
+
+    def _create_mask_window(self):
+        class ResizableMaskWindow(QMainWindow):
+            def __init__(self, outer):
+                super().__init__(outer)
+                self.outer = outer
+                self._aspect_ratio = None  # Will be set once we get a mask
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                if self._aspect_ratio:
+                    new_width = self.width()
+                    new_height = int(new_width / self._aspect_ratio)
+                    self.resize(new_width, new_height)
+                self.outer._rescale_mask_pixmap()
+
+            def set_aspect_ratio(self, aspect_ratio):
+                self._aspect_ratio = aspect_ratio
+
+        self.mask_window = ResizableMaskWindow(self)
+        self.mask_window.setWindowTitle("DSE Mask Preview")
+
+        central_widget = QWidget()
+        layout = QVBoxLayout()
+        central_widget.setLayout(layout)
+
+        self.mask_label = QLabel()
+        self.mask_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mask_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.mask_label.setScaledContents(True)
+
+        layout.addWidget(self.mask_label)
+        self.mask_window.setCentralWidget(central_widget)
+
+        self.mask_window.resize(300, 300)
+        self.mask_window.show()
+
+    def _update_mask_preview(self):
+        gamma = self.gamma_slider.value() / 100.0
+        temp_worker = DSEWorker(
+            self.original_image,
+            self.scales_slider.value(),
+            self.boost_slider.value() / 100.0,
+            gamma,
+            self.b3_spline_kernel
+        )
+        mask = temp_worker.create_darkness_mask(self.L_original, gamma)
+        self.current_mask = mask
+
+        mask_img = (np.clip(mask, 0, 1) * 255).astype(np.uint8)
+        qimage = QImage(mask_img.data, mask.shape[1], mask.shape[0], mask.shape[1], QImage.Format.Format_Grayscale8)
+        self.mask_pixmap = QPixmap.fromImage(qimage)  # save original pixmap
+        self.mask_window.set_aspect_ratio(mask.shape[1] / mask.shape[0])  # width / height
+        self._rescale_mask_pixmap()
+
+    def _rescale_mask_pixmap(self):
+        if hasattr(self, "mask_pixmap") and self.mask_pixmap:
+            resized = self.mask_pixmap.scaled(
+                self.mask_window.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.mask_label.setPixmap(resized)
+
+    def _create_preview_area(self):
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        self.scroll_area.setWidget(self.graphics_view)
+
+    def _create_zoom_area(self):
+        self.zoom_group_box = QGroupBox("Zoom Controls")
+        zoom_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self._zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self._zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        self.zoom_group_box.setLayout(zoom_layout)
+
+    def _zoom_in(self):
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+
+    def _zoom_out(self):
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+
+    def _fit_to_preview(self):
+        if self.pixmap_item.pixmap().isNull():
+            return
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.zoom_factor = 1.0
+
+    def _apply_zoom(self):
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+
+    def _create_controls(self):
+        self.controls_group = QGroupBox("DSE Controls")
+        controls_layout = QFormLayout()
+
+        # Number of Scales
+        self.scales_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scales_slider.setRange(2, 10)
+        self.scales_slider.setValue(6)
+        self.scales_value = QLabel(str(self.scales_slider.value()))
+        self.scales_slider.valueChanged.connect(lambda v: self.scales_value.setText(str(v)))
+        scale_layout = QHBoxLayout()
+        scale_layout.addWidget(self.scales_slider)
+        scale_layout.addWidget(self.scales_value)
+        controls_layout.addRow("Number of Scales:", scale_layout)
+
+        # Boost Factor
+        self.boost_slider = QSlider(Qt.Orientation.Horizontal)
+        self.boost_slider.setRange(10, 1000)
+        self.boost_slider.setValue(500)
+        self.boost_value = QLabel(str(self.boost_slider.value() / 100.0))
+        self.boost_slider.valueChanged.connect(lambda v: self.boost_value.setText(f"{v / 100.0:.2f}"))
+        boost_layout = QHBoxLayout()
+        boost_layout.addWidget(self.boost_slider)
+        boost_layout.addWidget(self.boost_value)
+        controls_layout.addRow("Boost Factor:", boost_layout)
+
+        # Iterations
+        self.iter_slider = QSlider(Qt.Orientation.Horizontal)
+        self.iter_slider.setRange(1, 10)
+        self.iter_slider.setValue(2)
+        self.iter_value = QLabel(str(self.iter_slider.value()))
+        self.iter_slider.valueChanged.connect(lambda v: self.iter_value.setText(str(v)))
+        iter_layout = QHBoxLayout()
+        iter_layout.addWidget(self.iter_slider)
+        iter_layout.addWidget(self.iter_value)
+        controls_layout.addRow("Iterations:", iter_layout)
+
+        # Mask Gamma
+        self.gamma_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gamma_slider.setRange(10, 1000)
+        self.gamma_slider.setValue(100)
+        self.gamma_value = QLabel(f"{self.gamma_slider.value() / 100.0:.2f}")
+        self.gamma_slider.valueChanged.connect(lambda v: self.gamma_value.setText(f"{v / 100.0:.2f}"))
+        gamma_layout = QHBoxLayout()
+        gamma_layout.addWidget(self.gamma_slider)
+        gamma_layout.addWidget(self.gamma_value)
+        controls_layout.addRow("Mask Gamma:", gamma_layout)
+
+        # Preview and toggle buttons
+        togglebuttonlayout = QHBoxLayout()
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.clicked.connect(self._on_preview_clicked)
+        togglebuttonlayout.addWidget(self.preview_button)
+
+        self.toggle_button = QPushButton("Show Original")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.clicked.connect(self._toggle_image)
+        togglebuttonlayout.addWidget(self.toggle_button)
+
+        controls_layout.addRow(togglebuttonlayout)
+        self.controls_group.setLayout(controls_layout)
+
+    def _toggle_image(self):
+        if self.toggle_button.isChecked():
+            self.toggle_button.setText("Show Preview")
+            self._update_preview_pixmap(self.original_image)
+            self.showing_original = True
+        else:
+            self.toggle_button.setText("Show Original")
+            self._update_preview_pixmap(self.preview_image)
+            self.showing_original = False
+
+    def _create_progress_display(self):
+        self.progress_group_box = QGroupBox("Progress")
+        layout = QVBoxLayout()
+
+        self.current_step_label = QLabel("Idle")
+        layout.addWidget(self.current_step_label)
+
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+
+        self.progress_group_box.setLayout(layout)
+
+    def _create_bottom_buttons(self):
+        bottom_layout = QHBoxLayout()
+
+        self.apply_button = QPushButton("Apply")
+        self.apply_button.clicked.connect(self._on_apply_clicked)
+        bottom_layout.addWidget(self.apply_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        bottom_layout.addWidget(self.cancel_button)
+
+        self.main_layout.addLayout(bottom_layout)
+
+    def _on_preview_clicked(self):
+        self.preview_button.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self.progress_bar.setValue(0)
+
+        n_scales = self.scales_slider.value()
+        boost_factor = self.boost_slider.value() / 100.0
+        gamma = self.gamma_slider.value() / 100.0
+        iterations = self.iter_slider.value()
+
+        self.worker = DSEWorker(
+            self.original_image, n_scales, boost_factor, gamma,
+            self.b3_spline_kernel, iterations=iterations, is_mono=self.is_mono
+        )
+        self.thread = QThread()
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress_update.connect(self._update_progress)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.thread.start()
+
+    def _update_progress(self, message, percent):
+        self.current_step_label.setText(message)
+        self.progress_bar.setValue(percent)
+
+    def _on_worker_finished(self, output_image, mask):
+        if output_image is not None:
+            self.preview_image = output_image
+            self._update_preview_pixmap(output_image)
+            self.apply_button.setEnabled(True)
+        else:
+            QMessageBox.critical(self, "Error", "DSE process failed.")
+
+        self.preview_button.setEnabled(True)
+
+    def _on_apply_clicked(self):
+        self.image_manager.set_image(self.preview_image, {"description": "WaveScale Dark Enhance"}, step_name="WaveScale Dark Enhance")
+        self.accept()
+
+    def _update_preview_pixmap(self, image):
+        image_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        if image_uint8.ndim == 2:
+            image_uint8 = np.repeat(image_uint8[..., None], 3, axis=2)
+        h, w = image_uint8.shape[:2]
+        qimage = QImage(image_uint8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        self.pixmap_item.setPixmap(pixmap)
+        self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+
+    def rgb_to_lab(self, rgb_image):
+        M = np.array([[0.4124564, 0.3575761, 0.1804375],
+                      [0.2126729, 0.7151522, 0.0721750],
+                      [0.0193339, 0.1191920, 0.9503041]], dtype=np.float32)
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+        xyz_image = np.dot(rgb_image.reshape(-1, 3), M.T).reshape(rgb_image.shape)
+        xyz_image[..., 0] /= 0.95047
+        xyz_image[..., 2] /= 1.08883
+
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta ** 3, np.cbrt(t), (t / (3 * delta ** 2)) + (4 / 29))
+
+        fx = f(xyz_image[..., 0])
+        fy = f(xyz_image[..., 1])
+        fz = f(xyz_image[..., 2])
+
+        L = (116.0 * fy) - 16.0
+        a = 500.0 * (fx - fy)
+        b = 200.0 * (fy - fz)
+
+        return np.stack([L, a, b], axis=-1)
+
 class BlemishBlasterWorkerSignals(QObject):
     finished = pyqtSignal(np.ndarray)  # Emitted when processing is done
 
@@ -31057,7 +31641,10 @@ class ExoPlanetWindow(QDialog):
         vmag = None
         if v_col:
             try:
-                vmag = float(table[0][v_col])
+                v = float(table[0][v_col])
+                # drop nans as “no valid magnitude”
+                if np.isfinite(v):
+                    vmag = v
             except Exception:
                 vmag = None
 
@@ -31233,7 +31820,8 @@ class ExoPlanetWindow(QDialog):
             x, y = self.star_positions[i]
             sky = wcs.pixel_to_world(x, y)
             name, v = self._query_simbad_name_and_vmag(sky.ra.deg, sky.dec.deg)
-            if name and (v is not None):
+            # require both a name *and* a finite vmag
+            if name and (v is not None) and np.isfinite(v):
                 kname, kmag = name, v
                 break
 
@@ -39378,11 +39966,11 @@ class XISFViewer(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-    @announce_zoom
+
     def zoom_in(self):
         self.center_image_on_zoom(1.25)
 
-    @announce_zoom
+
     def zoom_out(self):
         self.center_image_on_zoom(1 / 1.25)
 
@@ -39433,7 +40021,7 @@ class XISFViewer(QWidget):
 
         # 4) announce
         pct = int(self.scale_factor * 100)
-        print(f"Zoom now {pct}%")
+
         vp = self.scroll_area.viewport()
         center_local = vp.rect().center()                    # QPoint in viewport coords
         center_global = vp.mapToGlobal(center_local)         # map to screen coords
@@ -59103,20 +59691,13 @@ class MainWindow(QMainWindow):
         Updates the WCS (self.wcs) and header (self.header) accordingly.
         """
         # --- First, try ASTAP plate solve ---
-        self.status_label.setText("Status: Attempting ASTAP plate solve...")
-        QApplication.processEvents()
         solved_header = self.plate_solve_image()  # This method should try to solve via ASTAP and return a header (or None).
         if solved_header is not None:
-            self.status_label.setText("ASTAP plate solve succeeded.")
             # instead of manually doing header.update + WCS(...)
             self.apply_wcs_header(solved_header)
-            #QMessageBox.information(self, "Plate Solve", 
-            #                        "ASTAP plate solve succeeded. WCS, orientation, and pixscale updated.")
             return
 
         # --- If ASTAP plate solve failed, fall back to blind solve via Astrometry.net ---
-        self.status_label.setText("Status: ASTAP failed. Proceeding with blind solve via Astrometry.net...")
-        QApplication.processEvents()
 
         # Load or prompt for API key
         api_key = load_api_key()
@@ -59271,6 +59852,7 @@ class MainWindow(QMainWindow):
         it falls back to blind solving via Astrometry.net.
         On success, the method updates self.header and initializes self.wcs.
         """
+      
         if not hasattr(self, 'image_path') or not self.image_path:
             #QMessageBox.warning(self, "Plate Solve", "No image loaded.")
             return
@@ -59304,7 +59886,7 @@ class MainWindow(QMainWindow):
             return
 
         # Run ASTAP on the temporary file.
-        process = QProcess(self)
+        process = QProcess()
         args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
         print("Running ASTAP with arguments:", args)
         process.start(astap_exe, args)
