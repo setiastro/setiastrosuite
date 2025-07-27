@@ -1,9 +1,9 @@
 {
-  "version": "2.20.0",
+  "version": "2.20.1",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.0/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.0/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Embrace the darkness! New WaveScale Dark Enhancer. Use it to darken and enhance dust lanes, dark structures, dark contrast areas. Perfect compliment to WaveScaleHDR."
+  "notes": "Toggle in HDR, Aspect ratios for Crop, various bug fixes."
 }
