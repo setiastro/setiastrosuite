@@ -29,6 +29,7 @@ import base64
 import ast
 import platform
 import glob
+from typing import List, Tuple, Dict, Set
 import time
 from datetime import datetime
 import pywt
@@ -76,6 +77,7 @@ import gzip
 import traceback
 import sep
 from astroquery.mast import Tesscut
+
 from lightkurve import TessTargetPixelFile
 import oktopus
 import lightkurve as lk
@@ -279,7 +281,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.0"
+VERSION = "2.20.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1409,11 +1411,40 @@ class AstroEditingSuite(QMainWindow):
         win.show()
         self.exoplanet_detect_window = win
 
+    def _astap_available(self) -> bool:
+        """Return True if we can find the ASTAP executable (either in settings or on PATH)."""
+        # 1) check user‐configured override in QSettings
+        settings = QSettings()
+        custom = settings.value("astap/exe_path", type=str)
+        if custom:
+            # make sure it actually exists and is executable
+            if os.path.isfile(custom) and os.access(custom, os.X_OK):
+                return True
+
+        # 2) fall back to scanning PATH for the right binary name
+        if sys.platform.startswith("win"):
+            candidates = ["astap.exe", "astap.com", "astap.bat"]
+        else:
+            candidates = ["astap"]
+        for exe in candidates:
+            if shutil.which(exe):
+                return True
+
+        return False
 
     def _on_reference_selected(self, path):
         # switch to WIMI tab
         self.tabs.setCurrentWidget(self.wimi_tab)
         self.wimi_tab.load_image_path(path)
+
+        if not self._astap_available():
+            QMessageBox.critical(
+                self,
+                "Cannot Blind Solve",
+                "ASTAP was not found on your system.\n"
+                "Please install ASTAP or add it to your PATH before retrying."
+            )
+            return
 
         # define the background task
         def do_blind_solve():
@@ -5447,6 +5478,7 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
         pen = QPen(Qt.GlobalColor.green, 2)   # 2px wide
         pen.setCosmetic(True)                # stays 2px no matter the zoom
         self.setPen(pen)
+        self._fixed_aspect_ratio = None 
 
         # no fill
         self.setBrush(QBrush(Qt.BrushStyle.NoBrush))        
@@ -5464,6 +5496,10 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
         self._initHandles()
         # only set origin _once_ here
         self.setTransformOriginPoint(self.rect().center())
+
+    def setFixedAspectRatio(self, ratio: float | None):
+        """Lock resize to this width/height ratio, or None to free‐hand."""
+        self._fixed_aspect_ratio = ratio
 
     def _initHandles(self):
         pen = QPen(Qt.GlobalColor.green,2)
@@ -5587,7 +5623,17 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
             r.setBottomRight(p)
         elif self._active_handle == "bl":
             r.setBottomLeft(p)
-        # normalize and apply
+
+        # enforce aspect if locked
+        if self._fixed_aspect_ratio:
+            w = r.width()
+            h_target = w / self._fixed_aspect_ratio
+            # decide whether top or bottom moved
+            if self._active_handle in ("tl", "tr"):
+                r.setTop(r.bottom() - h_target)
+            else:
+                r.setBottom(r.top() + h_target)
+
         r = r.normalized()
         self.setRect(r)
         self._updateHandlePositions()
@@ -5630,6 +5676,30 @@ class CropTool(QDialog):
         instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instr.setStyleSheet("font-style: italic; color: gray;")
         layout.addWidget(instr)
+
+        ratio_layout = QHBoxLayout()
+        ratio_layout.addStretch(1) 
+        ratio_layout.addWidget(QLabel("Aspect Ratio:"))
+        self.aspect_combo = QComboBox()
+        self.aspect_combo.addItems([
+            "Free",
+            "Original",
+            "1:1",
+            "16:9",
+            "9:16",
+            "4:3",
+        ])
+        ratio_layout.addWidget(self.aspect_combo)
+        ratio_layout.addStretch(1)  # push combo to the left
+        layout.addLayout(ratio_layout)
+
+        # remember original image AR
+        h, w = self.original_image_data.shape[:2]
+        self._orig_ar = w / h
+
+        # connect
+        self.aspect_combo.currentTextChanged.connect(self._onAspectRatioChanged)
+
         # install filter after view is created:
         self.view.viewport().installEventFilter(self)
         # Layout & buttons
@@ -5649,6 +5719,42 @@ class CropTool(QDialog):
         self.setLayout(layout)
         self._loadImage()
         self.view.viewport().installEventFilter(self)
+
+    def _onAspectRatioChanged(self, text: str):
+        # figure out numeric ratio (or None for free‑hand)
+        if text == "Free":
+            ar = None
+        elif text == "Original":
+            ar = self._orig_ar
+        else:
+            a, b = map(float, text.split(":"))
+            ar = a / b
+
+        # lock future drags to this aspect
+        if self._rect_item:
+            self._rect_item.setFixedAspectRatio(ar)
+
+            # if we have a live rect and a ratio, immediately reshape it
+            if ar is not None:
+                from PyQt6.QtCore import QRectF
+
+                # grab the old rectangle (in item‑local coords)
+                old = self._rect_item.rect()
+                w   = old.width()
+                h   = w / ar
+
+                # center it around the old center
+                cx, cy = old.center().x(), old.center().y()
+                new_rect = QRectF(cx - w/2, cy - h/2, w, h)
+
+                # apply it
+                self._rect_item.setRect(new_rect)
+
+                # reset the transform‑origin to the new center
+                self._rect_item.setTransformOriginPoint(new_rect.center())
+
+                # and move the handles
+                self._rect_item._updateHandlePositions()
 
     def _loadImage(self):
         """Load the current image into the scene and remember the pixmap item."""
@@ -5680,7 +5786,6 @@ class CropTool(QDialog):
 
     def eventFilter(self, source, ev):
         if source is self.view.viewport():
-            # translate to scene coords when needed
             if ev.type() in (
                 QEvent.Type.MouseButtonPress,
                 QEvent.Type.MouseMove,
@@ -5688,33 +5793,87 @@ class CropTool(QDialog):
             ):
                 scene_pt = self.view.mapToScene(ev.pos())
 
-            # if we haven't yet created our rotatable rect, intercept
+            # 1) drawing first rectangle
             if self._rect_item is None:
+                # start drawing
                 if ev.type() == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
                     self.drawing = True
                     self.origin  = scene_pt
                     return True
+
+                # live update
                 if ev.type() == QEvent.Type.MouseMove and getattr(self, "drawing", False):
+                    # compute raw rect
                     r = QRectF(self.origin, scene_pt).normalized()
+
+                    # enforce drop‑down ratio
+                    txt = self.aspect_combo.currentText()
+                    if txt != "Free":
+                        if txt == "Original":
+                            ar = self._orig_ar
+                        else:
+                            a, b = map(float, txt.split(":"))
+                            ar = a / b
+                        w = r.width()
+                        h_target = w / ar
+                        if scene_pt.y() < self.origin.y():
+                            r.setTop(r.bottom() - h_target)
+                        else:
+                            r.setBottom(r.top() + h_target)
+                        r = r.normalized()
+
+                    # redraw dashed rect
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
                     pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.DashLine)
-                    pen.setCosmetic(True) 
+                    pen.setCosmetic(True)
                     self.selection_rect_item = self.scene.addRect(r, pen)
                     return True
-                if ev.type() == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton and getattr(self, "drawing", False):
+
+                # finalize on mouse up
+                if ev.type() == QEvent.Type.MouseButtonRelease \
+                   and ev.button() == Qt.MouseButton.LeftButton \
+                   and getattr(self, "drawing", False):
+
                     self.drawing = False
                     final_r = QRectF(self.origin, scene_pt).normalized()
+
+                    # enforce ratio one more time
+                    txt = self.aspect_combo.currentText()
+                    if txt != "Free":
+                        if txt == "Original":
+                            ar = self._orig_ar
+                        else:
+                            a, b = map(float, txt.split(":"))
+                            ar = a / b
+                        w = final_r.width()
+                        h_target = w / ar
+                        if scene_pt.y() < self.origin.y():
+                            final_r.setTop(final_r.bottom() - h_target)
+                        else:
+                            final_r.setBottom(final_r.top() + h_target)
+                        final_r = final_r.normalized()
+
+                    # remove the live dashed rect
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
+
+                    # create the true, rotatable item
                     self._rect_item = ResizableRotatableRectItem(final_r)
+                    # lock its aspect
+                    self._rect_item.setFixedAspectRatio(
+                        None if txt=="Free"
+                        else (self._orig_ar if txt=="Original" else (a/b))
+                    )
+
+                    # save & add
                     pos   = self._rect_item.pos()
                     angle = self._rect_item.rotation()
                     CropTool.previous_crop_rect = (final_r, angle, pos)
                     self.scene.addItem(self._rect_item)
                     return True
 
-            # 2) If a rect already exists, don’t intercept—let the QGraphicsItem handle it!
+            # 2) once we have a rect, let its own handlers take over
             return False
 
         return super().eventFilter(source, ev)
@@ -12448,7 +12607,7 @@ class StackingSuiteDialog(QDialog):
             QApplication.processEvents()
 
             # (A) Identify reference shape from the first file
-            ref_file = file_list[0]
+            ref_file = file_List[0]
             ref_data, ref_header, bit_depth, is_mono = load_image(ref_file)
             if ref_data is None:
                 self.update_status(f"❌ Failed to load reference {os.path.basename(ref_file)}")
@@ -12848,9 +13007,9 @@ class StackingSuiteDialog(QDialog):
                 self.update_status("DEBUG: No matching Master Dark found.")
 
             # Load reference image
-            ref_data, _, _, _ = load_image(file_list[0])
+            ref_data, _, _, _ = load_image(file_List[0])
             if ref_data is None:
-                self.update_status(f"❌ Failed to load reference {os.path.basename(file_list[0])}")
+                self.update_status(f"❌ Failed to load reference {os.path.basename(file_List[0])}")
                 continue
 
             height, width = ref_data.shape[:2]
@@ -14176,7 +14335,7 @@ class StackingSuiteDialog(QDialog):
                 continue
 
             # 1) Identify the reference file to get shape and header
-            ref_file = file_list[0]
+            ref_file = file_List[0]
             if not os.path.exists(ref_file):
                 self.update_status(f"⚠️ Reference file '{ref_file}' not found, skipping group.")
                 continue
@@ -14598,7 +14757,7 @@ class StackingSuiteDialog(QDialog):
         QApplication.processEvents()
 
         # 3) Load the first file to determine shape + color/mono
-        first_file = file_list[0]
+        first_file = file_List[0]
         first_img, hdr, _, _ = load_image(first_file)
         if first_img is None:
             self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
@@ -14761,7 +14920,7 @@ class StackingSuiteDialog(QDialog):
             return None, {}, None
 
         # 2) Load a reference image to determine dimensions and channels
-        ref_file = file_list[0]
+        ref_file = file_List[0]
         if not os.path.exists(ref_file):
             self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
             return None, {}, None
@@ -14834,7 +14993,7 @@ class StackingSuiteDialog(QDialog):
                         i       = future_to_i[fut]
                         sub_img = fut.result()
                         if sub_img is None:
-                            self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
+                            self.update_status(f"DEBUG: Tile load returned None for file: {file_List[i]}")
                             continue
                         # Normalize shape → (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
@@ -23036,10 +23195,10 @@ class PSFViewer(QDialog):
             edges = np.linspace(0, 1, 51)
         else:
             if self.histogram_mode == 'PSF':
-                data = np.array(self.star_list['HFR'], float)
+                data = np.array(self.star_List['HFR'], float)
                 edges = np.linspace(0, 7.5, 51)
             else:
-                data = np.array(self.star_list['flux'], float)
+                data = np.array(self.star_List['flux'], float)
                 if data.size:
                     edges = np.linspace(data.min(), data.max(), 51)
                 else:
@@ -23096,13 +23255,13 @@ class PSFViewer(QDialog):
             # desired columns
             cols = ['HFR','eccentricity','a','b','theta','flux']
             # compute eccentricity
-            a = np.array(self.star_list['a'], float)
-            b = np.array(self.star_list['b'], float)
+            a = np.array(self.star_List['a'], float)
+            b = np.array(self.star_List['b'], float)
             ecc = np.nan_to_num(np.sqrt(1 - (b/a)**2))
             # insert into table representation
             data_map = {
                 'eccentricity': ecc,
-                **{c: np.array(self.star_list[c], float) for c in self.star_list.colnames}
+                **{c: np.array(self.star_List[c], float) for c in self.star_list.colnames}
             }
         
         # Filter out missing
@@ -24063,6 +24222,8 @@ class WaveScaleHDRDialog(QDialog):
 
         self.image_manager = image_manager
 
+        self.showing_original = False
+
         # Detect if the image is grayscale or RGB
         if self.image_manager.image.ndim == 2:
             self.is_grayscale = True
@@ -24250,12 +24411,19 @@ class WaveScaleHDRDialog(QDialog):
         self.mask_gamma_slider.setTickInterval(10)
         controls_layout.addRow("Mask Gamma:", self.mask_gamma_slider)
 
-
+        buttons_layout = QHBoxLayout()
 
         # Preview Button
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self._on_preview_clicked)
-        controls_layout.addRow(self.preview_button)
+        buttons_layout.addWidget(self.preview_button)
+
+        self.toggle_button = QPushButton("Show Original")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.clicked.connect(self._toggle_image)
+        buttons_layout.addWidget(self.toggle_button)
+
+        controls_layout.addRow(buttons_layout)
 
         self.controls_group.setLayout(controls_layout)
 
@@ -24307,6 +24475,18 @@ class WaveScaleHDRDialog(QDialog):
         progress_layout.addWidget(self.progress_bar)
 
         self.progress_group_box.setLayout(progress_layout)
+
+    def _toggle_image(self):
+        if self.toggle_button.isChecked():
+            # user wants to see the *un*-processed original
+            self.toggle_button.setText("Show Preview")
+            self._update_preview_pixmap(self.original_image)
+            self.showing_original = True
+        else:
+            # back to the HDR preview
+            self.toggle_button.setText("Show Original")
+            self._update_preview_pixmap(self.preview_image)
+            self.showing_original = False
 
     def _on_reset_clicked(self):
         """Reset the image and sliders to their default states."""
@@ -24402,6 +24582,10 @@ class WaveScaleHDRDialog(QDialog):
             # Update preview image
             self.preview_image = blended_preview
             self._update_preview_pixmap(blended_preview)
+
+            self.toggle_button.setChecked(False)
+            self.toggle_button.setText("Show Original")
+            self.showing_original = False
 
             # Enable Apply button
             self.apply_button.setEnabled(True)
@@ -24967,6 +25151,9 @@ class WaveScaleDarkEnhanceDialog(QDialog):
         self._update_mask_preview()  # initial mask
         self.gamma_slider.valueChanged.connect(self._delayed_gamma_update)
         self._update_preview_pixmap(self.original_image)
+
+        self.accepted.connect(self.mask_window.close)
+        self.rejected.connect(self.mask_window.close)
 
     def _delayed_gamma_update(self):
         self.gamma_update_timer.start(500)  # waits 500 ms after last change
@@ -29847,7 +30034,7 @@ class ClickableEllipseItem(QGraphicsEllipseItem):
 
 
 class ReferenceOverlayDialog(QDialog):
-    def __init__(self, plane: np.ndarray, positions: list[tuple], target_median: float, parent=None):
+    def __init__(self, plane: np.ndarray, positions: List[Tuple], target_median: float, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Reference Frame: Stars Overlay")
         self.plane = plane.astype(np.float32)
@@ -29862,7 +30049,7 @@ class ReferenceOverlayDialog(QDialog):
 
         # store ellipses here
         self.ellipse_items: dict[int, ClickableEllipseItem] = {}
-        self.flagged_stars: set[int] = set()  # updated by apply_threshold
+        self.flagged_stars: Set[int] = set()  # updated by apply_threshold
 
         self._build_ui()
         self._init_graphics()
@@ -29975,7 +30162,7 @@ class ReferenceOverlayDialog(QDialog):
             else:
                 ell.setPen(self._normal_pen)
 
-    def update_dip_flags(self, flagged_indices: set[int]):
+    def update_dip_flags(self, flagged_indices: Set[int]):
         """Update the visual color of stars flagged by threshold dips."""
         self.flagged_stars = flagged_indices
         self._update_highlights()
@@ -31136,7 +31323,7 @@ class ExoPlanetWindow(QDialog):
         QTimer.singleShot(0, lambda: self.referenceSelected.emit(path))
 
     @staticmethod
-    def _detrend_curve(curve: np.ndarray, deg: int, mask: np.ndarray | None = None) -> np.ndarray:
+    def _detrend_curve(curve: np.ndarray, deg: int, mask: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Fit up to a degree‐`deg` polynomial to the curve vs frame index and divide it out,
         using only the points where mask==True.  If you don't have enough points for `deg`,
@@ -31757,8 +31944,22 @@ class ExoPlanetWindow(QDialog):
         idx = sels[0].data(Qt.ItemDataRole.UserRole)
 
         star_id = self._query_simbad_main_id()
-        if star_id is None:
-            # fallback to manual entry
+
+        if star_id:
+            try:
+                
+                Vizier.ROW_LIMIT = 1
+                v = Vizier(columns=["Name"], catalog="B/vsx")
+                tbls = v.query_object(star_id)
+                if tbls and len(tbls) and len(tbls[0]):
+                    # take the VSX “Name” field as the AAVSO STARID
+                    star_id = tbls[0]["Name"][0]
+            except Exception:
+                # if anything goes wrong, silently ignore and keep the Simbad ID
+                pass
+
+        if not star_id:
+            # manual fallback
             star_id, ok = QInputDialog.getText(
                 self, "Target Star Name",
                 "Could not auto‑identify.  Enter target star name for STARID:",
@@ -31893,6 +32094,8 @@ class ExoPlanetWindow(QDialog):
         else:
             merr = np.full_like(mags, np.nan)
 
+        airmasses = getattr(self, "airmasses", None)    
+
         # 10) write out
         try:
             with open(path, "w") as f:
@@ -31903,14 +32106,31 @@ class ExoPlanetWindow(QDialog):
                     m   = mags[j]
                     me  = merr[j]
                     me_str = f"{me:.3f}" if np.isfinite(me) else "na"
-                    note = "MAG calc via ensemble: m=-2.5 log10(F/Fe)+K"  # short note
+                    note = "MAG calc via ensemble: m=-2.5 log10(F/Fe)+K"
+
+                    # clamp airmass to [1, 40]
+                    if airmasses is not None and j < len(airmasses):
+                        am = airmasses[j]
+                    else:
+                        am = 1.0
+                    am = float(np.clip(am, 1.0, 40.0))
+
                     fields = [
-                        # STARID, DATE,   MAG,      MERR,  FILT, TRANS, MTYPE,
-                        star_id,  f"{t:.5f}", f"{m:.3f}", me_str,
-                        filt,             "NO",   "STD",
-                        # CNAME,    CMAG,    KNAME,    KMAG,     AMASS, GROUP, CHART, NOTES
-                        "ENSEMBLE", "na",    kname,    f"{kmag:.3f}",
-                        "na",       "na",   "na",   note
+                        star_id,
+                        f"{t:.5f}",
+                        f"{m:.3f}",
+                        me_str,
+                        filt,
+                        "NO",
+                        "STD",
+                        "ENSEMBLE",
+                        "na",
+                        kname,
+                        f"{kmag:.3f}",
+                        f"{am:.1f}",       # now a valid AIRMASS
+                        "na",
+                        "na",
+                        note
                     ]
                     f.write(",".join(fields) + "\n")
         except Exception as e:
@@ -33893,7 +34113,7 @@ class SaspViewer(QMainWindow):
         self.custom_hdul.close()
         super().closeEvent(event)
 
-def pickles_match_for_simbad(simbad_sp: str, available_extnames: list[str]) -> list[str]:
+def pickles_match_for_simbad(simbad_sp: str, available_extnames: List[str]) -> List[str]:
     """
     Given a SIMBAD‐style spectral type (e.g. "A", "A3", "A3V", "M0V", "kA3hF0mF3", etc.)
     and a list of available Pickles EXTNAMEs (like ["A5III","A5V","A7III","B0V","G5V","M0V",...]),
@@ -33982,7 +34202,7 @@ def pickles_match_for_simbad(simbad_sp: str, available_extnames: list[str]) -> l
         else:
             same_letter_any_lum.append((ext, digit2))
 
-    def pick_nearest(candidates: list[tuple[str,int]], target_sub: int) -> list[str]:
+    def pick_nearest(candidates: List[tuple[str,int]], target_sub: int) -> List[str]:
         """
         Given a list of (extname, subtype_int) and an integer target_sub,
         return the extname(s) whose subtype_int is closest to target_sub.
@@ -35227,7 +35447,7 @@ class SFCCDialog(QDialog):
 
             # ── Match to Pickles template ─────────────────────────────
             match_list   = pickles_match_for_simbad(sp_clean, self.pickles_templates)
-            best_template = match_list[0] if match_list else None
+            best_template = match_List[0] if match_list else None
 
             # Project to pixel coords and store star
             xpix, ypix = self.wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
@@ -35461,7 +35681,7 @@ class SFCCDialog(QDialog):
         # …
         for m in raw_matches:
             xi, yi, sp = m["x_pix"], m["y_pix"], m["template"]
-            star_src = self.star_list[m["sim_index"]]
+            star_src = self.star_List[m["sim_index"]]
             if img.dtype == np.uint8:
                 Rm = img[yi, xi, 0] / 255.0
                 Gm = img[yi, xi, 1] / 255.0
@@ -40862,7 +41082,7 @@ class MetricsPanel(QWidget):
 class MetricsWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self._thresholds_per_group: dict[str, list[float|None]] = {}
+        self._thresholds_per_group: dict[str, List[float|None]] = {}
         self.setWindowTitle("Frame Metrics")
         self.resize(800, 600)
 
@@ -40901,7 +41121,7 @@ class MetricsWindow(QWidget):
 
         # internal storage
         self._all_images = []
-        self._current_indices: list[int] | None = None
+        self._current_indices: List[int] | None = None
 
     def _update_status(self, *args):
         """Recompute and show: Flagged Items X / Y (Z%)."""
@@ -41005,7 +41225,7 @@ class BlinkTab(QWidget):
         self.zoom_level = 0.5  # Default zoom level
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
-        self.thresholds_by_group: dict[str, list[float|None]] = {}
+        self.thresholds_by_group: dict[str, List[float|None]] = {}
         self.aggressive_stretch_enabled = False
         self.current_sigma = 3.7
         self.current_pixmap = None
@@ -41264,7 +41484,7 @@ class BlinkTab(QWidget):
         # ensure we have a 4-slot list for this group
         thr_list = self.thresholds_by_group.setdefault(group, [None]*4)
         # store the new threshold for this metric
-        thr_list[metric_idx] = threshold
+        thr_List[metric_idx] = threshold
 
         # build the list of indices to re-evaluate
         if group == "All":
@@ -61898,34 +62118,6 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName("Seti Astro")
     QCoreApplication.setApplicationName  ("Seti Astro Suite")
 
-    #for attempt in range(5):
-    #    try:
-    #        # ——— use the new, non-deprecated field names ———
-    #        Simbad.add_votable_fields(
-    #            'otype',         # short object type
-    #            'otypes',        # verbose object type
-    #            'mesdiameter',   # was 'diameter'
-    #            'rvz_redshift',  # was 'z_value'
-    #            'B',             # was 'flux(B)'
-    #            'V',             # was 'flux(V)'
-    #            'plx_value',     # was 'plx'
-    #            'sp'             # spectral type
-    #        )#
-
-    #        Simbad.ROW_LIMIT = 0    # no row limit
-    #        Simbad.TIMEOUT   = 1   # seconds#
-
-    #        # if we get here, everything succeeded—stop retrying
-    #        break
-
-    #    except Exception as e:
-    #        if attempt < 4:
-    #            # wait a second and try again
-    #            time.sleep(1)
-    #        else:
-    #            # last attempt failed: warn and move on
-    #            print("Warning: SIMBAD service is currently unavailable. "
-    #                "SIMBAD-dependent features may be disabled.")
     try:
         # Initialize main window
         window = AstroEditingSuite()
