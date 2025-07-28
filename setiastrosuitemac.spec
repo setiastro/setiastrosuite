@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+import sys, os
 from PyInstaller.utils.hooks import (
     collect_submodules,
     collect_dynamic_libs,
@@ -7,6 +7,8 @@ from PyInstaller.utils.hooks import (
     collect_all
 )
 
+
+sklearn_api_submods = collect_submodules('sklearn.externals.array_api_compat.numpy')
 #############################################
 # Collect everything we need
 #############################################
@@ -32,6 +34,9 @@ numcodecs_submodules = collect_submodules('numcodecs')
 numcodecs_binaries   = collect_dynamic_libs('numcodecs')
 numcodecs_datas      = collect_data_files('numcodecs')
 
+# 6) PyTorch dynamic libs & data
+torch_binaries = collect_dynamic_libs('torch')
+torch_datas    = collect_data_files('torch')
 #############################################
 # Build up hiddenimports and binaries
 #############################################
@@ -39,6 +44,7 @@ binaries = []
 binaries += sep_pjw_binaries
 binaries += kaleido_binaries
 binaries += numcodecs_binaries
+binaries += torch_binaries     # <-- include all torch .so/.dylib
 
 hiddenimports = []
 hiddenimports += photutils_submodules
@@ -50,8 +56,11 @@ hiddenimports += [
     'importlib_metadata',
     'numcodecs',           # ensure the package is there
     'numcodecs.zfpy',      # explicit for the zfpy extension
+    'torch._C',            # ensure the torch C-extension is loaded
 ]
+hiddenimports += sklearn_api_submods
 directory = '/Users/franklinmarek/cosmicclarity/setiastrosuite'
+
 
 #############################################
 # Data collection
@@ -69,7 +78,9 @@ datas=[
     ('platesolve.png', '.'),
     ('starregistration.png', '.'),
     ('supernova.png', '.'),
+    ('dse.png', '.'),
     ('psf.png', '.'),
+    ('gridicon.png', '.'),
     ('eye.png', '.'),
     ('disk.png', '.'),
     ('nuke.png', '.'),
@@ -81,12 +92,16 @@ datas=[
     ('slot0.png', '.'),
     ('slot2.png', '.'),
     ('hdr.png', '.'),
+    ('spcc.png', '.'),
+    ('SASP_data.fits', '.'),
     ('slot3.png', '.'),
     ('slot4.png', '.'),
     ('slot5.png', '.'),
+    ('convo.png', '.'),
     ('slot6.png', '.'),
     ('slot7.png', '.'),
     ('slot8.png', '.'),
+    ('exoicon.png', '.'),
     ('slot9.png', '.'),
     ('pixelmath.png', '.'),
     ('histogram.png', '.'),
@@ -114,8 +129,10 @@ datas=[
     ('copyslot.png', '.'),
     ('rgbextract.png', '.'),
     ('hubble.png', '.'),
+    ('livestacking.png', '.'),
     ('staradd.png', '.'),
     ('starnet.png', '.'),
+    ('HRDiagram.png', '.'),
     ('clahe.png', '.'),
     ('morpho.png', '.'),
     ('whitebalance.png', '.'),
@@ -142,21 +159,23 @@ datas += typingext_datas
 datas += importlib_metadata_datas
 datas += kaleido_datas
 datas += numcodecs_datas    # <-- ensure .so and support files for numcodecs
+datas += torch_datas       # <-- include torch’s data files
+datas += collect_data_files('lightkurve', includes=['data/lightkurve.mplstyle'])
 
 #############################################
 # Build the spec
 #############################################
 a = Analysis(
-    ['setiastrosuitemacQT6.py'],
+    ['setiastrosuitemacQT6.py'],  # your entrypoint
     pathex=[],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['fix_importlib_metadata.py'],  # leave your metadata‐shim hook
-    excludes=['torch', 'torchvision'],
-    noarchive=False,
+    runtime_hooks=['fix_importlib_metadata.py'],  # keep your metadata shim
+    excludes=['PyQt5'],  # drop torch & torchvision from excludes!
+    noarchive=True,
     optimize=0,
 )
 
@@ -172,7 +191,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
