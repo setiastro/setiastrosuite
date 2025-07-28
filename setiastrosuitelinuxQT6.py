@@ -61,9 +61,16 @@ if getattr(sys, 'frozen', False):
 
 import typing_extensions
 import urllib
+
+
+
 # Standard library imports
+from itertools import combinations
+from tifffile import imwrite
+
 import pickle
 import os
+os.environ['LIGHTKURVE_STYLE'] = 'default'
 import tempfile
 import time
 import json
@@ -86,6 +93,7 @@ import base64
 import ast
 import platform
 import glob
+from typing import List, Tuple, Dict, Set
 import time
 from datetime import datetime
 import pywt
@@ -93,7 +101,7 @@ from io import BytesIO
 import re
 from collections import defaultdict
 from scipy.spatial import Delaunay, KDTree
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, laplace
 import scipy.ndimage as ndi
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
@@ -101,16 +109,26 @@ import multiprocessing
 import matplotlib
 matplotlib.use("QtAgg") 
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.colors import hsv_to_rgb
 import numpy as np
-from matplotlib.patches import Circle
-from matplotlib.ticker import MaxNLocator
-
+from typing import List, Tuple, Optional
+from skimage.restoration import richardson_lucy, denoise_bilateral, denoise_tv_chambolle
+from skimage.color import rgb2gray, rgb2lab, lab2rgb
+from skimage.transform import warp_polar, warp
+from skimage import img_as_float32
+from numpy.fft import fft2, ifft2, fftshift, ifftshift
+from typing import Optional, Tuple, Callable
+from scipy.signal import medfilt
+import matplotlib.ticker as mtick
+from scipy.interpolate import RBFInterpolator
 import random
 if sys.stdout is not None:
     sys.stdout.reconfigure(encoding='utf-8')
 
 from astropy.stats import sigma_clipped_stats
 from astropy.io.votable import parse_single_table
+from astropy.timeseries import LombScargle, BoxLeastSquares
 from photutils.detection import DAOStarFinder
 from scipy.spatial import ConvexHull
 from astropy.table import Table, vstack
@@ -122,6 +140,14 @@ import astroalign
 import gzip
 import traceback
 import sep
+from astroquery.mast import Tesscut
+
+from lightkurve import TessTargetPixelFile
+import oktopus
+import lightkurve as lk
+from scipy.interpolate import griddata
+
+lk.MPLSTYLE = None
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
@@ -130,6 +156,7 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u
 import itertools
 from astropy.io.fits import Header
+from pyvo.dal.exceptions import DALServiceError
 
 # Reproject for WCS-based alignment
 try:
@@ -169,7 +196,8 @@ from scipy.interpolate import PchipInterpolator
 from scipy.interpolate import Rbf
 from scipy.ndimage import median_filter
 from scipy.ndimage import convolve
-
+from scipy.signal import fftconvolve
+from scipy.interpolate import interp1d
 
 import rawpy
 import numpy.ma as ma
@@ -177,6 +205,9 @@ import numpy.ma as ma
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from matplotlib.patches import Circle
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
 
 #################################
 # PyQt6 Imports
@@ -185,6 +216,7 @@ from collections import defaultdict
 import fnmatch
 import pyqtgraph as pg
 import psutil
+from PyQt6.QtGui import QIntValidator
 # ----- QtWidgets -----
 from PyQt6.QtWidgets import (
     QApplication,
@@ -201,6 +233,8 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QTreeWidget,
     QTreeWidgetItem,
+    QGraphicsPolygonItem,
+    QFrame,
     QToolTip,
     QCheckBox,
     QDialog,
@@ -248,7 +282,8 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QSplashScreen,
     QProgressDialog, 
-    QDockWidget
+    QDockWidget,
+    QAbstractItemView
 )
 
 # ----- QtGui -----
@@ -269,6 +304,7 @@ from PyQt6.QtGui import (
     QShortcut,
     QPolygon,
     QPolygonF,
+    QKeyEvent,
     QPalette, 
     QWheelEvent, 
     QDoubleValidator,
@@ -290,13 +326,16 @@ from PyQt6.QtCore import (
     QFileSystemWatcher,
     QEvent,
     pyqtSlot,
+    QLocale,
     QProcess,
     QSize,
     QObject,
     QSettings,
     QRunnable,
     QThreadPool,
-    QSignalBlocker
+    QSignalBlocker,
+    QStandardPaths,
+    QMetaObject
 )
 
 
@@ -306,7 +345,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.15.12"
+VERSION = "2.20.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -367,6 +406,14 @@ if hasattr(sys, '_MEIPASS'):
     aperture_path = os.path.join(sys._MEIPASS, 'aperture.png')
     jwstpupil_path = os.path.join(sys._MEIPASS, 'jwstpupil.png')
     signature_icon_path = os.path.join(sys._MEIPASS, 'pen.png')
+    livestacking_path = os.path.join(sys._MEIPASS, 'livestacking.png')
+    hrdiagram_path = os.path.join(sys._MEIPASS, 'HRDiagram.png')
+    convoicon_path = os.path.join(sys._MEIPASS, 'convo.png')
+    spcc_icon_path = os.path.join(sys._MEIPASS, 'spcc.png')
+    sasp_data_path = os.path.join(sys._MEIPASS, 'SASP_data.fits')
+    exoicon_path = os.path.join(sys._MEIPASS, 'exoicon.png')
+    peeker_icon = os.path.join(sys._MEIPASS, 'gridicon.png')
+    dse_icon_path = os.path.join(sys._MEIPASS, 'dse.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -425,27 +472,43 @@ else:
     aperture_path = 'aperture.png'
     jwstpupil_path = 'jwstpupil.png'
     signature_icon_path = 'pen.png'
+    livestacking_path = 'livestacking.png'
+    hrdiagram_path = 'HRDiagram.png'
+    convoicon_path = 'convo.png'
+    spcc_icon_path = 'spcc.png'
+    sasp_data_path = 'SASP_data.fits'
+    exoicon_path = 'exoicon.png'
+    peeker_icon = 'gridicon.png'
+    dse_icon_path = 'dse.png'
+
 
 def announce_zoom(method):
     def wrapper(self, *args, **kwargs):
-        # try calling with whatever was passed, but if that fails,
-        # call the zero-arg version
+        # 1) invoke the real zoom method, swallowing any extra args
         try:
             result = method(self, *args, **kwargs)
         except TypeError:
             result = method(self)
 
-        # now announce
+        # 2) now compute the percent and show the tooltip
         try:
-            pct = self.zoom_factor * 100
-            print(f"Zoom now {pct:.0f}%")
-            vp = self.scroll_area.viewport()
-            center_local = vp.rect().center()                    # QPoint in viewport coords
-            center_global = vp.mapToGlobal(center_local)         # map to screen coords
+            pct = int(self.zoom_factor * 100)
 
-            QToolTip.showText(center_global, f"{pct}%")
-        except Exception:
-            pass
+            # look for either naming convention
+            sa = getattr(self, "scrollArea", None) \
+              or getattr(self, "scroll_area", None)
+
+            if sa is not None:
+                vp = sa.viewport()
+                center_local  = vp.rect().center()
+                center_global = vp.mapToGlobal(center_local)
+                QToolTip.showText(center_global, f"{pct}%")
+            else:
+                # fallback to cursor-position
+                QToolTip.showText(QCursor.pos(), f"{pct}%")
+        except Exception as e:
+            # silently ignore any tooltip failures
+            print("announce_zoom tooltip error:", e)
 
         return result
 
@@ -463,6 +526,7 @@ class AstroEditingSuite(QMainWindow):
         self.settings = QSettings()   # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
         self.preview_windows = {}
+        self._convo_deconvo_window = None
 
         # NEW: Dictionary to store custom slot names (default names)
         self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
@@ -481,6 +545,7 @@ class AstroEditingSuite(QMainWindow):
 
         # Initialize UI
         self.current_theme = self.settings.value("theme", "dark")  # Fallback to dark
+        self.SFCC_window = None
         self.initUI()
         self.connect_mask_manager_signals()        
 
@@ -646,6 +711,18 @@ class AstroEditingSuite(QMainWindow):
         # Add White Balance to Functions menu
         functions_menu.addAction(whitebalance_action)   
 
+        spcc_action = QAction("SFCC (Color Calibration)", self)
+        spcc_action.setShortcut('Ctrl+Shift+C')
+        spcc_action.setStatusTip('Spectral‐Photometric Color Calibration')
+        spcc_action.triggered.connect(self.SFCC_show)
+        functions_menu.addAction(spcc_action)
+
+        convo_icon = QIcon(convoicon_path)  # Set this to your 16×16 or 24×24 icon path
+        self.convo_deconvo_action = QAction(convo_icon, "Convolution / Deconvolution", self)
+        self.convo_deconvo_action.setStatusTip("Open Convolution & Deconvolution tool")
+        self.convo_deconvo_action.triggered.connect(self.convo_deconvo_show)
+        functions_menu.addAction(self.convo_deconvo_action)
+
         # Extract Luminance Action with Icon
         extract_luminance_icon = QIcon(LExtract_path)
         extract_luminance_action = QAction(extract_luminance_icon, "Extract Luminance", self)
@@ -699,6 +776,12 @@ class AstroEditingSuite(QMainWindow):
         hdr_action.setStatusTip('Apply WaveScale HDR to the current image')
         hdr_action.triggered.connect(self.open_hdr_dialog)
         functions_menu.addAction(hdr_action)
+
+        dse_action = QAction(QIcon(dse_icon_path), "WaveScale Dark Enhancer", self)
+        dse_action.setShortcut("Ctrl+Shift+D")
+        dse_action.setStatusTip("Enhance dark nebula and voids using wavelets")
+        dse_action.triggered.connect(self.open_dse_dialog)
+        functions_menu.addAction(dse_action)
 
         clahe_action = QAction("CLAHE", self)
         clahe_action.setShortcut('Ctrl+Shift+C')  # Assign a keyboard shortcut
@@ -913,11 +996,21 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         mosaic_menu = menubar.addMenu("Star Stuff")
 
+        peeker_action = QAction(QIcon(peeker_icon), "Image Peeker…", self)
+        peeker_action.setStatusTip("Peek at your image in an n×n grid of panels")
+        peeker_action.triggered.connect(self.open_image_peeker)
+        mosaic_menu.addAction(peeker_action)
+
         # Stacking Suite Action (New!)
         stacking_suite_action = QAction(QIcon(stacking_path), "Stacking Suite", self)
         stacking_suite_action.setStatusTip("Calibrate and stack images with advanced methods")
         stacking_suite_action.triggered.connect(self.stacking_suite_action)
         mosaic_menu.addAction(stacking_suite_action)
+
+        live_stacking_action = QAction(QIcon(livestacking_path), "Live Stacking", self)
+        live_stacking_action.setStatusTip("Open the Live Stacking interface")
+        live_stacking_action.triggered.connect(self.live_stacking)
+        mosaic_menu.addAction(live_stacking_action)
 
         mosaic_master_action = QAction(QIcon(mosaic_path), "Mosaic Master", self)
         mosaic_master_action.setStatusTip("Create a mosaic from multiple images.")
@@ -958,6 +1051,12 @@ class AstroEditingSuite(QMainWindow):
         star_spike_action.setStatusTip("Add diffraction spikes to stars in the active image")
         star_spike_action.triggered.connect(self.starspiketool)  # connects to the method below
         mosaic_menu.addAction(star_spike_action)
+
+        exo_action = QAction(QIcon(exoicon_path), "Exoplanet Detector", self)
+        exo_action.setStatusTip("Detect exoplanet transits from a series of images")
+        exo_action.triggered.connect(self.exoplanet_detect)
+        mosaic_menu.addAction(exo_action)
+
 
         # --------------------
         # Toolbar
@@ -1054,6 +1153,13 @@ class AstroEditingSuite(QMainWindow):
         whitebalance_action.setToolTip("Adjust white balance of the image.")
         toolbar.addAction(whitebalance_action)
 
+        spcc_icon = QIcon(spcc_icon_path)  # point this at whatever icon you like
+        spcc_action.setIcon(spcc_icon)
+        spcc_action.setToolTip("Launch SFCC dialog")
+        toolbar.addAction(spcc_action)
+
+        toolbar.addAction(self.convo_deconvo_action)
+
         extract_luminance_icon = QIcon(LExtract_path)
         extract_luminance_action = QAction(extract_luminance_icon, "Extract Luminance", self)
         extract_luminance_action.triggered.connect(self.extract_luminance)
@@ -1073,6 +1179,8 @@ class AstroEditingSuite(QMainWindow):
         toolbar.addAction(blemish_blaster_action)
 
         toolbar.addAction(hdr_action)
+
+        toolbar.addAction(dse_action)
 
         # Add CLAHE Button to Toolbar with Icon
         clahe_icon = QIcon(clahe_path)
@@ -1107,7 +1215,9 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar = QToolBar("Star Stuff Toolbar")
         mosaictoolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, mosaictoolbar)  
-        mosaictoolbar.addAction(stacking_suite_action)      
+        mosaictoolbar.addAction(peeker_action)
+        mosaictoolbar.addAction(stacking_suite_action)  
+        mosaictoolbar.addAction(live_stacking_action)    
         mosaictoolbar.addAction(mosaic_master_action)    
         mosaictoolbar.addAction(stellar_align_action)
         mosaictoolbar.addAction(star_registration_action)
@@ -1115,6 +1225,7 @@ class AstroEditingSuite(QMainWindow):
         mosaictoolbar.addAction(psf_viewer_action)     
         mosaictoolbar.addAction(supernova_action)   
         mosaictoolbar.addAction(star_spike_action)
+        mosaictoolbar.addAction(exo_action)
         
         # --------------------
         # Mask Toolbar
@@ -1233,16 +1344,31 @@ class AstroEditingSuite(QMainWindow):
         self.tabs.addTab(CosmicClarityTab(image_manager=self.image_manager), "Cosmic Clarity")
         self.tabs.addTab(CosmicClaritySatelliteTab(), "Cosmic Clarity Satellite")
         self.tabs.addTab(StatisticalStretchTab(image_manager=self.image_manager), "Statistical Stretch")
-        self.tabs.addTab(FullCurvesTab(image_manager=self.image_manager), "Curves Utility")
+        self.curves_tab = FullCurvesTab(image_manager=self.image_manager)
+        self.tabs.addTab(self.curves_tab, "Curves Utility")
         self.tabs.addTab(PerfectPalettePickerTab(image_manager=self.image_manager, parent=self), "Perfect Palette Picker")
         self.tabs.addTab(NBtoRGBstarsTab(image_manager=self.image_manager, parent=self), "NB to RGB Stars")
         self.tabs.addTab(StarStretchTab(image_manager=self.image_manager), "Star Stretch")
         self.tabs.addTab(FrequencySeperationTab(image_manager=self.image_manager), "Frequency Separation")
         self.tabs.addTab(HaloBGonTab(image_manager=self.image_manager), "Halo-B-Gon")
-        self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager), "Continuum Subtraction")
-        self.tabs.addTab(MainWindow(), "What's In My Image")
+        self.tabs.addTab(ContinuumSubtractTab(image_manager=self.image_manager, parent=self), "Continuum Subtraction")
+        self.tabs.addTab(ImageCombineTab(image_manager=self.image_manager), "Image Combination")
+        self.wimi_tab = MainWindow()
+        self.tabs.addTab(self.wimi_tab, "What's In My Image")
         self.tabs.addTab(WhatsInMySky(), "What's In My Sky")
         self.tabs.currentChanged.connect(self.on_tab_changed)
+
+        self.curveDock = QDockWidget("Curves Editor", self)
+        # let it live on either side
+        self.curveDock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea |
+            Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        # put the actual CurveEditor widget into the dock
+        
+        self.curveDock.setWidget(self.curves_tab.curveDialog)
+        # default dock on the right
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.curveDock)
 
         # Set the layout for the main window
         central_widget = QWidget(self)  # Create a central widget
@@ -1304,21 +1430,118 @@ class AstroEditingSuite(QMainWindow):
         # Window Properties
         # --------------------
         self.setWindowTitle(f'Seti Astro\'s Suite V{VERSION} QT6')
-        self.setGeometry(100, 100, 800, 600)  # Set window size as needed
 
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
+        self.curveDock.hide()
 
     def show_history_dialog(self):
         slot = self.image_manager.current_slot
         self.history_dialog = HistoryExplorerDialog(self.image_manager, slot=self.image_manager.current_slot, parent=self)
         self.history_dialog.show()
 
+    def SFCC_show(self):
+        """
+        Show (or re‐show) the SFCC dialog.  We keep it in an instance attribute
+        so it doesn’t get garbage‐collected.
+        """
+        if self.SFCC_window is None:
+            self.SFCC_window = SFCCDialog(parent=self)
 
+
+        self.SFCC_window.show()
+        self.SFCC_window.raise_()  # bring to front
+
+    def live_stacking(self):
+        """
+        Slot called when the user clicks “Live Stacking”.
+        Will open the LiveStackWindow (to be implemented) and show it.
+        """
+        # keep a reference so it doesn’t get garbage-collected
+        self.live_stack_window = LiveStackWindow(parent=self)
+        self.live_stack_window.show()
 
     def starspiketool(self):
         dialog = StarSpikeTool(self.image_manager, self.mask_manager, parent=self)
         dialog.exec()
+
+    def exoplanet_detect(self):
+        win = ExoPlanetWindow(parent=self)
+        # force this to be queued → never block the emitter
+        win.referenceSelected.connect(
+            self._on_reference_selected,
+            Qt.ConnectionType.QueuedConnection
+        )
+        win.show()
+        self.exoplanet_detect_window = win
+
+    def _astap_available(self) -> bool:
+        """Return True if we can find the ASTAP executable (either in settings or on PATH)."""
+        # 1) check user‐configured override in QSettings
+        settings = QSettings()
+        custom = settings.value("astap/exe_path", type=str)
+        if custom:
+            # make sure it actually exists and is executable
+            if os.path.isfile(custom) and os.access(custom, os.X_OK):
+                return True
+
+        # 2) fall back to scanning PATH for the right binary name
+        if sys.platform.startswith("win"):
+            candidates = ["astap.exe", "astap.com", "astap.bat"]
+        else:
+            candidates = ["astap"]
+        for exe in candidates:
+            if shutil.which(exe):
+                return True
+
+        return False
+
+    def _on_reference_selected(self, path):
+        # switch to WIMI tab
+        self.tabs.setCurrentWidget(self.wimi_tab)
+        self.wimi_tab.load_image_path(path)
+
+        if not self._astap_available():
+            QMessageBox.critical(
+                self,
+                "Cannot Blind Solve",
+                "ASTAP was not found on your system.\n"
+                "Please install ASTAP or add it to your PATH before retrying."
+            )
+            return
+
+        # define the background task
+        def do_blind_solve():
+            self.wimi_tab.perform_blind_solve2()
+
+        # fire it off
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(do_blind_solve)
+
+        # when it’s done, schedule a popup on the main thread
+        def _notify(_):
+            #QTimer.singleShot(0, lambda: QMessageBox.information(self, "Blind Solve", "Blind-solve is complete!"))
+
+            # Forward RA/Dec from WIMI → ExoPlanetWindow
+            if hasattr(self, 'exoplanet_detect_window') and self.exoplanet_detect_window:
+                ra  = getattr(self.wimi_tab, "center_ra", None)
+                dec = getattr(self.wimi_tab, "center_dec", None)
+                if ra is not None and dec is not None:
+                    self.exoplanet_detect_window.receive_wcs_coordinates(ra, dec)
+        future.add_done_callback(_notify)
+
+    def convo_deconvo_show(self):
+        """
+        Show (or re‐show) the Convolution/Deconvolution dialog.
+        Store it as an instance attribute so it doesn’t get garbage‐collected.
+        """
+        if self._convo_deconvo_window is None:
+            self._convo_deconvo_window = ConvoDeconvoDialog(parent=self)
+            # If you need to pass data (e.g. the current image) into the dialog,
+            # you could do it here, e.g.:
+            #   self._convo_deconvo_window.set_image(self.image_manager.get_current_image())
+        self._convo_deconvo_window.show()
+        self._convo_deconvo_window.raise_()  # bring to front
 
     def remove_pedestal(self):
         # 1) Prompt the user
@@ -1387,6 +1610,15 @@ class AstroEditingSuite(QMainWindow):
         self.supernova_hunter_tab = SupernovaAsteroidHunterTab()
         # Show the new window (or tab)
         self.supernova_hunter_tab.show()
+
+    def open_image_peeker(self):
+        # Keep a reference so it doesn't get GC'd
+        self._image_peeker = ImagePeekerDialog(
+            parent=self,
+            image_manager=self.image_manager,
+            settings=self.settings
+        )
+        self._image_peeker.show()
 
     def stacking_suite_action(self):
         self.stackingsuitewindow = StackingSuiteDialog()
@@ -1473,7 +1705,7 @@ class AstroEditingSuite(QMainWindow):
         if slot in self.mask_slot_actions:
             self.mask_slot_actions[slot].setText(new_name)
             self.mask_slot_actions[slot].setStatusTip(f"Apply or preview mask for {new_name}")
-        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
 
 
     def show_slot_context_menu(self, pos, slot):
@@ -1541,7 +1773,6 @@ class AstroEditingSuite(QMainWindow):
         # Refresh Menubar
         self.menuBar().update()
 
-        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
 
     def clear_slot_contents(self, slot):
         """
@@ -1585,9 +1816,6 @@ class AstroEditingSuite(QMainWindow):
         # Emit signal to update the UI and trigger the image refresh
         self.image_manager.image_changed.emit(slot, np.zeros((1, 1), dtype=np.uint8), {})
 
-        # Notify user that the slot was cleared
-        QMessageBox.information(self, "Slot Cleared", f"Slot {slot} has been completely cleared.")
-
 
 
     def stellar_alignment(self):
@@ -1601,41 +1829,49 @@ class AstroEditingSuite(QMainWindow):
 
     def psf_viewer(self):
         """
-        Create and show the PSFViewer dialog using the current image from the image manager.
+        Create and show the PSFViewer dialog using the current image
+        from the ImageManager's active slot.
         """
-        # Check if a PSFViewer dialog is already open; if so, bring it to the front.
-        if (hasattr(self, 'psf_viewer_dialog') and 
-                self.psf_viewer_dialog is not None and 
-                self.psf_viewer_dialog.isVisible()):
+        # 1) If it’s already open, just raise it.
+        if (hasattr(self, 'psf_viewer_dialog') and
+            self.psf_viewer_dialog is not None and
+            self.psf_viewer_dialog.isVisible()):
             self.psf_viewer_dialog.raise_()
             self.psf_viewer_dialog.activateWindow()
             return
 
-        # Get the image from slot 0.
-        img = self.image_manager._images.get(0, None)
-        if img is None:
-            QMessageBox.warning(self, "No Image", "Slot 0 does not contain an image.")
+        # 2) Grab the current slot & image.
+        slot = self.image_manager.current_slot
+        img, _meta = self.image_manager.get_current_image_and_metadata()
+
+        # 3) Sanity check
+        if img is None or img.size == 0:
+            QMessageBox.warning(
+                self,
+                "No Image",
+                f"Slot {slot+1} does not contain an image."
+            )
             return
 
-        # If the image is grayscale, replicate to 3 channels.
+        # 4) Ensure 3-channel
         if img.ndim == 2:
             img = np.stack([img] * 3, axis=-1)
 
-        # Create the PSFViewer dialog.
+        # 5) Create & show the PSFViewer
         self.psf_viewer_dialog = PSFViewer(img, self)
 
-        # Define a helper function to update the PSFViewer when slot 0 changes.
-        def update_psf(slot, image, metadata):
-            if slot == 0:
-                if image is None:
-                    return
-                if image.ndim == 2:
-                    image = np.stack([image] * 3, axis=-1)
-                self.psf_viewer_dialog.updateImage(image)
+        # 6) Whenever *this* slot’s image changes, push the update through.
+        def _on_image_changed(changed_slot, new_img, metadata):
+            if changed_slot != slot or self.psf_viewer_dialog is None:
+                return
+            # ignore empty clears
+            if new_img is None or new_img.size == 0:
+                return
+            if new_img.ndim == 2:
+                new_img = np.stack([new_img] * 3, axis=-1)
+            self.psf_viewer_dialog.updateImage(new_img)
 
-        # Connect the image_changed signal.
-        #self.image_manager.image_changed.connect(update_psf)
-
+        self.image_manager.image_changed.connect(_on_image_changed)
         self.psf_viewer_dialog.show()
 
 
@@ -1672,6 +1908,11 @@ class AstroEditingSuite(QMainWindow):
     def on_tab_changed(self, index):
         current_tab = self.tabs.widget(index)
         # Check if the tab has a 'refresh' method.
+        if current_tab is self.curves_tab:
+            self.curveDock.show()
+        else:
+            self.curveDock.hide()
+
         if hasattr(current_tab, "refresh"):
             current_tab.refresh()
 
@@ -1966,7 +2207,7 @@ class AstroEditingSuite(QMainWindow):
         # Refresh Menubar
         self.menuBar().update()
 
-        QMessageBox.information(self, "Rename Successful", f"Slot {slot} renamed to {new_name}.")
+
 
     def rename_mask_slot(self):
         """
@@ -2001,7 +2242,7 @@ class AstroEditingSuite(QMainWindow):
         # if slot in self.mask_preview_windows:
         #     self.mask_preview_windows[slot].setWindowTitle(f"Preview - {new_name}")
 
-        QMessageBox.information(self, "Rename Mask Slot", f"Mask slot {slot} renamed to '{new_name}'.")
+
 
 
     def open_pixel_math_dialog(self):
@@ -2064,36 +2305,44 @@ class AstroEditingSuite(QMainWindow):
 
     def apply_mask(self):
         """Prompt user for a mask slot and flag it in MaskManager for application."""
-        # Check available mask slots
-        available_slots = [slot for slot in range(self.mask_manager.max_slots) if self.mask_manager.get_mask(slot) is not None]
-
+        # 1) Gather all non‐empty mask slots
+        available_slots = [
+            slot for slot in range(self.mask_manager.max_slots)
+            if self.mask_manager.get_mask(slot) is not None
+        ]
         if not available_slots:
             QMessageBox.warning(self, "No Masks Available", "There are no masks to apply.")
             return
 
-        # Prompt user to select a mask slot
-        slot, ok = QInputDialog.getItem(
+        # 2) Build the list of display names, using any custom names
+        display_names = [
+            self.mask_slot_names.get(slot, f"Mask Slot {slot}")
+            for slot in available_slots
+        ]
+
+        # 3) Ask the user to choose one
+        chosen_name, ok = QInputDialog.getItem(
             self,
             "Select Mask Slot",
-            "Choose a mask slot to apply:",
-            [f"Slot {s}" for s in available_slots],
-            0,  # Default selection
-            False  # Do not allow user input outside the options
+            "Choose a mask to apply:",
+            display_names,
+            0,
+            False
         )
-
         if not ok:
-            return  # User canceled
+            return
 
-        # Extract selected slot number
-        selected_slot = int(slot.split()[-1])
+        # 4) Map the chosen display name back to the slot index
+        idx = display_names.index(chosen_name)
+        selected_slot = available_slots[idx]
 
-        # Flag the mask in MaskManager
+        # 5) Apply it
         self.mask_manager.apply_mask_from_slot(selected_slot)
 
-        # Update the UI banner to indicate an active mask
-        self.update_mask_banner(selected_slot, self.mask_manager.get_applied_mask())
-
-        print(f"Mask from Slot {selected_slot} flagged for application.")
+        # 6) Update banner (you can also display chosen_name here)
+        self.update_mask_banner(selected_slot,
+                                self.mask_manager.get_applied_mask())
+        print(f"Mask from {chosen_name} (slot {selected_slot}) flagged for application.")
 
     def apply_mask_from_slot(self, slot):
         """
@@ -2173,14 +2422,9 @@ class AstroEditingSuite(QMainWindow):
             if ok:
                 # Set the mask in the selected slot using MaskManager
                 self.mask_manager.set_mask(slot_number, mask)
-                QMessageBox.information(
-                    self, 
-                    "Mask Loaded", 
-                    f"Mask loaded from {filename} into slot {slot_number}."
-                )
                 print(f"AstroEditingSuite: Mask loaded from {filename} into slot {slot_number}.")
             else:
-                QMessageBox.information(self, "Load Mask", "Mask loading canceled.")
+
                 print("AstroEditingSuite: Mask loading canceled by the user.")
 
         except Exception as e:
@@ -2359,7 +2603,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Flipped", "The image has been successfully flipped horizontally.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} flipped horizontally successfully.")
 
@@ -2394,7 +2638,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, flipped_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Flipped", "The image has been successfully flipped vertically.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} flipped vertically successfully.")
 
@@ -2429,7 +2673,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Rotated", "The image has been successfully rotated 90° clockwise.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} rotated 90° clockwise successfully.")
 
@@ -2464,7 +2708,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, rotated_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Rotated", "The image has been successfully rotated 90° counterclockwise.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} rotated 90° counterclockwise successfully.")
 
@@ -2504,7 +2748,7 @@ class AstroEditingSuite(QMainWindow):
             self.image_manager.image_changed.emit(self.image_manager.current_slot, inverted_image, metadata)
 
             # Notify the user
-            QMessageBox.information(self, "Image Inverted", "The image has been successfully inverted.")
+
 
             print(f"Image in Slot {self.image_manager.current_slot} inverted successfully.")
 
@@ -2521,6 +2765,14 @@ class AstroEditingSuite(QMainWindow):
         dialog = WaveScaleHDRDialog(self.image_manager, self)
         dialog.exec()
 
+    def open_dse_dialog(self):
+        """Open the Dark Structure Enhance dialog."""
+        if self.image_manager.image is None:
+            QMessageBox.warning(self, "No Image Loaded", "Please load an image before using Dark Structure Enhance.")
+            return
+
+        dialog = WaveScaleDarkEnhanceDialog(self.image_manager, self)
+        dialog.exec()
 
     def open_blemish_blaster(self):
         """Handler method to open the Blemish Blaster tool."""
@@ -2643,7 +2895,6 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setDetailedText("\n".join([f"{k}: {v}" for k, v in downloads.items()]))
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
-                    import webbrowser
                     # Open the appropriate link based on the user's OS
                     platform = sys.platform
                     if platform.startswith("win"):
@@ -2699,7 +2950,6 @@ class AstroEditingSuite(QMainWindow):
                 msg_box.setDetailedText(detailed_text)
 
                 if msg_box.exec() == QMessageBox.StandardButton.Yes:
-                    import webbrowser
                     # Open the appropriate link based on the user's OS
                     platform = sys.platform
                     if platform.startswith("win"):
@@ -4976,7 +5226,6 @@ class AstroEditingSuite(QMainWindow):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -5280,7 +5529,7 @@ def siril_style_autostretch(image, sigma=3.0):
     else:
         raise ValueError("Unsupported image format for histogram stretch.")
 
-HANDLE_SIZE = 20
+HANDLE_SIZE = 80
 
 class ResizableRotatableRectItem(QGraphicsRectItem):
     """
@@ -5289,6 +5538,14 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
     """
     def __init__(self, rect: QRectF, parent=None):
         super().__init__(rect, parent)
+        # ── make the rectangle’s pen cosmetic ────────────────────
+        pen = QPen(Qt.GlobalColor.green, 2)   # 2px wide
+        pen.setCosmetic(True)                # stays 2px no matter the zoom
+        self.setPen(pen)
+        self._fixed_aspect_ratio = None 
+
+        # no fill
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))        
         self.setFlags(
             QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
             QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
@@ -5304,8 +5561,13 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
         # only set origin _once_ here
         self.setTransformOriginPoint(self.rect().center())
 
+    def setFixedAspectRatio(self, ratio: float | None):
+        """Lock resize to this width/height ratio, or None to free‐hand."""
+        self._fixed_aspect_ratio = ratio
+
     def _initHandles(self):
-        pen = QPen(Qt.GlobalColor.black)
+        pen = QPen(Qt.GlobalColor.green,2)
+        pen.setCosmetic(True)  # Make pen size independent of zoom level
         brush = QBrush(Qt.GlobalColor.white)
         for pos in ("tl","tr","br","bl"):
             h = QGraphicsEllipseItem(0,0, HANDLE_SIZE, HANDLE_SIZE, self)
@@ -5383,11 +5645,31 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
 
 
     def mouseReleaseEvent(self, ev):
+        # if we were rotating, finish that
         if self._rotating:
             self._rotating = False
             ev.accept()
             return
+
+        # if we were resizing, clear that flag so next click goes to move/rotate
+        if self._active_handle:
+            self._active_handle = None
+            ev.accept()
+            return
+
         super().mouseReleaseEvent(ev)
+
+    def itemChange(self, change, value):
+        """
+        Qt calls this whenever position, rotation, scale, etc. change.
+        We use it to update our handle‐positions so they follow both moves and rotations.
+        """
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,
+            QGraphicsItem.GraphicsItemChange.ItemRotationHasChanged
+        ):
+            self._updateHandlePositions()
+        return super().itemChange(change, value)
 
     def _refreshPivot(self):
         scene_ctr = self.mapToScene(self.boundingRect().center())
@@ -5405,7 +5687,17 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
             r.setBottomRight(p)
         elif self._active_handle == "bl":
             r.setBottomLeft(p)
-        # normalize and apply
+
+        # enforce aspect if locked
+        if self._fixed_aspect_ratio:
+            w = r.width()
+            h_target = w / self._fixed_aspect_ratio
+            # decide whether top or bottom moved
+            if self._active_handle in ("tl", "tr"):
+                r.setTop(r.bottom() - h_target)
+            else:
+                r.setBottom(r.top() + h_target)
+
         r = r.normalized()
         self.setRect(r)
         self._updateHandlePositions()
@@ -5448,6 +5740,30 @@ class CropTool(QDialog):
         instr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         instr.setStyleSheet("font-style: italic; color: gray;")
         layout.addWidget(instr)
+
+        ratio_layout = QHBoxLayout()
+        ratio_layout.addStretch(1) 
+        ratio_layout.addWidget(QLabel("Aspect Ratio:"))
+        self.aspect_combo = QComboBox()
+        self.aspect_combo.addItems([
+            "Free",
+            "Original",
+            "1:1",
+            "16:9",
+            "9:16",
+            "4:3",
+        ])
+        ratio_layout.addWidget(self.aspect_combo)
+        ratio_layout.addStretch(1)  # push combo to the left
+        layout.addLayout(ratio_layout)
+
+        # remember original image AR
+        h, w = self.original_image_data.shape[:2]
+        self._orig_ar = w / h
+
+        # connect
+        self.aspect_combo.currentTextChanged.connect(self._onAspectRatioChanged)
+
         # install filter after view is created:
         self.view.viewport().installEventFilter(self)
         # Layout & buttons
@@ -5468,20 +5784,64 @@ class CropTool(QDialog):
         self._loadImage()
         self.view.viewport().installEventFilter(self)
 
-    def _loadImage(self):
-        img = self.image_data
-        if img.ndim==3 and img.shape[2]==1:
-            img = img.squeeze(2)
-        if img.ndim==3:
-            h,w,_ = img.shape
-            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,3*w,QImage.Format.Format_RGB888)
+    def _onAspectRatioChanged(self, text: str):
+        # figure out numeric ratio (or None for free‑hand)
+        if text == "Free":
+            ar = None
+        elif text == "Original":
+            ar = self._orig_ar
         else:
-            h,w = img.shape
-            q = QImage((img*255).astype(np.uint8).tobytes(), w,h,w,QImage.Format.Format_Grayscale8)
+            a, b = map(float, text.split(":"))
+            ar = a / b
+
+        # lock future drags to this aspect
+        if self._rect_item:
+            self._rect_item.setFixedAspectRatio(ar)
+
+            # if we have a live rect and a ratio, immediately reshape it
+            if ar is not None:
+                from PyQt6.QtCore import QRectF
+
+                # grab the old rectangle (in item‑local coords)
+                old = self._rect_item.rect()
+                w   = old.width()
+                h   = w / ar
+
+                # center it around the old center
+                cx, cy = old.center().x(), old.center().y()
+                new_rect = QRectF(cx - w/2, cy - h/2, w, h)
+
+                # apply it
+                self._rect_item.setRect(new_rect)
+
+                # reset the transform‑origin to the new center
+                self._rect_item.setTransformOriginPoint(new_rect.center())
+
+                # and move the handles
+                self._rect_item._updateHandlePositions()
+
+    def _loadImage(self):
+        """Load the current image into the scene and remember the pixmap item."""
+        img = self.image_data
+        if img.ndim == 3 and img.shape[2] == 1:
+            img = img.squeeze(2)
+        if img.ndim == 3:
+            h, w, _ = img.shape
+            q = QImage((img * 255).astype(np.uint8).tobytes(), w, h, 3 * w,
+                       QImage.Format.Format_RGB888)
+        else:
+            h, w = img.shape
+            q = QImage((img * 255).astype(np.uint8).tobytes(), w, h, w,
+                       QImage.Format.Format_Grayscale8)
+
         pix = QPixmap.fromImage(q)
         self.scene.clear()
-        self.scene.addItem(QGraphicsPixmapItem(pix))
-        self.view.fitInView(self.scene.itemsBoundingRect(), Qt.AspectRatioMode.KeepAspectRatio)
+        pix_item = QGraphicsPixmapItem(pix)
+        pix_item.setZValue(-1)             # so rectangle stays on top
+        self.scene.addItem(pix_item)
+        self._pixmap_item = pix_item       # 🌟 remember for coordinate mapping
+        self.view.fitInView(self.scene.itemsBoundingRect(),
+                            Qt.AspectRatioMode.KeepAspectRatio)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
@@ -5490,7 +5850,6 @@ class CropTool(QDialog):
 
     def eventFilter(self, source, ev):
         if source is self.view.viewport():
-            # translate to scene coords when needed
             if ev.type() in (
                 QEvent.Type.MouseButtonPress,
                 QEvent.Type.MouseMove,
@@ -5498,32 +5857,87 @@ class CropTool(QDialog):
             ):
                 scene_pt = self.view.mapToScene(ev.pos())
 
-            # if we haven't yet created our rotatable rect, intercept
+            # 1) drawing first rectangle
             if self._rect_item is None:
+                # start drawing
                 if ev.type() == QEvent.Type.MouseButtonPress and ev.button() == Qt.MouseButton.LeftButton:
                     self.drawing = True
                     self.origin  = scene_pt
                     return True
+
+                # live update
                 if ev.type() == QEvent.Type.MouseMove and getattr(self, "drawing", False):
+                    # compute raw rect
                     r = QRectF(self.origin, scene_pt).normalized()
+
+                    # enforce drop‑down ratio
+                    txt = self.aspect_combo.currentText()
+                    if txt != "Free":
+                        if txt == "Original":
+                            ar = self._orig_ar
+                        else:
+                            a, b = map(float, txt.split(":"))
+                            ar = a / b
+                        w = r.width()
+                        h_target = w / ar
+                        if scene_pt.y() < self.origin.y():
+                            r.setTop(r.bottom() - h_target)
+                        else:
+                            r.setBottom(r.top() + h_target)
+                        r = r.normalized()
+
+                    # redraw dashed rect
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
-                    pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
+                    pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.DashLine)
+                    pen.setCosmetic(True)
                     self.selection_rect_item = self.scene.addRect(r, pen)
                     return True
-                if ev.type() == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.LeftButton and getattr(self, "drawing", False):
+
+                # finalize on mouse up
+                if ev.type() == QEvent.Type.MouseButtonRelease \
+                   and ev.button() == Qt.MouseButton.LeftButton \
+                   and getattr(self, "drawing", False):
+
                     self.drawing = False
                     final_r = QRectF(self.origin, scene_pt).normalized()
+
+                    # enforce ratio one more time
+                    txt = self.aspect_combo.currentText()
+                    if txt != "Free":
+                        if txt == "Original":
+                            ar = self._orig_ar
+                        else:
+                            a, b = map(float, txt.split(":"))
+                            ar = a / b
+                        w = final_r.width()
+                        h_target = w / ar
+                        if scene_pt.y() < self.origin.y():
+                            final_r.setTop(final_r.bottom() - h_target)
+                        else:
+                            final_r.setBottom(final_r.top() + h_target)
+                        final_r = final_r.normalized()
+
+                    # remove the live dashed rect
                     if self.selection_rect_item:
                         self.scene.removeItem(self.selection_rect_item)
+
+                    # create the true, rotatable item
                     self._rect_item = ResizableRotatableRectItem(final_r)
+                    # lock its aspect
+                    self._rect_item.setFixedAspectRatio(
+                        None if txt=="Free"
+                        else (self._orig_ar if txt=="Original" else (a/b))
+                    )
+
+                    # save & add
                     pos   = self._rect_item.pos()
                     angle = self._rect_item.rotation()
                     CropTool.previous_crop_rect = (final_r, angle, pos)
                     self.scene.addItem(self._rect_item)
                     return True
 
-            # 2) If a rect already exists, don’t intercept—let the QGraphicsItem handle it!
+            # 2) once we have a rect, let its own handlers take over
             return False
 
         return super().eventFilter(source, ev)
@@ -5584,25 +5998,29 @@ class CropTool(QDialog):
         self.scene.addItem(self._rect_item)
 
     def apply_crop(self):
-        """Crop out exactly the rotated rectangle, then derotate so the result is upright."""
-        rc = self._getCurrentRect()
-        if not rc or rc.isNull():
+        """Crop out exactly the rotated & moved rectangle, using the rectangle’s own center as the pivot."""
+        if not self._rect_item:
             QMessageBox.warning(self, "No Selection", "Draw (and finalize) a crop first.")
             return
 
-        # 1) Figure out the rotation angle of the rect item
-        angle = self._rect_item.rotation()  # degrees, CCW positive
+        # 1) Grab the rotation angle and rectangle’s center in SCENE coords
+        angle = self._rect_item.rotation()                # degrees CCW positive
+        rect_local = self._rect_item.rect()
+        scene_center = self._rect_item.mapToScene(rect_local.center())
 
-        # 2) Prepare the original image and rotation matrix
-        img = self.original_image_data  # numpy array HxW(xC)
-        h_img, w_img = img.shape[:2]
-        center = (w_img/2.0, h_img/2.0)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        # 2) Convert scene_center → image‐pixel pivot
+        pm = self._pixmap_item.pixmap()
+        pm_w, pm_h = pm.width(), pm.height()
+        h_img, w_img = self.original_image_data.shape[:2]
+        sx = w_img / pm_w
+        sy = h_img / pm_h
+        pivot_x = scene_center.x() * sx
+        pivot_y = scene_center.y() * sy
 
-        # 3) Rotate the entire image
-        #    keep same size to make cropping simpler
+        # 3) Rotate **around that pivot**, not image center
+        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
         rotated = cv2.warpAffine(
-            img,
+            self.original_image_data,
             M,
             (w_img, h_img),
             flags=cv2.INTER_LINEAR,
@@ -5610,52 +6028,84 @@ class CropTool(QDialog):
             borderValue=0
         )
 
-        # 4) Extract integer crop coords from rc (these are in un‐rotated image pixels)
-        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+        # 4) Figure out the axis‐aligned bounding box of your rect in scene coords
+        corners = [
+            rect_local.topLeft(), rect_local.topRight(),
+            rect_local.bottomRight(), rect_local.bottomLeft()
+        ]
+        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
+        bb = QPolygonF(scene_pts).boundingRect()
 
-        # clamp just in case
-        x = max(0, min(x, w_img-1))
-        y = max(0, min(y, h_img-1))
-        w = max(1, min(w, w_img - x))
-        h = max(1, min(h, h_img - y))
+        # 5) Map that bounding box into **image**‐pixel coords
+        x0 = int(bb.left()   * sx)
+        y0 = int(bb.top()    * sy)
+        w0 = int(bb.width()  * sx)
+        h0 = int(bb.height() * sy)
 
-        # 5) Crop from the rotated image
-        cropped = rotated[y:y+h, x:x+w].copy()
+        # 6) Clamp to valid image range
+        x0 = max(0, min(x0, w_img-1))
+        y0 = max(0, min(y0, h_img-1))
+        w0 = max(1, min(w0, w_img - x0))
+        h0 = max(1, min(h0, h_img - y0))
 
-        # 6) Notify caller
+        # 7) Crop
+        cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
         self.crop_applied.emit(cropped)
 
-        # save size, rotation and position for next time
-        rect = self._getCurrentRect()
-        angle = self._rect_item.rotation()
-        pos   = self._rect_item.pos()
+        # 8) Save for “Load Previous Crop”
+        rect = self._rect_item.rect()
+        pos  = self._rect_item.scenePos()
         CropTool.previous_crop_rect = (rect, angle, pos)
+
         self.accept()
+
 
     def batch_crop_all_slots(self):
         """
-        Same logic as apply_crop, but loop through every slot in image_manager.
-        Each gets rotated + cropped by the same rectangle/angle.
+        Apply the same rotated & moved crop to all images in image_manager.
         """
-        rc = self._getCurrentRect()
-        if not rc or rc.isNull():
+        # 1) Make sure we have a selection
+        rect_local = self._rect_item.rect() if self._rect_item else None
+        if rect_local is None or rect_local.isNull():
             QMessageBox.warning(self, "No Selection", "Draw & finalize a crop first.")
             return
 
+        # 2) Grab rotation angle and rect center in scene coords
         angle = self._rect_item.rotation()
+        scene_center = self._rect_item.mapToScene(rect_local.center())
+
+        # 3) Map scene_center → image‐pixel pivot
+        pm = self._pixmap_item.pixmap()
+        pm_w, pm_h = pm.width(), pm.height()
         img0 = self.original_image_data
-        h0, w0 = img0.shape[:2]
-        center = (w0/2.0, h0/2.0)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        h_img, w_img = img0.shape[:2]
+        sx, sy = w_img/pm_w, h_img/pm_h
+        pivot_x, pivot_y = scene_center.x()*sx, scene_center.y()*sy
 
-        # integer coords
-        x, y, w, h = int(rc.x()), int(rc.y()), int(rc.width()), int(rc.height())
+        # 4) Build rotation matrix around that pivot
+        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
 
+        # 5) Compute the axis-aligned bounding box of the rotated rect in scene coords
+        corners = [
+            rect_local.topLeft(), rect_local.topRight(),
+            rect_local.bottomRight(), rect_local.bottomLeft()
+        ]
+        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
+        bb = QPolygonF(scene_pts).boundingRect()
+
+        # 6) Map BB → image pixels & clamp
+        x0 = int(bb.left()*sx);    y0 = int(bb.top()*sy)
+        w0 = int(bb.width()*sx);   h0 = int(bb.height()*sy)
+        x0 = max(0, min(x0, w_img-1))
+        y0 = max(0, min(y0, h_img-1))
+        w0 = max(1, min(w0, w_img - x0))
+        h0 = max(1, min(h0, h_img - y0))
+
+        # 7) Confirm
         num_slots = sum(1 for im in self.image_manager._images.values() if im is not None)
         if num_slots == 0:
             QMessageBox.information(self, "No Images", "There are no images to crop.")
             return
-
         reply = QMessageBox.question(
             self, "Confirm Batch Crop",
             f"Apply this same rotated crop to all {num_slots} images?",
@@ -5665,25 +6115,22 @@ class CropTool(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
+        # 8) Rotate & crop every slot
         any_cropped = False
         for slot, img in self.image_manager._images.items():
             if img is None:
                 continue
 
-            # rotate this slot’s image
-            rot = cv2.warpAffine(
-                img, M, (w0, h0),
+            # rotate around pivot
+            rotated = cv2.warpAffine(
+                img, M, (w_img, h_img),
                 flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT, borderValue=0
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0
             )
 
-            # bounds‐clamp
-            x1 = max(0, min(x, w0-1))
-            y1 = max(0, min(y, h0-1))
-            w1 = max(1, min(w, w0 - x1))
-            h1 = max(1, min(h, h0 - y1))
-
-            cropped = rot[y1:y1+h1, x1:x1+w1].copy()
+            # crop same box
+            cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
 
             # push undo / clear redo
             self.image_manager._undo_stacks[slot].append(
@@ -5699,9 +6146,12 @@ class CropTool(QDialog):
             )
             any_cropped = True
 
+        # 9) Wrap up
         if any_cropped:
-            QMessageBox.information(self, "Batch Crop Completed",
-                                    f"Successfully cropped {num_slots} images.")
+            QMessageBox.information(
+                self, "Batch Crop Completed",
+                f"Successfully cropped {num_slots} images."
+            )
             self.accept()
         else:
             QMessageBox.information(self, "Batch Crop", "No images were cropped.")
@@ -6033,6 +6483,11 @@ class ImageManager(QObject):
                 img, meta, _ = stack[index] if len(stack[index]) == 3 else (*stack[index], "Unnamed")
                 return img.copy(), meta.copy()
         return None, None
+
+    def get_image_for_slot(self, slot: int) -> Optional[np.ndarray]:
+        """Return the image stored in slot, or None if empty."""
+        return self._images.get(slot)
+
 
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
@@ -6666,15 +7121,6 @@ class MaskSlotPreviewDialog(QDialog):
         Inverts the current mask and updates the display and mask slot,
         while preserving the current zoom and scroll positions.
         """
-        reply = QMessageBox.question(
-            self, 
-            "Confirm Inversion", 
-            "Are you sure you want to invert the mask?", 
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-            QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
 
         try:
             # Invert the mask (assuming the mask is normalized between 0 and 1)
@@ -6689,7 +7135,6 @@ class MaskSlotPreviewDialog(QDialog):
             self.update_image()
             print("Mask display updated with inverted mask while preserving zoom and scroll positions.")
             
-            QMessageBox.information(self, "Mask Inverted", "The mask has been successfully inverted.")
             
         except Exception as e:
             QMessageBox.critical(self, "Inversion Failed", f"Failed to invert the mask:\n{e}")
@@ -6728,239 +7173,598 @@ class MaskSlotPreviewDialog(QDialog):
             QTimer.singleShot(0, self.fit_to_window)
             self.fitted = True
 
-class MaskCreationDialog(QDialog):
-    """
-    Dialog for creating masks with various types and customizations.
-    """
+class HandleItem(QGraphicsRectItem):
+    SIZE = 8
 
+    def __init__(self, role, parent_ellipse):
+        # parent‐ellipse tells Qt that this item’s coords are local to the ellipse
+        super().__init__(-self.SIZE/2, -self.SIZE/2, self.SIZE, self.SIZE, parent_ellipse)
+        self.role = role
+        self.parent_ellipse = parent_ellipse
+
+        # just a red box
+        self.setBrush(QColor(255, 0, 0))
+
+        # we only want left‐button drags
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        # don’t let Qt move this item for us
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, False)
+
+        cursors = {
+            'top':    Qt.CursorShape.SizeVerCursor,
+            'bottom': Qt.CursorShape.SizeVerCursor,
+            'left':   Qt.CursorShape.SizeHorCursor,
+            'right':  Qt.CursorShape.SizeHorCursor,
+            'rotate': Qt.CursorShape.OpenHandCursor
+        }
+        self.setCursor(cursors[role])
+
+        # will hold last mouse‐pos during a drag
+        self._lastScenePos = None
+
+        self.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations,
+            True
+        )
+
+    def mousePressEvent(self, event):
+        # record starting point in scene coords
+        self._lastScenePos = event.scenePos()
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        newScenePos = event.scenePos()
+        dx = newScenePos.x() - self._lastScenePos.x()
+        dy = newScenePos.y() - self._lastScenePos.y()
+
+        # hand off the delta to the ellipse
+        self.parent_ellipse.interactiveResize(self.role, dx, dy)
+
+        # ellipse.itemChange + QTimer will re-position all handles for us
+        self._lastScenePos = newScenePos
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._lastScenePos = None
+        event.accept()
+
+class InteractiveEllipseItem(QGraphicsEllipseItem):
+    """Ellipse with draggable handles for resizing/rotation."""
+    def __init__(self, rect):
+        super().__init__(rect)
+        self._resizing = False
+        self.setTransformOriginPoint(self.rect().center())
+
+        self.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges
+        )
+        self.handles = {
+            role: HandleItem(role, self)
+            for role in ('top','bottom','left','right','rotate')
+        }
+        self.updateHandles()
+
+    def updateHandles(self):
+        r = self.rect()
+        cx, cy = r.center().x(), r.center().y()
+
+        # temporarily disable handle->ellipse resize callbacks
+        for h in self.handles.values():
+            h.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, False)
+
+        # reposition them in *local* coords
+        for role, h in self.handles.items():
+            if role == 'top':
+                scene_pt = self.mapToScene(QPointF(cx, r.top()))
+            elif role == 'bottom':
+                scene_pt = self.mapToScene(QPointF(cx, r.bottom()))
+            elif role == 'left':
+                scene_pt = self.mapToScene(QPointF(r.left(), cy))
+            elif role == 'right':
+                scene_pt = self.mapToScene(QPointF(r.right(), cy))
+            else:
+                scene_pt = self.mapToScene(QPointF(cx, r.top() - 20))
+
+            local_pt = self.mapFromScene(scene_pt)
+            h.setPos(local_pt)
+
+        # re-enable resize callbacks
+        for h in self.handles.values():
+            h.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+
+    def itemChange(self, change, value):
+        if change in (
+            QGraphicsItem.GraphicsItemChange.ItemPositionChange,
+            QGraphicsItem.GraphicsItemChange.ItemTransformChange,
+            QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+        ):
+            # schedule handle reposition once Qt is done
+            QTimer.singleShot(0, self.updateHandles)
+        return super().itemChange(change, value)
+
+    def interactiveResize(self, role, dx, dy):
+        if self._resizing:
+            return        
+        r = self.rect()
+        if role == 'top':
+            r.setTop(r.top() + dy)
+        elif role == 'bottom':
+            r.setBottom(r.bottom() + dy)
+        elif role == 'left':
+            r.setLeft(r.left() + dx)
+        elif role == 'right':
+            r.setRight(r.right() + dx)
+        elif role == 'rotate':
+            new_angle = self.rotation() + dx
+            self.setRotation(new_angle)
+            return
+        self._resizing = True
+        self.prepareGeometryChange()
+        self.setRect(r)
+        self.updateHandles()
+        self._resizing = False        
+        # (no updateHandles() here — Qt will call itemChange → updateHandles)
+
+class MaskCanvas(QGraphicsView):
+    """Canvas supporting freehand polygons and interactive ellipses."""
     def __init__(self, image, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Mask Creation")
-        self.image = image.copy()  # Original image
-        self.mask = None
-        self.drawing = False
-        self.current_polygon = []
-        self.exclusion_polygons = []  # List of drawn polygons
-        self.scale_factor = 1.0
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.temp_ellipse = None
+        self.ellipse_origin = None
+        pix = self._to_pixmap(image)
+        self.bg_item = QGraphicsPixmapItem(pix)
+        self.scene.addItem(self.bg_item)
 
-        # Initialize parameters
-        self.mask_type = "Binary"
-        self.blur_amount = 0
+        self.mode = 'polygon'
+        self.temp_path = None
+        self.poly_points = []
+        self.shapes = []
 
-        # UI Components
-        self.init_ui()
+    def set_mode(self, mode):
+        assert mode in ('polygon','ellipse','select')
+        self.mode = mode
 
-    def init_ui(self):
-        # Main Layout
-        main_layout = QVBoxLayout()
+    def mousePressEvent(self, ev):
+        pt = self.mapToScene(ev.pos())
 
-        # Create a scrollable area for the image
-        self.scroll_area = QScrollArea(self)
-        self.scroll_area.setWidgetResizable(False)  # Align with XISFViewer
-        self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 1) if you're in ellipse‐mode but clicked on an existing ellipse or handle, let Qt
+        #    handle selection/moving instead of starting a new rubber‐band
+        if self.mode == 'ellipse' and ev.button() == Qt.MouseButton.LeftButton:
+            clicked_items = self.items(ev.pos())
+            for it in clicked_items:
+                if isinstance(it, (InteractiveEllipseItem, HandleItem)):
+                    # pass through to default QGraphicsView logic
+                    super().mousePressEvent(ev)
+                    return
 
-        # Image Preview within Scroll Area
-        self.image_label = QLabel()  # No parent to avoid layout conflicts
-        self.image_pixmap = self.convert_to_pixmap(self.image)
-        self.image_label.setPixmap(self.image_pixmap)
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setBackgroundRole(self.palette().ColorRole.Base)
-        self.image_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.image_label.setScaledContents(False)  # Maintain aspect ratio
+        # 2) polygon‐mode start
+        if self.mode == 'polygon' and ev.button() == Qt.MouseButton.LeftButton:
+            self.poly_points = [pt]
+            path = QPainterPath(pt)
+            self.temp_path = QGraphicsPathItem(path)
+            self.temp_path.setPen(QPen(QColor(255,0,0), 2, Qt.PenStyle.DashLine))
+            self.scene.addItem(self.temp_path)
+            return
 
-        # Add image label to scroll area
-        self.scroll_area.setWidget(self.image_label)
+        # 3) ellipse‐mode start (and you didn’t click an existing handle/ellipse)
+        if self.mode == 'ellipse' and ev.button() == Qt.MouseButton.LeftButton:
+            self.ellipse_origin = pt
+            self.temp_ellipse = QGraphicsEllipseItem(QRectF(pt, pt))
+            self.temp_ellipse.setPen(QPen(QColor(0,255,0), 2, Qt.PenStyle.DashLine))
+            self.scene.addItem(self.temp_ellipse)
+            return
 
-        # Enable mouse event handling
-        self.image_label.mousePressEvent = self.mouse_press_event
-        self.image_label.mouseMoveEvent = self.mouse_move_event
-        self.image_label.mouseReleaseEvent = self.mouse_release_event
-
-        # Add scroll area to main layout
-        main_layout.addWidget(self.scroll_area)
+        # 4) any other case: fall back to default (selection, pan, etc.)
+        super().mousePressEvent(ev)
 
 
+    def mouseMoveEvent(self, ev):
+        pt = self.mapToScene(ev.pos())
+        if self.mode == 'ellipse' and self.temp_ellipse is not None:
+            # update the dash ellipse’s geometry
+            rect = QRectF(self.ellipse_origin, pt).normalized()
+            self.temp_ellipse.setRect(rect)
+        elif self.mode=='polygon' and self.temp_path:
+            self.poly_points.append(pt)
+            p=QPainterPath(self.poly_points[0])
+            for q in self.poly_points[1:]: p.lineTo(q)
+            self.temp_path.setPath(p)
+        else: super().mouseMoveEvent(ev)
 
-        # Zoom and Fit-to-Preview Buttons
-        zoom_layout = QHBoxLayout()
-        zoom_in_button = QPushButton("Zoom In")
-        zoom_in_button.clicked.connect(self.zoom_in)
-        zoom_out_button = QPushButton("Zoom Out")
-        zoom_out_button.clicked.connect(self.zoom_out)
-        fit_to_preview_button = QPushButton("Fit to Preview")
-        fit_to_preview_button.clicked.connect(self.fit_to_preview)
-        select_entire_image_button = QPushButton("Select Entire Image")
-        select_entire_image_button.clicked.connect(self.select_entire_image)
+    def mouseReleaseEvent(self, ev):
+        pt = self.mapToScene(ev.pos())
+        if self.mode == 'ellipse' and self.temp_ellipse is not None:
+            final_rect = self.temp_ellipse.rect().normalized()
+            self.scene.removeItem(self.temp_ellipse)
+            self.temp_ellipse = None
 
-        zoom_layout.addWidget(zoom_in_button)
-        zoom_layout.addWidget(zoom_out_button)
-        zoom_layout.addWidget(fit_to_preview_button)
-        zoom_layout.addWidget(select_entire_image_button)
+            if final_rect.width() > 4 and final_rect.height() > 4:
+                w, h = final_rect.width(), final_rect.height()
 
-        # Mask Type Selection
-        mask_type_label = QLabel("Select Mask Type:")
-        self.mask_type_dropdown = QComboBox()
-        self.mask_type_dropdown.addItems([
-            "Binary", "Lightness", "Chrominance", "Star Mask",
-            "Color: Red", "Color: Orange", "Color: Yellow",
-            "Color: Green", "Color: Cyan", "Color: Blue",
-            "Color: Magenta"
-        ])
-        self.mask_type_dropdown.currentTextChanged.connect(self.update_mask_type)
+                # build local rect
+                local_rect = QRectF(0, 0, w, h)
 
-        # Convolution Blur Slider
-        blur_layout = QHBoxLayout()
-        blur_label = QLabel("Convolution Blur Amount:")
-        self.blur_slider = QSlider(Qt.Orientation.Horizontal)
-        self.blur_slider.setRange(0, 150)
-        self.blur_slider.setValue(0)
-        self.blur_slider.valueChanged.connect(self.update_blur_amount)
+                ell = InteractiveEllipseItem(local_rect)
+                ell.setPen(QPen(QColor(0,255,0), 2))
+                ell.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                ell.setZValue(1)
+                ell.setPos(final_rect.topLeft())
+                self.scene.addItem(ell)
+                self.shapes.append(ell)
+            return
+        elif self.mode=='polygon' and self.temp_path:
+            poly=QGraphicsPolygonItem(QPolygonF(self.poly_points))
+            poly.setBrush(QColor(0,255,0,50)); poly.setPen(QPen(QColor(0,255,0),2))
+            poly.setFlags(
+                    QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+                | QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+                )
+            self.scene.removeItem(self.temp_path); self.temp_path=None
+            self.scene.addItem(poly); self.shapes.append(poly)
+        else: super().mouseReleaseEvent(ev)
 
-        # Display the current blur amount
-        self.blur_value_label = QLabel("0")  # Initialize with the default value
-        self.blur_slider.valueChanged.connect(
-            lambda value: self.blur_value_label.setText(str(value))
-        )
+    def _to_pixmap(self, image):
+        h,w = image.shape[:2]
+        if image.ndim==3:
+            data=(image*255).astype(np.uint8)
+            fmt=QImage.Format.Format_RGB888; stride=3*w
+        else:
+            data=(image*255).astype(np.uint8)
+            fmt=QImage.Format.Format_Grayscale8; stride=w
+        img=QImage(data.data,w,h,stride,fmt)
+        return QPixmap.fromImage(img)
 
-        blur_layout.addWidget(blur_label)
-        blur_layout.addWidget(self.blur_slider)
-        blur_layout.addWidget(self.blur_value_label)
+    def create_mask(self):
+        h = self.bg_item.pixmap().height()
+        w = self.bg_item.pixmap().width()
+        mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Buttons
-        buttons_layout = QHBoxLayout()
-        preview_button = QPushButton("Preview Mask")
-        preview_button.clicked.connect(self.preview_mask)
+        for s in self.shapes:
+            if isinstance(s, QGraphicsPolygonItem):
+                pts = s.polygon()
+                arr = np.array([[p.x(), p.y()] for p in pts], np.int32)
+                cv2.fillPoly(mask, [arr], 1)
 
-        clear_button = QPushButton("Clear Drawings")
-        clear_button.clicked.connect(self.clear_exclusion_areas)
+            elif isinstance(s, InteractiveEllipseItem):
+                # 1) get the ellipse’s local rect
+                r = s.rect()
 
-        buttons_layout.addWidget(preview_button)
+                # 2) map its center into scene coordinates
+                scenep = s.mapToScene(r.center())
+                cx, cy = int(scenep.x()), int(scenep.y())
 
-        buttons_layout.addWidget(clear_button)
+                # 3) axes are half the width/height
+                rx = int(r.width()  / 2)
+                ry = int(r.height() / 2)
 
-        # Add Components to Layout
-        controls_layout = QVBoxLayout()
-        controls_layout.addWidget(mask_type_label)
-        controls_layout.addWidget(self.mask_type_dropdown)
-        controls_layout.addLayout(blur_layout)
-        controls_layout.addWidget(self.blur_slider)
-        controls_layout.addLayout(buttons_layout)
+                # 4) rotation in degrees (Qt is CCW-positive; OpenCV draws CCW too)
+                angle = s.rotation()
 
-        main_layout.addLayout(zoom_layout)
-        main_layout.addLayout(controls_layout)
+                # finally draw it into the mask
+                cv2.ellipse(
+                    mask,
+                    (cx, cy),
+                    (rx, ry),
+                    angle,
+                    0, 360,
+                    1,
+                    -1
+                )
 
-        self.setLayout(main_layout)
-        self.setMinimumSize(800, 500)
-
-    def convert_to_pixmap(self, image):
-        """
-        Converts a numpy array to QPixmap for display.
-        """
-        if image.ndim == 3:  # RGB
-            h, w, c = image.shape
-            image = (image * 255).astype(np.uint8)
-            q_image = QImage(image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        else:  # Grayscale
-            h, w = image.shape
-            image = (image * 255).astype(np.uint8)
-            q_image = QImage(image.data, w, h, w, QImage.Format.Format_Grayscale8)
-        return QPixmap.fromImage(q_image)
-
-    # Mouse Events for Drawing
-    def mouse_press_event(self, event):
-        """
-        Handles the mouse press event to initiate drawing.
-        """
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drawing = True
-            adjusted_pos = self.get_adjusted_position(event.position())
-            self.current_polygon = [adjusted_pos]
-            self.update_selection()
-
-    def mouse_move_event(self, event):
-        """
-        Handles the mouse move event to update the current polygon being drawn.
-        """
-        if self.drawing:
-            adjusted_pos = self.get_adjusted_position(event.position())
-            self.current_polygon.append(adjusted_pos)
-            self.update_selection()
-
-    def mouse_release_event(self, event):
-        """
-        Handles the mouse release event to finalize the polygon.
-        """
-        if event.button() == Qt.MouseButton.LeftButton and self.drawing:
-            self.drawing = False
-            adjusted_polygon = QPolygon(self.current_polygon)
-            self.exclusion_polygons.append(adjusted_polygon)
-            self.current_polygon = []
-            self.update_selection()
-
+        return mask.astype(bool)
+    
     def select_entire_image(self):
-        """
-        Selects the entire image as the mask region.
-        """
-        self.clear_exclusion_areas()  # Clear existing exclusion areas
-        height, width = self.image.shape[:2]
-        self.exclusion_polygons.append(
-            QPolygon([
-                QPoint(0, 0),
-                QPoint(width - 1, 0),
-                QPoint(width - 1, height - 1),
-                QPoint(0, height - 1)
-            ])
-        )
-        self.update_selection()
+        # 1) remove any existing shapes
+        for item in list(self.shapes):
+            self.scene.removeItem(item)
+        self.shapes.clear()
 
-    def update_selection(self):
-        """
-        Updates the pixmap with all finalized polygons and the current polygon being drawn,
-        preserving the current zoom level.
-        """
-        # Start with the original pixmap scaled by the current zoom level
-        scaled_pixmap = self.image_pixmap.scaled(
-            self.image_pixmap.size() * self.scale_factor,
+        # 2) build a polygon the size of the background pixmap
+        rect = self.bg_item.boundingRect()
+        pts = [
+            rect.topLeft(),
+            rect.topRight(),
+            rect.bottomRight(),
+            rect.bottomLeft()
+        ]
+        poly = QGraphicsPolygonItem(QPolygonF(pts))
+        poly.setBrush(QColor(0, 255, 0, 50))
+        poly.setPen(QPen(QColor(0, 255, 0), 2))
+        poly.setFlags(
+            QGraphicsItem.GraphicsItemFlag.ItemIsSelectable |
+            QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+        )
+
+        # 3) add it to the scene & record it
+        self.scene.addItem(poly)
+        self.shapes.append(poly)
+
+class LivePreviewDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Mask Preview")
+        self.label = QLabel()
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.label)
+        self.resize(300,300)
+
+    def update_mask(self, mask: np.ndarray):
+        img = (mask*255).astype(np.uint8)
+        h, w = img.shape
+        bytes_per_line = w
+        qimg = QImage(
+            img.data, w, h, bytes_per_line,
+            QImage.Format.Format_Grayscale8
+        )
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
         )
-        self.pixmap = scaled_pixmap.copy()
+        self.label.setPixmap(pix)
 
-        painter = QPainter(self.pixmap)
+class MaskCreationDialog(QDialog):
+    """
+    Dialog for creating masks with various types and customizations,
+    backed by MaskCanvas (QGraphicsView).
+    """
+    def __init__(self, image, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mask Creation")
+        self.image = image.copy()
+        self.mask = None
+        self.live_preview = LivePreviewDialog(self)
 
-        # Draw all finalized exclusion polygons in semi-transparent green
-        pen = QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine)
-        brush = QColor(0, 255, 0, 50)  # Semi-transparent green
-        painter.setPen(pen)
-        painter.setBrush(brush)
-        for polygon in self.exclusion_polygons:
-            # Scale polygon points according to zoom
-            scaled_polygon = QPolygon(
-                [QPoint(int(point.x() * self.scale_factor), int(point.y() * self.scale_factor)) for point in polygon]
+        # Mask parameters
+        self.mask_type = "Binary"
+        self.blur_amount = 0
+
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # ── Mode toolbar ────────────────────────────────────────────
+        mode_bar = QHBoxLayout()
+        self.free_btn    = QPushButton("Freehand");            self.free_btn.setCheckable(True)
+        self.ellipse_btn = QPushButton("Ellipse");             self.ellipse_btn.setCheckable(True)
+        self.select_btn  = QPushButton("Select Entire Image"); self.select_btn.setCheckable(True)
+
+        # Make them mutually exclusive
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for btn in (self.free_btn, self.ellipse_btn, self.select_btn):
+            btn.setAutoExclusive(True)
+            group.addButton(btn)
+
+            # **ADD THIS STYLE SHEET** so the checked button lights up
+            btn.setStyleSheet("""
+                QPushButton {
+                    padding: 6px;
+                    border: 1px solid #888;
+                    border-radius: 4px;
+                    background: transparent;
+                }
+                QPushButton:checked {
+                    background-color: #0078d4;
+                    color: white;
+                    border-color: #005a9e;
+                }
+            """)
+
+        # Wire up mode changes
+        for btn, mode in [
+            (self.free_btn,    'polygon'),
+            (self.ellipse_btn, 'ellipse'),
+            (self.select_btn,  'select'),
+        ]:
+            btn.clicked.connect(lambda checked, m=mode: self._set_mode(m))
+            mode_bar.addWidget(btn)
+
+        # Default to Freehand
+        self.free_btn.setChecked(True)
+        layout.addLayout(mode_bar)
+
+
+
+        # ── The unified canvas ──────────────────────────────────────
+        self.canvas = MaskCanvas(self.image)
+        layout.addWidget(self.canvas)
+
+        # ── Zoom toolbar ────────────────────────────────────────────
+        zoom_bar = QHBoxLayout()
+        zoom_in_btn = QPushButton("Zoom In")
+        zoom_in_btn.clicked.connect(lambda: self.canvas.scale(1.2, 1.2))
+        zoom_out_btn = QPushButton("Zoom Out")
+        zoom_out_btn.clicked.connect(lambda: self.canvas.scale(1/1.2, 1/1.2))
+        fit_btn = QPushButton("Fit to View")
+        fit_btn.clicked.connect(
+            lambda: self.canvas.fitInView(
+                self.canvas.sceneRect(),
+                Qt.AspectRatioMode.KeepAspectRatio
             )
-            painter.drawPolygon(scaled_polygon)
+        )
+        for b in (zoom_in_btn, zoom_out_btn, fit_btn):
+            zoom_bar.addWidget(b)
+        layout.addLayout(zoom_bar)
 
-        # If currently drawing, draw the current polygon outline in red
-        if self.drawing and len(self.current_polygon) > 1:
-            pen = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            scaled_current_polygon = QPolygon(
-                [QPoint(int(point.x() * self.scale_factor), int(point.y() * self.scale_factor)) for point in self.current_polygon]
+        # ── Mask type & blur ────────────────────────────────────────
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Mask Type:"))
+        self.type_dd = QComboBox()
+        self.type_dd.addItems([
+            "Binary","Range Selection","Lightness","Chrominance","Star Mask",
+            "Color: Red","Color: Orange","Color: Yellow",
+            "Color: Green","Color: Cyan","Color: Blue","Color: Magenta"
+        ])
+        self.type_dd.currentTextChanged.connect(lambda t: setattr(self, 'mask_type', t))
+        controls.addWidget(self.type_dd)
+
+        controls.addWidget(QLabel("Blur:"))
+        self.blur_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blur_slider.setRange(0, 300)
+        self.blur_slider.valueChanged.connect(lambda v: setattr(self, 'blur_amount', v))
+        controls.addWidget(self.blur_slider)
+
+        self.blur_label = QLabel("0")
+        self.blur_slider.valueChanged.connect(lambda v: self.blur_label.setText(str(v)))
+        controls.addWidget(self.blur_label)
+
+        layout.addLayout(controls)
+
+        # ── RangeSelection controls (hidden by default) ────────────
+        self.range_box = QGroupBox("Range Selection")
+        g = QGridLayout(self.range_box)
+
+        # helper to build a slider+label
+        def make_slider(row, name, maxv):
+            g.addWidget(QLabel(name+":"), row,0)
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, maxv)
+            s.setValue(0 if name!="Upper" else maxv)
+            lbl = QLabel(f"{0.0:.2f}" if name!="Upper" else f"{1.0:.2f}")
+            g.addWidget(s, row,1)
+            g.addWidget(lbl, row,2)
+            return s,lbl
+
+        self.lower_sl, self.lower_lbl = make_slider(0, "Lower",   100)
+        self.upper_sl, self.upper_lbl = make_slider(1, "Upper",   100)
+        self.fuzz_sl,  self.fuzz_lbl  = make_slider(2, "Fuzziness",100)
+        self.smooth_sl,self.smooth_lbl= make_slider(3, "Smoothness",50)
+
+        # link checkbox
+        self.link_cb  = QCheckBox("Link limits")
+        g.addWidget(self.link_cb, 0,3,2,1)
+
+        # screening / light / invert
+        self.screen_cb = QCheckBox("Screening")
+        self.light_cb  = QCheckBox("Lightness")
+        self.invert_cb = QCheckBox("Invert")
+        for i,cb in enumerate((self.screen_cb,self.light_cb,self.invert_cb),4):
+            g.addWidget(cb, i, 0,1,4)
+
+        layout.addWidget(self.range_box)
+        self.range_box.hide()
+
+
+        # ── Preview & Clear ─────────────────────────────────────────
+        buttons = QHBoxLayout()
+        preview_btn = QPushButton("Preview Mask")
+        preview_btn.clicked.connect(self.preview_mask)
+        clear_btn = QPushButton("Clear All Shapes")
+        clear_btn.clicked.connect(self.clear_all)
+        buttons.addWidget(preview_btn)
+        buttons.addWidget(clear_btn)
+        layout.addLayout(buttons)
+
+        # sliders → labels + live preview
+        for sl, lbl in (
+            (self.lower_sl,  self.lower_lbl),
+            (self.upper_sl,  self.upper_lbl),
+            (self.fuzz_sl,   self.fuzz_lbl),
+            (self.smooth_sl, self.smooth_lbl),
+        ):
+            # read the slider’s own maximum() at runtime
+            sl.valueChanged.connect(
+                lambda v, l=lbl, s=sl: l.setText(f"{v/s.maximum():.2f}")
             )
-            painter.drawPolyline(scaled_current_polygon)
+            sl.valueChanged.connect(self._update_live_preview)
 
-        painter.end()
-        self.image_label.setPixmap(self.pixmap)
+        # link lower/upper
+        self.lower_sl.valueChanged.connect(self._on_linked)
+        self.link_cb.toggled.connect(self._on_link_switch)
+        self.type_dd.currentTextChanged.connect(self._on_type_changed)
+
+        self.setLayout(layout)
+        self.resize(900, 600)
+
+    def _set_mode(self, mode):
+        # toggle the toolbar buttons
+        self.free_btn.setChecked(mode == 'polygon')
+        self.ellipse_btn.setChecked(mode == 'ellipse')
+        self.select_btn.setChecked(mode == 'select')
+        # tell the canvas which tool to use
+        self.canvas.set_mode(mode)
+
+        # **NEW**: select-entire-image behavior
+        if mode == 'select':
+            self.canvas.select_entire_image()
+
+    def _on_type_changed(self, txt):
+        if txt=="Range Selection":
+            self.range_box.show()
+            # bring up live preview
+            if not self.live_preview:
+                self.live_preview = LivePreviewDialog(self)
+                self.live_preview.show()
+            self._update_live_preview()
+        else:
+            self.range_box.hide()
+            if self.live_preview:
+                self.live_preview.close()
+                self.live_preview = None
+
+    def _on_link_switch(self, checked):
+        # if linking, immediately sync upper to lower
+        if checked:
+            self.upper_sl.setValue(self.lower_sl.value())
+
+    def _on_linked(self, v):
+        if self.link_cb.isChecked():
+            self.upper_sl.setValue(v)
 
 
-    def clear_exclusion_areas(self):
-        """
-        Clears all drawn exclusion polygons and updates the preview.
-        """
-        self.exclusion_polygons = []
-        self.current_polygon = []
-        self.update_selection()
+    def _update_live_preview(self, *_):
+        m = self.generate_mask()
+        if m is None:
+            return
+        if not self.live_preview.isVisible():
+            self.live_preview.show()
+        self.live_preview.update_mask(m)
+
+    def closeEvent(self, event):
+        # ensure live‐preview is closed when this dialog is closed
+        if hasattr(self, 'live_preview') and self.live_preview.isVisible():
+            self.live_preview.close()
+        super().closeEvent(event)
+
+    def _range_selection_mask(self, comp, L, U, fuzz, smooth, screening, invert):
+        # comp: single‐channel image normalized to [0..1]
+        mask = np.zeros_like(comp, dtype=np.float32)
+
+        # 1) Hard clip region
+        inside = (comp >= L) & (comp <= U)
+        mask[inside] = 1.0
+
+        # 2) Fuzziness ramps
+        if fuzz > 0:
+            # ramp‑up below L
+            ramp = (comp - (L - fuzz)) / fuzz
+            mask += np.clip(ramp, 0, 1)
+            # ramp‑down above U
+            ramp2 = ((U + fuzz) - comp) / fuzz
+            mask *= np.clip(ramp2, 0, 1)
+
+        # 3) Screening
+        if screening:
+            mask *= comp
+
+        # 4) Gaussian smooth
+        if smooth > 0:
+            mask = cv2.GaussianBlur(mask, (0,0), smooth)
+
+        # 5) Invert
+        if invert:
+            mask = 1.0 - mask
+
+        return np.clip(mask, 0, 1)
 
     def update_mask_type(self, mask_type):
         """
@@ -7043,67 +7847,88 @@ class MaskCreationDialog(QDialog):
 
     # Mask Generation and Preview
     def generate_mask(self):
-        """
-        Generates a mask based on the current settings and exclusion areas.
-        """
-        height, width = self.image.shape[:2]
-        mask = np.zeros((height, width), dtype=np.float32)  # Start with an empty mask
+        if not self.canvas.shapes:
+            QMessageBox.warning(self, "No Shapes", "Draw at least one shape first.")
+            return None
 
-        # Create the exclusion mask
-        exclusion_mask = self.create_exclusion_mask(self.image.shape, self.exclusion_polygons)
+        base_mask = self.canvas.create_mask().astype(np.float32)
 
-        # Apply mask type
+        # apply mask‐type logic
         if self.mask_type == "Binary":
-            mask[exclusion_mask] = 1.0  # Binary mask for exclusion areas
+            mask = base_mask
+        elif self.mask_type == "Range Selection":
+            # 1) pick component
+            if self.light_cb.isChecked():
+                comp = self.generate_lightness_mask()
+            else:
+                # grayscale luminance
+                if self.image.ndim == 3:
+                    comp = (self.image[...,0]*0.2989 +
+                            self.image[...,1]*0.5870 +
+                            self.image[...,2]*0.1140)
+                else:
+                    comp = self.image.copy()
+
+            # 2) normalize to [0,1]
+            #comp = (comp - comp.min())/(comp.max() - comp.min() + 1e-12)
+
+            # 3) read slider values as fractions
+            L     = self.lower_sl.value()  / self.lower_sl.maximum()
+            U     = self.upper_sl.value()  / self.upper_sl.maximum()
+            fuzz  = self.fuzz_sl.value()   / self.fuzz_sl.maximum()
+            smooth= self.smooth_sl.value() / (self.smooth_sl.maximum()/10)  # tweak scale as you like
+
+            # 4) build the range‐selection mask
+            rs = self._range_selection_mask(
+                comp=comp,
+                L=L, U=U,
+                fuzz=fuzz,
+                smooth=smooth,
+                screening=self.screen_cb.isChecked(),
+                invert=self.invert_cb.isChecked()
+            )
+
+            # 5) combine with your shape‐based base_mask
+            mask = base_mask * rs
+                 
         elif self.mask_type == "Lightness":
-            lightness_mask = self.generate_lightness_mask()
-            mask[exclusion_mask] = lightness_mask[exclusion_mask]
+            L = self.generate_lightness_mask()
+            mask = np.where(base_mask, L, 0.0)
         elif self.mask_type == "Chrominance":
-            chrominance_mask = self.generate_chrominance_mask()
-            mask[exclusion_mask] = chrominance_mask[exclusion_mask]
+            C = self.generate_chrominance_mask()
+            mask = np.where(base_mask, C, 0.0)
         elif self.mask_type == "Star Mask":
-            # Build a star‐based mask
-            # 1) Detect *all* stars over the full image
-            full_star_mask = self.create_star_mask(self.image, None)
-
-            # 2) Turn your drawn polygons into an *inclusion* mask
-            inclusion_mask = exclusion_mask
-
-            # 3) Only keep stars falling inside the polygons:
-            mask[:] = 0.0
-            mask[inclusion_mask] = full_star_mask[inclusion_mask]           
+            S = self.create_star_mask(self.image, None)
+            mask = np.where(base_mask, S, 0.0)
         elif self.mask_type.startswith("Color:"):
-            color = self.mask_type.split(":")[1].strip()
-            color_mask = self.generate_color_mask(color)
-            mask[exclusion_mask] = color_mask[exclusion_mask]
-
-        # Apply convolution blur if specified
-        if self.blur_amount > 0:
-            kernel_size = self.blur_amount * 2 + 1  # Ensure kernel size is odd
-            mask = cv2.GaussianBlur(mask, (kernel_size, kernel_size), 0)
-
-        # Normalize the mask to [0, 1] for visualization
-        mask = np.clip(mask, 0, 1)
-        return mask
-    
-    def preview_mask(self):
-        """
-        Previews the mask with the current settings in a new window.
-        """
-        if not self.exclusion_polygons:
-            QMessageBox.warning(self, "No Exclusions", "No exclusion areas have been drawn.")
-            return
-
-        # Generate the mask
-        mask = self.generate_mask()
-        if mask is not None:
-            self.mask = mask
-            # Open the mask in a new preview dialog
-            preview_dialog = MaskPreviewDialog(self.mask, self)
-            preview_dialog.exec()
+            color = self.mask_type.split(":",1)[1].strip()
+            C = self.generate_color_mask(color)
+            mask = np.where(base_mask, C, 0.0)
         else:
-            QMessageBox.warning(self, "Mask Generation Failed", "Failed to generate the mask.")
+            mask = base_mask
 
+        # blur if requested
+        if self.blur_amount > 0:
+            k = self.blur_amount * 2 + 1
+            mask = cv2.GaussianBlur(mask, (k,k), 0)
+
+        return np.clip(mask, 0.0, 1.0)
+    
+    def clear_all(self):
+        # wipe canvas shapes and restore background image
+        self.canvas.shapes.clear()
+        self.canvas.scene.clear()
+        pix = self.canvas._to_pixmap(self.image)
+        self.canvas.bg_item = QGraphicsPixmapItem(pix)
+        self.canvas.scene.addItem(self.canvas.bg_item)
+
+    def preview_mask(self):
+        m = self.generate_mask()
+        if m is None:
+            return
+        self.mask = m
+        dlg = MaskPreviewDialog(self.mask, self)
+        dlg.exec()
 
     # Mask Creation and Generation Helpers
     def get_adjusted_position(self, event_pos):
@@ -7238,8 +8063,6 @@ class MaskCreationDialog(QDialog):
             return np.zeros(self.image.shape[:2], dtype=np.float32)
 
     def create_star_mask(self, image, exclusion_mask=None):
-        import sep
-
         # 1) Build a grayscale detection image
         if image.ndim == 3:
             data = (0.2126*image[...,0] + 0.7152*image[...,1] + 0.0722*image[...,2]).astype(np.float32)
@@ -7416,6 +8239,8 @@ class MaskPreviewDialog(QDialog):
         zoom_out_button.clicked.connect(self.zoom_out)
         fit_to_window_button = QPushButton("Fit to Window")
         fit_to_window_button.clicked.connect(self.fit_to_window)
+        invert_mask_button = QPushButton("Invert Mask")
+        invert_mask_button.clicked.connect(self.invert_mask)        
         save_mask_button = QPushButton("Save Mask")
         save_mask_button.clicked.connect(self.save_mask)
 
@@ -7425,10 +8250,19 @@ class MaskPreviewDialog(QDialog):
 
         # Add zoom buttons to main layout
         main_layout.addLayout(zoom_layout)
+        main_layout.addWidget(invert_mask_button)
         main_layout.addWidget(save_mask_button)
 
         self.setLayout(main_layout)
         self.setMinimumSize(600, 400)
+
+    def invert_mask(self):
+        """
+        Inverts the current mask and updates the display.
+        """
+        self.mask = 1.0 - self.mask
+        self.pixmap = self.convert_to_pixmap(self.mask)
+        self.update_image()
 
     def convert_to_pixmap(self, mask):
         """
@@ -7559,29 +8393,58 @@ class MaskPreviewDialog(QDialog):
                 self.save_image(self.mask, filename)
                 QMessageBox.information(self, "Mask Saved", f"Mask saved to {filename}.")
                 self.accept()
+
         elif choice == "Save to Mask Slot":
             # Traverse parent hierarchy until we find the main window with a mask_manager.
             parent = self.parent()
             while parent and not hasattr(parent, 'mask_manager'):
                 parent = parent.parent()
+
             if parent and hasattr(parent, 'mask_manager'):
-                slot, ok = QInputDialog.getInt(
-                    self,
-                    "Save to Mask Slot",
-                    f"Enter slot number (0-{parent.mask_manager.max_slots - 1}):",
-                    0,
-                    0,
-                    parent.mask_manager.max_slots - 1,
+                max_slot = parent.mask_manager.max_slots - 1
+
+                # Create a small dialog with your CustomSpinBox
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Save to Mask Slot")
+                layout = QVBoxLayout(dlg)
+
+                # Prompt
+                prompt = QLabel(f"Enter slot number (0–4):", dlg)
+                layout.addWidget(prompt)
+
+                # Custom spin box for slot selection
+                slot_spin = CustomSpinBox(
+                    minimum=0,
+                    maximum=4,
+                    initial=0,
+                    step=1,
+                    parent=dlg
                 )
-                if ok:
+                layout.addWidget(slot_spin)
+
+                # OK / Cancel buttons
+                buttons = QDialogButtonBox(
+                    QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+                    parent=dlg
+                )
+                buttons.accepted.connect(dlg.accept)
+                buttons.rejected.connect(dlg.reject)
+                layout.addWidget(buttons)
+
+                if dlg.exec() == QDialog.DialogCode.Accepted.value:
+                    slot = slot_spin.value
                     parent.mask_manager.set_mask(slot, self.mask)
-                    # ** Update the mask slot toolbar so that the button for this slot shows a blue border **
+
+                    # Update the toolbar highlight if available
                     if hasattr(parent, 'update_mask_slot_toolbar_highlight'):
                         parent.update_mask_slot_toolbar_highlight()
+
                     QMessageBox.information(self, "Mask Saved", f"Mask saved to Slot {slot}.")
                     self.accept()
+
             else:
                 QMessageBox.warning(self, "No Mask Manager", "Parent does not have a mask_manager.")
+
 
 
     def save_image(self, mask, filename):
@@ -7783,9 +8646,10 @@ class HistogramDialog(QDialog):
         self.image = image_manager.image  # image_manager.image returns the current slot's image.
         self.zoom_factor = 1.0  # 1.0 means 100%
         self.log_scale = False  # Default: linear x-axis
+        self.log_y     = False
+        self._connected  = False    # track our connection state
         self.initUI()
-        # Connect to the image_changed signal so that the histogram updates when the active slot changes.
-        self.image_manager.image_changed.connect(self.on_image_changed)
+
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
@@ -7830,7 +8694,13 @@ class HistogramDialog(QDialog):
         self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
         self.log_toggle_button.toggled.connect(self.toggleLogScale)
         controls_layout.addWidget(self.log_toggle_button)
-        
+
+        self.log_y_button = QPushButton("Toggle Log Y-Axis", self)
+        self.log_y_button.setCheckable(True)
+        self.log_y_button.setToolTip("Toggle between linear & logarithmic Y-axis")
+        self.log_y_button.toggled.connect(self.toggleLogYScale)
+        controls_layout.addWidget(self.log_y_button)
+
         main_layout.addLayout(controls_layout)
         
         # Close button.
@@ -7841,8 +8711,26 @@ class HistogramDialog(QDialog):
         self.setLayout(main_layout)
         self.drawHistogram()
 
+    def toggleLogYScale(self, checked: bool):
+        self.log_y = checked
+        self.drawHistogram()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._connected:
+            self.image_manager.image_changed.connect(self.on_image_changed)
+            self._connected = True
+
+    def hideEvent(self, event):
+        if self._connected:
+            try:
+                self.image_manager.image_changed.disconnect(self.on_image_changed)
+            except (TypeError, RuntimeError):
+                pass
+            self._connected = False
+        super().hideEvent(event)
+
     def on_image_changed(self, slot, image, metadata):
-        # Update the histogram only if the changed slot is the active one.
         if slot == self.image_manager.current_slot:
             self.image = image
             self.drawHistogram()
@@ -7871,32 +8759,46 @@ class HistogramDialog(QDialog):
         base_width = 512
         height = 300
         width = int(base_width * self.zoom_factor)
+
+        
+        bin_count = 512
+        
+        # Choose bin edges based on the log_scale toggle.
+        if self.log_scale:
+            # Compute a small positive epsilon
+            raw_min = float(np.min(self.image))
+            eps     = max(raw_min, 1e-4)
+            self._hist_eps     = eps
+            self._hist_log_min = log_min = np.log10(eps)
+            self._hist_log_max = log_max = 0.0  # because log10(1)=0
+
+            if abs(log_max - log_min) < 1e-6:
+                # no dynamic range → fallback to a tiny linear stretch from eps→1
+                bin_edges = np.linspace(eps, 1.0, bin_count + 1)
+                def x_pos(edge):
+                    # if eps==1, everything collapses → draw at left
+                    if eps >= 1.0:
+                        return 0
+                    return int((edge - eps) / (1.0 - eps) * width)
+
+            else:
+                # proper log spacing
+                bin_edges = np.logspace(log_min, log_max, bin_count + 1)
+                def x_pos(edge):
+                    return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
+        else:
+            # Linear mode is unchanged
+            bin_edges = np.linspace(0, 1, bin_count + 1)
+            def x_pos(edge):
+                return int(edge * width)
+        
         
         # Create a pixmap with the computed dimensions.
         pixmap = QPixmap(width, height)
         pixmap.fill(Qt.GlobalColor.white)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        bin_count = 512
-        
-        # Choose bin edges based on the log_scale toggle.
-        if self.log_scale:
-            raw_min = float(np.min(self.image))
-            eps     = max(raw_min, 1e-4)   # Cannot start at 0 for log scale.
-            self._hist_eps     = eps
-            self._hist_log_min = np.log10(eps)
-            self._hist_log_max = 0.0  # since log10(1)==0            
-            bin_edges = np.logspace(np.log10(eps), 0, bin_count + 1)
-            log_min = np.log10(eps)
-            log_max = 0  # log10(1)=0
-            def x_pos(edge):
-                return int((np.log10(edge) - log_min) / (log_max - log_min) * width)
-        else:
-            bin_edges = np.linspace(0, 1, bin_count + 1)
-            def x_pos(edge):
-                return int(edge * width)
-        
+
         # Draw histogram bars.
         if self.image.ndim == 3 and self.image.shape[2] == 3:
             # For RGB images, draw each channel histogram.
@@ -7907,10 +8809,13 @@ class HistogramDialog(QDialog):
             ]
             for ch in range(3):
                 hist, _ = np.histogram(self.image[..., ch].ravel(), bins=bin_edges)
-                if hist.max() > 0:
-                    hist = hist.astype(np.float32) / hist.max()
-                else:
-                    hist = hist.astype(np.float32)
+                hist = hist.astype(np.float32)
+                if self.log_y:
+                    # log-scale the Y axis: log(count+1) → avoid log(0)
+                    hist = np.log10(hist + 1.0)
+                # now normalize to [0,1] for drawing
+                maxv = hist.max()
+                hist = hist / maxv if maxv > 0 else hist
                 painter.setPen(QPen(channel_colors[ch]))
                 for i in range(bin_count):
                     x0 = x_pos(bin_edges[i])
@@ -7925,10 +8830,13 @@ class HistogramDialog(QDialog):
             else:
                 gray = self.image
             hist, _ = np.histogram(gray.ravel(), bins=bin_edges)
-            if hist.max() > 0:
-                hist = hist.astype(np.float32) / hist.max()
-            else:
-                hist = hist.astype(np.float32)
+            hist = hist.astype(np.float32)
+            if self.log_y:
+                # log-scale the Y axis: log(count+1) → avoid log(0)
+                hist = np.log10(hist + 1.0)
+            # now normalize to [0,1] for drawing
+            maxv = hist.max()
+            hist = hist / maxv if maxv > 0 else hist
             painter.setPen(QPen(QColor(0, 0, 0)))
             for i in range(bin_count):
                 x0 = x_pos(bin_edges[i])
@@ -8001,6 +8909,1537 @@ class HistogramDialog(QDialog):
                 item = QTableWidgetItem(f"{val:.3f}")
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.stats_table.setItem(row, col, item)
+
+class PreviewPane(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.zoom_factor = 1.0
+        self.is_autostretched = False
+        self._image_array     = None
+        self.original_image = None    # QImage
+        self.stretched_image = None   # QImage
+        self._panning = False
+        self._pan_start = QPoint()
+        self._h_scroll_start = 0
+        self._v_scroll_start = 0
+
+        # the scrollable image area
+        self.image_label  = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scroll_area  = QScrollArea()
+        self.scroll_area.setWidget(self.image_label)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setMinimumSize(450, 450)
+        self.scroll_area.viewport().installEventFilter(self)
+
+        # zoom controls
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(1, 400)
+        self.zoom_slider.setValue(100)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+
+        self.zoom_in_btn  = QPushButton("＋")
+        self.zoom_in_btn.clicked .connect(lambda: self.adjust_zoom(10))
+        self.zoom_out_btn = QPushButton("－")
+        self.zoom_out_btn.clicked.connect(lambda: self.adjust_zoom(-10))
+        self.fit_btn      = QPushButton("Fit")
+        self.fit_btn.clicked .connect(self.fit_to_view)
+        self.stretch_btn  = QPushButton("AutoStretch")
+        self.stretch_btn.clicked.connect(self.toggle_stretch)
+
+        zl = QHBoxLayout()
+        zl.addWidget(self.zoom_out_btn)
+        zl.addWidget(self.zoom_slider)
+        zl.addWidget(self.zoom_in_btn)
+        zl.addWidget(self.fit_btn)
+        zl.addWidget(self.stretch_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.scroll_area, 1)
+        layout.addLayout(zl)
+
+        self.fit_to_view()
+
+    def load_qimage(self, img: QImage):
+        """
+        Call this to (re)load a fresh image.
+        We immediately convert it to a numpy array once
+        so we never have to touch the QImage bits again.
+        """
+        # keep a local copy of the QImage (for fast redisplay)
+        self.original_image   = img.copy()
+
+        # one & only time we go QImage→numpy
+        self._image_array     = self.qimage_to_numpy(self.original_image)
+
+        # reset any existing stretch state
+        self.stretched_image  = None
+        self.is_autostretched = False
+        self.zoom_factor      = 1.0
+        self.zoom_slider.setValue(100)
+
+        self._update_display()
+
+    def set_overlay(self, overlays):
+        """ Store and repaint overlays on top of the image. """
+        self._overlays = overlays
+        self._update_display()
+
+    def toggle_stretch(self):
+        if self._image_array is None:
+            return
+
+        self.is_autostretched = not self.is_autostretched
+
+        if self.is_autostretched:
+            # stretch the stored numpy array
+            arr = self._image_array.copy()
+            if arr.ndim == 2:
+                stretched = stretch_mono_image(
+                    arr,
+                    target_median=0.25,
+                    normalize=True,
+                    apply_curves=False
+                )
+            else:
+                stretched = stretch_color_image(
+                    arr,
+                    target_median=0.25,
+                    linked=False,
+                    normalize=True,
+                    apply_curves=False
+                )
+
+            # convert back to a QImage for display
+            self.stretched_image = self.numpy_to_qimage(stretched).copy()
+        else:
+            # go back to the original QImage
+            self.stretched_image = self.original_image.copy()
+
+        self._update_display()
+
+    def qimage_to_numpy(self, qimg: QImage) -> np.ndarray:
+        """
+        Safely copy a QImage into a contiguous numpy array,
+        and return float32 data normalized to [0.0, 1.0].
+        Supports Grayscale8 and RGB888.
+        """
+        # force a copy & right format
+        if qimg.format() == QImage.Format.Format_Grayscale8:
+            img = qimg.convertToFormat(QImage.Format.Format_Grayscale8).copy()
+            w, h = img.width(), img.height()
+            ptr   = img.bits()
+            ptr.setsize(h * w)
+            buf   = ptr.asstring()
+            arr   = np.frombuffer(buf, np.uint8).reshape((h, w))
+        else:
+            img = qimg.convertToFormat(QImage.Format.Format_RGB888).copy()
+            w, h = img.width(), img.height()
+            bpl   = img.bytesPerLine()
+            ptr   = img.bits()
+            ptr.setsize(h * bpl)
+            buf   = ptr.asstring()
+            raw   = np.frombuffer(buf, np.uint8).reshape((h, bpl))
+            raw   = raw[:, : 3*w]
+            arr   = raw.reshape((h, w, 3))
+
+        # **normalize to float32 [0..1]**
+        return (arr.astype(np.float32) / 255.0)
+
+    def numpy_to_qimage(self, arr: np.ndarray) -> QImage:
+        """
+        Convert a H×W or H×W×3 numpy array (float in [0..1] or uint8 in [0..255])
+        into a QImage (copying the buffer).
+        """
+        # If floating point, assume 0..1 and scale up:
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        # Otherwise convert any other integer type to uint8
+        elif arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+        h, w = arr.shape[:2]
+        if arr.ndim == 2:
+            img = QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+            return img.copy()
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            bytes_per_line = 3 * w
+            img = QImage(arr.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            return img.copy()
+        else:
+            raise ValueError(f"Cannot convert array of shape {arr.shape} to QImage")
+
+    def on_zoom_changed(self, val):
+        self.zoom_factor = val/100
+        self._update_display()
+
+    def adjust_zoom(self, delta):
+        v = self.zoom_slider.value() + delta
+        self.zoom_slider.setValue(min(max(v,1),400))
+
+    def fit_to_view(self):
+        if not self.original_image:
+            return
+        avail = self.scroll_area.viewport().size()
+        iw, ih = self.original_image.width(), self.original_image.height()
+        f = min(avail.width()/iw, avail.height()/ih)
+        self.zoom_factor = f
+        self.zoom_slider.setValue(int(f*100))
+        self._update_display()
+
+    def _update_display(self):
+        """
+        Chooses original vs stretched image and repaints.
+        """
+        img = self.stretched_image or self.original_image
+        if img is None:
+            return
+
+        pix = QPixmap.fromImage(self.stretched_image or self.original_image)
+        painter = QPainter(pix)
+        painter.setPen(QPen(Qt.GlobalColor.red, 2))
+        # draw any overlays
+        for ov in getattr(self, "_overlays", []):
+            x, y, p3, p4 = ov
+            # if p3 is an integer / we intended an ellipse
+            if isinstance(p3, (int,)) and isinstance(p4, (int, float)):
+                w = int(p3)
+                h = w
+                painter.drawEllipse(x, y, w, h)
+                painter.drawText(x, y, f"{p4:.2f}")
+            else:
+                # treat as vector overlay: (angle, length)
+                angle = float(p3)
+                length_um = float(p4)
+                # convert length from µm → pixels if necessary;
+                # here we assume overlays were built in pixels:
+                dx = math.cos(angle) * length_um
+                dy = -math.sin(angle) * length_um
+                x2 = x + dx
+                y2 = y + dy
+                painter.drawLine(int(x), int(y), int(x2), int(y2))
+                # optional: draw a simple arrowhead
+                # (two short lines at ±20° from the vector)
+                ah = 5  # arrow‐head pixel length
+                for sign in (+1, -1):
+                    ang2 = angle + sign * math.radians(20)
+                    ax = x2 - ah * math.cos(ang2)
+                    ay = y2 + ah * math.sin(ang2)
+                    painter.drawLine(int(x2), int(y2), int(ax), int(ay))
+        painter.end()
+        scaled = pix.scaled(
+            pix.size() * self.zoom_factor,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
+
+    def eventFilter(self, source, evt):
+        if source is self.scroll_area.viewport():
+            if evt.type() == QEvent.Type.MouseButtonPress and evt.button() == Qt.MouseButton.LeftButton:
+                self._panning = True
+                self._pan_start = evt.position().toPoint()
+                self._h_scroll_start = self.scroll_area.horizontalScrollBar().value()
+                self._v_scroll_start = self.scroll_area.verticalScrollBar().value()
+                self.scroll_area.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                return True
+
+            elif evt.type() == QEvent.Type.MouseMove and self._panning:
+                delta = evt.position().toPoint() - self._pan_start
+                self.scroll_area.horizontalScrollBar().setValue(self._h_scroll_start - delta.x())
+                self.scroll_area.verticalScrollBar().setValue(self._v_scroll_start - delta.y())
+                return True
+
+            elif evt.type() == QEvent.Type.MouseButtonRelease and evt.button() == Qt.MouseButton.LeftButton:
+                self._panning = False
+                self.scroll_area.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                return True
+
+        return super().eventFilter(source, evt)
+
+    def load_numpy(self, arr: np.ndarray):
+        """
+        Convenience wrapper: take an H×W or H×W×3 NumPy array (float in [0..1] or uint8),
+        convert it to a QImage and display.
+        """
+        # Convert to QImage
+        qimg = self.numpy_to_qimage(arr)
+        # Delegate to your existing loader
+        self.load_qimage(qimg)
+
+
+def field_curvature_analysis(
+    img: np.ndarray,
+    grid: int,
+    panel: int,
+    pixel_scale: float,
+    snr_thresh: float = 5.0
+) -> Tuple[np.ndarray, List[Tuple[int,int,float,float]]]:
+    """
+    1) Estimate background + detect stars via SEP.
+    2) Compute per‐star FWHM (≈2*a), eccentricity, and orientation theta.
+    3) Bin the FWHM into a grid×grid mosaic (median per cell) → FWHM_um heatmap.
+    4) Normalize that heatmap to [0..1] for display.
+    5) Build an overlay list of (x_pix,y_pix,angle_rad,elongation_um) for each star.
+    """
+    H, W = img.shape[:2]
+    # grayscale float32
+    if img.ndim == 3 and img.shape[2] == 3:
+        gray = (0.2126*img[...,0] + 0.7152*img[...,1] + 0.0722*img[...,2]).astype(np.float32)
+    else:
+        gray = img.astype(np.float32)
+
+    # background / stats
+    mean, med, std = sigma_clipped_stats(gray, sigma=3.0)
+    data = gray - med
+
+    # detect
+    objs = sep.extract(data, thresh=snr_thresh, err=std)
+    if objs is None or len(objs)==0:
+        # empty mosaic + no overlays
+        blank = np.zeros((H,W), dtype=float)
+        return blank, []
+
+    x, y = objs['x'], objs['y']
+    a, b, theta = objs['a'], objs['b'], objs['theta']
+
+    # FWHM ≈ 2 * a  (in pixels) → µm
+    fwhm_um = 2.0 * a * pixel_scale
+
+    # eccentricity → elongation factor e = a/b - 1
+    e = np.clip(a / np.where(b>0, b, 1.0) - 1.0, 0.0, None)
+    elongation_um = e * pixel_scale
+
+    # --- build mosaic of median‐FWHM in each grid cell ---
+    cell_w, cell_h = W/grid, H/grid
+    fmap = np.zeros((H,W), dtype=float)
+    heat = np.full((grid, grid), np.nan, dtype=float)
+    for j in range(grid):
+        for i in range(grid):
+            mask = (
+                (x>= i*cell_w) & (x< (i+1)*cell_w) &
+                (y>= j*cell_h) & (y< (j+1)*cell_h)
+            )
+            if np.any(mask):
+                mval = np.median(fwhm_um[mask])
+            else:
+                mval = np.nan
+            heat[j,i] = mval
+            # fill that block
+            y0, y1 = int(j*cell_h), int((j+1)*cell_h)
+            x0, x1 = int(i*cell_w), int((i+1)*cell_w)
+            fmap[y0:y1, x0:x1] = mval if not np.isnan(mval) else 0.0
+
+    # replace empty with global median
+    med_heat = np.nanmedian(heat)
+    fmap = np.where(fmap==0, med_heat, fmap)
+
+    # normalize to [0..1]
+    mn, mx = fmap.min(), fmap.max()
+    if mx>mn:
+        norm = (fmap - mn) / (mx - mn)
+    else:
+        norm = np.zeros_like(fmap)
+
+    # --- build elongation‐arrow overlays ---
+    overlays: List[Tuple[int,int,float,float]] = []
+    for xi, yi, ang, el in zip(x, y, theta, elongation_um):
+        overlays.append((int(xi), int(yi), float(ang), float(el)))
+
+    return norm, overlays
+
+def tilt_analysis(
+    img: np.ndarray,
+    pixel_size_um: float,
+    focal_length_mm: float,
+    aperture_mm: float,
+    sigma_clip: float = 2.0,
+    thresh_sigma: float = 5.0,
+) -> Tuple[np.ndarray, Tuple[float,float,float], Tuple[int,int]]:
+    """
+    Robust sensor‐tilt measurement via direct plane fit, with a thin‐lens defocus model.
+
+    1) Convert to 2-D luminance if needed.
+    2) Detect stars & measure half-light radius via SEP → rad (pixels).
+    3) Compute blur diameter d_um = 2*a_px * pixel_size_um.
+    4) Convert blur → defocus via thin‐lens: Δz_um = d_um * (focal_length_mm / aperture_mm).
+    5) Fit plane Δz = a x + b y + c to all stars (sigma‐clipped).
+    6) Return that best‐fit plane evaluated over every pixel, normalized 0–1 for display.
+    """
+    # 0) grayscale float32
+    if img.ndim == 3 and img.shape[2] == 3:
+        gray = (0.2126*img[...,0] + 0.7152*img[...,1] + 0.0722*img[...,2]).astype(np.float32)
+    else:
+        gray = img.astype(np.float32)
+    H, W = gray.shape
+
+    # 1) SEP star detection
+    data = np.ascontiguousarray(gray, dtype=np.float32)
+    bkg  = sep.Background(data)
+    stars = sep.extract(data - bkg.back(),
+                        thresh=thresh_sigma,
+                        err=bkg.globalrms)
+    if stars is None or len(stars) < 10:
+        return np.zeros((H,W), dtype=float), (0.0,0.0,0.0), (H,W)
+
+    x     = stars['x']
+    y     = stars['y']
+    a_pix = stars['a']   # semi-major axis
+    flags = stars['flag'] if 'flag' in stars.dtype.names else np.zeros_like(a_pix, dtype=int)
+
+    # 2) map to defocus distance (µm) via thin-lens:
+    #    blur diameter ≈ 2*a_pix * px_size_um
+    #    Δz_um = blur_um * (focal_length_mm / aperture_mm)
+    blur_um     = 2.0 * a_pix * pixel_size_um
+    f_number    = focal_length_mm / aperture_mm
+    defocus_um  = blur_um * f_number
+
+    # 3) initial least‐squares plane fit
+    A     = np.vstack([x, y, np.ones_like(x)]).T  # (N,3)
+    sol, *_ = np.linalg.lstsq(A, defocus_um, rcond=None)
+    a, b, c = sol
+
+    # 4) sigma‐clip outliers and re-fit
+    z_pred = A.dot(sol)
+    resid  = defocus_um - z_pred
+    mask   = np.abs(resid) < sigma_clip * np.std(resid)
+    if mask.sum() > 10:
+        sol, *_ = np.linalg.lstsq(A[mask], defocus_um[mask], rcond=None)
+        a, b, c = sol
+
+    # 5) build full‐frame plane
+    Y, X      = np.mgrid[0:H, 0:W]
+    plane_full = a*X + b*Y + c
+
+    # 6) normalize to [0..1] for display
+    pmin, pmax = plane_full.min(), plane_full.max()
+    if pmax > pmin:
+        norm_plane = (plane_full - pmin) / (pmax - pmin)
+    else:
+        norm_plane = np.zeros_like(plane_full)
+
+    return norm_plane, (a, b, c), (H, W)
+
+def focal_plane_curvature_overlay(img: np.ndarray, grid: int, panel: int):
+    """
+    Compute the best-fit sphere radius through each local panel,
+    return a list of QPainter-friendly overlay primitives,
+    e.g. [(x,y,radius,quality), …].
+    """
+    overlays = []
+    h, w = img.shape[:2]
+    xs = np.linspace(0, w-panel, grid, dtype=int)
+    ys = np.linspace(0, h-panel, grid, dtype=int)
+    for y in ys:
+        for x in xs:
+            patch = img[y:y+panel, x:x+panel]
+            # Fit a circle to the intensity → radius
+            radius = fit_circle_radius(patch)
+            overlays.append((x, y, panel, radius))
+    return overlays
+
+
+
+def build_mosaic_numpy(
+    arr: np.ndarray,
+    grid: int,
+    panel: int,
+    sep: int = 4,
+    background: float = 0.0
+) -> np.ndarray:
+    """
+    Tile `arr` into a grid×grid mosaic of size `panel` each, separated by `sep` pixels.
+    If arr is 2D, result is 2D; if 3D (H×W×3), result is 3D.
+    """
+    h, w = arr.shape[:2]
+    out_h = grid * panel + (grid - 1) * sep
+    out_w = grid * panel + (grid - 1) * sep
+    if arr.ndim == 2:
+        mosaic = np.full((out_h, out_w), background, dtype=arr.dtype)
+    else:
+        c = arr.shape[2]
+        mosaic = np.full((out_h, out_w, c), background, dtype=arr.dtype)
+
+    # evenly spaced top-left corners
+    xs = [int((w - panel) * i / (grid - 1)) for i in range(grid)]
+    ys = [int((h - panel) * j / (grid - 1)) for j in range(grid)]
+
+    for row, y in enumerate(ys):
+        for col, x in enumerate(xs):
+            patch = arr[y : y + panel, x : x + panel]
+            dy = row * (panel + sep)
+            dx = col * (panel + sep)
+            mosaic[dy:dy + panel, dx:dx + panel, ...] = patch
+
+    return mosaic
+
+
+
+
+def fit_circle_radius(patch: np.ndarray) -> float:
+    """
+    Very rough radius estimate by thresholding + edge points + circle fit.
+    Returns radius in pixels (caller scales to physical units).
+    """
+    # 1) threshold at ~50% max:
+    thr = patch.max() * 0.5
+    mask = patch > thr
+    ys, xs = np.nonzero(mask)
+    if len(xs) < 5:
+        return 0.0
+
+    # 2) algebraic circle fit (Taubin)
+    x = xs.astype(float)
+    y = ys.astype(float)
+    x_m = x.mean();  y_m = y.mean()
+    u = x - x_m;   v = y - y_m
+    Suu = (u*u).sum();  Suv = (u*v).sum();  Svv = (v*v).sum()
+    Suuu = (u*u*u).sum();  Svvv = (v*v*v).sum()
+    Suvv = (u*v*v).sum();  Svuu = (v*u*u).sum()
+    # Solved system:
+    A = np.array([[Suu, Suv], [Suv, Svv]])
+    B = np.array([(Suuu + Suvv)/2.0, (Svvv + Svuu)/2.0])
+    try:
+        uc, vc = np.linalg.solve(A, B)
+    except np.linalg.LinAlgError:
+        return 0.0
+    radius = math.hypot(uc, vc)
+    return radius
+
+def focal_plane_curvature_overlay(
+    img: np.ndarray,
+    grid: int,
+    panel: int,
+    pixel_size_um: Optional[float] = None
+) -> List[Tuple[int,int,int,float]]:
+    """
+    Divide `img` into grid×grid panels, estimate per-panel best-focus radius,
+    and return overlay tuples (x, y, panel, radius_um).
+    If pixel_size_um is given, radius is returned in microns; else in pixels.
+    """
+    overlays: List[Tuple[int,int,int,float]] = []
+    h, w = img.shape[:2]
+    xs = [int((w - panel) * i / (grid - 1)) for i in range(grid)]
+    ys = [int((h - panel) * j / (grid - 1)) for j in range(grid)]
+
+    for y in ys:
+        for x in xs:
+            patch = img[y : y + panel, x : x + panel]
+            r_px = fit_circle_radius(patch)
+            r = (r_px * pixel_size_um) if pixel_size_um else r_px
+            overlays.append((x, y, panel, r))
+
+    return overlays
+
+
+class TiltDialog(QDialog):
+    def __init__(self,
+                 title: str,
+                 img: np.ndarray,
+                 plane: Optional[Tuple[float,float,float]] = None,
+                 img_shape: Optional[Tuple[int,int]]    = None,
+                 pixel_size_um: float                   = 1.0,
+                 overlays: Optional[List[Tuple]]        = None,
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.pixel_size_um = pixel_size_um
+
+        # ––––– Create the view and load the image –––––
+        self.view = PreviewPane()
+        self.view.load_numpy(img)
+        if overlays:
+            self.view.set_overlay(overlays)
+
+        # ––––– Corner tilt table –––––
+        table = None
+        if plane and img_shape:
+            a, b, c = plane
+            H, W = img_shape
+            cx, cy = W/2, H/2
+            corners = {
+                "Top Left":    (0,   0),
+                "Top Right":   (W,   0),
+                "Bottom Left": (0,   H),
+                "Bottom Right":(W,   H),
+            }
+            rows = []
+            corner_deltas = []
+            for name,(x,y) in corners.items():
+                delta = a*(x - cx) + b*(y - cy)
+                corner_deltas.append(delta)
+
+            min_d, max_d = min(corner_deltas), max(corner_deltas)
+
+            # 2) now build a more meaningful label:
+            range_label = QLabel(f"Tilt span: {min_d:.1f} µm … {max_d:.1f} µm")            
+            for name, (x, y) in corners.items():
+                # how far above/below the center plane
+                delta = a*(x - cx) + b*(y - cy)
+                rows.append((name, f"{delta:.1f}"))
+
+            table = QTableWidget(len(rows), 2, self)
+            table.setHorizontalHeaderLabels(["Corner", "Δ µm"])
+            # hide the vertical header
+            table.verticalHeader().setVisible(False)
+            for i, (name, val) in enumerate(rows):
+                table.setItem(i, 0, QTableWidgetItem(name))
+                table.setItem(i, 1, QTableWidgetItem(val))
+            table.resizeColumnsToContents()
+
+        # ––––– Layout everything –––––
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.view,        1)  # stretch = 1
+        layout.addWidget(range_label,     0)  # stretch = 0
+        if table:
+            layout.addWidget(table,       0)
+        close_btn = QPushButton("Close", self)
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn,       0)
+
+        self.view.fit_to_view()
+
+def compute_fwhm_heatmap_full(
+    img: np.ndarray,
+    pixel_scale: float,
+    thresh_sigma: float = 5.0
+) -> np.ndarray:
+    """
+    1) Detect stars with SEP, measure fwhm_um = 2*a*pixel_scale
+    2) Interpolate fwhm_um onto the full H×W grid with cubic+nearest
+    3) Normalize to [0..1] and return that heatmap
+    """
+    gray = img.mean(axis=2).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+    H, W = gray.shape
+    data = np.ascontiguousarray(gray, dtype=np.float32)
+    bkg  = sep.Background(data)
+    objs = sep.extract(data - bkg.back(), thresh=thresh_sigma, err=bkg.globalrms)
+    if objs is None or len(objs) < 5:
+        return np.zeros((H,W),dtype=float)
+
+    x = objs['x']; y = objs['y']
+    fwhm_um = 2.0 * objs['a'] * pixel_scale
+
+    # create interpolation grid
+    grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
+    points = np.vstack([x, y]).T
+
+    # first cubic, then nearest for NaNs
+    heat = griddata(points, fwhm_um, (grid_x, grid_y), method='cubic')
+    mask = np.isnan(heat)
+    if mask.any():
+        heat[mask] = griddata(points, fwhm_um, (grid_x, grid_y), method='nearest')[mask]
+
+    # normalize
+    mn, mx = heat.min(), heat.max()
+    return (heat - mn)/max(mx-mn,1e-9)
+
+
+
+def fit_2d_poly(x, y, z, deg=2, sigma_clip=3.0, max_iter=3):
+    """
+    Fit z(x,y) = Σ_{i+j≤deg} c_{ij} x^i y^j
+    by linear least squares + sigma-clipping.
+    Returns the flattened coeff array.
+    """
+    # Build list of (i,j) exponents
+    exps = [(i, j) for total in range(deg+1)
+                  for i in range(total+1)
+                  for j in [total - i]]
+    # Design matrix
+    A = np.vstack([ (x**i)*(y**j) for (i,j) in exps ]).T  # shape (N,len(exps))
+    mask = np.ones_like(z, bool)
+
+    for _ in range(max_iter):
+        sol, *_ = np.linalg.lstsq(A[mask], z[mask], rcond=None)
+        zfit    = A.dot(sol)
+        resid   = z - zfit
+        std     = np.std(resid[mask])
+        newm    = np.abs(resid) < sigma_clip*std
+        if newm.sum() == mask.sum():
+            break
+        mask = newm
+
+    return sol, exps
+
+def eval_2d_poly(sol, exps, X, Y):
+    """
+    Evaluate the polynomial with coeffs sol and exponents exps
+    on a full grid X,Y.
+    """
+    Z = np.zeros_like(X, float)
+    for c,(i,j) in zip(sol, exps):
+        Z += c * (X**i) * (Y**j)
+    return Z
+
+def compute_fwhm_surface(img, pixel_scale, thresh_sigma=5.0, deg=3):
+    # grayscale
+    gray = img.mean(axis=2).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+    H, W = gray.shape
+    data = np.ascontiguousarray(gray, np.float32)
+    bkg  = sep.Background(data)
+    stars = sep.extract(data - bkg.back(), thresh=thresh_sigma, err=bkg.globalrms)
+    if stars is None or len(stars)<10:
+        return np.zeros((H,W), float)
+
+    x = stars['x']; y = stars['y']
+    fwhm_um = 2.0 * stars['a'] * pixel_scale
+
+    # 1) fit
+    sol, exps = fit_2d_poly(x, y, fwhm_um, deg=deg)
+
+    # 2) evaluate
+    Y, X     = np.mgrid[0:H, 0:W]
+    surf     = eval_2d_poly(sol, exps, X, Y)
+
+    # 3) normalize
+    mn, mx = surf.min(), surf.max()
+    heat = (surf - mn)/max(mx-mn,1e-9)
+    return heat, (mn, mx)
+
+
+def compute_eccentricity_surface(
+    img: np.ndarray,
+    pixel_scale: float,
+    thresh_sigma: float = 5.0,
+    deg: int = 3
+) -> Tuple[np.ndarray, Tuple[float,float]]:
+    """
+    1) SEP → x,y,a,b
+    2) e = clip(1 - b/a)
+    3) Fit e(x,y) with a 2D poly of degree 'deg' + sigma-clip
+    4) Evaluate on full H×W grid, normalize to [0..1]
+    """
+    gray = img.mean(axis=2).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+    H, W = gray.shape
+    data = np.ascontiguousarray(gray, np.float32)
+    bkg  = sep.Background(data)
+    stars = sep.extract(data - bkg.back(), thresh=thresh_sigma, err=bkg.globalrms)
+    if stars is None or len(stars)<6:
+        return np.zeros((H,W),dtype=float), (0.0, 0.0)
+
+    x = stars['x']; y = stars['y']
+    a = stars['a']; b = stars['b']
+    e = np.clip(1.0 - b/a, 0.0, 1.0)
+    e_min, e_max = float(e.min()), float(e.max())
+
+    # fit polynomial
+    sol, exps = fit_2d_poly(x, y, e, deg=deg)
+    Y, X = np.mgrid[0:H,0:W]
+    surf = eval_2d_poly(sol, exps, X, Y)
+
+    mn, mx = surf.min(), surf.max()
+    norm = (surf - mn)/max(mx-mn,1e-9)
+    return norm, (e_min, e_max)
+
+
+def compute_orientation_surface(
+    img: np.ndarray,
+    thresh_sigma: float = 5.0,
+    deg: int = 1,            # for pure tilt a plane is enough
+    sigma_clip: float = 3.0,
+    max_iter: int = 3
+) -> Tuple[np.ndarray, Tuple[float,float]]:
+    """
+    Fits a smooth orientation surface θ(x,y) via circular least squares.
+
+    Returns
+    -------
+    norm_hue : H×W array
+      Hue = (θ_fit + π/2)/π in [0..1], ready for display.
+    (h_min, h_max) :
+      min/max of the raw hue samples at star positions.
+    """
+    # → 1) make a 2D grayscale
+    gray = img.mean(axis=2).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+    H, W = gray.shape
+
+    # → 2) SEP detect
+    data = np.ascontiguousarray(gray, np.float32)
+    bkg  = sep.Background(data)
+    stars = sep.extract(data - bkg.back(), thresh=thresh_sigma, err=bkg.globalrms)
+    if stars is None or len(stars) < 6:
+        return np.zeros((H, W), dtype=float), (0.0, 0.0)
+
+    x     = stars['x']
+    y     = stars['y']
+    theta = stars['theta']  # in radians
+
+    # → 3) form double‐angle sine/cosine
+    s = np.sin(2*theta)
+    c = np.cos(2*theta)
+
+    # compute raw hue range for legend
+    # compute **actual** θ range for legend (in radians)
+    theta_min, theta_max = float(theta.min()), float(theta.max())
+
+    # → 4) build design matrix for deg‐th 2D poly
+    exps = [(i,j) for total in range(deg+1)
+                  for i in range(total+1)
+                  for j in [total-i]]
+    A    = np.vstack([ (x**i)*(y**j) for (i,j) in exps ]).T  # shape (N, M)
+
+    # → 5) sigma‐clip loops on residual length
+    mask = np.ones_like(s, bool)
+    for _ in range(max_iter):
+        sol_s, *_ = np.linalg.lstsq(A[mask], s[mask], rcond=None)
+        sol_c, *_ = np.linalg.lstsq(A[mask], c[mask], rcond=None)
+        fit_s = A.dot(sol_s)
+        fit_c = A.dot(sol_c)
+        resid = np.hypot(s - fit_s, c - fit_c)
+        std   = np.std(resid[mask])
+        newm  = resid < sigma_clip*std
+        if newm.sum() == mask.sum():
+            break
+        mask = newm
+
+    # → 6) evaluate both polys on the full image grid
+    Y, X = np.mgrid[0:H, 0:W]
+    surf_s = sum(coeff*(X**i)*(Y**j) for coeff,(i,j) in zip(sol_s, exps))
+    surf_c = sum(coeff*(X**i)*(Y**j) for coeff,(i,j) in zip(sol_c, exps))
+
+    # → 7) recover the smooth θ_fit and map to hue [0..1]
+    theta_fit = 0.5 * np.arctan2(surf_s, surf_c)       # in [−π/2..π/2]
+    hue       = (theta_fit + np.pi/2) / np.pi          # now [0..1]
+
+    return hue, (theta_min, theta_max)
+
+class SurfaceDialog(QDialog):
+    def __init__(self, title, heatmap, vmin, vmax, units:str="", cmap="gray", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+
+        # image
+        # image (apply the chosen colormap if it’s a 2D heatmap,
+        # and load RGB directly if it’s already color)
+        from matplotlib import cm
+        import matplotlib.pyplot as plt
+
+        view = PreviewPane()
+        if heatmap.ndim == 2:
+            # 1) map to RGBA via colormap
+            cmap_obj = cm.get_cmap(cmap)
+            rgba = cmap_obj(heatmap)            # shape H×W×4, floats 0–1
+            rgb  = (rgba[...,:3] * 255).astype(np.uint8)
+            view.load_numpy(rgb)
+        else:
+            # assume already float32 [0..1] RGB or uint8 RGB
+            view.load_numpy(heatmap)
+        view.fit_to_view()
+
+        # colorbar pixmap
+        cb = self._make_colorbar(cmap, vmin, vmax, units)
+        lbl_cb = QLabel()
+        lbl_cb.setPixmap(cb)
+
+        # layout
+        h = QHBoxLayout()
+        h.addWidget(view, 1)
+        h.addWidget(lbl_cb, 0)
+
+        btn = QPushButton("Close")
+        btn.clicked.connect(self.accept)
+        lbl_span = QLabel(f"Span: {vmin:.2f} … {vmax:.2f} {units}")
+
+        v = QVBoxLayout(self)
+        v.addLayout(h)
+        v.addWidget(lbl_span)
+        v.addWidget(btn)
+
+    def _make_colorbar(self, cmap_name, vmin, vmax, units):
+        # build a 256×20 gradient in RGBA
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from matplotlib import cm
+        grad = np.linspace(0,1,256)[:,None]
+        bar  = cm.get_cmap(cmap_name)(grad)
+        bar  = (bar[:,:,:3]*255).astype(np.uint8)
+        # make a QImage
+        H,W,_ = bar.shape
+        img = QImage(bar.data, 1, 256, 3*1, QImage.Format.Format_RGB888)
+        # rotate to vertical
+        return QPixmap.fromImage(img.mirrored(False, True).scaled(20,256))
+
+def distortion_vectors_sip(x_pix, y_pix, sip, pixel_size_um):
+    """
+    Evaluate the SIP Δ‐pixels at the given star positions,
+    return (dx_um, dy_um) and also the raw dx_pix,dy_pix arrays.
+    """
+    A = sip.a
+    B = sip.b
+    order = A.shape[0] - 1
+
+    # pull off CRPIX so u,v are relative to the SIP origin
+    crpix1, crpix2 = sip.forward_origin   # equivalent to wcs.wcs.crpix
+    u = x_pix - crpix1
+    v = y_pix - crpix2
+
+    dx_pix = np.zeros_like(u)
+    dy_pix = np.zeros_like(u)
+
+    # vectorized polynomial evaluation
+    for i in range(order+1):
+        for j in range(order+1-i):
+            a_ij = A[i, j]
+            b_ij = B[i, j]
+            if a_ij:
+                dx_pix += a_ij * (u**i) * (v**j)
+            if b_ij:
+                dy_pix += b_ij * (u**i) * (v**j)
+
+    dx_um = dx_pix * pixel_size_um
+    dy_um = dy_pix * pixel_size_um
+
+    return dx_pix, dy_pix, dx_um, dy_um
+
+def distortion_vectors(img: np.ndarray,
+                       sip_meta: dict,
+                       pixel_size_um: float):
+    """
+    1) SEP detect stars → x_pix,y_pix
+    2) extract A,B,crpix from sip_meta
+    3) eval dx_pix,dy_pix → dx_um,dy_um
+    4) return overlays
+    """
+    # 1) detect stars
+    gray = img.mean(-1).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+    data = np.ascontiguousarray(gray, np.float32)
+    bkg  = sep.Background(data)
+    stars = sep.extract(data - bkg.back(),
+                        thresh=5.0, err=bkg.globalrms)
+    if stars is None:
+        return []
+
+    x_pix = stars['x']; y_pix = stars['y']
+
+    # 2) pull SIP from meta (now robust to missing A_ORDER)
+    A, B, crpix1, crpix2 = extract_sip_from_meta(sip_meta)
+
+    # 3) vector‐polynomial evaluation
+    u = x_pix - crpix1
+    v = y_pix - crpix2
+    dx_pix = np.zeros_like(u)
+    dy_pix = np.zeros_like(u)
+    order  = A.shape[0] - 1
+    for i in range(order+1):
+        for j in range(order+1-i):
+            a_ij = A[i, j]
+            b_ij = B[i, j]
+            if a_ij:
+                dx_pix += a_ij * (u**i) * (v**j)
+            if b_ij:
+                dy_pix += b_ij * (u**i) * (v**j)
+
+    # 4) to microns & pack
+    dx_um = dx_pix * pixel_size_um
+    dy_um = dy_pix * pixel_size_um
+
+    overlays = []
+    for x,y,dx,dy in zip(x_pix, y_pix, dx_um, dy_um):
+        ang    = math.atan2(dy, dx)
+        length = math.hypot(dx, dy)
+        overlays.append((int(x), int(y), ang, length))
+    return overlays
+
+def eval_sip(A, B, u, v):
+    """
+    Vectorized SIP evaluation: given coefficient arrays A,B and 
+    coordinate offsets u=x-crpix1, v=y-crpix2, returns dx_pix, dy_pix.
+    """
+    dx = np.zeros_like(u)
+    dy = np.zeros_like(u)
+    order = A.shape[0]-1
+    for i in range(order+1):
+        for j in range(order+1-i):
+            a = A[i, j]
+            b = B[i, j]
+            if a:
+                dx += a * (u**i)*(v**j)
+            if b:
+                dy += b * (u**i)*(v**j)
+    return dx, dy
+
+def extract_sip_from_meta(sm: dict):
+    """
+    Given the metadata dict that ASTAP wrote into your slot,
+    pull out the forward SIP polynomials A and B (and the reference pixel).
+    We no longer rely on A_ORDER existing; we infer it from the A_i_j keys.
+    """
+    # 1) find all the A_i_j keys that actually made it into sm
+    a_keys = [k for k in sm.keys() if re.match(r"A_\d+_\d+", k)]
+    if not a_keys:
+        raise ValueError("No SIP A_?_? coefficients found in metadata!")
+
+    # 2) parse out all the (i,j) pairs and infer the polynomial order as max(i+j)
+    pairs = [tuple(map(int, k.split("_")[1:])) for k in a_keys]
+    order = max(i+j for i,j in pairs)
+
+    # 3) allocate forward‐SIP coefficient arrays
+    A = np.zeros((order+1, order+1), float)
+    B = np.zeros((order+1, order+1), float)
+
+    for i, j in pairs:
+        A[i, j] = float(sm[f"A_{i}_{j}"])
+        B[i, j] = float(sm[f"B_{i}_{j}"])
+
+    # 4) pull the reference pixel
+    crpix1 = float(sm["CRPIX1"])
+    crpix2 = float(sm["CRPIX2"])
+
+    return A, B, crpix1, crpix2
+
+class DistortionGridDialog(QDialog):
+    def __init__(self,
+                img: np.ndarray,
+                sip_meta: dict,
+                arcsec_per_pix: float,
+                n_grid_lines: int = 10,
+                amplify: float    = 20.0,
+                parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Astrometric Distortion & Histogram")
+
+        # — 1) detect stars —
+        gray = img.mean(-1).astype(np.float32) if img.ndim==3 else img.astype(np.float32)
+        data = np.ascontiguousarray(gray, np.float32)
+        bkg  = sep.Background(data)
+        stars = sep.extract(data - bkg.back(), thresh=5.0, err=bkg.globalrms)
+        if stars is None or len(stars) < 10:
+            QMessageBox.warning(self, "Distortion", "Not enough stars found.")
+            self.reject()
+            return
+
+        x_pix = stars['x']
+        y_pix = stars['y']
+
+        # — 2) extract SIP A,B and reference pixel from metadata dict —
+        A, B, crpix1, crpix2 = extract_sip_from_meta(sip_meta)
+
+        # — 4) per-star residuals in pixels → arc-sec —
+        u_star = x_pix - crpix1
+        v_star = y_pix - crpix2
+        dx_star_pix, dy_star_pix = eval_sip(A, B, u_star, v_star)
+        disp_star_pix    = np.hypot(dx_star_pix, dy_star_pix)
+        disp_star_arcsec = disp_star_pix * arcsec_per_pix
+
+        # — 5) full‐image warp maps (pixels) for drawing grid —
+        H, W = data.shape
+        YY, XX = np.mgrid[0:H, 0:W]
+        U = XX - crpix1
+        V = YY - crpix2
+        DX_pix, DY_pix = eval_sip(A, B, U, V)
+        DX = DX_pix * amplify
+        DY = DY_pix * amplify
+
+        # — 6) build the distortion grid scene —
+        scene = QGraphicsScene(self)
+        scene.setBackgroundBrush(QColor(30,30,30))
+        pen  = QPen(QColor(255,100,100), 1)
+        label_font = QFont("Arial", 12, QFont.Weight.Bold)
+
+        # title above the grid
+        title = QLabel("Astrometric Distortion Grid")
+        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: white;")
+
+        # draw horizontal + vertical lines
+        for i in range(n_grid_lines+1):
+            y0  = i*(H-1)/n_grid_lines
+            xs  = np.linspace(0, W-1, 200)
+            ys  = np.full_like(xs, y0)
+            xi  = np.clip(xs.astype(int), 0, W-1)
+            yi  = np.clip(ys.astype(int), 0, H-1)
+            warped = np.column_stack([ xs + DX[yi,xi], ys + DY[yi,xi] ])
+            path = QPainterPath(QPointF(*warped[0]))
+            for px,py in warped[1:]:
+                path.lineTo(QPointF(px,py))
+            scene.addPath(path, pen)
+
+        for j in range(n_grid_lines+1):
+            x0  = j*(W-1)/n_grid_lines
+            ys  = np.linspace(0, H-1, 200)
+            xs  = np.full_like(ys, x0)
+            xi  = np.clip(xs.astype(int), 0, W-1)
+            yi  = np.clip(ys.astype(int), 0, H-1)
+            warped = np.column_stack([ xs + DX[yi,xi], ys + DY[yi,xi] ])
+            path = QPainterPath(QPointF(*warped[0]))
+            for px,py in warped[1:]:
+                path.lineTo(QPointF(px,py))
+            scene.addPath(path, pen)
+
+        # annotate each grid‐intersection
+        for i in range(n_grid_lines+1):
+            for j in range(n_grid_lines+1):
+                y0 = i*(H-1)/n_grid_lines
+                x0 = j*(W-1)/n_grid_lines
+                xi, yi = int(round(x0)), int(round(y0))
+
+                # local distortion in pixels → arcsec
+                d_pix    = math.hypot(DX_pix[yi, xi], DY_pix[yi, xi])
+                d_arcsec = d_pix * arcsec_per_pix
+
+                px = x0 + DX[yi, xi]
+                py = y0 + DY[yi, xi]
+
+                txt = QGraphicsTextItem(f"{d_arcsec:.1f}\"")
+                txt.setFont(label_font)
+                txt.setScale(5.0)
+                txt.setDefaultTextColor(QColor(200,200,200))
+                txt.setPos(px + 4, py + 4)
+                scene.addItem(txt)
+
+        view = QGraphicsView(scene)
+        view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        view.fitInView(scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        # pack title + view vertically
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(title)
+        left_layout.addWidget(view, 1)
+
+        # — 7) histogram of per-star residuals (arcsec) —
+        fig    = Figure(figsize=(4,4))
+        canvas = FigureCanvas(fig)
+        ax     = fig.add_subplot(111)
+        ax.hist(disp_star_arcsec, bins=30, edgecolor='black')
+        ax.set_xlabel("Distortion (″)")
+        ax.set_ylabel("Number of stars")
+        ax.set_title("Residual histogram")
+        fig.tight_layout()
+
+        # side-by-side layout
+        hl = QHBoxLayout()
+        hl.addLayout(left_layout, 1)
+        hl.addWidget(canvas, 1)
+
+        # close button
+        btn = QPushButton("Close")
+        btn.clicked.connect(self.accept)
+
+        # final
+        v = QVBoxLayout(self)
+        v.addLayout(hl)
+        v.addWidget(btn, 0)
+
+def plate_solve_current_image(image_manager, settings, parent=None):
+    """
+    Plate-solve the current slot image *including* SIP terms,
+    and return the updated metadata dict (with all the A_*, B_* SIP cards).
+    """
+
+    # 1) grab pixel data + original header
+    arr, meta = image_manager.get_current_image_and_metadata()
+    orig_hdr  = meta.get("original_header", fits.Header())
+
+    # 2) dump to a temp FITS so ASTAP can read & inject SIP
+    tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+    tmpname = tmp.name; tmp.close()
+    fits.writeto(tmpname, arr.astype(np.float32), orig_hdr, overwrite=True)
+
+    # 3) run ASTAP in “slot-only” mode so it updates meta in place
+    solver            = PlateSolver(settings, parent=parent)
+    solver._from_slot = True
+    solver._slot_meta = meta
+    solver.image_path = tmpname
+
+    if not solver.run_astap(tmpname):
+        solver.run_astrometry_net(tmpname)
+
+    # 4) grab the updated metadata dict
+    slot       = image_manager.current_slot
+    solved_meta = image_manager._metadata[slot]
+
+    # 5) clean up and return
+    os.remove(tmpname)
+    return solved_meta
+
+class ImagePeekerDialog(QDialog):
+    def __init__(self, parent=None, image_manager=None, settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Image Peaker")
+        self.image_manager = image_manager
+        self.settings = settings
+
+        self._build_ui()
+        self._connect_signals()
+
+    def _build_ui(self):
+        # left: parameter controls
+        params = QGroupBox("Grid parameters")
+        params.setMinimumWidth(180)
+        params.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)        
+        gl = QGridLayout(params)
+        # — Grid size
+        # — Grid size (use our global CustomSpinBox)
+        gl.addWidget(QLabel("Grid size:"), 0, 0)
+        self.grid_spin = CustomSpinBox(minimum=2, maximum=10, initial=3, step=1)
+        gl.addWidget(self.grid_spin, 0, 1)
+
+        # — Panel size + live value
+        gl.addWidget(QLabel("Panel size:"), 1, 0)
+        panel_row = QHBoxLayout()
+        self.panel_slider = QSlider(Qt.Orientation.Horizontal)
+        self.panel_slider.setRange(32, 512)
+        self.panel_slider.setValue(256)
+        # numeric label:
+        self.panel_value_label = QLabel(str(self.panel_slider.value()))
+        self.panel_value_label.setFixedWidth(40)
+        panel_row.addWidget(self.panel_slider, 1)
+        panel_row.addWidget(self.panel_value_label)
+        gl.addLayout(panel_row, 1, 1)
+
+        # — Separation + live value
+        gl.addWidget(QLabel("Separation:"), 2, 0)
+        sep_row = QHBoxLayout()
+        self.sep_slider = QSlider(Qt.Orientation.Horizontal)
+        self.sep_slider.setRange(0, 50)
+        self.sep_slider.setValue(4)
+        self.sep_value_label = QLabel(str(self.sep_slider.value()))
+        self.sep_value_label.setFixedWidth(40)
+        sep_row.addWidget(self.sep_slider, 1)
+        sep_row.addWidget(self.sep_value_label)
+        gl.addLayout(sep_row, 2, 1)
+
+        # — Pixel size
+        gl.addWidget(QLabel("Pixel size (µm):"), 3, 0)
+        self.pixel_size_input = QDoubleSpinBox()
+        self.pixel_size_input.setRange(0.01, 50.0)
+        self.pixel_size_input.setSingleStep(0.1)
+        # try to prefill from settings or leave at a sane default:
+        px = self.settings.value("pixel_size_um", 4.8, type=float)
+        self.pixel_size_input.setValue(px)
+        gl.addWidget(self.pixel_size_input, 3, 1)
+
+        # — Focal length
+        gl.addWidget(QLabel("Focal length (mm):"), 4, 0)
+        self.focal_length_input = QDoubleSpinBox()
+        self.focal_length_input.setRange(10.0, 5000.0)
+        self.focal_length_input.setSingleStep(10.0)
+        fl = self.settings.value("focal_length_mm", 800.0, type=float)
+        self.focal_length_input.setValue(fl)
+        gl.addWidget(self.focal_length_input, 4, 1)
+
+        # — Aperture diameter —
+        gl.addWidget(QLabel("Aperture (mm):"), 5, 0)
+        self.aperture_input = QDoubleSpinBox()
+        self.aperture_input.setRange(1, 5000)
+        self.aperture_input.setSingleStep(1)
+        self.aperture_input.setValue(
+            self.settings.value("aperture_mm", 100.0, type=float)
+        )
+        gl.addWidget(self.aperture_input, 5, 1)
+
+        # right: the preview pane
+        self.preview_pane = PreviewPane()
+        analysis_label      = QLabel("Analysis:")
+        self.analysis_combo = QComboBox()
+        self.analysis_combo.addItems([
+        "None",
+        "Tilt Analysis",
+        "Focal Plane Analysis",
+        "Astrometric Distortion Analysis",
+        ])
+        self.analysis_combo.currentTextChanged.connect(self._run_analysis)
+
+        combo_layout = QHBoxLayout()
+        combo_layout.addWidget(analysis_label)
+        combo_layout.addWidget(self.analysis_combo)
+        combo_layout.addStretch(1)
+
+        # buttons
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.ok_btn     = QPushButton("Save Settings && Exit")
+        self.cancel_btn = QPushButton("Exit without Saving")
+        btns.addWidget(self.ok_btn)
+        btns.addWidget(self.cancel_btn)
+
+        # main layout
+        main_layout = QHBoxLayout(self)
+        main_layout.addWidget(params)  # your existing “params” widget
+
+        right_layout = QVBoxLayout()
+        right_layout.addLayout(combo_layout)      # first the combo
+        right_layout.addWidget(self.preview_pane, 1)  # then the preview pane (expands)
+        right_layout.addLayout(btns)              # then the buttons
+
+        main_layout.addLayout(right_layout, 1)    # make it stretchable on the right
+
+        self.setLayout(main_layout)
+
+
+
+    def accept(self):
+        self.settings.setValue("pixel_size_um",   self.pixel_size_input.value())
+        self.settings.setValue("focal_length_mm", self.focal_length_input.value())
+        self.settings.setValue("aperture_mm",     self.aperture_input.value())
+        super().accept()
+
+    def _connect_signals(self):
+        self.grid_spin.valueChanged.connect(self._refresh_mosaic)
+        self.panel_slider.valueChanged.connect(self._refresh_mosaic)
+        self.sep_slider.valueChanged.connect(self._refresh_mosaic)
+        self.panel_slider.valueChanged.connect(self._on_panel_changed)
+        self.sep_slider.valueChanged.connect(self._on_sep_changed)        
+        self.ok_btn.clicked.connect(self.accept)
+        self.cancel_btn.clicked.connect(self.reject)
+
+        # build once on show
+        QTimer.singleShot(0, self._refresh_mosaic)
+
+    def _run_analysis(self, *_):
+        mode = self.analysis_combo.currentText()
+        arr, meta = self.image_manager.get_current_image_and_metadata()
+        if arr is None:
+            return
+
+        ps = meta.get("pixel_size_um", self.pixel_size_input.value())
+        fl = meta.get("focal_length_mm", self.focal_length_input.value())
+        ap = self.aperture_input.value()
+        thresh = meta.get("snr_threshold", 5.0)
+
+        if mode == "Tilt Analysis":
+            # define a simple calibration: defocus_um = fwhm_px * pixel_size_um
+            def fwhm_to_defocus_um(fwhm_px: np.ndarray) -> np.ndarray:
+                return fwhm_px * ps
+
+            norm_plane, (a,b,c), (H,W) = tilt_analysis(
+                arr,
+                pixel_size_um    = ps,
+                focal_length_mm  = fl,
+                aperture_mm      = ap,
+                sigma_clip       = 2.5,
+                thresh_sigma     = meta.get("snr_threshold",5.0)
+            )
+            dlg = TiltDialog(
+            title       = "Sensor Tilt (µm)",
+            img         = norm_plane,
+            plane       = (a,b,c),
+            img_shape   = (H,W),
+            pixel_size_um = ps,
+            parent      = self
+            )
+            dlg.show()
+
+
+        elif mode == "Focal Plane Analysis":
+            # -- FWHM surface (units µm) --
+            fwhm_heat, (mn_f, mx_f) = compute_fwhm_surface(arr, ps, thresh_sigma=thresh, deg=3)
+            fwhm_dlg = SurfaceDialog(
+                title       = "FWHM Heatmap",
+                heatmap     = fwhm_heat,
+                vmin        = mn_f,
+                vmax        = mx_f,
+                units       = "µm",
+                cmap        = "viridis",
+                parent      = self
+            )
+            fwhm_dlg.show()
+
+            # 2) Eccentricity magnitude
+            ecc_heat, (mn_e, mx_e) = compute_eccentricity_surface(arr, ps, thresh_sigma=thresh, deg=3)
+            SurfaceDialog(
+                title   = "Eccentricity Map",
+                heatmap = ecc_heat,
+                vmin    = mn_e,
+                vmax    = mx_e,
+                units   = "e = 1−b/a",
+                cmap    = "magma",
+                parent  = self
+            ).show()
+
+            # 3) Orientation (phase)
+            ori_heat, (mn_o, mx_o) = compute_orientation_surface(arr, thresh_sigma=thresh, deg=3)
+            SurfaceDialog(
+                title   = "Orientation Map",
+                heatmap = ori_heat,
+                vmin    = mn_o,
+                vmax    = mx_o,
+                units   = "rad",
+                cmap    = "hsv",
+                parent  = self
+            ).show()
+
+        elif mode == "Astrometric Distortion Analysis":
+            arr, meta = self.image_manager.get_current_image_and_metadata()
+            hdr = meta.get("original_header", None)
+
+            # if we don’t already have SIP in original_header, plate‑solve
+            if hdr is None or "A_0_0" not in hdr:
+                wcs = plate_solve_current_image(
+                    self.image_manager,
+                    self.settings,
+                    parent=self
+                )
+                # after solving, re‑grab the updated header
+                _, meta = self.image_manager.get_current_image_and_metadata()
+                hdr = meta.get("original_header", None)
+
+            if hdr is None or "A_0_0" not in hdr:
+                QMessageBox.warning(
+                    self,
+                    "No Distortion Data",
+                    "Plate solve completed, but no SIP distortion matrices were found.\n\n"
+                    "For best results please install ASTAP with the D80 catalog, then retry."
+                )
+                return
+
+            # 2) Compute the overlays directly from the ASTAP‑injected SIP
+            
+
+            # 3) Show your new dialog
+            try:
+                arcsec_per_pix = abs(hdr["CDELT1"]) * 3600.0
+            except KeyError:
+                try:
+                    cd11 = hdr["CD1_1"]
+                    cd12 = hdr.get("CD1_2", 0.0)
+                    cd21 = hdr.get("CD2_1", 0.0)
+                    cd22 = hdr["CD2_2"]
+                    scale_deg = np.sqrt(abs(cd11 * cd22 - cd12 * cd21))
+                    arcsec_per_pix = scale_deg * 3600.0
+                except KeyError:
+                    QMessageBox.critical(self, "WCS Error", "Cannot determine pixel scale from FITS header.")
+                    return
+
+            dlg = DistortionGridDialog(
+                img              = arr,
+                sip_meta         = hdr,
+                arcsec_per_pix   = arcsec_per_pix,  # pass this directly
+                n_grid_lines     = 10,
+                amplify          = 60.0,
+                parent           = self
+            )
+            dlg.show()
+    
+        else:
+            self._refresh_mosaic()
+            
+    def _on_panel_changed(self, v):
+        self.panel_value_label.setText(str(v))
+        self._refresh_mosaic()
+
+    def _on_sep_changed(self, v):
+        self.sep_value_label.setText(str(v))
+        self._refresh_mosaic()
+
+    def _update_sep_color_button(self):
+        # show current color
+        pix = QIcon().pixmap(16,16)
+        pix.fill(self._sep_color)
+        self.sep_color_btn.setIcon(QIcon(pix))
+
+    def _choose_sep_color(self):
+        col = QColorDialog.getColor(self._sep_color, self, "Choose separation color")
+        if col.isValid():
+            self._sep_color = col
+            self._update_sep_color_button()
+
+    def _refresh_mosaic(self):
+        # 1) Grab the current numpy image from your manager
+        img_np, metadata = self.image_manager.get_current_image_and_metadata()
+        if img_np is None:
+            return
+
+        # 2) Turn it into a QImage
+        try:
+            qimg = self._to_qimage(img_np)
+        except Exception as e:
+            QMessageBox.warning(self, "Conversion Error", f"Could not convert image to display: {e}")
+            return
+
+        # 3) Build your mosaic from that QImage
+        n   = self.grid_spin.value
+        ps  = self.panel_slider.value()
+        sep = self.sep_slider.value()
+        sep_col = QColor(0,0,0)   # or store user‐chosen color
+
+        mosaic = self._build_mosaic(qimg, n, ps, sep, sep_col)
+
+        # 4) Send it into your scrollable PreviewPane
+        self.preview_pane.load_qimage(mosaic)
+
+    def _on_ok(self):
+        # user clicked OK → generate & display the mosaic
+        n        = self.grid_spin.value
+        panel_sz = self.panel_slider.value()
+        sep      = self.sep_slider.value()
+        sep_col  = self._sep_color
+
+        # fetch the currently loaded image (you’ll adapt to your image_manager API)
+        img = self.image_manager.current_qimage()
+        if img is None:
+            QMessageBox.warning(self, "No image", "No image loaded to peek at!")
+            return
+
+        mosaic = self._build_mosaic(img, n, panel_sz, sep, sep_col)
+        self.preview.setPixmap(QPixmap.fromImage(mosaic))
+        # keep dialog open so user can tweak parameters
+
+    def _build_mosaic(self, img, n, panel_sz, sep, sep_col):
+        """
+        Returns a QImage that is an n×n grid of clipped regions
+        sampled evenly across img, with given panel size, separation,
+        and background color.
+        """
+        # compute output size
+        W = n*panel_sz + (n-1)*sep
+        H = n*panel_sz + (n-1)*sep
+        mosaic = QImage(W, H, img.format())
+        painter = QPainter(mosaic)
+        painter.fillRect(0,0,W,H, sep_col)
+
+        # sample positions
+        src_w, src_h = img.width(), img.height()
+        # evenly spaced centers
+        xs = [int((src_w - panel_sz) * i / (n-1)) for i in range(n)]
+        ys = [int((src_h - panel_sz) * j / (n-1)) for j in range(n)]
+
+        for row, y in enumerate(ys):
+            for col, x in enumerate(xs):
+                patch = img.copy(x, y, panel_sz, panel_sz)
+                dx = col * (panel_sz + sep)
+                dy = row * (panel_sz + sep)
+                painter.drawImage(dx, dy, patch)
+
+        painter.end()
+        return mosaic
+
+    def _to_qimage(self, arr: np.ndarray) -> QImage:
+        """
+        Convert a 2D or 3-channel H×W numpy array in [0..1] or [0..255]
+        to a QImage.  Keeps the underlying buffer alive on self.
+        """
+        # 1) normalize dtype
+        if arr.dtype in (np.float32, np.float64):
+            arr8 = np.clip(arr * 255, 0, 255).astype(np.uint8)
+        elif arr.dtype != np.uint8:
+            arr8 = arr.astype(np.uint8)
+        else:
+            arr8 = arr
+
+        h, w = arr8.shape[:2]
+
+        # 2) dump to bytes so QImage() sees a bytes object, not a memoryview
+        buf = arr8.tobytes()
+        # keep a reference so Python doesn’t free it
+        self._last_qimage_buffer = buf
+
+        # 3) construct the QImage
+        if arr8.ndim == 2:
+            # grayscale
+            bytes_per_line = w
+            return QImage(buf, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+
+        elif arr8.ndim == 3 and arr8.shape[2] == 3:
+            # RGB
+            bytes_per_line = 3 * w
+            return QImage(buf, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+
+        else:
+            raise ValueError(f"Cannot convert array of shape {arr.shape} to QImage")
+
 
 # --------------------------------------------------
 # Stacking Suite
@@ -8301,6 +10740,45 @@ class ReferenceFrameReviewDialog(QDialog):
     def getUserChoice(self):
         return self.user_choice
 
+def bytes_available():
+    vm = psutil.virtual_memory()
+    # Keep a safety margin (e.g. leave 10% free)
+    return int(vm.available * 0.9)
+
+
+def compute_safe_chunk(height, width, N, channels, dtype, pref_h, pref_w):
+    vm    = psutil.virtual_memory()
+    avail = vm.free * 0.9
+    bpe64 = np.dtype(dtype).itemsize      # 8 bytes
+    workers = os.cpu_count() or 1
+
+    # budget *all* float64 copies (master + per-thread)
+    bytes_per_pixel = (N + workers) * channels * bpe64
+    max_pixels      = int(avail // bytes_per_pixel)
+    if max_pixels < 1:
+        raise MemoryError("Not enough RAM for even a 1×1 tile")
+
+    raw_side = int(math.sqrt(max_pixels))
+    # **shrink by √workers to be super-safe**
+    fudge    = int(math.sqrt(workers)) or 1
+    safe_side = max(1, raw_side // fudge)
+
+    # clamp to user prefs and image dims
+    ch = min(pref_h, height, safe_side)
+    cw = min(pref_w, width,  safe_side)
+
+    # final area clamp
+    if ch * cw > max_pixels // fudge**2:
+        # extra safety: adjust cw so area ≤ max_pixels/fudge²
+        cw = max(1, (max_pixels // (fudge**2)) // ch)
+
+    if ch < 1 or cw < 1:
+        raise MemoryError(f"Chunk too small after fudge: {ch}×{cw}")
+
+    print(f"[DEBUG] raw_side={raw_side}, workers={workers} ⇒ safe_side={safe_side}")
+    print(f"[DEBUG] final chunk: {ch}×{cw}")
+    return ch, cw
+
 class StackingSuiteDialog(QDialog):
     def __init__(self):
         super().__init__()
@@ -8316,6 +10794,7 @@ class StackingSuiteDialog(QDialog):
 
         # QSettings for your app
         self.settings = QSettings() 
+
         
 
         # Load or default these
@@ -8385,6 +10864,17 @@ class StackingSuiteDialog(QDialog):
         layout.addWidget(self.wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.setup_status_bar(layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
+        self.restore_saved_master_calibrations()
+
+    def restore_saved_master_calibrations(self):
+        saved_darks = self.settings.value("stacking/master_darks", [], type=list)
+        saved_flats = self.settings.value("stacking/master_flats", [], type=list)
+
+        if saved_darks:
+            self.add_master_files(self.master_dark_tree, "DARK", saved_darks)
+
+        if saved_flats:
+            self.add_master_files(self.master_flat_tree, "FLAT", saved_flats)
 
     def create_conversion_tab(self):
         tab = QWidget()
@@ -8535,7 +11025,6 @@ class StackingSuiteDialog(QDialog):
 
                 # Try extracting EXIF metadata
                 try:
-                    import exifread
                     with open(file_path, 'rb') as f:
                         tags = exifread.process_file(f, details=False)
 
@@ -9002,7 +11491,13 @@ class StackingSuiteDialog(QDialog):
 
         # Add "Clear Selection" button for Master Darks
         self.clear_master_dark_selection_btn = QPushButton("Clear Selection")
-        self.clear_master_dark_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_dark_tree))
+        self.clear_master_dark_selection_btn.clicked.connect(
+            lambda: self.clear_tree_selection(self.master_dark_tree, self.master_files)
+        )
+        self.clear_master_dark_selection_btn.clicked.connect(
+            lambda: (self.clear_tree_selection(self.master_dark_tree, self.master_files),
+                    self.save_master_paths_to_settings())
+        )        
         main_layout.addWidget(self.clear_master_dark_selection_btn)
 
         return tab
@@ -9120,7 +11615,10 @@ class StackingSuiteDialog(QDialog):
         main_layout.addWidget(self.master_flat_btn)
 
         self.clear_master_flat_selection_btn = QPushButton("Clear Selection")
-        self.clear_master_flat_selection_btn.clicked.connect(lambda: self.clear_tree_selection(self.master_flat_tree))
+        self.clear_master_flat_selection_btn.clicked.connect(
+            lambda: (self.clear_tree_selection(self.master_flat_tree, self.master_files),
+                    self.save_master_paths_to_settings())
+        )
         main_layout.addWidget(self.clear_master_flat_selection_btn)
         return tab
 
@@ -9453,6 +11951,32 @@ class StackingSuiteDialog(QDialog):
             self.reference_frame = file_path
             self.ref_frame_path.setText(os.path.basename(file_path))
 
+    def save_master_paths_to_settings(self):
+        """Save current master dark and flat paths to QSettings using their actual trees."""
+
+        # Master Darks
+        dark_paths = []
+        for i in range(self.master_dark_tree.topLevelItemCount()):
+            group = self.master_dark_tree.topLevelItem(i)
+            for j in range(group.childCount()):
+                fname = group.child(j).text(0)
+                for path in self.master_files.values():
+                    if os.path.basename(path) == fname:
+                        dark_paths.append(path)
+
+        # Master Flats
+        flat_paths = []
+        for i in range(self.master_flat_tree.topLevelItemCount()):
+            group = self.master_flat_tree.topLevelItem(i)
+            for j in range(group.childCount()):
+                fname = group.child(j).text(0)
+                for path in self.master_files.values():
+                    if os.path.basename(path) == fname:
+                        flat_paths.append(path)
+
+        self.settings.setValue("stacking/master_darks", dark_paths)
+        self.settings.setValue("stacking/master_flats", flat_paths)
+
     def clear_tree_selection(self, tree, file_dict):
         """Clears selected items from a simple (non-tuple-keyed) tree like Master Darks or Darks tab."""
         selected_items = tree.selectedItems()
@@ -9762,8 +12286,12 @@ class StackingSuiteDialog(QDialog):
             try:
                 hdr0 = fits.getheader(fp, ext=0)
                 filt = hdr0.get("FILTER", "Unknown")
-                exp  = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", 0.0))
-                exp  = float(exp)
+                exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
+                try:
+                    exp = float(exp_raw)
+                except (TypeError, ValueError):
+                    print(f"⚠️ Exposure missing or invalid in {fp}, defaulting to 0.0s")
+                    exp = 0.0
                 data0 = fits.getdata(fp, ext=0)
                 h, w = data0.shape[-2:]
                 size = f"{w}x{h}"
@@ -9877,7 +12405,6 @@ class StackingSuiteDialog(QDialog):
             sf  = 1.0
             ds  = 0.65
             if ena:
-                import re
                 m = re.search(r"scale\s*:\s*([\d\.]+)x?", txt)
                 if m: sf = float(m.group(1))
                 m = re.search(r"drop\s*:\s*([\d\.]+)", txt)
@@ -10000,6 +12527,7 @@ class StackingSuiteDialog(QDialog):
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))  # Save last used folder
             self.add_master_files(self.master_dark_tree, "DARK", files)
+            self.save_master_paths_to_settings() 
 
         self.update_override_dark_combo()
         self.assign_best_master_dark()
@@ -10014,6 +12542,7 @@ class StackingSuiteDialog(QDialog):
         if files:
             self.settings.setValue("last_opened_folder", os.path.dirname(files[0]))
             self.add_master_files(self.master_flat_tree, "FLAT", files)
+            self.save_master_paths_to_settings() 
 
 
     def add_files(self, tree, title, expected_type):
@@ -10338,7 +12867,7 @@ class StackingSuiteDialog(QDialog):
             memmap_path = os.path.join(master_dir, f"temp_dark_{exposure_time}_{image_size}.dat")
             final_stacked = np.memmap(
                 memmap_path,
-                dtype=np.float32,
+                dtype=np.float64,
                 mode='w+',
                 shape=(height, width, channels)
             )
@@ -10448,6 +12977,7 @@ class StackingSuiteDialog(QDialog):
             self.add_master_dark_to_tree(f"{exposure_time}s ({image_size})", master_dark_path)
             self.update_status(f"✅ Master Dark saved: {master_dark_path}")
             self.assign_best_master_files()
+            self.save_master_paths_to_settings()
 
         # Finally, assign best master dark, etc.
         self.assign_best_master_dark()
@@ -10731,7 +13261,7 @@ class StackingSuiteDialog(QDialog):
             height, width = ref_data.shape[:2]
             channels = 1 if ref_data.ndim == 2 else 3
             memmap_path = os.path.join(master_dir, f"temp_flat_{session}_{exposure_time}_{image_size}_{filter_name}.dat")
-            final_stacked = np.memmap(memmap_path, dtype=np.float32, mode="w+", shape=(height, width, channels))
+            final_stacked = np.memmap(memmap_path, dtype=np.float64, mode="w+", shape=(height, width, channels))
             num_frames = len(file_list)
 
             for y_start in range(0, height, self.chunk_height):
@@ -10820,6 +13350,7 @@ class StackingSuiteDialog(QDialog):
             self.master_sizes[master_flat_path] = image_size
             self.add_master_flat_to_tree(filter_name, master_flat_path)
             self.update_status(f"✅ Master Flat saved: {master_flat_path}")
+            self.save_master_paths_to_settings()
 
         self.assign_best_master_dark()
         self.assign_best_master_files()
@@ -11657,7 +14188,31 @@ class StackingSuiteDialog(QDialog):
         )
         self.alignment_thread.progress_update.connect(self.update_status)
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
+        self.align_progress = QProgressDialog("Aligning stars…", None, 0, 0, self)
+        self.align_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.align_progress.setMinimumDuration(0)
+        self.align_progress.setCancelButton(None)
+        self.align_progress.setWindowTitle("Stellar Alignment")
+        self.align_progress.setValue(0)
+        self.align_progress.show()
+
+        self.alignment_thread.progress_step.connect(self._on_align_progress)
+        self.alignment_thread.registration_complete.connect(self._on_align_done)        
         self.alignment_thread.start()
+        
+    @pyqtSlot(int, int)
+    def _on_align_progress(self, done, total):
+        self.align_progress.setLabelText(f"Aligning stars… ({done}/{total})")
+        self.align_progress.setMaximum(total)
+        self.align_progress.setValue(done)
+        QApplication.processEvents()
+
+    @pyqtSlot(bool, str)
+    def _on_align_done(self, success, message):
+        if hasattr(self, "align_progress"):
+            self.align_progress.close()
+            del self.align_progress
+        self.update_status(message)
 
     def save_alignment_matrices_sasd(self, transforms_dict):
         out_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
@@ -12070,6 +14625,20 @@ class StackingSuiteDialog(QDialog):
 
             # Initialize a list to collect rejected pixel coordinates for this group.
             rejection_coords = []
+            N = len(aligned_paths)
+            DTYPE    = np.float64
+            pref_h   = self.chunk_height
+            pref_w   = self.chunk_width
+
+            # 3) Compute a safe chunk size once, up front
+            try:
+                chunk_h, chunk_w = compute_safe_chunk(
+                    height, width, N, channels, DTYPE, pref_h, pref_w
+                )
+                self.update_status(f"🔧 Using chunk size {chunk_h}×{chunk_w} for float64")
+            except MemoryError as e:
+                self.update_status(f"⚠️ {e}")
+                return None, {}, None
 
             # 3) Loop over tiles
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12083,6 +14652,7 @@ class StackingSuiteDialog(QDialog):
 
                     # Build tile stack: shape (N, tile_h, tile_w, channels)
                     N = len(aligned_paths)
+                 
                     tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float32)
                     num_cores = os.cpu_count() or 4
                     with ThreadPoolExecutor(max_workers=num_cores) as executor:
@@ -12265,7 +14835,6 @@ class StackingSuiteDialog(QDialog):
         measured_frames = []
 
         # Decide how many images to load at once. Typically # of CPU cores:
-        import os
         max_workers = os.cpu_count() or 4
         chunk_size = max_workers  # or a custom formula if you prefer
 
@@ -12468,12 +15037,12 @@ class StackingSuiteDialog(QDialog):
         out_h = int(h * scale_factor)
         out_w = int(w * scale_factor)
         if is_mono:
-            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float32)
-            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float32)
+            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float64)
+            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float64)
             finalize_func = finalize_drizzle_2d
         else:
-            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
-            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float32)
+            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
+            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
             finalize_func = finalize_drizzle_3d
 
         # 6) For each aligned file, deposit raw pixels—skipping only that file's rejections
@@ -12582,18 +15151,21 @@ class StackingSuiteDialog(QDialog):
         """
         Performs chunked stacking integration of aligned (_n_r) images using the current
         rejection algorithm. Returns:
-        integrated_image: Final integrated (stacked) image as a NumPy array.
-        per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y) 
-                            coordinates that were rejected for THAT file only.
-        ref_header: the header from the reference file (or a new one if missing)
+        - integrated_image: Final integrated (stacked) image as a NumPy array.
+        - per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y)
+            coordinates that were rejected for THAT file only.
+        - ref_header: the header from the reference file (or a new one if missing)
         """
-        import os
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # 0) Initial status
         self.update_status(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
+        QApplication.processEvents()
+
+        # 1) Sanity checks
         if not file_list:
             self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
             return None, {}, None
-        # 1) Load a reference image to determine dimensions and channels
+
+        # 2) Load a reference image to determine dimensions and channels
         ref_file = file_list[0]
         if not os.path.exists(ref_file):
             self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
@@ -12602,72 +15174,92 @@ class StackingSuiteDialog(QDialog):
         if ref_data is None:
             self.update_status(f"⚠️ Could not load reference '{ref_file}' for group '{group_key}'.")
             return None, {}, None
-
         if ref_header is None:
-            ref_header = fits.Header()  # fallback if no header was present
+            ref_header = fits.Header()
 
         is_color = (ref_data.ndim == 3 and ref_data.shape[2] == 3)
         height, width = ref_data.shape[:2]
         channels = 3 if is_color else 1
+
         self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
         QApplication.processEvents()
-        # 2) Allocate final integrated image and set up a dictionary for rejections
-        integrated_image = np.zeros((height, width, channels), dtype=np.float32)
+
+        # 3) Allocate output and rejections dict
+        N = len(file_list)
+        integrated_image = np.zeros((height, width, channels), dtype=np.float64)
         per_file_rejections = {f: [] for f in file_list}
 
-        # 3) Define tile dimensions
-        chunk_h = self.chunk_height
-        chunk_w = self.chunk_width
+        # 4) Compute chunk size
+        DTYPE  = np.float64
+        pref_h = self.chunk_height
+        pref_w = self.chunk_width
+        try:
+            chunk_h, chunk_w = compute_safe_chunk(
+                height, width, N, channels, DTYPE, pref_h, pref_w
+            )
+            self.update_status(f"🔧 Using chunk size {chunk_h}×{chunk_w} for float64")
+            QApplication.processEvents()
+        except MemoryError as e:
+            self.update_status(f"⚠️ {e}")
+            return None, {}, None
 
-        # 4) Process the image tile by tile
+        # 5) Precompute total tile count for progress
+        n_rows     = math.ceil(height / chunk_h)
+        n_cols     = math.ceil(width  / chunk_w)
+        total_tiles = n_rows * n_cols
+        tile_idx    = 0
+
+        # 6) Loop over tiles
         for y_start in range(0, height, chunk_h):
-            y_end = min(y_start + chunk_h, height)
+            y_end  = min(y_start + chunk_h, height)
             tile_h = y_end - y_start
 
             for x_start in range(0, width, chunk_w):
-                x_end = min(x_start + chunk_w, width)
+                x_end  = min(x_start + chunk_w, width)
                 tile_w = x_end - x_start
 
-                # Build a tile stack: shape (N, tile_h, tile_w, channels)
-                N = len(file_list)
-                tile_stack = np.zeros((N, tile_h, tile_w, channels), dtype=np.float32)
-                weights_list = []
-                num_cores = os.cpu_count() or 4
+                # --- Update progress ---
+                tile_idx += 1
+                self.update_status(f"Integrating tile {tile_idx}/{total_tiles}...")
+                QApplication.processEvents()
+
+                # 6a) Build tile stack
+                tile_stack    = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
+                weights_list  = []
+                num_cores     = os.cpu_count() or 4
 
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
-                    future_to_index = {}
+                    future_to_i = {}
                     for i, fpath in enumerate(file_list):
-                        
                         future = executor.submit(load_fits_tile, fpath, y_start, y_end, x_start, x_end)
-                        future_to_index[future] = i
+                        future_to_i[future] = i
                         weights_list.append(frame_weights.get(fpath, 1.0))
 
-                    for future in as_completed(future_to_index):
-                        i = future_to_index[future]
-                        sub_img = future.result()
+                    for fut in as_completed(future_to_i):
+                        i       = future_to_i[fut]
+                        sub_img = fut.result()
                         if sub_img is None:
                             self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
                             continue
-                        # Ensure shape => (tile_h, tile_w, channels)
+                        # Normalize shape → (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
                             sub_img = sub_img[:, :, np.newaxis]
                             if channels == 3:
                                 sub_img = np.repeat(sub_img, 3, axis=2)
                         elif sub_img.ndim == 3 and sub_img.shape[0] == 3 and channels == 3:
                             sub_img = sub_img.transpose(1, 2, 0)
-                        sub_img = sub_img.astype(np.float32, copy=False)
-                        tile_stack[i] = sub_img
+                        tile_stack[i] = sub_img.astype(np.float32, copy=False)
 
                 weights_array = np.array(weights_list, dtype=np.float32)
 
-                # 5) Run your chosen rejection algorithm => (tile_result, tile_rej_map)
+                # 6b) Apply rejection algorithm
                 algo = self.rejection_algorithm
                 if algo == "Simple Median (No Rejection)":
-                    tile_result = np.median(tile_stack, axis=0)
-                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                    tile_result  = np.median(tile_stack, axis=0)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=bool)
                 elif algo == "Simple Average (No Rejection)":
-                    tile_result = np.average(tile_stack, axis=0, weights=weights_array)
-                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=np.bool_)
+                    tile_result  = np.average(tile_stack, axis=0, weights=weights_array)
+                    tile_rej_map = np.zeros((N, tile_h, tile_w), dtype=bool)
                 elif algo == "Weighted Windsorized Sigma Clipping":
                     tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
                         tile_stack, weights_array,
@@ -12704,30 +15296,27 @@ class StackingSuiteDialog(QDialog):
                         lower=self.sigma_low, upper=self.sigma_high
                     )
 
-                # 6) Place the integrated tile into the final image
+                # 7) Place the integrated tile into the final image
                 integrated_image[y_start:y_end, x_start:x_end, :] = tile_result
 
-                # 7) For color, tile_rej_map is shape (N, tile_h, tile_w, C). Combine channels if needed.
+                # 8) Record per-file rejections
                 if tile_rej_map.ndim == 4:
-                    # shape => (N, tile_h, tile_w, channels)
-                    # reduce across channels => (N, tile_h, tile_w)
                     tile_rej_map = np.any(tile_rej_map, axis=-1)
-
-                # 8) Now tile_rej_map is shape (N, tile_h, tile_w). Record the rejections per file
                 for i, fpath in enumerate(file_list):
-                    frame_mask = tile_rej_map[i]  # shape (tile_h, tile_w)
-                    ys_tile, xs_tile = np.where(frame_mask)
-                    for dx, dy in zip(xs_tile, ys_tile):
-                        global_x = x_start + dx
-                        global_y = y_start + dy
-                        per_file_rejections[fpath].append((global_x, global_y))
+                    ys, xs = np.where(tile_rej_map[i])
+                    for dy, dx in zip(ys, xs):
+                        per_file_rejections[fpath].append((x_start + dx, y_start + dy))
 
-        # 9) Squeeze if mono
+        # 9) If mono, squeeze away channel axis
         if channels == 1:
             integrated_image = integrated_image[..., 0]
 
-        # Return integrated_image, the per-file rejection dictionary, and the reference header
+        # 10) Final status
+        self.update_status(f"Integration complete for group '{group_key}'.")
+        QApplication.processEvents()
+
         return integrated_image, per_file_rejections, ref_header
+
 
 
     def outlier_rejection_with_mask(self, tile_stack, weights_array):
@@ -12763,6 +15352,1534 @@ class StackingSuiteDialog(QDialog):
         
         return tile_result, rejection_mask
 
+class LiveStackSettingsDialog(QDialog):
+    """
+    Combined dialog for:
+      • Live‐stack parameters (bootstrap frames, σ‐clip threshold)
+      • Culling thresholds (max FWHM, max eccentricity, min star count)
+    """
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Live Stack & Culling Settings")
+
+        # — Live Stack Settings —
+        # Bootstrap frames (int)
+        self.bs_spin = CustomSpinBox(
+            minimum=1,
+            maximum=100,
+            initial=parent.bootstrap_frames,
+            step=1
+        )
+        self.bs_spin.valueChanged.connect(lambda v: None)
+
+        # Sigma threshold (float)
+        self.sigma_spin = CustomDoubleSpinBox(
+            minimum=0.1,
+            maximum=10.0,
+            initial=parent.clip_threshold,
+            step=0.1,
+            suffix="σ"
+        )
+        self.sigma_spin.valueChanged.connect(lambda v: None)
+
+        # — Culling Thresholds —
+        # Max FWHM (float)
+        self.fwhm_spin = CustomDoubleSpinBox(
+            minimum=0.1,
+            maximum=50.0,
+            initial=parent.max_fwhm,
+            step=0.1,
+            suffix=" px"
+        )
+        self.fwhm_spin.valueChanged.connect(lambda v: None)
+
+        # Max eccentricity (float)
+        self.ecc_spin = CustomDoubleSpinBox(
+            minimum=0.0,
+            maximum=1.0,
+            initial=parent.max_ecc,
+            step=0.01
+        )
+        self.ecc_spin.valueChanged.connect(lambda v: None)
+
+        # Min star count (int)
+        self.star_spin = CustomSpinBox(
+            minimum=0,
+            maximum=5000,
+            initial=parent.min_star_count,
+            step=1
+        )
+        self.star_spin.valueChanged.connect(lambda v: None)
+
+        # Build form layout
+        form = QFormLayout()
+        form.addRow("Switch to μ–σ clipping after:", self.bs_spin)
+        form.addRow("Clip threshold:", self.sigma_spin)
+        form.addRow(QLabel(""))  # blank row for separation
+        form.addRow("Max FWHM (px):", self.fwhm_spin)
+        form.addRow("Max Eccentricity:", self.ecc_spin)
+        form.addRow("Min Star Count:", self.star_spin)
+
+        self.mapping_combo = QComboBox()
+        opts = ["Natural", "SHO", "HSO", "OSH", "SOH", "HOS", "OHS"]
+        self.mapping_combo.addItems(opts)
+        # preselect current
+        idx = opts.index(parent.narrowband_mapping) \
+              if parent.narrowband_mapping in opts else 0
+        self.mapping_combo.setCurrentIndex(idx)
+        form.addRow("Narrowband Mapping:", self.mapping_combo)
+
+        # OK / Cancel buttons
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+        # Assemble dialog layout
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(btns)
+        self.setLayout(layout)
+
+    def getValues(self):
+        """
+        Returns a tuple of five values in order:
+          (bootstrap_frames, clip_threshold,
+           max_fwhm, max_ecc, min_star_count)
+        """
+        bs      = self.bs_spin.value
+        sigma   = self.sigma_spin.value()
+        fwhm    = self.fwhm_spin.value()
+        ecc     = self.ecc_spin.value()
+        stars   = self.star_spin.value
+        mapping = self.mapping_combo.currentText()
+        return bs, sigma, fwhm, ecc, stars, mapping
+
+
+
+class LiveMetricsPanel(QWidget):
+    """
+    A simple 2×2 grid of PyQtGraph plots to show, in real time:
+      [0,0] → FWHM (px) vs. frame index
+      [0,1] → Eccentricity vs. frame index
+      [1,0] → Star Count vs. frame index
+      [1,1] → (μ–ν)/σ (∝SNR) vs. frame index
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        titles = ["FWHM (px)", "Eccentricity", "Star Count", "(μ–ν)/σ (∝SNR)"]
+
+        layout = QVBoxLayout(self)
+        grid = pg.GraphicsLayoutWidget()
+        layout.addWidget(grid)
+
+        self.plots = []
+        self.scats = []
+        self._data_x = [[], [], [], []]
+        self._data_y = [[], [], [], []]
+        self._flags  = [[], [], [], []]  # track if each point was “bad” (True) or “good” (False)
+
+        for row in range(2):
+            for col in range(2):
+                pw = grid.addPlot(row=row, col=col)
+                idx = row * 2 + col
+                pw.setTitle(titles[idx])
+                pw.showGrid(x=True, y=True, alpha=0.3)
+                pw.setLabel('bottom', "Frame #")
+                pw.setLabel('left', titles[idx])
+
+                scat = pg.ScatterPlotItem(pen=pg.mkPen(None),
+                                          brush=pg.mkBrush(100, 100, 255, 200),
+                                          size=6)
+                pw.addItem(scat)
+                self.plots.append(pw)
+                self.scats.append(scat)
+
+    def add_point(self, frame_idx: int, fwhm: float, ecc: float, star_cnt: int, snr_val: float, flagged: bool):
+        """
+        Append one new data point to each metric.  
+        If flagged == True, draw that single point in red; else blue.  
+        But keep all previously-plotted points at their original colors.
+        """
+        values = [fwhm, ecc, star_cnt, snr_val]
+        for i in range(4):
+            self._data_x[i].append(frame_idx)
+            self._data_y[i].append(values[i])
+            self._flags[i].append(flagged)
+
+            # Now build a brush list for *all* points up to index i,
+            # coloring each point according to its own flag.
+            brushes = [
+                pg.mkBrush(255, 0, 0, 200) if self._flags[i][j]
+                else pg.mkBrush(100, 100, 255, 200)
+                for j in range(len(self._data_x[i]))
+            ]
+
+            self.scats[i].setData(
+                self._data_x[i],
+                self._data_y[i],
+                brush=brushes,
+                pen=pg.mkPen(None),
+                size=6
+            )
+
+    def clear_all(self):
+        """Clear data from all four plots."""
+        for i in range(4):
+            self._data_x[i].clear()
+            self._data_y[i].clear()
+            self._flags[i].clear()
+            self.scats[i].clear()
+
+class LiveMetricsWindow(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Stack Metrics")
+        self.resize(600, 400)
+
+        layout = QVBoxLayout(self)
+        self.metrics_panel = LiveMetricsPanel(self)
+        layout.addWidget(self.metrics_panel)
+
+def compute_frame_star_metrics(image_2d):
+    """
+    Runs SEP on a normalized 2D image to estimate:
+      - star_count (int)
+      - avg_fwhm    (float)
+      - avg_ecc     (float)
+    
+    This replaces the DAOStarFinder version, because DAOStarFinder
+    does not always produce an 'fwhm' column.  SEP will give us 'a', 'b',
+    from which FWHM = 2.3548 * sqrt(a * b), and ecc = sqrt(1 - (b/a)^2).
+    """
+    # 1) estimate background & global RMS
+    mean, median, std = sigma_clipped_stats(image_2d)
+    data = image_2d - median
+
+    try:
+        # 2) run SEP extract (threshold = 5σ)
+        objects = sep.extract(data, thresh=5.0, 
+                              err=std, 
+                              minarea=16,   # adjust if needed
+                              deblend_nthresh=32,
+                              clean=True)
+    except Exception:
+        # if SEP fails (e.g. “internal pixel buffer full”), just return zeros
+        return 0, 0.0, 0.0
+
+    if objects is None or len(objects) == 0:
+        return 0, 0.0, 0.0
+
+    # 3) star count
+    star_count = len(objects)
+
+    # 4) compute FWHM and eccentricity for each detected source
+    #    SEP’s "a" and "b" columns are the RMS ellipse axes
+    #    FWHM = 2.3548 * sqrt(a * b)
+    a_vals = objects['a']
+    b_vals = objects['b']
+    # Avoid negative or zero values:
+    a_vals = np.clip(a_vals, 1e-3, None)
+    b_vals = np.clip(b_vals, 1e-3, None)
+
+    fwhm_vals = 2.3548 * np.sqrt(a_vals * b_vals)
+    avg_fwhm = float(np.nanmean(fwhm_vals)) if len(fwhm_vals) > 0 else 0.0
+
+    # 5) compute eccentricity: e = sqrt(1 − (b/a)^2)
+    ratios = np.clip(b_vals / a_vals, 0.0, 1.0)
+    ecc_vals = np.sqrt(1.0 - ratios * ratios)
+    avg_ecc = float(np.nanmean(ecc_vals)) if len(ecc_vals) > 0 else 0.0
+
+    return star_count, avg_fwhm, avg_ecc
+
+def estimate_global_snr(
+    stack_image: np.ndarray,
+    bkg_box_size: int = 200
+) -> float:
+    """
+    “Hybrid” global SNR ≔ (μ_patch − median_patch) / σ_central,
+    where:
+      • μ_patch    and median_patch come from a small bkg_box_size×bkg_box_size patch
+        centered inside the middle 50% of the image.
+      • σ_central  is the standard deviation computed over the entire “middle 50%” region.
+
+    Steps:
+      1) Collapse to grayscale (H×W) if needed.
+      2) Identify the middle 50% rectangle of the image.
+      3) Within that, center a patch of size up to bkg_box_size×bkg_box_size.
+      4) Compute μ_patch = mean(patch), median_patch = median(patch).
+      5) Compute σ_central = std(middle50_region).
+      6) If σ_central ≤ 0, return 0. Otherwise return (μ_patch − median_patch) / σ_central.
+    """
+
+    # 1) Collapse to simple 2D float array (grayscale)
+    if stack_image.ndim == 3 and stack_image.shape[2] == 3:
+        # RGB → grayscale by averaging channels
+        gray = stack_image.mean(axis=2).astype(np.float32)
+    else:
+        # Already mono: just cast to float32
+        gray = stack_image.astype(np.float32)
+
+    H, W = gray.shape
+
+    # 2) Compute coordinates of the “middle 50%” rectangle
+    y0 = H // 4
+    y1 = y0 + (H // 2)
+    x0 = W // 4
+    x1 = x0 + (W // 2)
+
+    # Extract that central50 region as a view (no copy)
+    central50 = gray[y0:y1, x0:x1]
+
+    # 3) Within that central50, choose a patch of up to bkg_box_size×bkg_box_size, centered
+    center_h = (y1 - y0)
+    center_w = (x1 - x0)
+
+    # Clamp box size so it does not exceed central50 dimensions
+    box_h = min(bkg_box_size, center_h)
+    box_w = min(bkg_box_size, center_w)
+
+    # Compute top-left corner of that patch so it’s centered in central50
+    cy0 = y0 + (center_h - box_h) // 2
+    cx0 = x0 + (center_w - box_w) // 2
+
+    patch = gray[cy0 : cy0 + box_h, cx0 : cx0 + box_w]
+
+    # 4) Compute patch statistics
+    mu_patch = float(np.mean(patch))
+    med_patch = float(np.median(patch))
+    min_patch = float(np.min(patch))
+
+    # 5) Compute σ over the entire central50 region
+    sigma_central = float(np.std(central50))
+    if sigma_central <= 0.0:
+        return 0.0
+
+    nu = med_patch - 3.0 * sigma_central * med_patch
+
+    # 6) Return (mean − nu) / σ
+    return (mu_patch - nu) / sigma_central
+    #return (mu_patch) / sigma_central
+
+class LiveStackWindow(QDialog):
+    """
+    Live Stacking dialog:
+     - Watch a directory for new frames
+     - Apply dark/flat calibration
+     - Debayer if needed
+     - Align, stretch, and running-average stack
+     - Show the live preview
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Live Stacking")
+        self.resize(900, 600)
+
+        # ─── State Variables ─────────────────────────────────────
+        self.watch_folder = None
+        self.processed_files = set()
+        self.master_dark = None
+        self.master_flat = None
+        self.master_flats  = {}
+
+        self.filter_stacks = {}       # key → np.ndarray (float32)
+        self.filter_counts = {}       # key → int
+        self.filter_buffers  = {}  # key → list of bootstrap frames [H×W arrays]
+        self.filter_mus      = {}  # key → µ array after bootstrap (H×W)
+        self.filter_m2s      = {}  # key → M2 array after bootstrap (H×W)
+
+        self.cull_folder = None
+
+        self.is_running = False
+        self.frame_count = 0
+        self.current_stack = None
+
+        # ── Load persisted settings ───────────────────────────────
+        s = QSettings()
+        self.bootstrap_frames    = s.value("LiveStack/bootstrap_frames",    24,     type=int)
+        self.clip_threshold      = s.value("LiveStack/clip_threshold",      3.5,    type=float)
+        self.max_fwhm            = s.value("LiveStack/max_fwhm",            15.0,   type=float)
+        self.max_ecc             = s.value("LiveStack/max_ecc",             0.9,    type=float)
+        self.min_star_count      = s.value("LiveStack/min_star_count",      5,      type=int)
+        self.narrowband_mapping  = s.value("LiveStack/narrowband_mapping",  "Natural", type=str)
+
+
+        self.total_exposure = 0.0  # seconds
+        self.exposure_label = QLabel("Total Exp: 00:00:00")
+        self.exposure_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+
+        self.brightness = 0.0   # [-1.0..+1.0]
+        self.contrast   = 1.0   # [0.1..3.0]
+
+
+        self._buffer = []    # store up to bootstrap_frames normalized frames
+        self._mu = None      # per-pixel mean (after bootstrap)
+        self._m2 = None      # per-pixel sum of squares differences (for Welford)
+
+        # ─── Create Separate Metrics Window (initially hidden) ─────
+        # We do NOT embed this in the stacking dialog’s layout!
+        self.metrics_window = LiveMetricsWindow(None)
+        self.metrics_window.hide()
+
+        # ─── UI ELEMENTS FOR STACKING DIALOG ───────────────────────
+        # 1) Folder selection
+        self.folder_label = QLabel("Folder: (none)")
+        self.select_folder_btn = QPushButton("Select Folder…")
+        self.select_folder_btn.clicked.connect(self.select_folder)
+
+        # 2) Load master dark/flat
+        self.load_darks_btn = QPushButton("Load Master Dark…")
+        self.load_darks_btn.clicked.connect(self.load_masters)
+        self.load_flats_btn = QPushButton("Load Master Flat…")
+        self.load_flats_btn.clicked.connect(self.load_masters)
+        self.load_filter_flats_btn = QPushButton("Load MonoFilter Flats…")
+        self.load_filter_flats_btn.clicked.connect(self.load_filter_flats)        
+
+        # 2b) Cull folder selection
+        self.cull_folder_label = QLabel("Cull Folder: (none)")
+        self.select_cull_btn = QPushButton("Select Cull Folder…")
+        self.select_cull_btn.clicked.connect(self.select_cull_folder)
+
+        self.dark_status_label = QLabel("Dark: ❌")
+        self.flat_status_label = QLabel("Flat: ❌")
+        for lbl in (self.dark_status_label, self.flat_status_label):
+            lbl.setStyleSheet("color: #cccccc; font-weight: bold;")
+        # 3) “Process & Monitor” / “Monitor Only” / “Stop” / “Reset”
+        self.mono_color_checkbox = QCheckBox("Mono → Color Stacking")
+        self.mono_color_checkbox.setToolTip(
+            "When checked, bucket mono frames by FILTER and composite R, G, B, Ha, OIII, SII."
+        )
+        # **Connect the toggled(bool) signal** before we ever call it
+        self.mono_color_checkbox.toggled.connect(self._on_mono_color_toggled)
+
+        self.process_and_monitor_btn = QPushButton("Process && Monitor")
+        self.process_and_monitor_btn.clicked.connect(self.start_and_process)
+        self.monitor_only_btn = QPushButton("Monitor Only")
+        self.monitor_only_btn.clicked.connect(self.start_monitor_only)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.clicked.connect(self.stop_live)
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.clicked.connect(self.reset_live)
+
+        self.frame_count_label = QLabel("Frames: 0")
+
+        # 4) Live‐stack preview area (QGraphicsView)
+        self.scene = QGraphicsScene(self)
+        self.view = QGraphicsView(self.scene, self)
+        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+        self._did_initial_fit = False
+
+        # 5) Zoom toolbar + Settings icon
+        tb = QToolBar()
+
+        zi = QAction(QIcon.fromTheme("zoom-in"), "Zoom In", self)
+        zo = QAction(QIcon.fromTheme("zoom-out"), "Zoom Out", self)
+        fit = QAction(QIcon.fromTheme("zoom-fit-best"), "Fit to Window", self)
+
+        tb.addAction(zi)
+        tb.addAction(zo)
+        tb.addAction(fit)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+        # — Replace the QAction “wrench” with a styled QToolButton —
+        self.wrench_button = QToolButton()
+        self.wrench_button.setIcon(QIcon(wrench_path))
+        self.wrench_button.setToolTip("Settings")
+        # Apply your stylesheet to the QToolButton
+        self.wrench_button.setStyleSheet("""
+            QToolButton {
+                background-color: #FF4500;
+                color: white;
+                font-size: 16px;
+                padding: 8px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        # Connect the clicked signal to open_settings()
+        self.wrench_button.clicked.connect(self.open_settings)
+
+        # Add the styled QToolButton into the toolbar
+        tb.addWidget(self.wrench_button)
+
+        zi.triggered.connect(self.zoom_in)
+        zo.triggered.connect(self.zoom_out)
+        fit.triggered.connect(self.fit_to_window)
+
+
+        # 6) Brightness & Contrast sliders
+        bright_slider = QSlider(Qt.Orientation.Horizontal)
+        bright_slider.setRange(-100, 100)
+        bright_slider.setValue(0)
+        bright_slider.setToolTip("Brightness")
+        bright_slider.valueChanged.connect(self.on_brightness_changed)
+
+        contrast_slider = QSlider(Qt.Orientation.Horizontal)
+        contrast_slider.setRange(10, 1000)
+        contrast_slider.setValue(100)
+        contrast_slider.setToolTip("Contrast")
+        contrast_slider.valueChanged.connect(self.on_contrast_changed)
+
+        bc_layout = QHBoxLayout()
+        bc_layout.addWidget(QLabel("Brightness"))
+        bc_layout.addWidget(bright_slider)
+        bc_layout.addWidget(QLabel("Contrast"))
+        bc_layout.addWidget(contrast_slider)
+
+        # 7) “Send to Slot” button
+        send_btn = QPushButton("Send to Slot ▶")
+        send_btn.clicked.connect(self.send_to_slot)
+
+        # 8) “Show Metrics” button
+        self.show_metrics_btn = QPushButton("Show Metrics")
+        self.show_metrics_btn.clicked.connect(self.show_metrics_window)
+
+        # ─── ASSEMBLE MAIN LAYOUT (exactly one setLayout call!) ─────
+        main_layout = QVBoxLayout()
+
+        # A) Top‐row controls
+        controls = QHBoxLayout()
+        controls.addWidget(self.select_folder_btn)
+        controls.addWidget(self.load_darks_btn)
+        controls.addWidget(self.load_flats_btn)
+        controls.addWidget(self.load_filter_flats_btn)
+        controls.addWidget(self.select_cull_btn)
+        controls.addStretch()
+        controls.addWidget(self.mono_color_checkbox)
+        controls.addWidget(self.process_and_monitor_btn)
+        controls.addWidget(self.monitor_only_btn)
+        controls.addWidget(self.stop_btn)
+        controls.addWidget(self.reset_btn)
+        main_layout.addLayout(controls)
+
+        # B) Status line: folder label + frame count
+        status_line = QHBoxLayout()
+        status_line.addWidget(self.folder_label)
+        status_line.addWidget(self.dark_status_label)
+        status_line.addWidget(self.flat_status_label)
+        status_line.addWidget(self.cull_folder_label)
+        status_line.addStretch()        
+        status_line.addWidget(self.frame_count_label)
+        status_line.addWidget(self.exposure_label)
+        main_layout.addLayout(status_line)
+
+        # C) Zoom toolbar
+        main_layout.addWidget(tb)
+
+        # D) Show Metrics button (separate window)
+        main_layout.addWidget(self.show_metrics_btn)
+
+        # E) Live‐stack preview area
+        main_layout.addWidget(self.view)
+
+        # F) Brightness/Contrast sliders
+        main_layout.addLayout(bc_layout)
+
+        # G) “Send to Slot” + mode/idle labels
+        main_layout.addWidget(send_btn)
+        self.mode_label = QLabel("Mode: Linear Average")
+        self.mode_label.setStyleSheet("color: #a0a0a0;")
+        main_layout.addWidget(self.mode_label)
+        self.status_label = QLabel("Idle")
+        self.status_label.setStyleSheet("color: #a0a0a0;")
+        main_layout.addWidget(self.status_label)
+
+        # Finalize
+        self.setLayout(main_layout)
+
+        # Timer for polling new files
+        self.poll_timer = QTimer(self)
+        self.poll_timer.setInterval(1500)
+        self.poll_timer.timeout.connect(self.check_for_new_frames)
+        self._on_mono_color_toggled(self.mono_color_checkbox.isChecked())
+
+
+    # ─────────────────────────────────────────────────────────────────────────
+    def _on_mono_color_toggled(self, checked: bool):
+        self.mono_color_mode = checked
+        self.filter_stacks.clear()
+        self.filter_counts.clear()
+
+        msg = "Enabled" if checked else "Disabled"
+        self.status_label.setText(f"Mono→Color Mode {msg}")
+
+    def show_metrics_window(self):
+        """Pop up the separate metrics window (never embed it here)."""
+        self.metrics_window.show()
+        self.metrics_window.raise_()
+
+
+    def select_cull_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Cull Folder")
+        if folder:
+            self.cull_folder = folder
+            self.cull_folder_label.setText(f"Cull: {os.path.basename(folder)}")
+
+    def _cull_frame(self, path: str):
+        """
+        Move a flagged frame into the cull folder (if set), 
+        or just update the status label if not.
+        """
+        name = os.path.basename(path)
+        if self.cull_folder:
+            try:
+                os.makedirs(self.cull_folder, exist_ok=True)
+                dst = os.path.join(self.cull_folder, name)
+                shutil.move(path, dst)
+                self.status_label.setText(f"⚠ Culled {name} → {self.cull_folder}")
+            except Exception:
+                self.status_label.setText(f"⚠ Failed to cull {name}")
+        else:
+            self.status_label.setText(f"⚠ Flagged (not stacked): {name}")
+        QApplication.processEvents()
+
+    def open_settings(self):
+        dlg = LiveStackSettingsDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            bs, sigma, fwhm, ecc, stars, mapping = dlg.getValues()
+
+            # 1) Persist into QSettings
+            s = QSettings()
+            s.setValue("LiveStack/bootstrap_frames",   bs)
+            s.setValue("LiveStack/clip_threshold",     sigma)
+            s.setValue("LiveStack/max_fwhm",           fwhm)
+            s.setValue("LiveStack/max_ecc",            ecc)
+            s.setValue("LiveStack/min_star_count",     stars)
+            s.setValue("LiveStack/narrowband_mapping", mapping)
+
+            # 2) Apply to this live‐stack session
+            self.bootstrap_frames   = bs
+            self.clip_threshold     = sigma
+            self.max_fwhm           = fwhm
+            self.max_ecc            = ecc
+            self.min_star_count     = stars
+            self.narrowband_mapping = mapping
+
+            self.status_label.setText(
+                f"↺ Settings saved: BS={bs}, σ={sigma:.1f}, "
+                f"FWHM≤{fwhm:.1f}, ECC≤{ecc:.2f}, Stars≥{stars}, "
+                f"Mapping={mapping}"
+            )
+            QApplication.processEvents()
+
+    def zoom_in(self):
+        self.view.scale(1.2, 1.2)
+
+    def zoom_out(self):
+        self.view.scale(1/1.2, 1/1.2)
+
+    def fit_to_window(self):
+        self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    # — Brightness / Contrast —
+
+    def _refresh_preview(self):
+        """
+        Recompute the current preview array (stack vs. composite)
+        and call update_preview on it.
+        """
+        if self.mono_color_mode:
+            # build the composite from filter_stacks
+            preview = self._build_color_composite()
+        else:
+            # use the normal running stack
+            preview = self.current_stack
+
+        if preview is not None:
+            self.update_preview(preview)
+
+    def on_brightness_changed(self, val: int):
+        self.brightness = val / 100.0  # map to [-1,1]
+        self._refresh_preview()
+
+    def on_contrast_changed(self, val: int):
+        self.contrast = val / 100.0   # map to [0.1,10.0]
+        self._refresh_preview()
+
+    # — Sending out —
+
+    def send_to_slot(self):
+        # 1) Pick the image to send
+        if self.mono_color_mode:
+            img = self._build_color_composite()
+        else:
+            img = self.current_stack
+
+        # 2) Bail if there's nothing ready
+        if img is None:
+            self.status_label.setText("⚠ Nothing to send")
+            return
+
+        # 3) Ask the user which slot
+        mgr = self.parent.image_manager
+        slots = [str(i) for i in range(mgr.max_slots)]
+        current = str(mgr.current_slot)
+        slot_str, ok = QInputDialog.getItem(
+            self, "Select Slot", "Slot:", slots,
+            current=slots.index(current),
+            editable=False
+        )
+        if not ok:
+            return
+        slot_index = int(slot_str)
+
+        # 4) Send the image (make a copy so LiveStack can keep running)
+        metadata = {
+            "source": "LiveStack",
+            "frames_stacked": self.frame_count
+        }
+        mgr.set_image_for_slot(
+            slot_index,
+            img.copy(),
+            metadata,
+            step_name="Live Stack"
+        )
+        if hasattr(self.parent, "set_active_slot"):
+            self.parent.set_active_slot(slot_index)
+        else:
+            mgr.set_current_slot(slot_index)
+
+        # 5) Update status
+        self.status_label.setText(f"Sent to slot {slot_index}")
+
+    # ── New helper: map header["FILTER"] to a single letter key
+    def _get_filter_key(self, header):
+        """
+        Map a FITS header FILTER string to one of:
+        'L' (luminance),
+        'R','G','B',
+        'H' (H-alpha),
+        'O' (OIII),
+        'S' (SII),
+        or return None if it doesn’t match.
+        """
+        raw = header.get('FILTER', '')
+        fn = raw.strip().upper()
+        if not fn:
+            return None
+
+        # H-alpha
+        if fn in ('H', 'HA', 'HALPHA', 'H-ALPHA'):
+            return 'H'
+        # OIII
+        if fn in ('O', 'O3', 'OIII'):
+            return 'O'
+        # SII
+        if fn in ('S', 'S2', 'SII'):
+            return 'S'
+        # Red
+        if fn in ('R', 'RED', 'RD'):
+            return 'R'
+        # Green
+        if fn in ('G', 'GREEN', 'GRN'):
+            return 'G'
+        # Blue
+        if fn in ('B', 'BLUE', 'BL'):
+            return 'B'
+        # Luminance
+        if fn in ('L', 'LUM', 'LUMI', 'LUMINANCE'):
+            return 'L'
+
+        return None
+
+    # ── New helper: stack a single mono frame under filter key
+    def _stack_mono_channel(self, key, img, delta=None):
+        # img: 2D or 3D array; we convert to 2D mono always
+        mono = img if img.ndim==2 else np.mean(img,axis=2)
+        # align if you need (use same logic as color branch)
+        if hasattr(self, 'reference_image_2d'):
+            d = delta or StarRegistrationWorker.compute_affine_transform_astroalign(
+                        mono, self.reference_image_2d)
+            if d is not None:
+                mono = StarRegistrationThread.apply_affine_transform_static(mono, d)
+        # normalize
+        norm = stretch_mono_image(mono, target_median=0.3)
+        # first frame?
+        if key not in self.filter_stacks:
+            self.filter_stacks[key] = norm.copy()
+            self.filter_counts[key] = 1
+            # set reference on first good channel frame
+            if not hasattr(self, 'reference_image_2d'):
+                self.reference_image_2d = norm.copy()
+        else:
+            cnt = self.filter_counts[key]
+            self.filter_stacks[key] = (cnt/self.filter_counts[key]+1)*self.filter_stacks[key] \
+                                      + (1.0/(cnt+1))*norm
+            self.filter_counts[key] += 1
+
+    # ── New helper: build an RGB preview from whatever channels we have
+    def _build_color_composite(self):
+        """
+        Composite filters into an RGB preview according to self.narrowband_mapping:
+
+        • "Natural":
+            – If SII present:
+                R = 0.5*(Ha + SII)
+                G = 0.5*(SII + OIII)
+                B = OIII
+            – Elif any R/G/B loaded:
+                R = R_filter
+                G = G_filter + OIII
+                B = B_filter + OIII
+            – Else (no SII, no R/G/B):
+                R = Ha
+                G = OIII
+                B = OIII
+
+        • Any 3-letter code (e.g. "SHO", "OHS"):
+            R = filter_stacks[mapping[0]]
+            G = filter_stacks[mapping[1]]
+            B = filter_stacks[mapping[2]]
+
+        Missing channels default to zero.
+        """
+        # 1) Determine H, W
+        if self.filter_stacks:
+            first = next(iter(self.filter_stacks.values()))
+            H, W = first.shape
+        elif getattr(self, 'current_stack', None) is not None:
+            H, W = self.current_stack.shape[:2]
+        else:
+            return None
+
+        # helper: get stack or zeros
+        def getf(k):
+            return self.filter_stacks.get(k, np.zeros((H, W), np.float32))
+
+        mode = self.narrowband_mapping.upper()
+        if mode == "NATURAL":
+            Ha = getf('H')
+            O3 = getf('O')
+            S2 = self.filter_stacks.get('S', None)
+            Rf = self.filter_stacks.get('R', None)
+            Gf = self.filter_stacks.get('G', None)
+            Bf = self.filter_stacks.get('B', None)
+
+            if S2 is not None:
+                # narrowband SII branch
+                R = 0.5 * (Ha + S2)
+                G = 0.5 * (S2 + O3)
+                B = O3.copy()
+
+            elif any(x is not None for x in (Rf, Gf, Bf)):
+                # broadband branch: Rf/Gf/Bf with OIII boost
+                R = Rf if Rf is not None else np.zeros((H, W), np.float32)
+                G = (Gf if Gf is not None else np.zeros((H, W), np.float32)) + O3
+                B = (Bf if Bf is not None else np.zeros((H, W), np.float32)) + O3
+
+            else:
+                # fallback HOO
+                R = Ha
+                G = O3
+                B = O3
+
+        else:
+            # direct mapping: e.g. "SHO" → R=S, G=H, B=O
+            letters = list(mode)
+            if len(letters) != 3 or any(l not in ("S","H","O") for l in letters):
+                # invalid code → fallback to natural
+                return self._build_color_composite.__wrapped__(self)
+
+            R = getf(letters[0])
+            G = getf(letters[1])
+            B = getf(letters[2])
+
+        return np.stack([R, G, B], axis=2)
+
+
+    def select_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder to Watch")
+        if folder:
+            self.watch_folder = folder
+            self.folder_label.setText(f"Folder: {os.path.basename(folder)}")
+
+    def load_masters(self):
+        """
+        When the user picks “Load Master Dark…” or “Load Master Flat…”, we load exactly one file
+        (the first in the dialog).  We simply store it in `self.master_dark` or `self.master_flat`,
+        but we also check its dimensions against any existing master so that the user can’t load
+        a 2D flat while the dark is 3D (for example).
+        """
+        sender = self.sender()
+        dlg = QFileDialog(self, "Select Master Files",
+                         filter="FITS TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        if not dlg.exec():
+            return
+
+        chosen = dlg.selectedFiles()[0]
+        img, hdr, bit_depth, is_mono = load_image(chosen)
+        if img is None:
+            QMessageBox.warning(self, "Load Error",
+                                f"Failed to load master file:\n{chosen}")
+            return
+
+        # Convert everything to float32 for consistency
+        img = img.astype(np.float32)
+
+        if "Dark" in sender.text():
+            # If a flat is already loaded, ensure shape‐compatibility
+            if self.master_flat is not None:
+                if not self._shapes_compatible(master=img, other=self.master_flat):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "Cannot load this master dark: it has incompatible shape "
+                        "vs. the already‐loaded master flat."
+                    )
+                    return
+
+            self.master_dark = img
+            self.dark_status_label.setText("Dark: ✅")
+            self.dark_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")            
+            QMessageBox.information(
+                self, "Master Dark Loaded",
+                f"Loaded master dark:\n{os.path.basename(chosen)}"
+            )
+        else:
+            # "Flat" was clicked
+            if self.master_dark is not None:
+                if not self._shapes_compatible(master=self.master_dark, other=img):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "Cannot load this master flat: it has incompatible shape "
+                        "vs. the already‐loaded master dark."
+                    )
+                    return
+
+            self.master_flat = img
+            self.flat_status_label.setText("Flat: ✅")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")            
+            QMessageBox.information(
+                self, "Master Flat Loaded",
+                f"Loaded master flat:\n{os.path.basename(chosen)}"
+            )
+
+    def load_filter_flats(self):
+        """
+        Let the user pick one or more flat files.
+        We try to read the FITS header FILTER key to decide which filter
+        each flat belongs to; otherwise fall back to the filename.
+        """
+        dlg = QFileDialog(self, "Select Filter Flats",
+                          filter="FITS or TIFF (*.fit *.fits *.tif *.tiff)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        if not dlg.exec():
+            return
+
+        files = dlg.selectedFiles()
+        loaded = []
+        for path in files:
+            img, hdr, bit_depth, is_mono = load_image(path)
+            if img is None:
+                continue
+            # guess filter key from header, else from filename
+            key = None
+            if hdr and hdr.get("FILTER"):
+                key = self._get_filter_key(hdr)
+            if not key:
+                # fallback: basename before extension
+                key = os.path.splitext(os.path.basename(path))[0]
+
+            # store it
+            self.master_flats[key] = img.astype(np.float32)
+            loaded.append(key)
+
+        # update the flat status label to list loaded filters
+        if loaded:
+            names = ", ".join(loaded)
+            self.flat_status_label.setText(f"Flats: {names}")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+            QMessageBox.information(
+                self, "Filter Flats Loaded",
+                f"Loaded flats for filters: {names}"
+            )
+        else:
+            QMessageBox.warning(self, "No Flats Loaded",
+                                "No flats could be loaded.")
+
+    def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
+        """
+        Return True if `master` and `other` can be used together in calibration:
+          - Exactly the same shape, OR
+          - master is 2D (H×W) and other is 3D (H×W×3), OR
+          - vice versa.
+        """
+        if master.shape == other.shape:
+            return True
+
+        # If one is 2D and the other is H×W×3, check the first two dims
+        if master.ndim == 2 and other.ndim == 3 and other.shape[:2] == master.shape:
+            return True
+        if other.ndim == 2 and master.ndim == 3 and master.shape[:2] == other.shape:
+            return True
+
+        return False
+
+    def _average_images(self, paths):
+        # stub: load each via load_image(), convert to float32, accumulate & divide
+        return None
+
+    def _normalized_average(self, paths):
+        # stub: load each, divide by its mean, average them, then renormalize
+        return None
+
+    def start_and_process(self):
+        """Process everything currently in folder, then begin monitoring."""
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        # Clear any old record so existing files are re-processed
+        self.processed_files.clear()
+        # Process all current files once
+        self.check_for_new_frames()
+        # Now start monitoring
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Processing & Monitoring: {os.path.basename(self.watch_folder)}")
+
+    def start_monitor_only(self):
+        """Mark existing files as seen and only process new arrivals."""
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        # Populate processed_files with all existing files so they won't be re-processed
+        exts = (
+            "*.fit", "*.fits", "*.tif", "*.tiff",
+            "*.cr2", "*.cr3", "*.nef", "*.arw",
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
+        )
+        all_paths = []
+        for ext in exts:
+            all_paths += glob.glob(os.path.join(self.watch_folder, ext))
+        self.processed_files = set(all_paths)
+
+        # Start monitoring
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Monitoring Only: {os.path.basename(self.watch_folder)}")
+
+    def start_live(self):
+        if not self.watch_folder:
+            self.status_label.setText("❗ No folder selected")
+            return
+        self.is_running = True
+        self.poll_timer.start()
+        self.status_label.setText(f"▶ Monitoring: {os.path.basename(self.watch_folder)}")
+        self.mode_label.setText("Mode: Linear Average")
+
+    def stop_live(self):
+        if self.is_running:
+            self.is_running = False
+            self.poll_timer.stop()
+            self.status_label.setText("■ Stopped")
+        else:
+            self.status_label.setText("■ Already stopped")
+
+    def reset_live(self):
+        if self.is_running:
+            self.is_running = False
+            self.poll_timer.stop()
+            self.status_label.setText("■ Stopped")
+        else:
+            self.status_label.setText("■ Already stopped")
+
+        # Clear all state
+        self.processed_files.clear()
+        self.frame_count = 0
+        self.current_stack = None
+
+        self.total_exposure = 0.0
+        self.exposure_label.setText("Total Exp: 00:00:00")
+
+        self.filter_stacks.clear()
+        self.filter_counts.clear()
+        self.filter_buffers.clear()
+        self.filter_mus.clear()
+        self.filter_m2s.clear()
+
+        if hasattr(self, 'reference_image_2d'):
+            del self.reference_image_2d
+
+        # Re-initialize bootstrapping stats
+        self._buffer = []
+        self._mu = None
+        self._m2 = None
+
+        # NEW: clear the metrics panel
+        self.metrics_window.metrics_panel.clear_all()
+
+        # Update labels
+        self.frame_count_label.setText("Frames: 0")
+        self.status_label.setText("↺ Reset")
+        self.mode_label.setText("Mode: Linear Average")
+
+        # Clear the displayed image
+        self.pixmap_item.setPixmap(QPixmap())
+
+        # Reset zoom/pan fit flag
+        self._did_initial_fit = False
+        #self.master_dark = None
+        #self.master_flat = None
+        #self.dark_status_label.setText("Dark: ❌")
+        #self.flat_status_label.setText("Flat: ❌")
+        #self.dark_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")
+        #self.flat_status_label.setStyleSheet("color: #cccccc; font-weight: bold;")        
+
+
+
+
+    def check_for_new_frames(self):
+        if not self.is_running or not self.watch_folder:
+            return
+
+        # build the list of files with supported extensions
+        exts = (
+            "*.fit", "*.fits", "*.tif", "*.tiff",
+            "*.cr2", "*.cr3", "*.nef", "*.arw",
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
+        )
+        all_paths = []
+        for ext in exts:
+            all_paths += glob.glob(os.path.join(self.watch_folder, ext))
+
+        # only pick the ones we haven’t seen yet
+        new = [p for p in sorted(all_paths) if p not in self.processed_files]
+        if not new:
+            return
+
+        # update status
+        first = os.path.basename(new[0])
+        self.status_label.setText(f"➜ New frame: {first}")
+
+        for path in new:
+            self.processed_files.add(path)
+            self.process_frame(path)
+
+    def process_frame(self, path):
+        # 1) Load
+        # ─── 1) RAW‐file check ────────────────────────────────────────────
+        lower = path.lower()
+        raw_exts = ('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')
+        if lower.endswith(raw_exts):
+            # Attempt to decode using rawpy
+            try:
+                with rawpy.imread(path) as raw:
+                    # Postprocess into an 8‐bit RGB array
+                    # (you could tweak postprocess params if desired)
+                    img_rgb8 = raw.postprocess(
+                        use_camera_wb=True,
+                        no_auto_bright=True,
+                        output_bps=16
+                    )  # shape (H, W, 3), dtype=uint8
+
+                # Convert to float32 [0..1] so it matches load_image() behavior
+                img = img_rgb8.astype(np.float32) / 65535.0
+
+                # Build a minimal FITS header and attempt to extract EXIF tags
+                header = fits.Header()
+                header["SIMPLE"] = True
+                header["BITPIX"] = 16
+                header["CREATOR"] = "LiveStack(RAW)"
+                header["IMAGETYP"] = "RAW"
+                # Default EXPTIME/ISO/DATE-OBS in case EXIF fails
+                header["EXPTIME"] = "Unknown"
+                header["ISO"]     = "Unknown"
+                header["DATE-OBS"] = "Unknown"
+
+                try:
+                    with open(path, 'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                    # EXIF: ExposureTime
+                    exp_tag = tags.get("EXIF ExposureTime") or tags.get("EXIF ShutterSpeedValue")
+                    if exp_tag:
+                        exp_str = str(exp_tag.values)
+                        if '/' in exp_str:
+                            top, bot = exp_str.split('/', 1)
+                            header["EXPTIME"] = (float(top)/float(bot), "Exposure Time (s)")
+                        else:
+                            header["EXPTIME"] = (float(exp_str), "Exposure Time (s)")
+                    # ISO
+                    iso_tag = tags.get("EXIF ISOSpeedRatings")
+                    if iso_tag:
+                        header["ISO"] = str(iso_tag.values)
+                    # Date/time original
+                    date_obs = tags.get("EXIF DateTimeOriginal")
+                    if date_obs:
+                        header["DATE-OBS"] = str(date_obs.values)
+                except Exception:
+                    # If EXIF parsing fails, just leave defaults
+                    pass
+
+                bit_depth = 16
+                is_mono = False
+
+            except Exception as e:
+                # If rawpy fails, bail out early
+                self.status_label.setText(f"⚠ Failed to decode RAW: {os.path.basename(path)}")
+                QApplication.processEvents()
+                return
+
+        else:
+            # ─── 2) Not RAW → call your existing load_image()
+            img, header, bit_depth, is_mono = load_image(path)
+            if img is None:
+                self.status_label.setText(f"⚠ Failed to load {os.path.basename(path)}")
+                QApplication.processEvents()
+                return
+
+        # ——— 2) CALIBRATION (once) ————————————————————————
+        # ——— 2a) DETECT MONO→COLOR MODE ————————————————————
+        mono_key = None
+        if self.mono_color_mode and is_mono and header.get('FILTER') and 'BAYERPAT' not in header:
+            mono_key = self._get_filter_key(header)
+
+        # ——— 2b) CALIBRATION (once) ————————————————————————
+        if self.master_dark is not None:
+            img = img.astype(np.float32) - self.master_dark
+        # prefer per-filter flat if we’re in mono→color and have one
+        if mono_key and mono_key in self.master_flats:
+            img = apply_flat_division_numba(img, self.master_flats[mono_key])
+        elif self.master_flat is not None:
+            img = apply_flat_division_numba(img, self.master_flat)
+
+        # ——— 3) DEBAYER if BAYERPAT ——————————————————————
+        if is_mono and header.get('BAYERPAT'):
+            pat = header['BAYERPAT'][0] if isinstance(header['BAYERPAT'], tuple) else header['BAYERPAT']
+            img = debayer_fits_fast(img, pat)
+            is_mono = False
+
+        # ——— 5) PROMOTION TO 3-CHANNEL if NOT in mono-mode —————
+        if mono_key is None and img.ndim == 2:
+            img = np.stack([img, img, img], axis=2)
+
+        # ——— 6) BUILD PLANE for alignment & metrics —————————
+        plane = img if (mono_key and img.ndim == 2) else np.mean(img, axis=2)
+
+        # ——— 7) ALIGN to reference_image_2d ——————————————————
+        if hasattr(self, 'reference_image_2d'):
+            delta = StarRegistrationWorker.compute_affine_transform_astroalign(
+                plane, self.reference_image_2d
+            )
+            if delta is None:
+                delta = IDENTITY_2x3
+            # apply to full img (if color) and to plane
+            if mono_key is None:
+                img = StarRegistrationThread.apply_affine_transform_static(img, delta)
+            plane = StarRegistrationThread.apply_affine_transform_static(
+                plane if plane.ndim == 2 else plane[:, :, None], delta
+            ).squeeze()
+
+        # ——— 8) NORMALIZE —————————————————————————————
+        if mono_key:
+            norm_plane = stretch_mono_image(plane, target_median=0.3)
+            norm_color = None
+        else:
+            norm_color = stretch_color_image(img, target_median=0.3, linked=False)
+            norm_plane = np.mean(norm_color, axis=2)
+
+        # ——— 9) METRICS & SNR —————————————————————————
+        sc, fwhm, ecc = compute_frame_star_metrics(norm_plane)
+        # instead, use the cumulative stack (or composite) for SNR:
+        if mono_key:
+            # once we have any filter_stacks, build the composite;
+            # fall back to this frame’s plane if it’s the first one
+            if self.filter_stacks:
+                stack_img = self._build_color_composite()
+            else:
+                stack_img = norm_plane
+        else:
+            # for color‐only, use the running‐average stack once it exists,
+            # else fall back to this frame’s normalized color
+            if self.current_stack is not None:
+                stack_img = self.current_stack
+            else:
+                stack_img = norm_color
+        snr_val = estimate_global_snr(stack_img)
+
+        # ——— 10) CULLING? ————————————————————————————
+        flagged = (
+            (fwhm > self.max_fwhm) or
+            (ecc > self.max_ecc)     or
+            (sc < self.min_star_count)
+        )
+        if flagged:
+            self._cull_frame(path)
+            self.metrics_window.metrics_panel.add_point(
+                self.frame_count + 1, fwhm, ecc, sc, snr_val, True
+            )
+            return
+
+        # ─── 11) FIRST-FRAME INITIALIZATION ──────────────────────────────
+        if self.frame_count == 0:
+            # set reference on the very first good frame
+            self.reference_image_2d = norm_plane.copy()
+            self.frame_count = 1
+            self.frame_count_label.setText("Frames: 1")
+            # always start in linear‐average mode
+            if mono_key:
+                self.mode_label.setText(f"Mode: Linear Average ({mono_key})")
+                self.status_label.setText(f"Started {mono_key}-filter linear stack")
+            else:
+                self.mode_label.setText("Mode: Linear Average")
+                self.status_label.setText("Started linear stack")
+            QApplication.processEvents()
+
+            if mono_key:
+                # start the filter stack
+                self.filter_stacks[mono_key]  = norm_plane.copy()
+                self.filter_counts[mono_key]  = 1
+                self.filter_buffers[mono_key] = [norm_plane.copy()]
+            else:
+                # start the normal running stack
+                self.current_stack = norm_color.copy()
+                self._buffer = [norm_color.copy()]
+            # ─── accumulate exposure ─────────────────────
+            exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+            if exp_val is not None:
+                try:
+                    secs = float(exp_val)
+                    self.total_exposure += secs
+                    hrs  = int(self.total_exposure // 3600)
+                    mins = int((self.total_exposure % 3600) // 60)
+                    secs_rem = int(self.total_exposure % 60)
+                    self.exposure_label.setText(
+                        f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                    )
+                except:
+                    pass
+            QApplication.processEvents()
+
+
+        else:
+            # ─── 12) RUNNING–AVERAGE or CLIP-σ UPDATE ────────────────────
+            if mono_key is None:
+                # — Color-only stacking —
+                if self.frame_count < self.bootstrap_frames:
+                    # 12a) Linear bootstrap
+                    n = self.frame_count + 1
+                    self.current_stack = (
+                        (self.frame_count / n) * self.current_stack
+                        + (1.0 / n) * norm_color
+                    )
+                    self._buffer.append(norm_color.copy())
+
+                    # hit the bootstrap threshold?
+                    if n == self.bootstrap_frames:
+                        # init Welford stats
+                        buf = np.stack(self._buffer, axis=0)
+                        self._mu = np.mean(buf, axis=0)
+                        diffs = buf - self._mu[np.newaxis, ...]
+                        self._m2 = np.sum(diffs * diffs, axis=0)
+                        self._buffer = None
+
+                        # switch to clipping mode
+                        self.mode_label.setText("Mode: μ-σ Clipping Average")
+                        self.status_label.setText("Switched to μ–σ clipping (color)")
+                        QApplication.processEvents()
+                    else:
+                        # still linear
+                        self.mode_label.setText("Mode: Linear Average")
+                        self.status_label.setText(f"Processed color frame #{n} (linear)")
+                        QApplication.processEvents()
+                else:
+                    # 12b) μ–σ clipping
+                    sigma = np.sqrt(self._m2 / (self.frame_count - 1))
+                    mask = np.abs(norm_color - self._mu) <= (self.clip_threshold * sigma)
+                    clipped = np.where(mask, norm_color, self._mu)
+
+                    n = self.frame_count + 1
+                    self.current_stack = (
+                        (self.frame_count / n) * self.current_stack
+                        + (1.0 / n) * clipped
+                    )
+
+                    # Welford update
+                    delta_mu = clipped - self._mu
+                    self._mu += delta_mu / n
+                    delta2 = clipped - self._mu
+                    self._m2 += delta_mu * delta2
+
+                    # stay in clipping mode
+                    self.mode_label.setText("Mode: μ-σ Clipping Average")
+                    self.status_label.setText(f"Processed color frame #{n} (clipped)")
+                    QApplication.processEvents()
+
+                # bump global frame count
+                self.frame_count = n
+                # ─── accumulate exposure ─────────────────────
+                exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+                if exp_val is not None:
+                    try:
+                        secs = float(exp_val)
+                        self.total_exposure += secs
+                        hrs  = int(self.total_exposure // 3600)
+                        mins = int((self.total_exposure % 3600) // 60)
+                        secs_rem = int(self.total_exposure % 60)
+                        self.exposure_label.setText(
+                            f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                        )
+                    except:
+                        pass
+                QApplication.processEvents()
+
+
+            else:
+                # — Mono→color (per-filter) stacking —
+                count = self.filter_counts.get(mono_key, 0)
+                buf   = self.filter_buffers.setdefault(mono_key, [])
+
+                if count < self.bootstrap_frames:
+                    # 12c) Linear bootstrap per-filter
+                    new_count = count + 1
+                    if count == 0:
+                        self.filter_stacks[mono_key] = norm_plane.copy()
+                    else:
+                        self.filter_stacks[mono_key] = (
+                            (count / new_count) * self.filter_stacks[mono_key]
+                            + (1.0 / new_count) * norm_plane
+                        )
+                    buf.append(norm_plane.copy())
+                    self.filter_counts[mono_key] = new_count
+
+                    if new_count == self.bootstrap_frames:
+                        # init Welford
+                        stacked = np.stack(buf, axis=0)
+                        mu    = np.mean(stacked, axis=0)
+                        diffs = stacked - mu[np.newaxis, ...]
+                        m2    = np.sum(diffs * diffs, axis=0)
+                        self.filter_mus[mono_key] = mu
+                        self.filter_m2s[mono_key] = m2
+
+                        self.mode_label.setText(f"Mode: μ-σ Clipping Average ({mono_key})")
+                        self.status_label.setText(f"Switched to μ–σ clipping ({mono_key})")
+                        QApplication.processEvents()
+                    else:
+                        # still linear
+                        self.mode_label.setText(f"Mode: Linear Average ({mono_key})")
+                        self.status_label.setText(
+                            f"Processed {mono_key}-filter frame #{new_count} (linear)"
+                        )
+                        QApplication.processEvents()
+
+                else:
+                    # 12d) μ–σ clipping per-filter
+                    mu = self.filter_mus[mono_key]
+                    m2 = self.filter_m2s[mono_key]
+                    sigma = np.sqrt(m2 / (count - 1))
+                    mask   = np.abs(norm_plane - mu) <= (self.clip_threshold * sigma)
+                    clipped = np.where(mask, norm_plane, mu)
+
+                    new_count = count + 1
+                    self.filter_stacks[mono_key] = (
+                        (count / new_count) * self.filter_stacks[mono_key]
+                        + (1.0 / new_count) * clipped
+                    )
+
+                    # Welford update on µ and m2
+                    delta   = clipped - mu
+                    new_mu  = mu + delta / new_count
+                    delta2  = clipped - new_mu
+                    new_m2  = m2 + delta * delta2
+                    self.filter_mus[mono_key] = new_mu
+                    self.filter_m2s[mono_key] = new_m2
+                    self.filter_counts[mono_key] = new_count
+
+                    self.mode_label.setText(f"Mode: μ-σ Clipping Average ({mono_key})")
+                    self.status_label.setText(
+                        f"Processed {mono_key}-filter frame #{new_count} (clipped)"
+                    )
+                    QApplication.processEvents()
+
+                # bump global frame count
+                self.frame_count += 1
+                self.frame_count_label.setText(f"Frames: {self.frame_count}")
+                # ─── accumulate exposure ─────────────────────
+                exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+                if exp_val is not None:
+                    try:
+                        secs = float(exp_val)
+                        self.total_exposure += secs
+                        hrs  = int(self.total_exposure // 3600)
+                        mins = int((self.total_exposure % 3600) // 60)
+                        secs_rem = int(self.total_exposure % 60)
+                        self.exposure_label.setText(
+                            f"Total Exp: {hrs:02d}:{mins:02d}:{secs_rem:02d}"
+                        )
+                    except:
+                        pass
+                QApplication.processEvents()
+
+            # ─── 13) Update UI ─────────────────────────────────────────
+            self.frame_count_label.setText(f"Frames: {self.frame_count}")
+            QApplication.processEvents()
+
+        # ——— 13) METRICS PANEL for good frame —————————————
+        self.metrics_window.metrics_panel.add_point(
+            self.frame_count, fwhm, ecc, sc, snr_val, False
+        )
+
+        # ——— 14) PREVIEW & STATUS LABEL —————————————————————
+        if mono_key:
+            preview = self._build_color_composite()
+            self.status_label.setText(f"Stacked {mono_key}-filter frame {os.path.basename(path)}")
+            QApplication.processEvents()
+        else:
+            preview = self.current_stack
+            self.status_label.setText(f"✔ processed {os.path.basename(path)}")
+            QApplication.processEvents()
+
+        self.update_preview(preview)
+        QApplication.processEvents()
+
+
+
+
+
+    def update_preview(self, array: np.ndarray):
+        """
+        Apply brightness/contrast, convert to QImage, and display in QGraphicsView
+        without resetting zoom/pan after the first fit.
+        """
+        # 1) normalize array [0..1] → adjust contrast & brightness
+        arr = np.clip(array, 0.0, 1.0).astype(np.float32)
+        pivot = 0.3
+        arr = ((arr - pivot) * self.contrast + pivot) + self.brightness
+        arr = np.clip(arr, 0.0, 1.0)
+
+        # 2) convert to uint8
+        arr8 = (arr * 255).astype(np.uint8)
+        h, w = arr8.shape[:2]
+
+        # 3) build QImage
+        if arr8.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            bytespp = w
+        else:
+            fmt = QImage.Format.Format_RGB888
+            bytespp = 3 * w
+        qimg = QImage(arr8.data, w, h, bytespp, fmt)
+
+        # 4) update the existing pixmap item
+        pix = QPixmap.fromImage(qimg)
+        self.pixmap_item.setPixmap(pix)
+
+        # 5) update scene rectangle so scrollbars know the new size
+        self.scene.setSceneRect(0, 0, w, h)
+
+        # 6) initial fit only once
+        if not self._did_initial_fit:
+            self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self._did_initial_fit = True
 
 def load_fits_tile(filepath, y_start, y_end, x_start, x_end):
     """
@@ -13616,6 +17733,51 @@ class MosaicMasterDialog(QDialog):
                             k.startswith("CRVAL3") or k.startswith("CRPIX3") or k.startswith("CDELT3") or
                             k.startswith("CD3_") or k.startswith("PC3_") or k.startswith("PC_3")):
                             del solved_header[k]
+                    for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]:
+                        if key in solved_header:
+                            try:
+                                solved_header[key] = int(solved_header[key])
+                            except ValueError:
+                                print(f"Warning: {key} value '{solved_header[key]}' could not be converted to int.")
+                                del solved_header[key]   
+                    # Fix for malformed SIP distortion headers
+                    # Fix for malformed SIP distortion headers
+                    sip_keys = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+                    sip_orders = {}
+
+                    # Parse and coerce to int
+                    for k in sip_keys:
+                        if k in solved_header:
+                            try:
+                                sip_orders[k] = int(solved_header[k])
+                            except Exception:
+                                print(f"Warning: SIP keyword {k} has invalid value {solved_header[k]}, removing.")
+                                del solved_header[k]
+
+                    # Patch missing A/B or AP/BP if needed
+                    if "A_ORDER" in sip_orders and "B_ORDER" not in sip_orders:
+                        solved_header["B_ORDER"] = sip_orders["A_ORDER"]
+                        print("Patched B_ORDER to match A_ORDER:", sip_orders["A_ORDER"])
+                    elif "B_ORDER" in sip_orders and "A_ORDER" not in sip_orders:
+                        solved_header["A_ORDER"] = sip_orders["B_ORDER"]
+                        print("Patched A_ORDER to match B_ORDER:", sip_orders["B_ORDER"])
+
+                    if "AP_ORDER" in sip_orders and "BP_ORDER" not in sip_orders:
+                        solved_header["BP_ORDER"] = sip_orders["AP_ORDER"]
+                        print("Patched BP_ORDER to match AP_ORDER:", sip_orders["AP_ORDER"])
+                    elif "BP_ORDER" in sip_orders and "AP_ORDER" not in sip_orders:
+                        solved_header["AP_ORDER"] = sip_orders["BP_ORDER"]
+                        print("Patched AP_ORDER to match BP_ORDER:", sip_orders["BP_ORDER"])
+
+
+                    # Force SIP orders to be int if still present
+                    for key in sip_keys:
+                        if key in solved_header:
+                            try:
+                                solved_header[key] = int(solved_header[key])
+                            except ValueError:
+                                print(f"Warning: {key} = {solved_header[key]} could not be converted to int. Removing.")
+                                del solved_header[key]                                                         
                     # Ensure mandatory WCS keys are present.
                     solved_header.setdefault("CTYPE1", "RA---TAN")
                     solved_header.setdefault("CTYPE2", "DEC--TAN")
@@ -13705,7 +17867,6 @@ class MosaicMasterDialog(QDialog):
                         
                     # (Optional: You can still detect stars if needed, but here we opt to use astroalign directly.)
                     try:
-                        import astroalign
                         # reproj_red is already a grayscale version from the reprojected image.
                         reproj_gray = reproj_red  
                         self.status_label.setText("Computing affine transform with astroalign...")
@@ -14514,7 +18675,6 @@ class MosaicMasterDialog(QDialog):
 
             except Exception as e:
                 print(f"[DEBUG] process_alignment error => {e}")
-                import traceback
                 traceback.print_exc()
                 return False
 
@@ -15562,7 +19722,7 @@ class MosaicMasterDialog(QDialog):
 
         # 3) Run ASTAP on the temporary file.
         process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
         print("Running ASTAP with arguments:", args)
         process.start(self.astap_exe, args)
         if not process.waitForStarted(5000):
@@ -15738,7 +19898,6 @@ class MosaicMasterDialog(QDialog):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -16311,7 +20470,6 @@ class StellarAlignmentDialog(QDialog):
         QApplication.processEvents()
 
         try:
-            import astroalign
             # Compute the transform to align the target image to the source.
             # Note: The order of arguments matters: here we find a transform that maps tgt_gray to src_gray.
             transform_obj, (src_pts, tgt_pts) = astroalign.find_transform(tgt_gray, src_gray)
@@ -16325,7 +20483,6 @@ class StellarAlignmentDialog(QDialog):
         self.status_label.setText("Warping target image with astroalign transform...")
         QApplication.processEvents()
 
-        import cv2
         H, W = src.shape[:2]
         # Apply the computed transform to the target image.
         if tgt.ndim == 2:
@@ -16493,36 +20650,23 @@ class StarRegistrationWorker(QRunnable):
                 use_ref, use_img = self.reference_image, img_for_alignment
 
             # 6) Try astroalign *on the downsampled images* first
+            # 6) Try Astroalign (no fallback)
             transform = None
-            if self.use_astroalign and use_ref is not None and use_ref.ndim == 2:
+            if use_ref is not None and use_ref.ndim == 2:
                 transform = self.compute_affine_transform_astroalign(use_img, use_ref)
-                if transform is not None:
-                    self.signals.progress.emit(f"Astroalign computed delta transform for {os.path.basename(self.file_path)}")
-                else:
-                    self.signals.progress.emit(f"Astroalign failed for {os.path.basename(self.file_path)}")
 
-            # 7) If astroalign didn’t work, fall back to DAO/RANSAC on the downsampled
             if transform is None:
-                self.signals.progress.emit(f"✨ Detecting stars in {os.path.basename(self.file_path)}")
-                img_stars = StarRegistrationThread.detect_grid_stars_static(use_img)
-                if len(img_stars) < 9:
-                    self.signals.error.emit(f"Not enough stars in {self.original_file}")
-                    return
-                self.signals.progress.emit(f"Detected {len(img_stars)} stars in {os.path.basename(self.file_path)}")
+                # if Astroalign fails, bail out immediately
+                self.signals.error.emit(
+                    f"Astroalign failed for {os.path.basename(self.file_path)} – skipping"
+                )
+                return
 
-                if self.use_triangle:
-                    transform = StarRegistrationThread.compute_affine_transform_triangle_then_ransac(
-                        img_stars, self.ref_stars, self.ref_triangles
-                    )
-                else:
-                    transform = StarRegistrationThread.compute_affine_transform_with_ransac_static(
-                        img_stars, self.ref_stars, self.ref_triangles
-                    )
-
-                if transform is None:
-                    self.signals.error.emit(f"Alignment failed for {self.original_file}")
-                    return
-                self.signals.progress.emit(f"Computed delta transform for {os.path.basename(self.file_path)}")
+            # report success
+            self.signals.progress.emit(
+                f"Astroalign delta for {os.path.basename(self.file_path)}: "
+                f"dx={transform[0,2]:.2f}, dy={transform[1,2]:.2f}"
+            )
 
             # 8) Upscale the small-image translation back to full resolution
             transform = np.array(transform, dtype=np.float64).reshape(2, 3)
@@ -16571,7 +20715,6 @@ class StarRegistrationWorker(QRunnable):
 
     @staticmethod
     def compute_affine_transform_astroalign(source_img, reference_img):
-        import astroalign
         try:
             transform_obj, _ = astroalign.find_transform(source_img, reference_img)
             return transform_obj.params[0:2, :]
@@ -16591,6 +20734,7 @@ IDENTITY_2x3 = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64)
 class StarRegistrationThread(QThread):
     progress_update = pyqtSignal(str)
     registration_complete = pyqtSignal(bool, str)
+    progress_step = pyqtSignal(int, int)  # (done, total)
 
     def __init__(self, reference_image_path, files_to_align, output_directory, 
                  max_refinement_passes=3, shift_tolerance=0.2):
@@ -16608,6 +20752,8 @@ class StarRegistrationThread(QThread):
         # Store cumulative transforms keyed by the persistent (raw) file path.
         self.alignment_matrices = {}
         self.transform_deltas = []  # List of shift arrays per pass.
+        self._done = 0
+        self._total = len(self.original_files) * self.max_refinement_passes        
 
     def run(self):
         try:
@@ -16703,6 +20849,11 @@ class StarRegistrationThread(QThread):
         except Exception as e:
             self.registration_complete.emit(False, f"Error: {e}")
 
+    def _increment_progress(self):
+        self._done += 1
+        self.progress_step.emit(self._done, self._total)
+
+
     def run_one_registration_pass(self, ref_stars, ref_triangles, pass_index):
         pool = QThreadPool.globalInstance()
         num_cores = os.cpu_count() or 4
@@ -16725,14 +20876,16 @@ class StarRegistrationThread(QThread):
                 ref_stars=ref_stars,
                 ref_triangles=ref_triangles,
                 output_directory=self.output_directory,
-                use_triangle=(pass_index >= 5),
-                use_astroalign=use_astroalign,
+                use_triangle=False,
+                use_astroalign=True,
                 reference_image=self.reference_image_2d,
                 downsample_factor=2
             )
             worker.signals.progress.connect(self.on_worker_progress)
             worker.signals.error.connect(self.on_worker_error)
+            worker.signals.result.connect(self._increment_progress)
             worker.signals.result_transform.connect(self.on_worker_result_transform)
+
             pool.start(worker)
         
         pool.waitForDone()
@@ -16766,12 +20919,13 @@ class StarRegistrationThread(QThread):
                     is_mono=False
                 )
                 transformed_files[original_file] = transformed_path
+
             else:
                 # Delta is small, so we consider this frame converged.
                 remaining_files[original_file] = current_file
                 aligned_count += 1
                 skipped_files.append(os.path.basename(current_file))  # Log the filename
-
+                
         self.transform_deltas.append(pass_deltas)
         # Update the persistent mapping for the next pass.
         self.file_key_to_current_path = {**transformed_files, **remaining_files}
@@ -17160,8 +21314,6 @@ class StarRegistrationThread(QThread):
 
     @staticmethod
     def apply_affine_transform_static(image, transform_matrix):
-        import numpy as np
-        import cv2
         # Ensure the transform matrix is a NumPy array of shape (2,3) and type float32.
         transform_matrix = np.array(transform_matrix, dtype=np.float32).reshape(2, 3)
         
@@ -17211,8 +21363,7 @@ class StarRegistrationThread(QThread):
         
         Returns an affine transform (2x3 matrix) or None if matching fails.
         """
-        import numpy as np
-        from itertools import combinations
+        
         from scipy.spatial import Delaunay
 
         if len(img_stars) < 3:
@@ -17879,66 +22030,99 @@ class PlateSolver(QDialog):
         else:
             self.slot_status_label.setText(message)
 
-    def save_temp_fits_image(self, normalized_image, image_path: str):
+    def save_temp_fits_image(self, normalized_image: np.ndarray, image_path: str, header_override: fits.Header = None) -> str:
         """
-        Save the normalized_image as a FITS file to a temporary file.
-        
-        If the original image is FITS, this method retrieves the stored metadata
-        from the ImageManager and passes it directly to save_image().
-        If not, it generates a minimal header.
-        
-        Returns the path to the temporary FITS file.
+        Save `normalized_image` as a FITS file to a temporary path.
+
+        If the original image is FITS, it will try to pull its header (or use
+        `header_override` if provided).  Otherwise, it creates a minimal header.
+
+        Before writing, it strips any WCS/CD/CROTA/CDELT/CTYPE/etc. keywords so
+        that ASTAP can write a completely fresh solution.
+
+        Returns the full path to the temporary FITS file.
         """
-        # Always save as FITS.
+        # Always write out as FITS with 32-bit float pixels.
         selected_format = "fits"
         bit_depth = "32-bit floating point"
-        is_mono = (normalized_image.ndim == 2 or 
-                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
-        
-        # If the original image is FITS, try to get its stored metadata.
-        original_header = None
-        if image_path.lower().endswith((".fits", ".fit")):
-            if self.parent() and hasattr(self.parent(), "image_manager"):
-                # Use the metadata from the current slot.
-                _, meta = self.parent().image_manager.get_current_image_and_metadata()
-                # Assume that meta already contains a proper 'original_header'
-                # (or the entire meta is the header).
-                original_header = meta.get("original_header", None)
-            # If nothing is stored, fall back to creating a minimal header.
-            if original_header is None:
-                print("No stored FITS header found; creating a minimal header.")
-                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+        # Determine if this is truly a mono image:
+        is_mono = (normalized_image.ndim == 2 or
+                (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+
+        # === 1) Decide which header to use: override vs. slot‐metadata vs. disk‐file vs. minimal
+        if header_override is not None:
+            # If caller gave us a cleaned header, use that exactly.
+            clean_header = header_override.copy()
         else:
-            # For non-FITS images, generate a minimal header.
-            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
-        
-        # Create a temporary filename.
+            # Otherwise, attempt to load the original header from ImageManager (slot) or disk.
+            original_header = None
+
+            if image_path.lower().endswith((".fits", ".fit")):
+                # 1a) Try slot‐based header if ImageManager is present:
+                if self.parent() and hasattr(self.parent(), "image_manager"):
+                    _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                    original_header = meta.get("original_header", None)
+
+                # 1b) If that failed (or batch mode), read directly from disk:
+                if original_header is None:
+                    try:
+                        with fits.open(image_path, memmap=False) as hdul:
+                            original_header = hdul[0].header.copy()
+                        print("Original FITS header loaded from file.")
+                    except Exception as e:
+                        print("Failed to load header from FITS file; will create minimal header. Error:", e)
+
+                # 1c) If still no header, fallback to minimal:
+                if original_header is None:
+                    print("No stored FITS header found; creating a minimal header.")
+                    original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+                clean_header = original_header.copy()
+            else:
+                # Non‐FITS images: create a minimal header
+                clean_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+        # === 2) Strip any WCS/CD/CTYPE/CROTA/CDELT/etc. keywords from clean_header ===
+        for key in list(clean_header.keys()):
+            for prefix in (
+                "CRPIX", "CRVAL", "CDELT", "CROTA",
+                "CD1_", "CD2_", "CTYPE", "CUNIT",
+                "WCSAXES", "LATPOLE", "LONPOLE",
+                "EQUINOX", "PV1_", "PV2_",
+                "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
+                "SIP", "PLTSOLVD"
+            ):
+                if key.upper().startswith(prefix):
+                    clean_header.pop(key, None)
+                    break
+
+        # === 3) Write out the temp FITS using save_image() ===
         tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
         tmp_path = tmp_file.name
         tmp_file.close()
-        
+
         try:
-            # Call your global save_image() exactly as in AstroEditingSuite.
             save_image(
                 img_array=normalized_image,
                 filename=tmp_path,
                 original_format=selected_format,
                 bit_depth=bit_depth,
-                original_header=original_header,
+                original_header=clean_header,
                 is_mono=is_mono
-                # (image_meta and file_meta can be omitted if not needed)
             )
-            print(f"Temporary normalized FITS saved to: {tmp_path}")
+            print(f"Temporary cleaned FITS saved to: {tmp_path}")
         except Exception as e:
             print("Error saving temporary FITS file using save_image():", e)
             raise e
+
         return tmp_path
+
 
     def create_minimal_fits_header(self, img_array, is_mono=False):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -18006,16 +22190,40 @@ class PlateSolver(QDialog):
         # --- Normalize the image ---
         normalized_image = self.stretch_image(image_data)
 
-        # --- Save normalized image to a temporary FITS file ---
+        # --- 1) Copy original_header & strip any old WCS keywords before saving ---
+        if original_header is None:
+            # Fallback to a minimal header if none was loaded
+            clean_header = self.create_minimal_fits_header(normalized_image, 
+                                                          normalized_image.ndim == 2 or (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+        else:
+            clean_header = original_header.copy()
+        for key in list(clean_header.keys()):
+            for prefix in (
+                "CRPIX", "CRVAL", "CDELT", "CROTA",
+                "CD1_", "CD2_", "CTYPE", "CUNIT",
+                "WCSAXES", "LATPOLE", "LONPOLE",
+                "EQUINOX", "PV1_", "PV2_",
+                "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
+                "SIP", "PLTSOLVD"
+            ):
+                if key.upper().startswith(prefix):
+                    clean_header.pop(key, None)
+                    break
+
+        # --- 2) Write the stretched image to a temp FITS using our cleaned header ---
         try:
-            tmp_path = self.save_temp_fits_image(normalized_image, image_path)
+            tmp_path = self.save_temp_fits_image(
+                normalized_image,
+                image_path,
+                header_override=clean_header
+            )
         except Exception as e:
             print("Failed to save temporary FITS file:", e)
             return False
 
         # --- Run ASTAP on the temporary file ---
         process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
         print("Running ASTAP with arguments:", args)
         process.start(self.astap_exe, args)
         if not process.waitForStarted(5000):
@@ -18144,19 +22352,56 @@ class PlateSolver(QDialog):
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
+
         # --- Directly update the metadata dictionary for the current slot ---
-        if update_manager:
-            if self.parent() and hasattr(self.parent(), "image_manager"):
-                try:
-                    current_slot = self.parent().image_manager.current_slot
-                    self.parent().image_manager._metadata[current_slot].update(solved_header)
-                    print("ImageManager metadata for slot", current_slot, "updated with solved header.")
-                except Exception as e:
-                    print("Error updating ImageManager metadata with solved data:", e)
-                    return False
-            else:
-                print("No parent ImageManager found; cannot update solved metadata.")
-                return False
+        # --- Directly update the metadata dictionary for the current slot ---
+        # inside run_astap(), after you’ve built solved_header:
+        if update_manager and getattr(self, "_from_slot", False):
+            img_mgr = self.parent().image_manager
+            slot    = img_mgr.current_slot
+
+            # ensure we have both A_ORDER and B_ORDER
+            if "B_ORDER" in solved_header and "A_ORDER" not in solved_header:
+                solved_header["A_ORDER"] = solved_header["B_ORDER"]
+            if "A_ORDER" in solved_header and "B_ORDER" not in solved_header:
+                solved_header["B_ORDER"] = solved_header["A_ORDER"]
+
+            # Which keywords we actually want
+            int_keys = {"A_ORDER","B_ORDER","AP_ORDER","BP_ORDER","WCSAXES"}
+            sip_coef = re.compile(r"^(?:A|B|AP|BP)_(?:\d+_\d+)$")
+            linear   = re.compile(r"^(?:CRPIX|CRVAL|CDELT|CD|PC)\d?_?\d*$")
+            ctype    = re.compile(r"^(?:CTYPE|CUNIT)\d?$")
+
+            full_hdr = fits.Header()
+            for k, v in solved_header.items():
+                # skip everything but SIP + linear WCS + axis types
+                if k in int_keys:
+                    # grab first integer in the string
+                    m = re.match(r"\s*([+-]?\d+)", str(v))
+                    full_hdr[k] = int(m.group(1)) if m else int(float(v))
+
+                elif sip_coef.match(k):
+                    # floating‐point SIP coefficients
+                    m = re.match(r"\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)", str(v))
+                    full_hdr[k] = float(m.group(1)) if m else float(v)
+
+                elif linear.match(k):
+                    # CRPIX, CRVAL, CDELT, CD, PC
+                    m = re.match(r"\s*([+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)", str(v))
+                    full_hdr[k] = float(m.group(1)) if m else float(v)
+
+                elif ctype.match(k):
+                    full_hdr[k] = str(v).strip("'\"")
+
+                else:
+                    # everything else gets dropped
+                    continue
+
+            # stash the cleaned FITS header + SIP‐aware WCS
+            img_mgr._metadata[slot]["original_header"] = full_hdr
+            img_mgr._metadata[slot]["wcs"]             = WCS(full_hdr)
+
+            print(f"✔ stored just the WCS+SIP keywords in slot {slot}")
         else:
             print("Batch mode: Skipping image manager metadata update.")
 
@@ -18395,12 +22640,17 @@ class PlateSolver(QDialog):
         item["wcs"] = WCS(wcs_header)
 
         # --- (Optional) Update the metadata of the slot if applicable ---
-        if getattr(self, "_from_slot", False) and hasattr(self, "_slot_meta"):
-            if "file_path" not in wcs_header and "file_path" in self._slot_meta:
-                wcs_header["file_path"] = self._slot_meta["file_path"]
-            # Directly update the metadata dictionary for the current slot.
-            self.parent().image_manager._metadata[self.parent().image_manager.current_slot].update(wcs_header)
-            print("ImageManager metadata for current slot updated with solved header.")
+        if getattr(self, "_from_slot", False):
+            img_mgr = self.parent().image_manager
+            slot    = img_mgr.current_slot
+
+            # save the blind‐solve header as your new "original_header"
+            img_mgr._metadata[slot]["original_header"] = wcs_header.copy()
+
+            # build & stash the SIP‐aware WCS too
+            img_mgr._metadata[slot]["wcs"] = WCS(wcs_header)
+
+            print(f"✔ saved blind‐solve header + WCS in slot {slot}")
 
         # --- Now prompt the user to save the new plate-solved FITS file ---
         save_path, _ = QFileDialog.getSaveFileName(self, "Save Plate-Solved FITS", "", "FITS files (*.fits *.fit)")
@@ -18658,7 +22908,7 @@ class BatchPlateSolverDialog(QDialog):
             return False
 
         process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
         self.logStatus(f"Running ASTAP with arguments: {args}")
         process.start(astap_exe, args)
         if not process.waitForStarted(5000):
@@ -18808,71 +23058,99 @@ class BatchPlateSolverDialog(QDialog):
         self.was_single_channel = was_single_channel
         return stretched_image
 
-    def save_temp_fits_image(self, normalized_image, image_path: str):
+    def save_temp_fits_image(self, normalized_image: np.ndarray, image_path: str, header_override: fits.Header = None) -> str:
         """
-        Save the normalized_image as a FITS file to a temporary file.
-        
-        If the original image is FITS, this method retrieves the stored metadata
-        from the ImageManager and passes it directly to save_image().
-        If not, it generates a minimal header.
-        
-        Returns the path to the temporary FITS file.
+        Save `normalized_image` as a FITS file to a temporary path.
+
+        If the original image is FITS, it will try to pull its header (or use
+        `header_override` if provided).  Otherwise, it creates a minimal header.
+
+        Before writing, it strips any WCS/CD/CROTA/CDELT/CTYPE/etc. keywords so
+        that ASTAP can write a completely fresh solution.
+
+        Returns the full path to the temporary FITS file.
         """
-        # Always save as FITS.
+        # Always write out as FITS with 32-bit float pixels.
         selected_format = "fits"
         bit_depth = "32-bit floating point"
-        is_mono = (normalized_image.ndim == 2 or 
-                   (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
-        
-        # If the original image is FITS, try to get its stored metadata.
-        original_header = None
-        if image_path.lower().endswith((".fits", ".fit")):
-            # In single-image mode, an ImageManager might be available.
-            if self.parent() and hasattr(self.parent(), "image_manager"):
-                _, meta = self.parent().image_manager.get_current_image_and_metadata()
-                original_header = meta.get("original_header", None)
-            else:
-                # In batch mode, no ImageManager is available; try reading the header directly.
-                try:
-                    with fits.open(image_path, memmap=False) as hdul:
-                        original_header = dict(hdul[0].header)
-                    print("Original FITS header loaded from file.")
-                except Exception as e:
-                    print("Failed to load header from FITS file; creating a minimal header. Error:", e)
-            if original_header is None:
-                print("No stored FITS header found; creating a minimal header.")
-                original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+        # Determine if this is truly a mono image:
+        is_mono = (normalized_image.ndim == 2 or
+                (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+
+        # === 1) Decide which header to use: override vs. slot‐metadata vs. disk‐file vs. minimal
+        if header_override is not None:
+            # If caller gave us a cleaned header, use that exactly.
+            clean_header = header_override.copy()
         else:
-            # For non-FITS images, generate a minimal header.
-            original_header = self.create_minimal_fits_header(normalized_image, is_mono)
-        
-        # Create a temporary filename.
+            # Otherwise, attempt to load the original header from ImageManager (slot) or disk.
+            original_header = None
+
+            if image_path.lower().endswith((".fits", ".fit")):
+                # 1a) Try slot‐based header if ImageManager is present:
+                if self.parent() and hasattr(self.parent(), "image_manager"):
+                    _, meta = self.parent().image_manager.get_current_image_and_metadata()
+                    original_header = meta.get("original_header", None)
+
+                # 1b) If that failed (or batch mode), read directly from disk:
+                if original_header is None:
+                    try:
+                        with fits.open(image_path, memmap=False) as hdul:
+                            original_header = hdul[0].header.copy()
+                        print("Original FITS header loaded from file.")
+                    except Exception as e:
+                        print("Failed to load header from FITS file; will create minimal header. Error:", e)
+
+                # 1c) If still no header, fallback to minimal:
+                if original_header is None:
+                    print("No stored FITS header found; creating a minimal header.")
+                    original_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+                clean_header = original_header.copy()
+            else:
+                # Non‐FITS images: create a minimal header
+                clean_header = self.create_minimal_fits_header(normalized_image, is_mono)
+
+        # === 2) Strip any WCS/CD/CTYPE/CROTA/CDELT/etc. keywords from clean_header ===
+        for key in list(clean_header.keys()):
+            for prefix in (
+                "CRPIX", "CRVAL", "CDELT", "CROTA",
+                "CD1_", "CD2_", "CTYPE", "CUNIT",
+                "WCSAXES", "LATPOLE", "LONPOLE",
+                "EQUINOX", "PV1_", "PV2_",
+                "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
+                "SIP", "PLTSOLVD"
+            ):
+                if key.upper().startswith(prefix):
+                    clean_header.pop(key, None)
+                    break
+
+        # === 3) Write out the temp FITS using save_image() ===
         tmp_file = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
         tmp_path = tmp_file.name
         tmp_file.close()
-        
+
         try:
-            # Call your global save_image() exactly as in AstroEditingSuite.
             save_image(
                 img_array=normalized_image,
                 filename=tmp_path,
                 original_format=selected_format,
                 bit_depth=bit_depth,
-                original_header=original_header,
+                original_header=clean_header,
                 is_mono=is_mono
-                # (image_meta and file_meta can be omitted if not needed)
             )
-            print(f"Temporary normalized FITS saved to: {tmp_path}")
+            print(f"Temporary cleaned FITS saved to: {tmp_path}")
         except Exception as e:
             print("Error saving temporary FITS file using save_image():", e)
             raise e
+
         return tmp_path
+
 
     def create_minimal_fits_header(self, img_array, is_mono=False):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -18940,6 +23218,7 @@ class BatchPlateSolverDialog(QDialog):
         self.logStatus("Batch plate solving completed.")
 
 
+
 class PSFViewer(QDialog):
     def __init__(self, image, parent=None):
         """
@@ -18950,22 +23229,27 @@ class PSFViewer(QDialog):
         self.image = image
         self.zoom_factor = 1.0
         self.log_scale = False
-        self.star_catalog = None
-        self.histogram_mode = 'PSF'  # Can be toggled later
+        self.star_list = None
+        self.histogram_mode = 'PSF'  # or 'Flux'
+        # Default detection threshold in sigma
+        self.detection_threshold = 5  
+
+        # Debounce timer for threshold slider
+        self.threshold_timer = QTimer(self)
+        self.threshold_timer.setSingleShot(True)
+        self.threshold_timer.setInterval(500)  # 500 ms
+        self.threshold_timer.timeout.connect(self._applyThreshold)
+
         self.initUI()
-        QTimer.singleShot(0, self.compute_star_catalog)
-        # Compute the star catalog using SEP (one-pass detection).
-        
-        
-        
+        # Defer the first catalog compute until the dialog is shown
+        QTimer.singleShot(0, self._applyThreshold)
 
     def initUI(self):
         main_layout = QVBoxLayout(self)
         
-        # Top layout holds the histogram display and the statistics table.
+        # ─── Top: histogram + stats ────────────────────────────────
         top_layout = QHBoxLayout()
-
-        # Scroll area for histogram.
+        # Histogram scroll area
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setFixedSize(520, 310)
         self.scroll_area.setWidgetResizable(False)
@@ -18973,155 +23257,164 @@ class PSFViewer(QDialog):
         self.hist_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll_area.setWidget(self.hist_label)
         top_layout.addWidget(self.scroll_area)
-
-        # Statistics table (4 rows: Min, Max, Median, StdDev).
+        # Stats table
         self.stats_table = QTableWidget(self)
         self.stats_table.setRowCount(4)
-        # We'll update the number of columns later based on available data.
-        self.stats_table.setColumnCount(1)
+        self.stats_table.setColumnCount(1)  # will adjust dynamically
         self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
         self.stats_table.setFixedWidth(360)
         top_layout.addWidget(self.stats_table)
-
         main_layout.addLayout(top_layout)
-
-        # Add a status label to show extraction progress.
+        
+        # Status label
         self.status_label = QLabel("Status: Ready", self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         main_layout.addWidget(self.status_label)
-        # Controls layout: Zoom slider, Log scale toggle, and a histogram mode toggle.
-        controls_layout = QHBoxLayout()
         
+        # ─── Controls: zoom, log, mode ─────────────────────────────
+        controls_layout = QHBoxLayout()
+        # Zoom slider
+        controls_layout.addWidget(QLabel("Zoom:"))
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal, self)
-        self.zoom_slider.setRange(50, 1000)  # 50% to 1000%
-        self.zoom_slider.setValue(100)       # Default: 100%
+        self.zoom_slider.setRange(50, 1000)
+        self.zoom_slider.setValue(100)
         self.zoom_slider.setTickInterval(10)
         self.zoom_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.zoom_slider.valueChanged.connect(self.updateZoom)
-        controls_layout.addWidget(QLabel("Zoom:"))
         controls_layout.addWidget(self.zoom_slider)
-        
+        # Log scale toggle
         self.log_toggle_button = QPushButton("Toggle Log X-Axis", self)
         self.log_toggle_button.setCheckable(True)
-        self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis scaling.")
+        self.log_toggle_button.setToolTip("Toggle between linear and logarithmic x-axis.")
         self.log_toggle_button.toggled.connect(self.toggleLogScale)
         controls_layout.addWidget(self.log_toggle_button)
-        
-        # Button to switch between PSF and Flux histograms.
+        # PSF/Flux toggle
         self.mode_toggle_button = QPushButton("Show Flux Histogram", self)
         self.mode_toggle_button.setToolTip("Switch between PSF (FWHM) and Flux histograms.")
         self.mode_toggle_button.clicked.connect(self.toggleHistogramMode)
         controls_layout.addWidget(self.mode_toggle_button)
-        
         main_layout.addLayout(controls_layout)
         
-        # Close button.
+        # Detection threshold slider + label
+        thresh_layout = QHBoxLayout()
+        thresh_layout.addWidget(QLabel("Detection Threshold (σ):", self))
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.threshold_slider.setRange(1, 20)
+        self.threshold_slider.setValue(self.detection_threshold)
+        self.threshold_slider.setTickInterval(1)
+        self.threshold_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.threshold_slider.valueChanged.connect(self.onThresholdChange)
+        thresh_layout.addWidget(self.threshold_slider)
+
+        self.threshold_value_label = QLabel(str(self.detection_threshold), self)
+        thresh_layout.addWidget(self.threshold_value_label)
+        main_layout.addLayout(thresh_layout)
+        
+        # Close button
         close_btn = QPushButton("Close", self)
         close_btn.clicked.connect(self.accept)
         main_layout.addWidget(close_btn)
         
         self.setLayout(main_layout)
-        
-        # Draw initial histogram.
+        # Draw an initial (empty) histogram
         self.drawHistogram()
-        QApplication.processEvents()
 
-        
+    def onThresholdChange(self, value: int):
+        """Update label and restart debounce timer."""
+        self.detection_threshold = value
+        self.threshold_value_label.setText(str(value))
+        # Restart debounce timer
+        if self.threshold_timer.isActive():
+            self.threshold_timer.stop()
+        self.threshold_timer.start()
+
+    def _applyThreshold(self):
+        """
+        Called after the debounce timer fires — actually re-run extraction
+        and redraw the histogram.
+        """
+        self.compute_star_list()
+        self.drawHistogram()
 
 
     def updateImage(self, new_image):
         """
-        Update the current image, recompute the star catalog using SEP,
-        and redraw the histogram.
+        Replace the image, re-run detection, and redraw.
         """
         self.image = new_image
-        self.compute_star_catalog()
+        self.compute_star_list()
         self.drawHistogram()
 
-    def compute_star_catalog(self):
+    def compute_star_list(self):
         """
-        Use SEP to detect stars in one pass.
-        This subtracts the background and extracts sources.
-        We approximate the effective FWHM as 2 * a (where 'a' is the semi-major axis
-        returned by SEP). Other parameters (flux, x, y, etc.) are recorded in the star catalog.
+        Use SEP to detect stars with the current threshold.
         """
-        # Convert image to grayscale if necessary.
+        # Convert to grayscale
         if self.image.ndim == 3:
             image_gray = np.mean(self.image, axis=2)
         else:
             image_gray = self.image
-
-        # SEP requires a float32 array.
         data = image_gray.astype(np.float32)
         
-        # Estimate background.
+        # Background estimation
         bkg = sep.Background(data)
         data_sub = data - bkg.back()
-        threshold = 3  # Adjust this threshold as needed.
         
-        # Extract sources.
-        # Run SEP extraction.
+        # Use the slider’s value
+        threshold = float(self.detection_threshold)
+        
+        # Estimate error
         try:
-            err_val = bkg.globalrms  # globalrms should be a scalar.
-        except Exception as e:
+            err_val = bkg.globalrms
+        except Exception:
             err_val = np.median(bkg.rms())
         
-        # Update status message before extraction.
-        self.status_label.setText("Status: Starting Stellar extraction...")
+        # Update status
+        self.status_label.setText("Status: Starting star extraction...")
         QApplication.processEvents()
-
+        
+        # Run SEP
         try:
             sources = sep.extract(data_sub, threshold, err=err_val)
-            n_sources = len(sources) if sources is not None else 0
-            self.status_label.setText(f"Status: Extraction Completed. Detected {n_sources} objects.")
+            n = len(sources) if sources is not None else 0
+            self.status_label.setText(f"Status: Extraction completed — {n} sources.")
         except Exception as e:
-            self.status_label.setText(f"Status: Extraction Failed: {e}")
+            self.status_label.setText(f"Status: Extraction failed: {e}")
             sources = None
-
         QApplication.processEvents()
 
-        
+        # avoid ambiguous truth check on ndarray:
         if sources is None or len(sources) == 0:
-            self.star_catalog = None
+            self.star_list = None
             return
 
-        # Define an effective FWHM. Here we use 2*a, so that HFR = a.
-        # Now compute the flux radius (HFR) for a flux fraction of 0.5.
-        # Use an aperture of 6 * a as recommended.
+        # Compute HFR = 2 * a
         try:
-            r, flag = sep.flux_radius(data, sources['x'], sources['y'], 6.0 * sources['a'],
-                                    0.5, normflux=sources['flux'], subpix=5)
-        except Exception as e:
-            self.status_label.setText(f"Status: Flux radius computation failed: {e}")
+            a = sources['a']
+            r = 2 * a
+        except Exception:
             r = np.zeros(len(sources))
-        r = 2*sources['a']
-        # Build an Astropy Table for the star catalog.
-        from astropy.table import Table
-        star_catalog = Table()
-        star_catalog['xcentroid'] = sources['x']
-        star_catalog['ycentroid'] = sources['y']
-        star_catalog['flux'] = sources['flux']
-        star_catalog['HFR'] = r  # Use the computed flux radius as HFR.
-        star_catalog['a'] = sources['a']
-        star_catalog['b'] = sources['b']
-        star_catalog['theta'] = sources['theta']
+        
+        # Build Astropy table
+        tbl = Table()
+        tbl['xcentroid'] = sources['x']
+        tbl['ycentroid'] = sources['y']
+        tbl['flux']      = sources['flux']
+        tbl['HFR']       = r
+        tbl['a']         = sources['a']
+        tbl['b']         = sources['b']
+        tbl['theta']     = sources['theta']
+        self.star_list = tbl
 
-        self.star_catalog = star_catalog
-        self.drawHistogram()
-        QApplication.processEvents()
-
-    def updateZoom(self, value):
-        self.zoom_factor = value / 100.0
+    def updateZoom(self, val: int):
+        self.zoom_factor = val / 100.0
         self.drawHistogram()
 
-    def toggleLogScale(self, checked):
+    def toggleLogScale(self, checked: bool):
         self.log_scale = checked
         self.drawHistogram()
 
     def toggleHistogramMode(self):
-        """
-        Toggle between displaying a histogram of PSF (FWHM used) values and flux values.
-        """
         if self.histogram_mode == 'PSF':
             self.histogram_mode = 'Flux'
             self.mode_toggle_button.setText("Show PSF Histogram")
@@ -19132,144 +23425,108 @@ class PSFViewer(QDialog):
 
     def drawHistogram(self):
         """
-        Draw the histogram of either PSF (FWHM used) or flux values from the star catalog.
+        Paints the histogram of the current catalog (PSF or flux).
         """
-        # Create a pixmap for drawing.
-        base_width = 512
-        height = 300
-        width = int(base_width * self.zoom_factor)
-        pixmap = QPixmap(width, height)
-        pixmap.fill(Qt.GlobalColor.white)
-        painter = QPainter(pixmap)
+        # Create pixmap
+        base_w, h = 512, 300
+        w = int(base_w * self.zoom_factor)
+        pix = QPixmap(w, h)
+        pix.fill(Qt.GlobalColor.white)
+        painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        bin_count = 50  # Adjust number of bins as desired.
-        
-        # Determine the data to histogram.
-        if self.star_catalog is None or len(self.star_catalog) == 0:
+        # Prepare data & bins
+        if not self.star_list:
             data = np.array([])
-            bin_edges = np.linspace(0, 1, bin_count + 1)
+            edges = np.linspace(0, 1, 51)
         else:
             if self.histogram_mode == 'PSF':
-                # Use HFR (Half Flux Radius) by dividing the fwhm_used values by 2.
-                data = np.array(self.star_catalog['HFR'], dtype=float)
-                # With FWHM up to 15, HFR could be up to 7.5.
-                bin_edges = np.linspace(0, 7.5, bin_count + 1)
+                data = np.array(self.star_list['HFR'], float)
+                edges = np.linspace(0, 7.5, 51)
             else:
-                # Use the 'flux' column.
-                data = np.array(self.star_catalog['flux'])
-                if data.size > 0:
-                    bin_edges = np.linspace(data.min(), data.max(), bin_count + 1)
+                data = np.array(self.star_list['flux'], float)
+                if data.size:
+                    edges = np.linspace(data.min(), data.max(), 51)
                 else:
-                    bin_edges = np.linspace(0, 1, bin_count + 1)
+                    edges = np.linspace(0, 1, 51)
         
-        # Adjust bin edges for log scale if needed.
-        if self.log_scale:
-            eps = 1e-4
-            lower = max(bin_edges[0], eps)
-            upper = bin_edges[-1]
-            bin_edges = np.logspace(np.log10(lower), np.log10(upper), bin_count + 1)
-            def x_pos(val):
-                return int((np.log10(val) - np.log10(lower)) / (np.log10(upper) - np.log10(lower)) * width)
+        # Log or linear bin positions
+        if self.log_scale and edges[-1] > 0:
+            low, high = max(edges[0],1e-4), edges[-1]
+            edges = np.logspace(np.log10(low), np.log10(high), 51)
+            xfun = lambda v: int((np.log10(v) - np.log10(low)) / (np.log10(high)-np.log10(low)) * w)
         else:
-            def x_pos(val):
-                return int((val - bin_edges[0]) / (bin_edges[-1] - bin_edges[0]) * width)
+            low, high = edges[0], edges[-1]
+            xfun = lambda v: int((v - low) / (high - low) * w) if high>low else 0
         
-        # Compute histogram counts.
-        if data.size > 0:
-            hist, _ = np.histogram(data, bins=bin_edges)
-            if hist.max() > 0:
-                hist = hist.astype(np.float32) / hist.max()
-            else:
-                hist = hist.astype(np.float32)
-        else:
-            hist = np.zeros(bin_count)
+        # Histogram
+        hist = np.histogram(data, bins=edges)[0].astype(float)
+        if hist.max()>0:
+            hist /= hist.max()
         
-        # Draw histogram bars.
-        painter.setPen(QPen(Qt.GlobalColor.black))
-        for i in range(bin_count):
-            x0 = x_pos(bin_edges[i])
-            x1 = x_pos(bin_edges[i+1])
-            bar_width = max(x1 - x0, 1)
-            bar_height = hist[i] * height
-            painter.drawRect(x0, int(height - bar_height), bar_width, int(bar_height))
+        # Draw bars
+        pen = QPen(Qt.GlobalColor.black)
+        painter.setPen(pen)
+        for i in range(len(hist)):
+            x0 = xfun(edges[i])
+            x1 = xfun(edges[i+1])
+            bw = max(x1-x0, 1)
+            bh = hist[i] * h
+            painter.drawRect(x0, int(h-bh), bw, int(bh))
         
-        # Draw x-axis.
+        # X-axis & ticks
         painter.setPen(QPen(Qt.GlobalColor.black, 2))
-        painter.drawLine(0, height - 1, width, height - 1)
-        
-        # Draw tick marks and labels.
+        painter.drawLine(0, h-1, w, h-1)
         painter.setFont(QFont("Arial", 10))
-        if self.log_scale:
-            tick_values = np.logspace(np.log10(bin_edges[0]), np.log10(bin_edges[-1]), 6)
-            for tick in tick_values:
-                x = x_pos(tick)
-                painter.drawLine(x, height - 1, x, height - 6)
-                painter.drawText(x - 15, height - 10, f"{tick:.3f}")
-        else:
-            tick_values = np.linspace(bin_edges[0], bin_edges[-1], 6)
-            for tick in tick_values:
-                x = x_pos(tick)
-                painter.drawLine(x, height - 1, x, height - 6)
-                painter.drawText(x - 15, height - 10, f"{tick:.2f}")
+        ticks = (np.logspace(np.log10(low), np.log10(high), 6)
+                 if self.log_scale and high>low
+                 else np.linspace(low, high, 6))
+        for t in ticks:
+            x = xfun(t)
+            painter.drawLine(x, h-1, x, h-6)
+            painter.drawText(x-20, h-10, f"{t:.2f}" if not self.log_scale else f"{t:.3f}")
         
         painter.end()
-        self.hist_label.setPixmap(pixmap)
-        self.hist_label.resize(pixmap.size())
-        
-        # Update the statistics table.
+        self.hist_label.setPixmap(pix)
+        self.hist_label.resize(pix.size())
         self.updateStatistics()
 
     def updateStatistics(self):
         """
-        Compute and update summary statistics (Min, Max, Median, StdDev) for the following columns in the star catalog:
-        HFR, eccentricity, a, b, theta, flux.
-        Eccentricity is computed as sqrt(1 - (b/a)**2).
+        Fill the stats table with Min/Max/Median/StdDev for each chosen column.
         """
-        if self.star_catalog is None or len(self.star_catalog) == 0:
-            colnames = []
+        if not self.star_list:
+            cols = []
         else:
-            # Our desired column order.
-            desired_cols = ['HFR', 'eccentricity', 'a', 'b', 'theta', 'flux']
-            # We'll only include columns that exist (eccentricity is computed).
-            colnames = [col for col in desired_cols if col in self.star_catalog.colnames or col == 'eccentricity']
-
-            # Compute eccentricity from 'a' and 'b'
-            try:
-                a = np.array(self.star_catalog['a'], dtype=float)
-                b = np.array(self.star_catalog['b'], dtype=float)
-                # Avoid division by zero:
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    ecc = np.sqrt(1.0 - (b / a) ** 2)
-                # Replace any NaNs with zero.
-                ecc = np.nan_to_num(ecc)
-            except Exception:
-                ecc = np.zeros(len(self.star_catalog))
-
-        self.stats_table.setColumnCount(len(colnames))
-        self.stats_table.setHorizontalHeaderLabels(colnames)
+            # desired columns
+            cols = ['HFR','eccentricity','a','b','theta','flux']
+            # compute eccentricity
+            a = np.array(self.star_list['a'], float)
+            b = np.array(self.star_list['b'], float)
+            ecc = np.nan_to_num(np.sqrt(1 - (b/a)**2))
+            # insert into table representation
+            data_map = {
+                'eccentricity': ecc,
+                **{c: np.array(self.star_list[c], float) for c in self.star_list.colnames}
+            }
+        
+        # Filter out missing
+        cols = [c for c in cols if c in data_map]
+        self.stats_table.setColumnCount(len(cols))
+        self.stats_table.setHorizontalHeaderLabels(cols)
         self.stats_table.setRowCount(4)
-        self.stats_table.setVerticalHeaderLabels(["Min", "Max", "Median", "StdDev"])
-
-        # Loop over each desired column.
-        for col_index, col in enumerate(colnames):
-            try:
-                if col == 'eccentricity':
-                    col_data = ecc
-                else:
-                    col_data = np.array(self.star_catalog[col], dtype=float)
-                min_val = np.min(col_data)
-                max_val = np.max(col_data)
-                med_val = np.median(col_data)
-                std_val = np.std(col_data)
-            except Exception:
-                min_val = max_val = med_val = std_val = 0.0
-
-            for row_index, val in enumerate([min_val, max_val, med_val, std_val]):
-                item = QTableWidgetItem(f"{val:.3f}")
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.stats_table.setItem(row_index, col_index, item)
-
+        self.stats_table.setVerticalHeaderLabels(["Min","Max","Median","StdDev"])
+        
+        for ci, col in enumerate(cols):
+            arr = data_map.get(col, np.zeros(0))
+            if arr.size:
+                vals = [arr.min(), arr.max(), np.median(arr), np.std(arr)]
+            else:
+                vals = [0,0,0,0]
+            for ri, v in enumerate(vals):
+                it = QTableWidgetItem(f"{v:.3f}")
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.stats_table.setItem(ri, ci, it)
 
 class SupernovaAsteroidHunterTab(QWidget):
     def __init__(self):
@@ -19691,9 +23948,6 @@ class SupernovaAsteroidHunterTab(QWidget):
         Each anomaly is assumed to have keys: minX, minY, maxX, maxY
         3) Return the 8-bit color image (H,W,3).
         """
-        import cv2
-        import numpy as np
-
         # Ensure 3 channels
         if stretched_image.ndim == 2:
             stretched_3ch = np.stack([stretched_image]*3, axis=-1)
@@ -19884,9 +24138,6 @@ class SupernovaAsteroidHunterTab(QWidget):
         'image' is assumed to be float32 in [0..1], shape (H,W) or (H,W,3).
         'anomalies' is a list of dicts, each with keys: minX, minY, maxX, maxY, etc.
         """
-        import cv2
-        import numpy as np
-
         # 1) Convert to 3-channel if needed
         if image.ndim == 2:
             # grayscale => replicate to 3-ch so we can draw colored rectangles
@@ -20217,6 +24468,8 @@ class WaveScaleHDRDialog(QDialog):
 
         self.image_manager = image_manager
 
+        self.showing_original = False
+
         # Detect if the image is grayscale or RGB
         if self.image_manager.image.ndim == 2:
             self.is_grayscale = True
@@ -20404,12 +24657,19 @@ class WaveScaleHDRDialog(QDialog):
         self.mask_gamma_slider.setTickInterval(10)
         controls_layout.addRow("Mask Gamma:", self.mask_gamma_slider)
 
-
+        buttons_layout = QHBoxLayout()
 
         # Preview Button
         self.preview_button = QPushButton("Preview")
         self.preview_button.clicked.connect(self._on_preview_clicked)
-        controls_layout.addRow(self.preview_button)
+        buttons_layout.addWidget(self.preview_button)
+
+        self.toggle_button = QPushButton("Show Original")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.clicked.connect(self._toggle_image)
+        buttons_layout.addWidget(self.toggle_button)
+
+        controls_layout.addRow(buttons_layout)
 
         self.controls_group.setLayout(controls_layout)
 
@@ -20461,6 +24721,18 @@ class WaveScaleHDRDialog(QDialog):
         progress_layout.addWidget(self.progress_bar)
 
         self.progress_group_box.setLayout(progress_layout)
+
+    def _toggle_image(self):
+        if self.toggle_button.isChecked():
+            # user wants to see the *un*-processed original
+            self.toggle_button.setText("Show Preview")
+            self._update_preview_pixmap(self.original_image)
+            self.showing_original = True
+        else:
+            # back to the HDR preview
+            self.toggle_button.setText("Show Original")
+            self._update_preview_pixmap(self.preview_image)
+            self.showing_original = False
 
     def _on_reset_clicked(self):
         """Reset the image and sliders to their default states."""
@@ -20556,6 +24828,10 @@ class WaveScaleHDRDialog(QDialog):
             # Update preview image
             self.preview_image = blended_preview
             self._update_preview_pixmap(blended_preview)
+
+            self.toggle_button.setChecked(False)
+            self.toggle_button.setText("Show Original")
+            self.showing_original = False
 
             # Enable Apply button
             self.apply_button.setEnabled(True)
@@ -20859,7 +25135,579 @@ class WaveScaleHDRDialog(QDialog):
         rgb_image = np.clip(rgb_image, 0.0, 1.0)
 
         return rgb_image
-            
+
+class DSEWorker(QObject):
+    progress_update = pyqtSignal(str, int)
+    finished = pyqtSignal(np.ndarray, np.ndarray)
+
+    def __init__(self, rgb_image, n_scales, boost_factor, gamma, b3_spline_kernel, iterations=1, is_mono=False):
+        super().__init__()
+        self.rgb_image = rgb_image
+        self.n_scales = n_scales
+        self.boost_factor = boost_factor
+        self.gamma = gamma
+        self.b3_spline_kernel = b3_spline_kernel
+        self.iterations = iterations
+        self.is_mono = is_mono
+
+    def run(self):
+        try:
+            if self.is_mono:
+                self.progress_update.emit("Enhancing mono image...", 10)
+                L = self.rgb_image.squeeze()  # shape HxW
+
+                for iter_idx in range(self.iterations):
+                    if self.iterations > 1:
+                        self.progress_update.emit(f"Iteration {iter_idx+1} of {self.iterations}", 10 + iter_idx * int(70 / self.iterations))
+
+                    self.progress_update.emit("Building darkness mask...", 20)
+                    mask = self.create_darkness_mask(L, self.gamma)
+
+                    self.progress_update.emit("Decomposing via à trous...", 30)
+                    wavelet_planes, residual = self.atrous_wavelet_decompose(L)
+
+                    self.progress_update.emit("Enhancing dark structures...", 50)
+                    decay_rate = 0.5
+                    for i in range(len(wavelet_planes)):
+                        if i == 0:
+                            continue
+                        decay_factor = decay_rate ** i
+                        neg = np.clip(-wavelet_planes[i], 0, None)
+                        enhancement = neg * mask * (self.boost_factor - 1.0) * decay_factor
+                        wavelet_planes[i] -= enhancement
+                        self.progress_update.emit(f"Enhancing scale {i+1}", 50 + int(i / len(wavelet_planes) * 20))
+
+                    self.progress_update.emit("Reconstructing L...", 80)
+                    L = np.clip(self.atrous_wavelet_reconstruct(wavelet_planes + [residual]), 0, 1)
+
+                self.progress_update.emit("Done", 100)
+                output = L[..., np.newaxis] if self.rgb_image.ndim == 3 else L
+                self.finished.emit(output.astype(np.float32), mask)
+
+            else:
+                self.progress_update.emit("Converting to Lab...", 10)
+                lab = self.rgb_to_lab(self.rgb_image)
+                L = lab[..., 0]
+
+                for iter_idx in range(self.iterations):
+                    if self.iterations > 1:
+                        self.progress_update.emit(f"Iteration {iter_idx+1} of {self.iterations}", 10 + iter_idx * int(70 / self.iterations))
+
+                    self.progress_update.emit("Building darkness mask...", 20)
+                    mask = self.create_darkness_mask(L, self.gamma)
+
+                    self.progress_update.emit("Decomposing via à trous...", 30)
+                    wavelet_planes, residual = self.atrous_wavelet_decompose(L)
+
+                    self.progress_update.emit("Enhancing dark structures...", 50)
+                    decay_rate = 0.5
+                    for i in range(len(wavelet_planes)):
+                        if i == 0:
+                            continue
+                        decay_factor = decay_rate ** i
+                        neg = np.clip(-wavelet_planes[i], 0, None)
+                        enhancement = neg * mask * (self.boost_factor - 1.0) * decay_factor
+                        wavelet_planes[i] -= enhancement
+                        self.progress_update.emit(f"Enhancing scale {i+1}", 50 + int(i / len(wavelet_planes) * 20))
+
+                    self.progress_update.emit("Reconstructing L...", 80)
+                    L = np.clip(self.atrous_wavelet_reconstruct(wavelet_planes + [residual]), 0, 100)
+
+                lab[..., 0] = L
+                self.progress_update.emit("Converting back to RGB...", 90)
+                rgb_out = self.lab_to_rgb(lab)
+                self.progress_update.emit("Done", 100)
+                self.finished.emit(rgb_out.astype(np.float32), mask)
+
+        except Exception as e:
+            print(f"Error in DSEWorker: {e}")
+            self.finished.emit(None, None)
+
+    def rgb_to_lab(self, rgb_image):
+        M = np.array([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=np.float32)
+        rgb = np.clip(rgb_image, 0, 1)
+        xyz = np.dot(rgb.reshape(-1, 3), M.T).reshape(rgb.shape)
+        xyz[..., 0] /= 0.95047
+        xyz[..., 2] /= 1.08883
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta**3, np.cbrt(t), t / (3 * delta**2) + 4 / 29)
+        fx = f(xyz[..., 0])
+        fy = f(xyz[..., 1])
+        fz = f(xyz[..., 2])
+        L = 116 * fy - 16
+        a = 500 * (fx - fy)
+        b = 200 * (fy - fz)
+        return np.stack([L, a, b], axis=-1)
+
+    def lab_to_rgb(self, lab_image):
+        M_inv = np.array([
+            [3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [0.0556434, -0.2040259,  1.0572252]
+        ], dtype=np.float32)
+        fy = (lab_image[..., 0] + 16) / 116
+        fx = fy + lab_image[..., 1] / 500
+        fz = fy - lab_image[..., 2] / 200
+        def f_inv(t):
+            delta = 6 / 29
+            return np.where(t > delta, t**3, 3 * delta**2 * (t - 4/29))
+        X = 0.95047 * f_inv(fx)
+        Y = f_inv(fy)
+        Z = 1.08883 * f_inv(fz)
+        xyz = np.stack([X, Y, Z], axis=-1)
+        rgb = np.dot(xyz.reshape(-1, 3), M_inv.T).reshape(xyz.shape)
+        return np.clip(rgb, 0, 1)
+
+
+    def create_darkness_mask(self, L_channel, gamma):
+        """
+        Builds a dark structure mask by:
+        - Running à trous decomposition
+        - Extracting only the negative parts (dark structures)
+        - Combining key wavelet scales (e.g., 2–4)
+        - Applying a non-linear stretch with gamma
+        - Smoothing to suppress speckle and noise
+        """
+        # Step 1: à trous decomposition
+        wavelet_planes, _ = self.atrous_wavelet_decompose(L_channel)
+
+        # Step 2: Select mid-scales — scales 2, 3, 4 (1:4)
+        selected_scales = wavelet_planes[1:4]
+
+        # Step 3: Extract only dark structures (negative components)
+        dark_masks = [np.clip(-w, 0, None) for w in selected_scales]
+
+        # Step 4: Combine with mean instead of max for smoother map
+        combined = np.mean(dark_masks, axis=0)
+
+        # Step 5: Normalize
+        norm = combined / np.max(combined + 1e-8)
+
+        # Step 6: Apply gamma for user control
+        stretched = np.power(norm, gamma).astype(np.float32)
+
+        # Step 7: Apply Gaussian smoothing to suppress speckle
+        mask = gaussian_filter(stretched, sigma=3)  # sigma=3–5 works well
+        # Step 8: Apply brightening curve to emphasize midrange
+        def curves_brighten(x):
+            # Boosts midtones with a soft S-curve, adjustable
+            return np.clip(1.5 * x - 0.5 * x**2, 0, 1)
+
+        enhanced_mask = curves_brighten(mask)
+
+        return enhanced_mask
+
+
+    def atrous_wavelet_decompose(self, image):
+        current = image.copy()
+        scales = []
+        for scale_idx in range(self.n_scales):
+            kernel = self._spaced_kernel(self.b3_spline_kernel, scale_idx)
+            tmp = convolve(current, kernel.reshape(1, -1), mode='reflect')
+            smooth = convolve(tmp, kernel.reshape(-1, 1), mode='reflect')
+            wavelet = current - smooth
+            scales.append(wavelet)
+            current = smooth
+        return scales, current
+
+    def atrous_wavelet_reconstruct(self, planes):
+        result = planes[-1].copy()
+        for p in planes[:-1]:
+            result += p
+        return result
+
+    def _spaced_kernel(self, kernel, scale_idx):
+        if scale_idx == 0:
+            return kernel
+        step = 2 ** scale_idx
+        spaced = np.zeros((len(kernel) - 1) * step + 1, dtype=kernel.dtype)
+        spaced[::step] = kernel
+        return spaced
+
+
+class WaveScaleDarkEnhanceDialog(QDialog):
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("WaveScale Dark Enhancer")
+        self.setMinimumSize(800, 600)
+        self.image_manager = image_manager
+        self.showing_original = False
+
+        if self.image_manager.image is None:
+            QMessageBox.critical(self, "Error", "No image loaded.")
+            self.reject()
+            return
+
+        img = self.image_manager.image
+        img = img.astype(np.float32)
+        img = np.clip(img, 0, 1)
+
+        self.original_image = img.copy()
+        self.preview_image  = img.copy()
+
+        # Determine mono vs RGB
+        if img.ndim == 2 or (img.ndim == 3 and img.shape[2] == 1):
+            self.is_mono = True
+            self.L_original = img.squeeze()
+        else:
+            self.is_mono = False
+            self.lab_original = self.rgb_to_lab(img)
+            self.L_original  = self.lab_original[..., 0].copy()
+
+        self.b3_spline_kernel = np.array([1, 4, 6, 4, 1], dtype=np.float32) / 16.0
+
+        self.zoom_factor = 1.0
+        self.zoom_step = 1.25
+        self.zoom_min = 0.1
+        self.zoom_max = 5.0
+
+
+
+        self.main_layout = QVBoxLayout(self)
+        self.setLayout(self.main_layout)
+
+        self._create_preview_area()
+        self._create_zoom_area()
+        self._create_controls()
+        self._create_progress_display()
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.scroll_area)
+        layout.addWidget(self.zoom_group_box)
+
+        hbox_layout = QHBoxLayout()
+        hbox_layout.addWidget(self.controls_group, stretch=3)
+        hbox_layout.addWidget(self.progress_group_box, stretch=1)
+
+        layout.addLayout(hbox_layout)
+        self.main_layout.addLayout(layout)
+
+        self._create_bottom_buttons()
+
+        self.gamma_update_timer = QTimer()
+        self.gamma_update_timer.setSingleShot(True)
+        self.gamma_update_timer.timeout.connect(self._update_mask_preview)
+
+        self._create_mask_window()
+        self._update_mask_preview()  # initial mask
+        self.gamma_slider.valueChanged.connect(self._delayed_gamma_update)
+        self._update_preview_pixmap(self.original_image)
+
+        self.accepted.connect(self.mask_window.close)
+        self.rejected.connect(self.mask_window.close)
+
+    def _delayed_gamma_update(self):
+        self.gamma_update_timer.start(500)  # waits 500 ms after last change
+
+    def _on_gamma_changed(self, value):
+        """Updates the mask when gamma slider is moved."""
+        self._update_mask_preview()
+
+    def _create_mask_window(self):
+        class ResizableMaskWindow(QMainWindow):
+            def __init__(self, outer):
+                super().__init__(outer)
+                self.outer = outer
+                self._aspect_ratio = None  # Will be set once we get a mask
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                if self._aspect_ratio:
+                    new_width = self.width()
+                    new_height = int(new_width / self._aspect_ratio)
+                    self.resize(new_width, new_height)
+                self.outer._rescale_mask_pixmap()
+
+            def set_aspect_ratio(self, aspect_ratio):
+                self._aspect_ratio = aspect_ratio
+
+        self.mask_window = ResizableMaskWindow(self)
+        self.mask_window.setWindowTitle("Dark Mask Preview")
+
+        central_widget = QWidget()
+        layout = QVBoxLayout()
+        central_widget.setLayout(layout)
+
+        self.mask_label = QLabel()
+        self.mask_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mask_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.mask_label.setScaledContents(True)
+
+        layout.addWidget(self.mask_label)
+        self.mask_window.setCentralWidget(central_widget)
+
+        self.mask_window.resize(300, 300)
+        self.mask_window.show()
+
+    def _update_mask_preview(self):
+        gamma = self.gamma_slider.value() / 100.0
+        temp_worker = DSEWorker(
+            self.original_image,
+            self.scales_slider.value(),
+            self.boost_slider.value() / 100.0,
+            gamma,
+            self.b3_spline_kernel
+        )
+        mask = temp_worker.create_darkness_mask(self.L_original, gamma)
+        self.current_mask = mask
+
+        mask_img = (np.clip(mask, 0, 1) * 255).astype(np.uint8)
+        qimage = QImage(mask_img.data, mask.shape[1], mask.shape[0], mask.shape[1], QImage.Format.Format_Grayscale8)
+        self.mask_pixmap = QPixmap.fromImage(qimage)  # save original pixmap
+        self.mask_window.set_aspect_ratio(mask.shape[1] / mask.shape[0])  # width / height
+        self._rescale_mask_pixmap()
+
+    def _rescale_mask_pixmap(self):
+        if hasattr(self, "mask_pixmap") and self.mask_pixmap:
+            resized = self.mask_pixmap.scaled(
+                self.mask_window.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.mask_label.setPixmap(resized)
+
+    def _create_preview_area(self):
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+
+        self.scene = QGraphicsScene()
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setScene(self.scene)
+        self.graphics_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+
+        self.graphics_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+
+        self.scroll_area.setWidget(self.graphics_view)
+
+    def _create_zoom_area(self):
+        self.zoom_group_box = QGroupBox("Zoom Controls")
+        zoom_layout = QHBoxLayout()
+
+        self.zoom_in_button = QPushButton("Zoom In")
+        self.zoom_in_button.clicked.connect(self._zoom_in)
+        zoom_layout.addWidget(self.zoom_in_button)
+
+        self.zoom_out_button = QPushButton("Zoom Out")
+        self.zoom_out_button.clicked.connect(self._zoom_out)
+        zoom_layout.addWidget(self.zoom_out_button)
+
+        self.fit_to_preview_button = QPushButton("Fit to Preview")
+        self.fit_to_preview_button.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(self.fit_to_preview_button)
+
+        self.zoom_group_box.setLayout(zoom_layout)
+
+    def _zoom_in(self):
+        new_zoom = self.zoom_factor * self.zoom_step
+        if new_zoom <= self.zoom_max:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+
+    def _zoom_out(self):
+        new_zoom = self.zoom_factor / self.zoom_step
+        if new_zoom >= self.zoom_min:
+            self.zoom_factor = new_zoom
+            self._apply_zoom()
+
+    def _fit_to_preview(self):
+        if self.pixmap_item.pixmap().isNull():
+            return
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        self.zoom_factor = 1.0
+
+    def _apply_zoom(self):
+        self.graphics_view.resetTransform()
+        self.graphics_view.scale(self.zoom_factor, self.zoom_factor)
+
+    def _create_controls(self):
+        self.controls_group = QGroupBox("DSE Controls")
+        controls_layout = QFormLayout()
+
+        # Number of Scales
+        self.scales_slider = QSlider(Qt.Orientation.Horizontal)
+        self.scales_slider.setRange(2, 10)
+        self.scales_slider.setValue(6)
+        self.scales_value = QLabel(str(self.scales_slider.value()))
+        self.scales_slider.valueChanged.connect(lambda v: self.scales_value.setText(str(v)))
+        scale_layout = QHBoxLayout()
+        scale_layout.addWidget(self.scales_slider)
+        scale_layout.addWidget(self.scales_value)
+        controls_layout.addRow("Number of Scales:", scale_layout)
+
+        # Boost Factor
+        self.boost_slider = QSlider(Qt.Orientation.Horizontal)
+        self.boost_slider.setRange(10, 1000)
+        self.boost_slider.setValue(500)
+        self.boost_value = QLabel(str(self.boost_slider.value() / 100.0))
+        self.boost_slider.valueChanged.connect(lambda v: self.boost_value.setText(f"{v / 100.0:.2f}"))
+        boost_layout = QHBoxLayout()
+        boost_layout.addWidget(self.boost_slider)
+        boost_layout.addWidget(self.boost_value)
+        controls_layout.addRow("Boost Factor:", boost_layout)
+
+        # Iterations
+        self.iter_slider = QSlider(Qt.Orientation.Horizontal)
+        self.iter_slider.setRange(1, 10)
+        self.iter_slider.setValue(2)
+        self.iter_value = QLabel(str(self.iter_slider.value()))
+        self.iter_slider.valueChanged.connect(lambda v: self.iter_value.setText(str(v)))
+        iter_layout = QHBoxLayout()
+        iter_layout.addWidget(self.iter_slider)
+        iter_layout.addWidget(self.iter_value)
+        controls_layout.addRow("Iterations:", iter_layout)
+
+        # Mask Gamma
+        self.gamma_slider = QSlider(Qt.Orientation.Horizontal)
+        self.gamma_slider.setRange(10, 1000)
+        self.gamma_slider.setValue(100)
+        self.gamma_value = QLabel(f"{self.gamma_slider.value() / 100.0:.2f}")
+        self.gamma_slider.valueChanged.connect(lambda v: self.gamma_value.setText(f"{v / 100.0:.2f}"))
+        gamma_layout = QHBoxLayout()
+        gamma_layout.addWidget(self.gamma_slider)
+        gamma_layout.addWidget(self.gamma_value)
+        controls_layout.addRow("Mask Gamma:", gamma_layout)
+
+        # Preview and toggle buttons
+        togglebuttonlayout = QHBoxLayout()
+        self.preview_button = QPushButton("Preview")
+        self.preview_button.clicked.connect(self._on_preview_clicked)
+        togglebuttonlayout.addWidget(self.preview_button)
+
+        self.toggle_button = QPushButton("Show Original")
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.clicked.connect(self._toggle_image)
+        togglebuttonlayout.addWidget(self.toggle_button)
+
+        controls_layout.addRow(togglebuttonlayout)
+        self.controls_group.setLayout(controls_layout)
+
+    def _toggle_image(self):
+        if self.toggle_button.isChecked():
+            self.toggle_button.setText("Show Preview")
+            self._update_preview_pixmap(self.original_image)
+            self.showing_original = True
+        else:
+            self.toggle_button.setText("Show Original")
+            self._update_preview_pixmap(self.preview_image)
+            self.showing_original = False
+
+    def _create_progress_display(self):
+        self.progress_group_box = QGroupBox("Progress")
+        layout = QVBoxLayout()
+
+        self.current_step_label = QLabel("Idle")
+        layout.addWidget(self.current_step_label)
+
+        self.progress_bar = QProgressBar()
+        layout.addWidget(self.progress_bar)
+
+        self.progress_group_box.setLayout(layout)
+
+    def _create_bottom_buttons(self):
+        bottom_layout = QHBoxLayout()
+
+        self.apply_button = QPushButton("Apply")
+        self.apply_button.clicked.connect(self._on_apply_clicked)
+        bottom_layout.addWidget(self.apply_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        bottom_layout.addWidget(self.cancel_button)
+
+        self.main_layout.addLayout(bottom_layout)
+
+    def _on_preview_clicked(self):
+        self.preview_button.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self.progress_bar.setValue(0)
+
+        n_scales = self.scales_slider.value()
+        boost_factor = self.boost_slider.value() / 100.0
+        gamma = self.gamma_slider.value() / 100.0
+        iterations = self.iter_slider.value()
+
+        self.worker = DSEWorker(
+            self.original_image, n_scales, boost_factor, gamma,
+            self.b3_spline_kernel, iterations=iterations, is_mono=self.is_mono
+        )
+        self.thread = QThread()
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress_update.connect(self._update_progress)
+        self.worker.finished.connect(self._on_worker_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+
+        self.thread.start()
+
+    def _update_progress(self, message, percent):
+        self.current_step_label.setText(message)
+        self.progress_bar.setValue(percent)
+
+    def _on_worker_finished(self, output_image, mask):
+        if output_image is not None:
+            self.preview_image = output_image
+            self._update_preview_pixmap(output_image)
+            self.apply_button.setEnabled(True)
+        else:
+            QMessageBox.critical(self, "Error", "DSE process failed.")
+
+        self.preview_button.setEnabled(True)
+
+    def _on_apply_clicked(self):
+        self.image_manager.set_image(self.preview_image, {"description": "WaveScale Dark Enhance"}, step_name="WaveScale Dark Enhance")
+        self.accept()
+
+    def _update_preview_pixmap(self, image):
+        image_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+        if image_uint8.ndim == 2:
+            image_uint8 = np.repeat(image_uint8[..., None], 3, axis=2)
+        h, w = image_uint8.shape[:2]
+        qimage = QImage(image_uint8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        self.pixmap_item.setPixmap(pixmap)
+        self.graphics_view.setSceneRect(self.pixmap_item.boundingRect())
+
+    def rgb_to_lab(self, rgb_image):
+        M = np.array([[0.4124564, 0.3575761, 0.1804375],
+                      [0.2126729, 0.7151522, 0.0721750],
+                      [0.0193339, 0.1191920, 0.9503041]], dtype=np.float32)
+        rgb_image = np.clip(rgb_image, 0.0, 1.0)
+        xyz_image = np.dot(rgb_image.reshape(-1, 3), M.T).reshape(rgb_image.shape)
+        xyz_image[..., 0] /= 0.95047
+        xyz_image[..., 2] /= 1.08883
+
+        def f(t):
+            delta = 6 / 29
+            return np.where(t > delta ** 3, np.cbrt(t), (t / (3 * delta ** 2)) + (4 / 29))
+
+        fx = f(xyz_image[..., 0])
+        fy = f(xyz_image[..., 1])
+        fz = f(xyz_image[..., 2])
+
+        L = (116.0 * fy) - 16.0
+        a = 500.0 * (fx - fy)
+        b = 200.0 * (fy - fz)
+
+        return np.stack([L, a, b], axis=-1)
+
+    def closeEvent(self, event):
+        if hasattr(self, "mask_window") and self.mask_window is not None:
+            self.mask_window.close()
+        super().closeEvent(event)
+
 class BlemishBlasterWorkerSignals(QObject):
     finished = pyqtSignal(np.ndarray)  # Emitted when processing is done
 
@@ -22031,14 +26879,16 @@ class PolyGradientRemoval:
 class CustomDoubleSpinBox(QWidget):
     valueChanged = pyqtSignal(float)
 
-    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1, parent=None):
+    def __init__(self, minimum=0.0, maximum=10.0, initial=0.0, step=0.1,
+                 suffix: str = "", parent=None):
         super().__init__(parent)
         self.minimum = minimum
         self.maximum = maximum
         self.step = step
         self._value = initial
+        self.suffix = suffix
 
-        # Create a line edit with a double validator.
+        # Line edit
         self.lineEdit = QLineEdit(f"{initial:.3f}")
         self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
         validator = QDoubleValidator(self.minimum, self.maximum, 3, self)
@@ -22046,27 +26896,32 @@ class CustomDoubleSpinBox(QWidget):
         self.lineEdit.setValidator(validator)
         self.lineEdit.editingFinished.connect(self.onEditingFinished)
 
-        # Create up and down buttons.
-        self.upButton = QToolButton()
-        self.upButton.setText("▲")
+        # Up/down buttons
+        self.upButton = QToolButton(); self.upButton.setText("▲")
+        self.downButton = QToolButton(); self.downButton.setText("▼")
         self.upButton.clicked.connect(self.increaseValue)
-        self.downButton = QToolButton()
-        self.downButton.setText("▼")
         self.downButton.clicked.connect(self.decreaseValue)
 
-        # Arrange buttons vertically.
+        # Buttons layout
         buttonLayout = QVBoxLayout()
         buttonLayout.addWidget(self.upButton)
         buttonLayout.addWidget(self.downButton)
         buttonLayout.setSpacing(0)
         buttonLayout.setContentsMargins(0, 0, 0, 0)
 
-        # Arrange the line edit and button layout horizontally.
+        # Optional suffix label
+        self.suffixLabel = QLabel(self.suffix) if self.suffix else None
+        if self.suffixLabel:
+            self.suffixLabel.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        # Main layout
         mainLayout = QHBoxLayout()
+        mainLayout.setSpacing(2)
+        mainLayout.setContentsMargins(0, 0, 0, 0)
         mainLayout.addWidget(self.lineEdit)
         mainLayout.addLayout(buttonLayout)
-        mainLayout.setSpacing(0)
-        mainLayout.setContentsMargins(0, 0, 0, 0)
+        if self.suffixLabel:
+            mainLayout.addWidget(self.suffixLabel)
         self.setLayout(mainLayout)
 
         self.updateButtonStates()
@@ -22120,7 +26975,7 @@ class CustomSpinBox(QWidget):
         self.lineEdit = QLineEdit(str(initial))
         self.lineEdit.setAlignment(Qt.AlignmentFlag.AlignRight)
         # Optionally, restrict input to integers using a validator.
-        from PyQt6.QtGui import QIntValidator
+        
         self.lineEdit.setValidator(QIntValidator(self.minimum, self.maximum, self))
         self.lineEdit.editingFinished.connect(self.editingFinished)
 
@@ -24651,7 +29506,7 @@ class StarSpikePreviewWindow(QDialog):
             # fallback to add_image(...) if you want
             self.image_manager.add_image(slot_idx, self.preview_image, new_metadata)
 
-        QMessageBox.information(self, "Saved", f"Preview image saved to slot {slot_idx}.")
+        print(f"Preview image saved to slot {slot_idx}.")
 
 class AdvancedOptionsDialog(QDialog):
     """
@@ -25120,7 +29975,7 @@ class StarSpikeTool(QDialog):
         # 3) Save the final image to the chosen slot
         self.image_manager.set_image_for_slot(slot_idx, self.final_image, new_metadata, step_name="Star Spike Tool")
 
-        QMessageBox.information(self, "Saved", f"Spiked image saved to slot {slot_idx}.")
+        print(f"Spiked image saved to slot {slot_idx}.")
         self.close()
 
 
@@ -25331,22 +30186,2387 @@ class StarSpikeTool(QDialog):
 
         return (r_ratio, g_ratio, b_ratio)
 
+def aperture_sum(image: np.ndarray, x: float, y: float, radius: float) -> float:
+    """
+    Sum pixel values within a circular aperture.
 
+    Parameters
+    ----------
+    image : 2D numpy array
+        Grayscale image (H×W).
+    x, y : float
+        Subpixel center of aperture (in image coordinates).
+    radius : float
+        Radius of aperture in pixels.
+
+    Returns
+    -------
+    float
+        Sum of image pixels whose centers are within radius of (x,y).
+    """
+    H, W = image.shape[:2]
+    # Define integer bounds for the square containing the circle
+    x0 = max(int(np.floor(x - radius)), 0)
+    x1 = min(int(np.ceil (x + radius)), W - 1)
+    y0 = max(int(np.floor(y - radius)), 0)
+    y1 = min(int(np.ceil (y + radius)), H - 1)
+
+    # Create a grid of coordinates within that box
+    yy, xx = np.ogrid[y0:y1+1, x0:x1+1]
+    dist2 = (yy - y)**2 + (xx - x)**2
+
+    # Mask of points inside the circle
+    mask = dist2 <= (radius**2)
+
+    # Extract the sub-image and sum only the masked points
+    sub = image[y0:y1+1, x0:x1+1]
+    return float(np.sum(sub[mask]))
+
+class OverlayView(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # disable built-in hand drag
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        # always arrow cursor
+        self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        self._panning = False
+        self._last_pos = QPoint()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.pos())
+            # if we clicked an ellipse, let it handle the event
+            for it in self.scene().items(scene_pt):
+                if isinstance(it, ClickableEllipseItem):
+                    super().mousePressEvent(event)
+                    return
+            # else: start panning
+            self._panning = True
+            self._last_pos = event.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.pos() - self._last_pos
+            self._last_pos = event.pos()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._panning:
+            self._panning = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+class ClickableEllipseItem(QGraphicsEllipseItem):
+    def __init__(self, rect: QRectF, index: int, callback):
+        super().__init__(rect)
+        self.index = index
+        self.callback = callback
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        self.setAcceptHoverEvents(True)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.callback(self.index, shift)
+        super().mousePressEvent(ev)
+
+
+class ReferenceOverlayDialog(QDialog):
+    def __init__(self, plane: np.ndarray, positions: List[Tuple], target_median: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reference Frame: Stars Overlay")
+        self.plane = plane.astype(np.float32)
+        self.positions = positions
+        self.target_median = target_median
+        self.autostretch = True
+
+        # pens for normal vs selected
+        self._normal_pen   = QPen(QColor('lightblue'), 3)  # for normal state
+        self._dip_pen      = QPen(QColor('yellow'),    3)  # flagged by threshold
+        self._selected_pen = QPen(QColor('red'),       4)  # when selected
+
+        # store ellipses here
+        self.ellipse_items: dict[int, ClickableEllipseItem] = {}
+        self.flagged_stars: Set[int] = set()  # updated by apply_threshold
+
+        self._build_ui()
+        self._init_graphics()
+
+        # wire up list‐clicks in the parent to recolor
+        if parent and hasattr(parent, 'star_list'):
+            parent.star_list.itemSelectionChanged.connect(self._update_highlights)
+
+        # after show, reset zoom so 1px == 1screen-px
+        QTimer.singleShot(0, self._fit_to_100pct)
+
+    def _build_ui(self):
+        self.view = OverlayView(self)
+        self.view.setRenderHints(
+            QPainter.RenderHint.Antialiasing |
+            QPainter.RenderHint.SmoothPixmapTransform
+        )
+        self.scene = QGraphicsScene(self)
+        self.view.setScene(self.scene)
+
+        btns = QHBoxLayout()
+        for txt, slot in [
+            ("Zoom In",        lambda: self.view.scale(1.2, 1.2)),
+            ("Zoom Out",       lambda: self.view.scale(1/1.2, 1/1.2)),
+            ("Reset Zoom",     self._fit_to_100pct),
+            ("Fit to Window",  self._fit_to_window),
+            ("Toggle Stretch", self._toggle_autostretch),
+        ]:
+            b = QPushButton(txt)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        btns.addStretch()
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.view)
+        lay.addLayout(btns)
+        self.resize(800, 600)
+
+    def _init_graphics(self):
+        # draw the image...
+        img = self.plane if not self.autostretch else stretch_mono_image(self.plane, target_median=0.3)
+        arr8 = (np.clip(img,0,1) * 255).astype(np.uint8)
+        h, w = img.shape
+        qimg = QImage(arr8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        pix  = QPixmap.fromImage(qimg)
+
+        self.scene.clear()
+        self.ellipse_items.clear()
+        self.scene.addItem(QGraphicsPixmapItem(pix))
+
+        # add one ellipse per star
+        radius = max(2, int(math.ceil(1.2*self.target_median)))
+        for idx, (x, y) in enumerate(self.positions):
+            r = QRectF(x-radius, y-radius, 2*radius, 2*radius)
+            ell = ClickableEllipseItem(r, idx, self._on_star_clicked)
+            ell.setPen(self._normal_pen)
+            ell.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self.scene.addItem(ell)
+            self.ellipse_items[idx] = ell
+
+    def _fit_to_100pct(self):
+        self.view.resetTransform()
+        rect = self.scene.itemsBoundingRect()
+        self.view.setSceneRect(rect)
+        # scroll so that scene center ends up in the view’s center
+        self.view.centerOn(rect.center())
+
+    def _fit_to_window(self):
+        rect = self.scene.itemsBoundingRect()
+        self.view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _toggle_autostretch(self):
+        self.autostretch = not self.autostretch
+        self._init_graphics()
+
+    def _on_star_clicked(self, index: int, shift: bool):
+        """Star‐circle was clicked; update list selection then recolor."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'star_list'):
+            return
+
+        lst = parent.star_list
+        item = lst.item(index)
+        if not item:
+            return
+
+        if shift:
+            item.setSelected(not item.isSelected())
+        else:
+            lst.clearSelection()
+            item.setSelected(True)
+
+        lst.scrollToItem(item)
+        self._update_highlights()
+
+    def _update_highlights(self):
+        """Recolor all ellipses according to star_list selection and dip flags."""
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'star_list'):
+            return
+
+        sel = {item.data(Qt.ItemDataRole.UserRole)
+            for item in parent.star_list.selectedItems()}
+        
+        for idx, ell in self.ellipse_items.items():
+            if idx in sel:
+                ell.setPen(self._selected_pen)
+            elif idx in self.flagged_stars:
+                ell.setPen(self._dip_pen)
+            else:
+                ell.setPen(self._normal_pen)
+
+    def update_dip_flags(self, flagged_indices: Set[int]):
+        """Update the visual color of stars flagged by threshold dips."""
+        self.flagged_stars = flagged_indices
+        self._update_highlights()
+
+
+class ExoPlanetWindow(QDialog):
+    referenceSelected = pyqtSignal(str)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Exoplanet Transit Detector")
+        self.resize(900, 600)
+
+        # State
+        self.image_paths    = []
+        self._cached_images = []
+        self._cached_headers = []   # parallel to _cached_images
+        self.times = None           # will become a 1D array of astropy Time        
+        self.star_positions = []
+        self.fluxes         = None   # stars × frames
+        self.flags          = None
+        self.median_fwhm    = None
+        self.master_dark    = None
+        self.master_flat    = None
+        self.exposure_time = None
+        self._last_ensemble = []
+        # ------------ new settings ------------
+        # SEP detection threshold in σ
+        self.sep_threshold  = 5.0
+        # fraction of image border to ignore [0–0.5]
+        self.border_fraction = 0.10
+        # number of companion stars in ensemble model
+        self.ensemble_k          = 10
+
+        # ——— Analysis settings ——————————————————
+        self.ls_min_frequency     = 0.01
+        self.ls_max_frequency     = 10.0
+        self.ls_samples_per_peak  = 10
+
+        self.bls_min_period       = 0.05
+        self.bls_max_period       = 2.0
+        self.bls_n_periods        = 1000
+        self.bls_duration_min_frac= 0.01
+        self.bls_duration_max_frac= 0.5
+        self.bls_n_durations      = 20
+        # ------------------------------------------   
+
+        # — WCS coordinates —
+        self.wcs_ra = None
+        self.wcs_dec = None
+
+        # — Mode selector —
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Mode:"))
+        self.aligned_mode_rb = QRadioButton("Aligned Subs")
+        self.raw_mode_rb     = QRadioButton("Raw Subs")
+        self.aligned_mode_rb.setChecked(True)
+        mg = QButtonGroup(self)
+        mg.addButton(self.aligned_mode_rb); mg.addButton(self.raw_mode_rb)
+        mg.buttonToggled.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.aligned_mode_rb)
+        mode_layout.addWidget(self.raw_mode_rb)
+        mode_layout.addStretch()
+        self.wrench_button = QToolButton()
+        self.wrench_button.setIcon(QIcon(wrench_path))
+        self.wrench_button.setToolTip("Settings…")
+        self.wrench_button.setStyleSheet("""
+            QToolButton {
+                background-color: #FF4500;
+                color: white;
+                padding: 4px;
+                border-radius: 4px;
+            }
+            QToolButton:hover {
+                background-color: #FF6347;
+            }
+        """)
+        self.wrench_button.clicked.connect(self.open_settings)    
+        mode_layout.addWidget(self.wrench_button)    
+
+        # — Calibration controls (hidden in Aligned) —
+        cal_layout = QHBoxLayout()
+        self.load_darks_btn = QPushButton("Load Master Dark…")
+        self.load_flats_btn = QPushButton("Load Master Flat…")
+        for w in (self.load_darks_btn, self.load_flats_btn):
+            w.clicked.connect(self.load_masters)
+            w.hide()
+            cal_layout.addWidget(w)
+        self.dark_status_label = QLabel("Dark: ❌");  self.dark_status_label.hide()
+        self.flat_status_label = QLabel("Flat: ❌");  self.flat_status_label.hide()
+        cal_layout.addWidget(self.dark_status_label)
+        cal_layout.addWidget(self.flat_status_label)
+        cal_layout.addStretch()
+
+        # — Status & Progress —
+        self.status_label = QLabel("Ready")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+
+        # — Top controls: load vs measure —
+        top_layout = QHBoxLayout()
+        self.load_raw_btn     = QPushButton("1: Load Raw Subs…")
+        self.load_aligned_btn = QPushButton("Load, Measure && Photometry…")
+        self.calibrate_btn       = QPushButton("1a: Calibrate && Align Subs")
+        self.measure_btn      = QPushButton("2: Measure && Photometry")
+        self.load_raw_btn.    clicked.connect(self.load_raw_subs)
+        self.load_aligned_btn.clicked.connect(self.load_and_measure_subs)
+        self.calibrate_btn.clicked.connect(self.calibrate_and_align)
+        self.measure_btn.     clicked.connect(self.detect_stars)
+        self.detrend_combo = QComboBox()
+        self.detrend_combo.addItems(["No Detrend", "Linear", "Quadratic"])
+        self.save_aligned_btn = QPushButton("Save Aligned Frames…")
+        self.save_aligned_btn.clicked.connect(self.save_aligned_frames)
+       
+        
+        top_layout.addWidget(self.load_raw_btn)
+        top_layout.addWidget(self.load_aligned_btn)
+        top_layout.addWidget(self.calibrate_btn)
+        top_layout.addWidget(self.measure_btn)
+        top_layout.addStretch()
+        top_layout.addWidget(QLabel("Detrend:"))
+        top_layout.addWidget(self.detrend_combo)
+        top_layout.addWidget(self.save_aligned_btn)        
+
+        # — Star list & Plot —
+        middle = QHBoxLayout()
+        self.star_list  = QListWidget()
+        self.star_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.star_list.itemSelectionChanged.connect(self.update_plot_for_selection)
+        self.star_list.setStyleSheet("""
+            QListWidget::item:selected {
+                background: #3399ff; 
+                color: white;
+            }
+        """)
+        middle.addWidget(self.star_list, 2)
+        self.plot_widget = pg.PlotWidget(title="Light Curves")
+        self.plot_widget.addLegend()
+        middle.addWidget(self.plot_widget, 5)
+
+        # — Bottom: export & threshold —
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Dip threshold (ppt):"))
+
+        # slider
+        self.threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        self.threshold_slider.setRange(0, 100)
+        self.threshold_slider.setValue(20)
+        row1.addWidget(self.threshold_slider)
+
+        # dynamically-updated label
+        self.threshold_value_label = QLabel(f"{self.threshold_slider.value()} ppt")
+        row1.addWidget(self.threshold_value_label)
+
+        row1.addStretch()
+
+        # detrend combo, export button, etc.
+        self.identify_btn = QPushButton("Identify Star…")
+        self.identify_btn.clicked.connect(self.on_identify_star)
+        row1.addWidget(self.identify_btn)
+    
+        self.show_ensemble_btn = QPushButton("Show Ensemble Members")
+        self.show_ensemble_btn.clicked.connect(self.show_ensemble_members)
+        row1.addWidget(self.show_ensemble_btn)
+
+        self.analyze_btn = QPushButton("Analyze Star…")
+        self.analyze_btn.clicked.connect(self.on_analyze)
+        row1.addWidget(self.analyze_btn)
+
+        row2 = QHBoxLayout()
+        self.fetch_tesscut_btn = QPushButton("Query TESScut Light Curve")
+        self.fetch_tesscut_btn.setEnabled(False)
+        self.fetch_tesscut_btn.clicked.connect(self.query_tesscut)
+        row2.addWidget(self.fetch_tesscut_btn)
+        self.export_btn = QPushButton("Export CSV/FITS")
+        self.export_btn.clicked.connect(self.export_data)
+        row2.addWidget(self.export_btn)
+        self.export_aavso_btn = QPushButton("Export → AAVSO")
+        self.export_aavso_btn.clicked.connect(self.export_to_aavso)
+        row2.addWidget(self.export_aavso_btn)
+
+        # — Assemble —
+        main = QVBoxLayout(self)
+        main.addLayout(mode_layout)
+        main.addLayout(cal_layout)
+        main.addLayout(top_layout)
+        main.addLayout(middle)
+        main.addLayout(row1)
+        main.addLayout(row2)
+        # status at very bottom
+        statlay = QHBoxLayout()
+        statlay.addWidget(self.status_label)
+        statlay.addWidget(self.progress_bar)
+        main.addLayout(statlay)
+
+        # initialize
+        self.on_mode_changed(self.aligned_mode_rb, True)
+        self.detrend_combo.setCurrentIndex(2)
+        # And in case setCurrentIndex doesn’t auto‐fire, call it manually:
+        self.on_detrend_changed(2)
+        self.threshold_slider.valueChanged.connect(self._on_threshold_changed)
+        self.analyze_btn.setEnabled(False)
+        self.calibrate_btn.hide()
+
+    def _on_threshold_changed(self, v: int):
+        # update the little “20 ppt” label
+        self.threshold_value_label.setText(f"{v} ppt")
+        # now re-apply your dip-detection
+        self.apply_threshold(v)
+        if hasattr(self, '_ref_overlay'):
+            self._ref_overlay._update_highlights()      
+
+    def open_settings(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Photometry & Analysis Settings")
+        layout = QVBoxLayout(dlg)
+
+        # — Photometry settings —
+        photo_box = QGroupBox("Photometry")
+        fb = QFormLayout(photo_box)
+        self.sep_spin = QDoubleSpinBox()
+        self.sep_spin.setRange(1.0, 20.0)
+        self.sep_spin.setSingleStep(0.5)
+        self.sep_spin.setValue(self.sep_threshold)
+        fb.addRow("SEP detection σ:", self.sep_spin)
+
+        self.border_spin = QDoubleSpinBox()
+        self.border_spin.setRange(0.0, 0.5)
+        self.border_spin.setSingleStep(0.01)
+        self.border_spin.setValue(self.border_fraction)
+        fb.addRow("Border fraction:", self.border_spin)
+        layout.addWidget(photo_box)
+
+        ens_box = QGroupBox("Ensemble Normalization")
+        ef = QFormLayout(ens_box)
+        self.ensemble_spin = QSpinBox()
+        self.ensemble_spin.setRange(1, 50)
+        self.ensemble_spin.setValue(self.ensemble_k)
+        ef.addRow("Comparison stars (k):", self.ensemble_spin)
+        layout.addWidget(ens_box)
+
+        # — Analysis settings —  
+        ana_box = QGroupBox("Analysis (period search)")
+        form = QFormLayout(ana_box)
+
+        # LS samples-per-peak only
+        self.ls_samp_spin = QSpinBox()
+        self.ls_samp_spin.setRange(1, 100)
+        self.ls_samp_spin.setValue(self.ls_samples_per_peak)
+        form.addRow("LS samples / peak:", self.ls_samp_spin)
+
+        # BLS min/max period
+        self.bls_min_spin = QDoubleSpinBox(); self.bls_min_spin.setRange(0.01, 10.0)
+        self.bls_min_spin.setValue(self.bls_min_period)
+        form.addRow("BLS min period [d]:", self.bls_min_spin)
+
+        self.bls_max_spin = QDoubleSpinBox(); self.bls_max_spin.setRange(0.01, 10.0)
+        self.bls_max_spin.setValue(self.bls_max_period)
+        form.addRow("BLS max period [d]:", self.bls_max_spin)
+
+        # BLS # periods
+        self.bls_nper_spin = QSpinBox()
+        self.bls_nper_spin.setRange(10, 20000)
+        self.bls_nper_spin.setValue(self.bls_n_periods)
+        form.addRow("BLS # periods:", self.bls_nper_spin)
+
+        # BLS min/max duration fraction
+        self.bls_min_frac_spin = QDoubleSpinBox()
+        self.bls_min_frac_spin.setRange(0.0001, 1.0)
+        self.bls_min_frac_spin.setSingleStep(0.001)
+        self.bls_min_frac_spin.setValue(self.bls_duration_min_frac)
+        form.addRow("BLS min dur frac:", self.bls_min_frac_spin)
+
+        self.bls_max_frac_spin = QDoubleSpinBox()
+        self.bls_max_frac_spin.setRange(0.01, 1.0)
+        self.bls_max_frac_spin.setSingleStep(0.01)
+        self.bls_max_frac_spin.setValue(self.bls_duration_max_frac)
+        form.addRow("BLS max dur frac:", self.bls_max_frac_spin)
+
+        # BLS # durations
+        self.bls_ndur_spin = QSpinBox()
+        self.bls_ndur_spin.setRange(1, 200)
+        self.bls_ndur_spin.setValue(self.bls_n_durations)
+        form.addRow("BLS # durations:", self.bls_ndur_spin)
+
+
+        layout.addWidget(ana_box)
+
+        # OK/Cancel
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            # Photometry
+            self.sep_threshold   = self.sep_spin.value()
+            self.border_fraction = self.border_spin.value()
+            self.ensemble_k          = self.ensemble_spin.value()
+
+            # Lomb–Scargle
+            self.ls_samples_per_peak = self.ls_samp_spin.value()
+
+            # Box–Least–Squares
+            self.bls_min_period        = self.bls_min_spin.value()
+            self.bls_max_period        = self.bls_max_spin.value()
+            self.bls_n_periods         = self.bls_nper_spin.value()
+            self.bls_duration_min_frac = self.bls_min_frac_spin.value()
+            self.bls_duration_max_frac = self.bls_max_frac_spin.value()
+            self.bls_n_durations       = self.bls_ndur_spin.value()
+
+
+    def on_mode_changed(self, button, checked):
+        is_raw = checked and (button is self.raw_mode_rb)
+
+        # show/hide the Raw‐mode loaders + calibrate button
+        for w in (
+            self.load_raw_btn,
+            self.load_darks_btn,
+            self.load_flats_btn,
+            self.dark_status_label,
+            self.flat_status_label,
+            self.calibrate_btn,
+        ):
+            w.setVisible(is_raw)
+
+        # in Aligned mode only allow the aligned loader
+        self.load_aligned_btn.setVisible(not is_raw)
+        self.measure_btn.setVisible(is_raw)
+
+
+    def load_and_measure_subs(self):
+        # 1) load & sort
+        self.load_aligned_subs()
+        # 2) once loaded, immediately run photometry
+        self.detect_stars()
+
+    def load_raw_subs(self):
+        settings = QSettings()
+        start_dir = settings.value(
+            "ExoPlanet/lastRawFolder",
+            os.path.expanduser("~"),
+            type=str
+        )
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Raw Frames",
+            start_dir,
+            "FITS TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)"
+        )
+        if not paths:
+            return
+
+        # — remember for next time —
+        settings.setValue("ExoPlanet/lastRawFolder", os.path.dirname(paths[0]))
+
+        # ——— 1) HEADER PASS: extract DATE-OBS (with progress) ———
+        self.status_label.setText("Reading headers…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        datelist = []
+        for i, p in enumerate(paths, start=1):
+            ext = os.path.splitext(p)[1].lower()
+            ds = None
+
+            if ext == '.xisf':
+                try:
+                    xisf = XISF(p)
+                    img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
+                    if 'DATE-OBS' in img_meta:
+                        ds = img_meta['DATE-OBS'][0]['value']
+                except Exception:
+                    ds = None
+
+            elif ext in ('.fit', '.fits', '.fz'):
+                try:
+                    hdr, _ = get_valid_header(p)
+                    ds = hdr.get('DATE-OBS', None)
+                except Exception:
+                    ds = None
+
+            # parse into an astropy Time or leave None
+            t = None
+            if isinstance(ds, str):
+                try:
+                    t = Time(ds, format='isot', scale='utc')
+                except Exception as e:
+                    print(f"[DEBUG]   → parse error for {p}: {e}")
+                    t = None
+
+            datelist.append((p, t))
+
+            # update progress bar
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— 2) sort by timestamp (None last) or filename ———
+        # (False < True, so entries with real time come first)
+        datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
+        paths = [p for p, _ in datelist]
+
+        # ——— 3) IMAGE PASS: load, bin & stash headers (with progress) ———
+        self.image_paths     = paths
+        self._cached_images  = []
+        self._cached_headers = []
+        self.star_list.clear()
+        self.plot_widget.clear()
+
+        self.status_label.setText("Loading raw frames…")
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        for i, p in enumerate(paths, start=1):
+            self.status_label.setText(f"Loading raw frame {i}/{len(paths)}…")
+            QApplication.processEvents()
+
+            img, hdr, bit_depth, is_mono = load_image(p)
+            if img is None:
+                QMessageBox.warning(
+                    self, "Load Error",
+                    f"Failed to load raw frame:\n{os.path.basename(p)}"
+                )
+                self._cached_headers.append(None)
+            else:
+                # fast 2×2 binning
+                img_binned = bin2x2_numba(img)
+                self._cached_images.append(img_binned)
+
+                # stash header (FITS or XISF keywords dict)
+                ext = os.path.splitext(p)[1].lower()
+                if ext == '.xisf':
+                    try:
+                        xisf = XISF(p)
+                        img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
+                        self._cached_headers.append(img_meta)
+                    except Exception:
+                        self._cached_headers.append(None)
+                elif ext in ('.fit', '.fits', '.fz'):
+                    self._cached_headers.append(hdr)
+                else:
+                    # no header metadata on TIFF/others
+                    self._cached_headers.append(None)
+
+            if self.exposure_time is None:
+                # ——— FITS files ———
+                if isinstance(hdr, fits.Header):
+                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
+                    self.exposure_time = hdr.get('EXPOSURE',
+                                                hdr.get('EXPTIME', None))
+
+                # ——— XISF files ———
+                elif isinstance(hdr, dict):
+                    # you already do this for DATE-OBS; same here:
+                    # XISF metadata dict has 'file_meta' and 'image_meta'
+                    img_meta = hdr.get('image_meta', {}) or {}
+                    fits_kw  = img_meta.get('FITSKeywords', {})
+                    val = None
+                    if 'EXPOSURE' in fits_kw:
+                        val = fits_kw['EXPOSURE'][0].get('value')
+                    elif 'EXPTIME' in fits_kw:
+                        val = fits_kw['EXPTIME'][0].get('value')
+                    try:
+                        self.exposure_time = float(val)
+                    except Exception:
+                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                        self.exposure_time = None
+
+                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
+
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— 4) build Time array (masked where none) ———
+        strs = []
+        mask = []
+        for hdr in self._cached_headers:
+            if isinstance(hdr, dict) and 'DATE-OBS' in hdr:
+                val = hdr['DATE-OBS'][0]['value']
+                strs.append(val)
+                mask.append(False)
+            elif isinstance(hdr, Header) and 'DATE-OBS' in hdr:
+                strs.append(hdr['DATE-OBS'])
+                mask.append(False)
+            else:
+                strs.append('')
+                mask.append(True)
+
+        ma_strs = np.ma.MaskedArray(strs, mask=mask)
+        # masked entries turn into NaT automatically
+        self.times = Time(ma_strs, format='isot', scale='utc', out_subfmt='date')
+
+        # — done —
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"Loaded {len(self._cached_images)}/{len(paths)} raw frames"
+        )
+
+    def load_aligned_subs(self):
+        settings = QSettings()
+        start_dir = settings.value("ExoPlanet/lastAlignedFolder",
+                                os.path.expanduser("~"),
+                                type=str)
+
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Aligned Frames",
+            start_dir,
+            "FITS or TIFF (*.fit *.fits *.tif *.tiff *.xisf)"
+        )
+        if not paths:
+            return
+
+        # remember for next time
+        settings.setValue("ExoPlanet/lastAlignedFolder", os.path.dirname(paths[0]))
+
+        # ——— PASS 1: read headers & extract DATE-OBS with progress ———
+        self.status_label.setText("Reading metadata from aligned frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        datelist = []
+        for i, p in enumerate(paths, start=1):
+            ext = os.path.splitext(p)[1].lower()
+            ds = None
+
+            if ext == '.xisf':
+                try:
+                    xisf     = XISF(p)
+                    img_meta = xisf.get_images_metadata()[0]
+                    kw       = img_meta.get('FITSKeywords', {})
+                    if 'DATE-OBS' in kw:
+                        ds = kw['DATE-OBS'][0]['value']
+                except Exception:
+                    ds = None
+
+            elif ext in ('.fit', '.fits', '.fz'):
+                try:
+                    hdr, _ = get_valid_header(p)
+                    ds      = hdr.get('DATE-OBS', None)
+                except Exception:
+                    ds = None
+
+            # parse into astropy Time or None
+            t = None
+            if isinstance(ds, str):
+                try:
+                    t = Time(ds, format='isot', scale='utc')
+                except Exception as e:
+                    print(f"[DEBUG] Failed to parse DATE-OBS for {p}: {e}")
+                    t = None
+
+            datelist.append((p, t))
+
+            # update progress
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— sort by (has_time, then time or filename) ———
+        datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
+        sorted_paths = [p for p, _ in datelist]
+
+        # ——— PASS 2: load & bin images in sorted order ———
+        self.image_paths     = sorted_paths
+        self._cached_images  = []
+        self._cached_headers = []
+
+        self.status_label.setText("Loading aligned frames…")
+        self.progress_bar.setMaximum(len(sorted_paths))
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        for i, p in enumerate(sorted_paths, start=1):
+            self.status_label.setText(f"Loading frame {i}/{len(sorted_paths)}…")
+            QApplication.processEvents()
+
+            img, hdr, bit_depth, is_mono = load_image(p)
+            if img is None:
+                QMessageBox.warning(
+                    self, "Load Error",
+                    f"Failed to load aligned frame:\n{os.path.basename(p)}"
+                )
+                self._cached_headers.append(None)
+            else:
+                img_binned = bin2x2_numba(img)
+                self._cached_images.append(img_binned)
+                self._cached_headers.append(hdr)
+
+            if self.exposure_time is None:
+                # ——— FITS files ———
+                if isinstance(hdr, fits.Header):
+                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
+                    self.exposure_time = hdr.get('EXPOSURE',
+                                                hdr.get('EXPTIME', None))
+
+                # ——— XISF files ———
+                elif isinstance(hdr, dict):
+                    # you already do this for DATE-OBS; same here:
+                    # XISF metadata dict has 'file_meta' and 'image_meta'
+                    img_meta = hdr.get('image_meta', {}) or {}
+                    fits_kw  = img_meta.get('FITSKeywords', {})
+                    val = None
+                    if 'EXPOSURE' in fits_kw:
+                        val = fits_kw['EXPOSURE'][0].get('value')
+                    elif 'EXPTIME' in fits_kw:
+                        val = fits_kw['EXPTIME'][0].get('value')
+                    try:
+                        self.exposure_time = float(val)
+                    except Exception:
+                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                        self.exposure_time = None
+
+                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
+
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        # ——— build Time array from our first‐pass times ———
+        iso_strs = []
+        mask     = []
+        for _, t in datelist:
+            if t is not None:
+                iso_strs.append(t.isot)
+                mask.append(False)
+            else:
+                iso_strs.append('')
+                mask.append(True)
+
+        ma_strs = np.ma.MaskedArray(iso_strs, mask=mask)
+        self.times = Time(
+            ma_strs,
+            format='isot',
+            scale='utc',
+            out_subfmt='date'
+        )
+
+        # ——— done! ———
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"Loaded {len(self._cached_images)}/{len(sorted_paths)} aligned frames"
+        )
+
+    def load_masters(self):
+        """
+        Load a single master dark or flat, 2×2 bin it immediately,
+        then check compatibility against any already‐loaded master.
+        Remembers the last‐used folder in QSettings.
+        """
+        # — pull last folder from QSettings —
+        settings = QSettings()
+        last_master_dir = settings.value(
+            "ExoPlanet/lastMasterFolder",
+            os.path.expanduser("~"),
+            type=str
+        )
+
+        # — configure file dialog —
+        sender = self.sender()
+        dlg = QFileDialog(self, "Select Master File",
+                        last_master_dir,
+                        "FITS, TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)")
+        dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
+        if not dlg.exec():
+            return
+
+        path = dlg.selectedFiles()[0]
+
+        settings.setValue("ExoPlanet/lastMasterFolder", os.path.dirname(path))
+
+        img, hdr, bit_depth, is_mono = load_image(path)
+        if img is None:
+            QMessageBox.warning(self, "Load Error", f"Failed to load master file:\n{path}")
+            return
+
+        # normalize dtype and bin
+        img = img.astype(np.float32)
+        binned = bin2x2_numba(img)
+
+        # decide dark vs flat
+        if "Dark" in sender.text():
+            # if there's already a flat, ensure shapes match
+            if self.master_flat is not None:
+                if not self._shapes_compatible(binned, self.master_flat):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "This master dark (binned) doesn’t match your existing flat."
+                    )
+                    return
+
+            self.master_dark = binned
+            self.dark_status_label.setText("Dark: ✅")
+            self.dark_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+
+
+        else:
+            # flat
+            if self.master_dark is not None:
+                if not self._shapes_compatible(self.master_dark, binned):
+                    QMessageBox.warning(
+                        self, "Shape Mismatch",
+                        "This master flat (binned) doesn’t match your existing dark."
+                    )
+                    return
+
+            self.master_flat = binned
+            self.flat_status_label.setText("Flat: ✅")
+            self.flat_status_label.setStyleSheet("color: #00cc66; font-weight: bold;")
+
+
+    def _shapes_compatible(self, master: np.ndarray, other: np.ndarray) -> bool:
+        """
+        Return True if `master` and `other` can be used together in calibration:
+          - Exactly the same shape, OR
+          - master is 2D (H×W) and other is 3D (H×W×3), OR
+          - vice versa.
+        """
+        if master.shape == other.shape:
+            return True
+
+        # If one is 2D and the other is H×W×3, check the first two dims
+        if master.ndim == 2 and other.ndim == 3 and other.shape[:2] == master.shape:
+            return True
+        if other.ndim == 2 and master.ndim == 3 and master.shape[:2] == other.shape:
+            return True
+
+        return False
+
+    def calibrate_and_align(self):
+        """
+        Apply master dark/flat to each raw frame, then align them to the first frame.
+        """
+        if not self._cached_images:
+            QMessageBox.warning(self, "Calibrate", "Load raw subs first.")
+            return
+
+        self.status_label.setText("Calibrating & aligning frames…")
+        self.progress_bar.setVisible(True)
+        n = len(self._cached_images)
+        self.progress_bar.setMaximum(n)
+
+        reference_image_2d = None
+
+        for i, (img, hdr) in enumerate(zip(self._cached_images, self._cached_headers), start=1):
+            # 1) subtract master dark
+            if self.master_dark is not None:
+                img = img.astype(np.float32) - self.master_dark
+
+            # 2) divide by master flat
+            if self.master_flat is not None:
+                img = apply_flat_division_numba(img, self.master_flat)
+           
+            # 4) promote to 3-channel if still mono
+            if img.ndim == 2:
+                img = np.stack([img, img, img], axis=2)
+
+            # 5) build mono “plane” for star registration
+            plane = img if img.ndim == 2 else img.mean(axis=2)
+
+            # 6) on first frame, set reference
+            if reference_image_2d is None:
+                reference_image_2d = plane.copy()
+
+            # 7) compute transform & apply
+            delta = StarRegistrationWorker.compute_affine_transform_astroalign(
+                plane, reference_image_2d
+            )
+            if delta is None:
+                delta = IDENTITY_2x3
+
+            # apply to full image
+            img_aligned = StarRegistrationThread.apply_affine_transform_static(img, delta)
+            # update our cache
+            self._cached_images[i-1] = img_aligned
+
+            # update progress
+            self.progress_bar.setValue(i)
+            QApplication.processEvents()
+
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("Calibration & alignment complete")
+
+    def save_aligned_frames(self):
+        """Save out each image in self._cached_images using our global save_image()."""
+        if not self._cached_images:
+            QMessageBox.warning(self, "Save Aligned Frames", "No images to save. Run Calibrate & Align first.")
+            return
+
+        # pick a folder
+        out_dir = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
+        if not out_dir:
+            return
+
+        for i, orig_path in enumerate(self.image_paths):
+            img = self._cached_images[i]
+            # derive extension & format
+            ext = os.path.splitext(orig_path)[1].lstrip(".").lower()
+            fmt = ext if ext in ("fits","fit","tiff","tif","xisf","png","jpg","jpeg") else "fits"
+
+            # pull back the original header block if we saved it
+            hdr = None
+            if hasattr(self, "_cached_headers") and i < len(self._cached_headers):
+                hdr = self._cached_headers[i]
+
+            # choose an output name
+            base = os.path.splitext(os.path.basename(orig_path))[0]
+            out_name = f"{base}_aligned.{fmt}"
+            out_path = os.path.join(out_dir, out_name)
+
+            # call your global helper
+            # note: bit_depth, is_mono, image_meta, file_meta can all be None or defaulted
+            save_image(
+                img_array=img,
+                filename=out_path,
+                original_format=fmt,
+                bit_depth=None,
+                original_header=hdr,
+                is_mono=(img.ndim==2),
+                image_meta=None,
+                file_meta=None
+            )
+
+        QMessageBox.information(
+            self, "Save Complete",
+            f"Saved {len(self._cached_images)} aligned frames to:\n{out_dir}"
+        )
+
+    def detect_stars(self):
+        #print("=== detect_stars file order ===")
+        #for i, path in enumerate(self.image_paths, start=1):
+        #    print(f"{i:3d}: {path}")
+        #print("===============================")        
+        # — build & reset UI —
+        self.status_label.setText("Measuring frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(len(self.image_paths))
+        self.progress_bar.setValue(0)
+        #QApplication.processEvents()
+
+        # 0) make sure all the images are in memory
+        if not hasattr(self, "_cached_images") or len(self._cached_images) != len(self.image_paths):
+            self._cached_images = [load_image(p)[0] for p in self.image_paths]
+
+        n_frames = len(self._cached_images)
+        self.status_label.setText("Measuring frames…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setMaximum(n_frames)
+        self.progress_bar.setValue(0)
+        #QApplication.processEvents()
+
+        # 1) prepare a frame‐processing helper
+        def _process_frame(idx, img):
+            # mono-plane
+            plane = img.mean(axis=2) if img.ndim == 3 else img
+            mean, med, std = sigma_clipped_stats(plane)
+            zeroed = plane - med
+
+            # background
+            bkg    = sep.Background(zeroed)
+            bkgmap = bkg.back()
+            rmsmap = bkg.rms()
+            data_sub = zeroed - bkgmap
+
+            # SEP extract
+            try:
+                objs = sep.extract(
+                    data_sub,
+                    thresh=self.sep_threshold, err=rmsmap,
+                    minarea=16, deblend_nthresh=32, clean=True
+                )
+            except Exception:
+                objs = None
+
+            # compute FWHM/ecc if we got stars
+            if objs is None or len(objs)==0:
+                sc = 0; avg_fwhm = 0.0; avg_ecc = 0.0
+            else:
+                sc = len(objs)
+                a = np.clip(objs['a'],1e-3,None)
+                b = np.clip(objs['b'],1e-3,None)
+                fwhm_vals = 2.3548 * np.sqrt(a*b)
+                ecc_vals  = np.sqrt(1.0 - np.clip(b/a,0,1)**2)
+                avg_fwhm = float(np.nanmean(fwhm_vals))
+                avg_ecc   = float(np.nanmean(ecc_vals))
+
+            stats = {
+                "star_count":   sc,
+                "eccentricity": avg_ecc,
+                "mean":         float(np.mean(plane)),
+                "fwhm":         avg_fwhm
+            }
+            return idx, data_sub, objs, rmsmap, stats
+
+        # decide how many threads to spin up
+        cpu_cnt = multiprocessing.cpu_count()
+        n_workers = max(1, int(cpu_cnt * 0.8))
+
+        frame_data = {}
+        stats_map  = {}
+        # 2) fire off the jobs
+        with ThreadPoolExecutor(max_workers=n_workers) as exe:
+            futures = [
+                exe.submit(_process_frame, idx, img)
+                for idx, img in enumerate(self._cached_images)
+            ]
+            done = 0
+            for fut in as_completed(futures):
+                idx, data_sub, objs, rmsmap, stats = fut.result()
+                frame_data[idx] = (data_sub, objs, rmsmap)
+                stats_map[idx]  = stats
+
+                # update progress
+                done += 1
+                self.progress_bar.setValue(done)
+                self.status_label.setText(f"Measured frame {done}/{n_frames}")
+                #QApplication.processEvents()
+
+        # 2) pick best reference by star_count/(FWHM * mean)
+        def quality(i):
+            s = stats_map[i]
+            return s["star_count"] / (s["fwhm"] * s["mean"] + 1e-8)
+
+        ref_idx   = max(stats_map.keys(), key=quality)
+        ref_stats = stats_map[ref_idx]
+
+        # 3) fire off Whats In My Image and plate solving
+        self.ref_idx = ref_idx
+
+        # grab the binned image & its header
+        plane = self._cached_images[ref_idx]
+        hdr   = self._cached_headers[ref_idx]
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
+        tmp_path = tmp.name
+        # write the binned plane with its header
+        fits.PrimaryHDU(data=plane).writeto(tmp_path, overwrite=True)
+        tmp.close()
+
+        # now plate‐solve that binned FITS
+        self._emit_reference_later(tmp_path)
+
+        # 4) pull the SEP catalog for reference
+        data_ref, objs_ref, rms_ref = frame_data[ref_idx]
+        if objs_ref is None or len(objs_ref) == 0:
+            QMessageBox.warning(self, "No Stars", "No stars found in reference frame.")
+            self.progress_bar.setVisible(False)
+            return
+
+        xs = objs_ref['x']
+        ys = objs_ref['y']
+
+        # --- drop detections too close to the edge ---
+        h, w = data_ref.shape
+        bf = self.border_fraction
+        keep_border = (
+            (xs > w*bf) & (xs < w*(1-bf)) &
+            (ys > h*bf) & (ys < h*(1-bf))
+        )
+        xs = xs[keep_border]
+        ys = ys[keep_border]
+
+        self.median_fwhm = ref_stats["fwhm"]
+        aper_r = max(2, 1.2 * self.median_fwhm)
+
+        # 5) vectorized aperture sums on *all* frames
+        # — 5) vectorized aperture sums on *all* frames ——
+        n_stars  = len(xs)
+        n_frames = len(self._cached_images)
+        raw_flux = np.zeros((n_stars, n_frames), float)
+        flags    = np.zeros((n_stars, n_frames), int)
+
+        # NEW: array to hold the SEP‐reported errors
+        raw_flux_err = np.zeros((n_stars, n_frames), float)
+
+        self.status_label.setText("Computing aperture sums…")
+        self.progress_bar.setMaximum(n_frames)
+        self.progress_bar.setValue(0)
+        #QApplication.processEvents()
+
+        for t, img in enumerate(self._cached_images):
+            self.status_label.setText(f"Running Photometry frame {t+1}/{n_frames}…")
+            QApplication.processEvents()
+
+            plane = img.mean(axis=2) if img.ndim == 3 else img
+            if self.raw_mode_rb.isChecked():
+                if self.master_dark is not None:
+                    plane = plane.astype(np.float32) - self.master_dark
+                if self.master_flat is not None:
+                    plane = apply_flat_division_numba(plane, self.master_flat)
+
+            bkg    = sep.Background(plane - np.median(plane))
+            rmsmap = bkg.rms()
+            data_sub = plane - bkg.back()
+
+            # SEP sum circle returns flux, flux_error, flags
+            fl, ferr, flg = sep.sum_circle(
+                data_sub, xs, ys, aper_r, err=rmsmap
+            )
+            raw_flux[:, t]     = fl
+            raw_flux_err[:, t] = ferr     # <— capture the per‐star error
+            flags[:, t]        = flg
+
+            self.progress_bar.setValue(t+1)
+            #QApplication.processEvents()
+
+
+        # ——— 6) ENSEMBLE NORMALIZATION ———
+        # first compute each star’s “reference brightness” (e.g. median over all frames)
+        n_stars, n_frames = raw_flux.shape
+
+        # compute each star’s “reference brightness” (for neighbor search)
+        star_refs = np.nanmedian(raw_flux, axis=1)
+
+        # allocate outputs
+        rel_flux = np.zeros_like(raw_flux)
+        rel_err  = np.zeros_like(raw_flux_err)
+
+        k = self.ensemble_k  # e.g. 10 by default
+        self.ensemble_map = {} 
+
+        for i in range(n_stars):
+            # 1) find the k neighbors closest in ref‐brightness
+            diffs = np.abs(star_refs - star_refs[i])
+            diffs[i] = np.inf
+            neigh = np.argpartition(diffs, k)[:k]
+            self.ensemble_map[i] = list(neigh)
+
+            # 2) build the ensemble curve + estimate its error
+            ens_flux = np.nanmedian(raw_flux[neigh, :], axis=0)  # length n_frames
+            # propagate errors in quadrature, then /sqrt(N)
+            ens_err = np.sqrt(np.nansum(raw_flux_err[neigh, :]**2, axis=0)) / np.sqrt(len(neigh))
+
+            # 3) normalize star i by that ensemble (guard against zeros)
+            mask = ens_flux != 0
+            rel_flux[i, mask] = raw_flux[i, mask] / ens_flux[mask]
+
+            # 4) propagate the two error terms:
+            #    σ_rel = rel_flux * sqrt[ (σ_raw / raw_flux)**2 + (σ_ens / ens_flux)**2 ]
+            with np.errstate(divide='ignore', invalid='ignore'):
+                term1 = np.where(raw_flux[i]  != 0, raw_flux_err[i]  / raw_flux[i], 0)
+                term2 = np.where(ens_flux      != 0, ens_err           / ens_flux,      0)
+                rel_err[i, mask] = rel_flux[i, mask] * np.sqrt(term1[mask]**2 + term2[mask]**2)
+
+        # store for downstream steps & export
+        self.fluxes      = rel_flux
+        self.flux_errors = rel_err
+        self.flags       = flags
+
+        # — 6.5) detrend each star if requested —
+        if self.detrend_degree is not None:
+            n_stars = rel_flux.shape[0]
+
+            self.status_label.setText("Detrending curves…")
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setMaximum(n_stars)
+            self.progress_bar.setValue(0)
+            #QApplication.processEvents()
+
+            for i in range(n_stars):
+                curve = rel_flux[i].copy()
+                # mask = only those frames where we actually _have_ a measurement
+                good = np.isfinite(curve) & (curve > 0)
+
+
+                # do the fit _without_ excluding flagged points
+                detrended = self._detrend_curve(curve, self.detrend_degree, mask=good)
+                rel_flux[i] = detrended
+
+                self.progress_bar.setValue(i+1)
+                #QApplication.processEvents()
+
+            self.progress_bar.setVisible(False)
+            self.status_label.setText("Detrending complete")  
+
+        # ——— 7) flag per‐star 3σ outliers, but don’t drop the star entirely ———
+        for i in range(n_stars):
+            curve = rel_flux[i, :]
+            med_i = np.nanmedian(curve)
+            mad_i = np.nanmedian(np.abs(curve - med_i))
+            # robust σ estimate
+            sigma_i = 1.4826 * mad_i if mad_i > 0 else np.nanstd(curve)
+            if sigma_i > 0:
+                outlier_mask = np.abs(curve - med_i) > 2 * sigma_i
+                flags[i, outlier_mask] = 1
+
+        # ——— 8) now drop only stars that are flagged in ≥ 75% of frames ———
+        good_counts = np.sum(flags == 0, axis=1)
+        keep       = good_counts >= (0.75 * n_frames)
+
+        xs       = xs[keep]
+        ys       = ys[keep]
+        rel_flux = rel_flux[keep, :]
+        flags    = flags[keep, :]
+
+        self.star_positions = list(zip(xs, ys))
+        self.fluxes         = rel_flux.copy()
+        self.flags          = flags
+
+        # ——— 9) populate list with survivors ———
+        self.star_list.clear()
+        for i, (x, y) in enumerate(self.star_positions):
+            item = QListWidgetItem(
+                f"#{i}: x={x:.1f}, y={y:.1f}   RelFlux={rel_flux[i,0]:.3f}   FWHM={self.median_fwhm:.2f}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            self.star_list.addItem(item)
+
+        # ——— 10) overlay & finish ———
+        self._show_reference_with_circles(data_ref, self.star_positions)
+
+        self.status_label.setText("Ready")
+        self.progress_bar.setVisible(False)
+        self.analyze_btn.setEnabled(True)
+        self._on_threshold_changed(self.threshold_slider.value())
+
+    def show_ensemble_members(self):
+        sels = self.star_list.selectedItems()
+        if len(sels) != 1:
+            return
+        target = sels[0].data(Qt.ItemDataRole.UserRole)
+        members = self.ensemble_map.get(target, [])
+
+        # 1) clear *only* the old ensemble highlights (light‑blue),
+        #    leave any yellow flagged items in place
+        for idx in self._last_ensemble:
+            item = self.star_list.item(idx)
+            if item:
+                color = item.background().color()
+                if color == QColor('lightblue'):
+                    item.setBackground(QBrush())
+
+        # 2) highlight the new ensemble members, but don't override yellow
+        for idx in members:
+            item = self.star_list.item(idx)
+            if item:
+                if item.background().color() != QColor('yellow'):
+                    item.setBackground(QBrush(QColor('lightblue')))
+
+        # 3) remember for next time
+        self._last_ensemble = members
+    def on_detrend_changed(self, idx: int):
+        # idx==0 → quadratic, 1 → linear, 2 → none
+        mapping = {0:None, 1:1, 2:2}
+        self.detrend_degree = mapping[idx]
+        # if we already have fluxes, replot immediately
+        if getattr(self, 'fluxes', None) is not None:
+            self.update_plot_for_selection()
+
+    def _emit_reference_later(self, path: str):
+        # wrap the actual emit in a singleShot so it always posts back to the event loop
+        QTimer.singleShot(0, lambda: self.referenceSelected.emit(path))
+
+    @staticmethod
+    def _detrend_curve(curve: np.ndarray, deg: int, mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Fit up to a degree‐`deg` polynomial to the curve vs frame index and divide it out,
+        using only the points where mask==True.  If you don't have enough points for `deg`,
+        it will automatically degrade to a lower degree (down to linear).
+        """
+        x = np.arange(curve.size)
+
+        # default mask = “finite, positive, unflagged”
+        if mask is None:
+            mask = np.isfinite(curve) & (curve > 0)
+
+        n_good = int(mask.sum())
+        # need at least 2 points to fit *anything*
+        if n_good < 2:
+            return curve
+
+        # pick the highest degree we can actually fit
+        fit_deg = min(deg, n_good - 1)
+        if fit_deg < 1:
+            return curve
+
+        # perform the fit *only* on the good points
+        try:
+            coeffs = np.polyfit(x[mask], curve[mask], fit_deg)
+
+        except Exception:
+            # e.g. singular matrix
+
+            return curve
+
+        trend = np.polyval(coeffs, x)
+        # avoid divide-by-zero
+        trend[trend == 0] = 1.0
+        return curve / trend
+
+    def _show_reference_with_circles(self, plane, positions):
+        dlg = ReferenceOverlayDialog(
+            plane=plane,
+            positions=positions,
+            target_median=self.median_fwhm,
+            parent=self
+        )
+        # keep a reference so it doesn’t get garbage‐collected
+        self._ref_overlay = dlg
+        dlg.show()
+
+
+    def update_plot_for_selection(self):
+        # 1) Sanity check
+        if not hasattr(self, 'fluxes') or self.fluxes is None:
+            QMessageBox.warning(
+                self, "No Photometry",
+                "Please run photometry before selecting a star."
+            )
+            return
+
+        # 2) Build the X axis: hours since first exposure, or frame index fallback
+        try:
+            import astropy.units as u
+            delta = (self.times - self.times[0]).to(u.hour).value  # array of hours
+            x_all = delta
+            bottom_label = "Hours since start"
+        except Exception:
+            # If self.times isn't set or parsing fails
+            x_all = np.arange(self.fluxes.shape[1])
+            bottom_label = "Frame"
+
+        # 3) Clear plot and relabel axes
+        self.plot_widget.clear()
+        self.plot_widget.addLegend()
+        self.plot_widget.setLabel('bottom', bottom_label)
+        self.plot_widget.setLabel('left',   'Relative Flux')
+
+        n_stars = self.fluxes.shape[0]
+
+        # 4) Compute each star’s median flux once (for normalization)
+        medians = np.nanmedian(self.fluxes, axis=1)
+
+        # 5) Which stars to draw?
+        inds = [item.data(Qt.ItemDataRole.UserRole)
+                for item in self.star_list.selectedItems()]
+
+        # 6) Plot each star’s relative flux curve
+        max_gap = 1.0
+        for idx in inds:
+                # build rel flux & time
+                f = self.fluxes[idx]
+                flags_star = (self.flags[idx] if hasattr(self, 'flags') 
+                            else np.zeros_like(f, int))
+                mask = (np.isfinite(f) & (f > 0) & (flags_star == 0))
+                if mask.sum() < 2:
+                    continue
+
+                rel = f[mask] / medians[idx]
+                x   = x_all[mask]
+                ma  = self.moving_average(rel, window=5)
+
+                # find where gaps exceed max_gap
+                dt = np.diff(x)
+                breaks = np.where(dt > max_gap)[0]
+                segments = np.split(np.arange(len(x)), breaks+1)
+
+                color = pg.intColor(idx, hues=n_stars)
+                pen   = pg.mkPen(color=color, width=2)
+                dash  = pg.mkPen(color=color, width=2, style=Qt.PenStyle.DashLine)
+                brush = pg.mkBrush(color=color)
+
+                dull_color = QColor(color)
+                dull_color.setAlpha(60)            # out of 255, lower → more transparent
+                dull_pen   = pg.mkPen(color=dull_color, width=1)
+                dull_brush = pg.mkBrush(color=dull_color)
+
+                for seg in segments:
+                    xs, ys, mas = x[seg], rel[seg], ma[seg]
+                    # raw points (dimmer!)
+                    self.plot_widget.plot(
+                        xs, ys,
+                        pen=dull_pen,
+                        symbol='o',
+                        symbolBrush=dull_brush,
+                        name=f"Star #{idx}"
+                    )
+                    # moving average (full strength)
+                    self.plot_widget.plot(
+                        xs, mas,
+                        pen=dash,
+                        name=f"MA (w=5)"
+                    )
+
+    def apply_threshold(self, ppt_threshold: int, sigma_upper: float=3.0):
+        """
+        Flag dips below `ppt_threshold` ppt *and* clip any spikes > `sigma_upper` above the moving average.
+        """
+        if not hasattr(self, 'fluxes') or self.fluxes is None:
+            return
+
+        # relative flux and compute MA & sigma per star
+        rel = self.fluxes  # stars × frames
+        n_stars, n_frames = rel.shape
+
+        # build moving averages star-by-star
+        ma = np.array([self.moving_average(rel[i], window=5) for i in range(n_stars)])
+        # robust σ estimate of the *upper* side
+        diffs = rel - ma
+        # only consider diffs > 0 for σ
+        pos = diffs.copy()
+        pos[pos < 0] = np.nan
+        sigma_up = 1.4826 * np.nanmedian(np.abs(pos - np.nanmedian(pos, axis=1)[:,None]), axis=1)
+
+        # compute dips (ppt) relative to MA
+        dips = np.maximum((ma - rel)*1000, 0)  # bigger if rel << ma
+
+        # per-star flags:  
+        #  (a) dips ≥ ppt_threshold  
+        #  (b) remove any timepoints where rel > ma + sigma_upper*sigma_up 
+        flagged = set()
+        for i in range(n_stars):
+            dip_mask = dips[i] >= ppt_threshold
+            spike_mask = rel[i] > (ma[i] + sigma_upper*sigma_up[i])
+            # apply hysteresis: require at least 2 consecutive dip points to count
+            consec = np.convolve(dip_mask.astype(int), [1,1], mode='valid') == 2
+            dip_hyst = np.concatenate([[False], consec, [False]])
+            if np.any(dip_hyst):
+                flagged.add(i)
+            # zero out the spiky points so they don’t get highlighted
+            if np.any(spike_mask):
+                self.flags[i, spike_mask] = 1
+        for dlg in self.findChildren(ReferenceOverlayDialog):
+            dlg.update_dip_flags(flagged)                
+
+        # highlight in the star list
+        for row in range(self.star_list.count()):
+            item = self.star_list.item(row)
+            item.setBackground(QBrush())
+        for idx in flagged:
+            item = self.star_list.item(idx)
+            if item: item.setBackground(QBrush(QColor('yellow')))
+        self.status_label.setText(f"{len(flagged)} star(s) dip ≥ {ppt_threshold} ppt")   
+
+    def moving_average(self, curve, window=5):
+        """
+        Return a centered moving average of `curve` with length `window`.
+        5→ average of points [i-2..i+2], etc.
+        """
+
+        pad = window//2
+        ext = np.pad(curve, pad, mode="edge")
+        kernel = np.ones(window)/window
+        ma = np.convolve(ext, kernel, mode="valid")
+        return ma
+
+
+    def on_analyze(self):
+        sel = self.star_list.selectedItems()
+        if len(sel) != 1:
+            QMessageBox.information(self, "Analyze", "Please select exactly one star.")
+            return
+        idx = sel[0].data(Qt.ItemDataRole.UserRole)
+
+        # 1) Time + flux + mask
+        t_all = self.times.mjd
+        t_rel = t_all - t_all[0]
+        f_all = self.fluxes[idx]
+        good  = np.isfinite(f_all) & (self.flags[idx]==0)
+        t0, f0 = t_rel[good], f_all[good]
+        if len(t0) < 10:
+            QMessageBox.warning(self, "Analyze", "Not enough good points to analyze.")
+            return
+
+        # 2) Lomb–Scargle (data-driven bounds)
+        ls = LombScargle(t0, f0)
+        Tspan = np.ptp(t0)
+        dt    = np.median(np.diff(np.sort(t0)))
+        min_f = 1.0 / Tspan
+        max_f = 0.5  / dt
+        freq, power_ls = ls.autopower(
+            minimum_frequency    = min_f,
+            maximum_frequency    = max_f,
+            samples_per_peak     = self.ls_samples_per_peak
+        )
+        mask = (freq>0) & np.isfinite(power_ls)
+        freq, power_ls = freq[mask], power_ls[mask]
+        periods = 1.0/freq
+        order   = np.argsort(periods)
+        periods, power_ls = periods[order], power_ls[order]
+        best_period = periods[np.argmax(power_ls)]
+
+        # 3) Box–Least–Squares (absolute min duration)
+        bls = BoxLeastSquares(t0 * u.day, f0)
+        per_grid = np.linspace(
+            self.bls_min_period,
+            self.bls_max_period,
+            self.bls_n_periods
+        ) * u.day
+        min_p = per_grid.min().value
+        durations = np.linspace(
+            self.bls_duration_min_frac * min_p,
+            self.bls_duration_max_frac * min_p,
+            self.bls_n_durations
+        ) * u.day
+
+        res      = bls.power(per_grid, durations)
+        power    = res.power
+        flat_idx = np.nanargmax(power)
+        if power.ndim == 2:
+            pi, di = np.unravel_index(flat_idx, power.shape)
+            P_bls  = res.period[pi]
+            D_bls  = durations[di]
+            T0_bls = res.transit_time[pi, di]
+        else:
+            pi, di = flat_idx, 0
+            P_bls  = res.period[pi]
+            D_bls  = durations[0]
+            T0_bls = res.transit_time[pi]
+
+        dur_idx = di
+
+        # 4) Phase‐fold & model
+        phase = (((t0*u.day) - T0_bls)/P_bls) % 1
+        phase = phase.value
+        model = bls.model(t0*u.day, P_bls, D_bls, T0_bls)
+
+        # 5) show in a dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Analysis: Star #{idx}")
+        layout = QVBoxLayout(dlg)
+
+        # LS plot
+        pg_ls = pg.PlotWidget(title="Lomb–Scargle")
+        pg_ls.plot(1/freq, power_ls, pen='w')
+        pg_ls.addLine(x=best_period, pen=pg.mkPen('y', style=Qt.PenStyle.DashLine))
+        pg_ls.setLabel('bottom','Period [d]')
+        pg_ls.showGrid(True,True)
+        layout.addWidget(pg_ls)
+
+        # BLS plot (pick the slice at dur_idx)
+        pg_bls = pg.PlotWidget(title="BLS Periodogram")
+        # if power is 2D, pick out the fixed-duration slice, otherwise plot the whole 1D
+        bls_power = res.power
+        if bls_power.ndim == 2:
+            y = bls_power[:, dur_idx]
+        else:
+            y = bls_power
+        pg_bls.plot(res.period.value, y, pen='w')
+        pg_bls.addLine(x=P_bls.value, pen=pg.mkPen('r', style=Qt.PenStyle.DashLine))
+        pg_bls.setLabel('bottom','Period [d]')
+        pg_bls.showGrid(True,True)
+        layout.addWidget(pg_bls)
+
+        # Phase‐fold + box model
+        pg_fold = pg.PlotWidget(title=f"Phase‐Folded (P={P_bls.value:.4f} d)")
+        pg_fold.plot(phase, f0, pen=None, symbol='o', symbolBrush='c')
+        ord = np.argsort(phase)
+        pg_fold.plot(phase[ord], model[ord], pen=pg.mkPen('y',width=2))
+        pg_fold.setLabel('bottom','Phase')
+        pg_fold.showGrid(True,True)
+        layout.addWidget(pg_fold)
+
+        dlg.resize(900,600)
+        dlg.exec()
+
+    def on_identify_star(self):
+        # 1) Get the RA/Dec
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(self, "Identify Star", "Please select exactly one star first.")
+            return
+        ra, dec = radec
+        coord = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, frame='icrs')
+
+        # 2) Configure SIMBAD: clear everything, then ask for otype + V-flux
+        custom_simbad = Simbad()
+        custom_simbad.reset_votable_fields()          # clear defaults
+        custom_simbad.add_votable_fields("otype")     # object type
+        custom_simbad.add_votable_fields("flux(V)")   # V-band magnitude
+
+        # 3) Retry up to 5×
+        result = None
+        for attempt in range(1, 6):
+            try:
+                result = custom_simbad.query_region(coord, radius=5*u.arcsec)
+                break
+            except Exception as e:
+                print(f"[DEBUG] SIMBAD attempt {attempt} failed: {e}")
+                if attempt == 5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return
+                time.sleep(1)
+
+        # 4) Debug: show which columns we got
+        if result is not None:
+            print("SIMBAD column names:", result.colnames)
+            print("=== SIMBAD raw result ===")
+            result.pprint()
+            print("=========================")
+
+        # 5) No hits?
+        if result is None or len(result) == 0:
+            QMessageBox.information(
+                self, "No SIMBAD Matches",
+                f"No objects found within 5″ of {ra:.6f}, {dec:.6f}."
+            )
+            return
+
+        # 6) Pick out the first row & dynamically find the right keys
+        row = result[0]
+        cols = [c.lower() for c in result.colnames]
+
+        # find the columns
+        id_col    = next(c for c in result.colnames if c.lower()=="main_id")
+        ra_col    = next(c for c in result.colnames if c.lower()=="ra")
+        dec_col   = next(c for c in result.colnames if c.lower()=="dec")
+        otype_col = next((c for c in result.colnames if c.lower()=="otype"), None)
+        flux_col  = next((c for c in result.colnames if c.upper()=="V" or c.upper()=="FLUX_V"), None)
+
+        # extract & decode
+        main_id = row[id_col]
+        if isinstance(main_id, bytes):
+            main_id = main_id.decode("utf-8")
+
+        ra_val  = float(row[ra_col])
+        dec_val = float(row[dec_col])
+        match_coord = SkyCoord(ra=ra_val*u.deg, dec=dec_val*u.deg, frame='icrs')
+        offset = coord.separation(match_coord).arcsec
+
+        obj_type = None
+        if otype_col:
+            obj_type = row[otype_col]
+            if isinstance(obj_type, bytes):
+                obj_type = obj_type.decode("utf-8")
+        obj_type = obj_type or "n/a"
+
+        vmag = None
+        if flux_col:
+            raw = row[flux_col]
+            try:
+                vmag = float(raw)
+            except Exception:
+                vmag = None
+        vmag_str = f"{vmag:.3f}" if vmag is not None else "n/a"
+
+        # 7) Show results
+        simbad_url = (
+            "https://simbad.cds.unistra.fr/simbad/sim-id"
+            f"?Ident={quote(main_id)}"
+        )
+
+        # Create a QMessageBox with two buttons: “OK” and “Open in SIMBAD”
+        msg = QMessageBox(self)
+        msg.setWindowTitle("SIMBAD Lookup")
+        msg.setText(
+            f"Nearest object:\n"
+            f"  ID:     {main_id}\n"
+            f"  Type:   {obj_type}\n"
+            f"  V mag:  {vmag_str}\n"
+            f"  Offset: {offset:.2f}″"
+        )
+        # add Open‐in‐Simbad as an ActionRole so it shows up beside the standard buttons
+        open_btn = msg.addButton("Open in SIMBAD", QMessageBox.ButtonRole.ActionRole)
+        ok_btn   = msg.addButton(QMessageBox.StandardButton.Ok)
+        # run the dialog
+        msg.exec()
+
+        # if they clicked our button, open the URL in the default browser
+        if msg.clickedButton() == open_btn:
+            webbrowser.open(simbad_url)
+
+
+    def _query_simbad_main_id(self):
+        """
+        Try up to 5× to look up the MAIN_ID from SIMBAD for the currently selected star.
+        Returns the name (string) on success, or None on failure/no match.
+        """
+
+        # 1) get the star's sky coord
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            return None
+        coord = SkyCoord(ra=radec[0]*u.deg, dec=radec[1]*u.deg, frame="icrs")
+
+        # 2) retry up to 5×, just like on_identify_star()
+        table = None
+        for attempt in range(1, 6):
+            try:
+                custom = Simbad()
+                custom.reset_votable_fields()
+                custom.add_votable_fields("otype")
+                custom.add_votable_fields("flux(V)")
+                table = custom.query_region(coord, radius=5*u.arcsec)
+                break
+            except Exception as e:
+                print(f"[DEBUG] SIMBAD lookup attempt {attempt} failed: {e}")
+                if attempt == 5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return None
+                time.sleep(1)
+
+        # 3) no results?
+        if table is None or len(table) == 0:
+            return None
+
+        # 4) dynamically find the MAIN_ID column (case‐insensitive)
+        try:
+            id_col = next(c for c in table.colnames if c.lower() == "main_id")
+        except StopIteration:
+            return None
+
+        # 5) extract and decode
+        val = table[0][id_col]
+        if isinstance(val, bytes):
+            val = val.decode("utf-8")
+        return val
+
+    def _query_simbad_name_and_vmag(self, ra_deg, dec_deg, radius=5*u.arcsec):
+        """
+        Return (main_id, vmag) from SIMBAD within `radius` of (ra_deg,dec_deg),
+        retrying up to 5×.  If no valid match, return (None,None).
+        """
+        coord = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame="icrs")
+        table = None
+
+        for attempt in range(1,6):
+            try:
+                custom = Simbad()
+                custom.reset_votable_fields()
+                custom.add_votable_fields("otype","flux(V)")
+                table = custom.query_region(coord, radius=radius)
+                break
+            except Exception as e:
+                if attempt==5:
+                    QMessageBox.critical(
+                        self, "SIMBAD Error",
+                        f"Could not reach SIMBAD after 5 tries:\n{e}"
+                    )
+                    return None, None
+                time.sleep(1)
+
+        if table is None or len(table)==0:
+            return None, None
+
+        # find MAIN_ID column name dynamically
+        try:
+            id_col = next(c for c in table.colnames if c.lower()=="main_id")
+        except StopIteration:
+            return None, None
+
+        raw_id = table[0][id_col]
+        if isinstance(raw_id, bytes):
+            raw_id = raw_id.decode()
+        # find V‑mag column dynamically
+        v_col = next((c for c in table.colnames if c.upper() in ("FLUX_V","V")), None)
+        vmag = None
+        if v_col:
+            try:
+                v = float(table[0][v_col])
+                # drop nans as “no valid magnitude”
+                if np.isfinite(v):
+                    vmag = v
+            except Exception:
+                vmag = None
+
+        return raw_id, vmag
+
+    def export_data(self):
+        if self.fluxes is None or self.times is None:
+            QMessageBox.warning(self, "Export", "No photometry to export. Run Measure & Photometry first.")
+            return
+
+        # ask CSV vs FITS
+        dlg = QFileDialog(self, "Export Light Curves")
+        dlg.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dlg.setNameFilters(["CSV files (*.csv)", "FITS files (*.fits)"])
+        if not dlg.exec():
+            return
+        path = dlg.selectedFiles()[0]
+        fmt  = dlg.selectedNameFilter()
+
+        # assemble time & flux arrays
+        times_mjd = self.times.mjd              # float days
+        n_stars   = self.fluxes.shape[0]
+
+        # --- compute per-star RA/Dec from WCS + pixel positions ---
+        # self.star_positions is list of (x,y) in pixels
+        # pull the solved WCS from the WIMI tab in the main window
+        wimi_tab = self.parent().wimi_tab
+        wcs      = wimi_tab.wcs
+        xs = np.array([xy[0] for xy in self.star_positions])
+        ys = np.array([xy[1] for xy in self.star_positions])
+        sky = wcs.pixel_to_world(xs, ys)
+        ras = sky.ra.deg
+        decs = sky.dec.deg
+
+        # CSV export: add STAR_i_RA and STAR_i_DEC columns
+        if fmt.startswith("CSV") or path.lower().endswith(".csv"):
+            df = pd.DataFrame({"MJD": times_mjd})
+            for i in range(n_stars):
+                df[f"STAR_{i}"]     = self.fluxes[i]
+                df[f"FLAG_{i}"]     = self.flags[i]
+                df[f"STAR_{i}_RA"]  = ras[i]
+                df[f"STAR_{i}_DEC"] = decs[i]
+            df.to_csv(path, index=False)
+            QMessageBox.information(self, "Export CSV", f"Wrote CSV →\n{path}")
+            return
+
+        # — otherwise FITS export —
+
+        # 1) build a header from reference‐frame metadata
+        hdr_out = fits.Header()
+        orig_hdr = None
+        if hasattr(self, "_cached_headers") and 0 <= self.ref_idx < len(self._cached_headers):
+            orig_hdr = self._cached_headers[self.ref_idx]
+
+        # copy whitelist from orig_hdr if available
+        if isinstance(orig_hdr, fits.Header):
+            for key in ("OBJECT","TELESCOP","INSTRUME","OBSERVER",
+                        "DATE-OBS","EXPTIME","FILTER",
+                        "CRVAL1","CRVAL2","CRPIX1","CRPIX2",
+                        "CDELT1","CDELT2","CTYPE1","CTYPE2"):
+                if key in orig_hdr:
+                    hdr_out[key] = orig_hdr[key]
+        elif isinstance(orig_hdr, dict):
+            for key in ("OBJECT","TELESCOP","INSTRUME","DATE-OBS","EXPTIME","FILTER"):
+                val = orig_hdr.get(key, [{}])[0].get("value")
+                if val is not None:
+                    hdr_out[key] = val
+
+        # 2) reduction metadata
+        hdr_out["SEPTHR"]  = (self.sep_threshold,  "SEP detection threshold (sigma)")
+        hdr_out["BFRAC"]   = (self.border_fraction, "Border ignore fraction")
+        hdr_out["REFIDX"]  = (self.ref_idx,         "Reference frame index")
+        hdr_out["MEDFWHM"] = (self.median_fwhm,     "Median FWHM of reference")
+        hdr_out.add_history("Exported by Seti Astro Suite")
+
+        # 3) light curve table
+        cols = [fits.Column(name="MJD",  format="D", array=times_mjd)]
+        for i in range(n_stars):
+            cols.append(fits.Column(name=f"STAR_{i}",      format="E", array=self.fluxes[i]))
+            cols.append(fits.Column(name=f"FLAG_{i}",      format="I", array=self.flags[i]))
+        lc_hdu = fits.BinTableHDU.from_columns(cols, header=hdr_out, name="LIGHTCURVE")
+
+        # 4) star‐metadata table (per‐star x,y,RA,Dec)
+        star_idx = np.arange(n_stars, dtype=int)
+        cols2 = [
+            fits.Column(name="INDEX", format="I", array=star_idx),
+            fits.Column(name="X",     format="E", array=xs),
+            fits.Column(name="Y",     format="E", array=ys),
+            fits.Column(name="RA",    format="D", array=ras),
+            fits.Column(name="DEC",   format="D", array=decs),
+        ]
+        stars_hdu = fits.BinTableHDU.from_columns(cols2, name="STARS")
+
+        # 5) write out
+        primary = fits.PrimaryHDU(header=hdr_out)
+        hdul    = fits.HDUList([primary, lc_hdu, stars_hdu])
+        hdul.writeto(path, overwrite=True)
+        QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
+
+    def export_to_aavso(self):
+        """Export in AAVSO EXTENDED format, converting to apparent magnitudes."""
+        # 0) make sure we have photometry
+        if getattr(self, "fluxes", None) is None or getattr(self, "times", None) is None:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "No photometry available. Run Measure & Photometry first.")
+            return
+
+        # 1) exactly one star selected
+        sels = self.star_list.selectedItems()
+        if len(sels) != 1:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "Please select exactly one star before exporting.")
+            return
+        idx = sels[0].data(Qt.ItemDataRole.UserRole)
+
+        star_id = self._query_simbad_main_id()
+
+        if star_id:
+            try:
+                
+                Vizier.ROW_LIMIT = 1
+                v = Vizier(columns=["Name"], catalog="B/vsx")
+                tbls = v.query_object(star_id)
+                if tbls and len(tbls) and len(tbls[0]):
+                    # take the VSX “Name” field as the AAVSO STARID
+                    star_id = tbls[0]["Name"][0]
+            except Exception:
+                # if anything goes wrong, silently ignore and keep the Simbad ID
+                pass
+
+        if not star_id:
+            # manual fallback
+            star_id, ok = QInputDialog.getText(
+                self, "Target Star Name",
+                "Could not auto‑identify.  Enter target star name for STARID:",
+                QLineEdit.EchoMode.Normal, ""
+            )
+            if not ok or not star_id.strip():
+                return
+            star_id = star_id.strip()
+
+        # 2) exposure time
+        if not hasattr(self, "exposure_time") or self.exposure_time is None:
+            exp, ok = QInputDialog.getDouble(
+                self, "Exposure Time",
+                "No EXPOSURE found in headers. Please enter exposure time (s):",
+                decimals=1
+            )
+            if not ok:
+                return
+            self.exposure_time = exp
+
+        # 3) observer code
+        settings = QSettings()
+        prev_code = settings.value("AAVSO/observer_code", "", type=str)
+        code, ok = QInputDialog.getText(
+            self, "Observer Code",
+            "Enter your AAVSO observer code:",
+            QLineEdit.EchoMode.Normal,
+            prev_code
+        )
+        if not ok:
+            return
+        code = code.strip().upper()
+        settings.setValue("AAVSO/observer_code", code)
+
+        # 4) submission type
+        fmt, ok = QInputDialog.getItem(
+            self, "AAVSO Format",
+            "Choose submission format:",
+            ["Variable-Star Photometry", "Exoplanet Report"],
+            0, False
+        )
+        if not ok:
+            return
+
+        # 5) automatically pick a check star from your ensemble_map
+        #    use the same k you used in detect_stars()
+        from astropy.wcs import WCS
+        wcs = self.parent().wimi_tab.wcs
+
+        members = self.ensemble_map.get(idx, [])
+        kname = None
+        kmag  = None
+
+        for i in members:
+            x, y = self.star_positions[i]
+            sky = wcs.pixel_to_world(x, y)
+            name, v = self._query_simbad_name_and_vmag(sky.ra.deg, sky.dec.deg)
+            # require both a name *and* a finite vmag
+            if name and (v is not None) and np.isfinite(v):
+                kname, kmag = name, v
+                break
+
+        # if none of the ensemble members resolved, fall back to manual entry
+        if kname is None:
+            kname, ok = QInputDialog.getText(
+                self, "Check Star Name",
+                "Could not auto‑identify a check star. Enter check‑star ID:"
+            )
+            if not ok or not kname.strip():
+                return
+            kname = kname.strip()
+            kmag, ok = QInputDialog.getDouble(
+                self, "Check Star Magnitude",
+                f"Enter catalog magnitude for {kname}:",
+                decimals=3
+            )
+            if not ok:
+                return
+
+        # 6) choose filter code
+        filt_choices = ["V","TG","TB","TR"]
+        filt, ok = QInputDialog.getItem(
+            self, "Filter",
+            "Select filter code for this dataset:",
+            filt_choices, 0, False
+        )
+        if not ok:
+            return
+
+        # 7) output filename
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save AAVSO File", "", "Text files (*.txt *.dat *.csv)"
+        )
+        if not path:
+            return
+
+        # 8) build header lines
+        hdr = [
+            "#TYPE=EXTENDED",
+            f"#OBSCODE={code}",
+            f"#SOFTWARE=Seti Astro Suite v{VERSION}",
+            "#DELIM=,",
+            "#DATE=JD",
+            "#OBSTYPE=CCD",
+        ]
+        # RA/Dec of the selected star
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(self, "Export AAVSO",
+                                "Could not determine RA/Dec of selected star.")
+            return
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        c = SkyCoord(ra=radec[0]*u.deg, dec=radec[1]*u.deg, frame="icrs")
+        hdr += [
+            "#RA="  + c.ra.to_string(unit=u.hour, sep=":", pad=True, precision=2),
+            "#DEC=" + c.dec.to_string(unit=u.degree, sep=":", pad=True,
+                                    alwayssign=True, precision=1),
+        ]
+        hdr.append("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES")
+
+        # 9) prepare your time & magnitudes
+        jd = self.times.utc.jd
+        rel_flux = self.fluxes[idx, :]           # relative flux per frame
+        # convert to mag:  m = kmag − 2.5 log10(rel_flux)
+        with np.errstate(divide="ignore"):
+            mags = kmag - 2.5 * np.log10(rel_flux)
+        # magnitude errors from flux_errors if you stored them
+        if hasattr(self, "flux_errors"):
+            rel_err = self.flux_errors[idx, :]
+            merr = (2.5/np.log(10)) * (rel_err / rel_flux)
+        else:
+            merr = np.full_like(mags, np.nan)
+
+        airmasses = getattr(self, "airmasses", None)    
+
+        # 10) write out
+        try:
+            with open(path, "w") as f:
+                for L in hdr:
+                    f.write(L + "\n")
+                f.write("\n")
+                for j, t in enumerate(jd):
+                    m   = mags[j]
+                    me  = merr[j]
+                    me_str = f"{me:.3f}" if np.isfinite(me) else "na"
+                    note = "MAG calc via ensemble: m=-2.5 log10(F/Fe)+K"
+
+                    # clamp airmass to [1, 40]
+                    if airmasses is not None and j < len(airmasses):
+                        am = airmasses[j]
+                    else:
+                        am = 1.0
+                    am = float(np.clip(am, 1.0, 40.0))
+
+                    fields = [
+                        star_id,
+                        f"{t:.5f}",
+                        f"{m:.3f}",
+                        me_str,
+                        filt,
+                        "NO",
+                        "STD",
+                        "ENSEMBLE",
+                        "na",
+                        kname,
+                        f"{kmag:.3f}",
+                        f"{am:.1f}",       # now a valid AIRMASS
+                        "na",
+                        "na",
+                        note
+                    ]
+                    f.write(",".join(fields) + "\n")
+        except Exception as e:
+            QMessageBox.critical(self, "Export AAVSO",
+                                f"Failed to write file:\n{e}")
+            return
+
+        # 11) offer to open the AAVSO upload page
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Export AAVSO")
+        msg.setText(f"Wrote {fmt} →\n{path}\n\nOpen AAVSO WebObs upload page now?")
+        yes = msg.addButton("Yes", QMessageBox.ButtonRole.AcceptRole)
+        msg.addButton("No", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == yes:
+            import webbrowser
+            webbrowser.open("https://www.aavso.org/webobs/file")
+
+
+
+
+
+    @pyqtSlot(float, float)
+    def receive_wcs_coordinates(self, ra, dec):
+        """
+        Accepts RA/Dec from WIMI after plate solve.
+        Stores coordinates and enables TESScut button.
+        """
+        self.wcs_ra = ra
+        self.wcs_dec = dec
+        self.status_label.setText(f"WCS received: RA={ra:.5f}, Dec={dec:.5f}")
+        self.fetch_tesscut_btn.setEnabled(True)  
+
+    def query_tesscut(self):
+        # 1) Get the RA/Dec of the selected star
+        radec = self.get_selected_star_radec()
+        if radec is None:
+            QMessageBox.warning(
+                self, "No Star Selected",
+                "Please select a star from the list to fetch TESScut data."
+            )
+            return
+        ra, dec = radec
+        print(f"[DEBUG] TESScut Query Requested for RA={ra:.6f}, Dec={dec:.6f}")
+        coord = SkyCoord(ra=ra, dec=dec, unit="deg")
+
+        size = 10         # cutout size in pixels
+        MAX_RETRIES = 5
+
+        # ─── Manifest retry loop ───
+        manifest = None
+        for mtry in range(1, MAX_RETRIES+1):
+            try:
+                print(f"[DEBUG] Manifest attempt {mtry}/{MAX_RETRIES}…")
+                manifest = Tesscut.get_cutouts(coordinates=coord, size=size)
+                if manifest:
+                    print(f"[DEBUG] Manifest OK: {len(manifest)} sector(s).")
+                    break
+                else:
+                    raise RuntimeError("Empty manifest")
+            except Exception as me:
+                print(f"[DEBUG] Manifest attempt {mtry} failed: {me}")
+                if mtry == MAX_RETRIES:
+                    QMessageBox.information(
+                        self, "No TESS Data",
+                        "There are no TESS cutouts available at that position."
+                    )
+                    self.status_label.setText("No TESScut data found.")
+                    return
+                time.sleep(2)
+
+        # ─── Download retry loop ───
+        self.status_label.setText("Querying TESScut…")
+        QApplication.processEvents()
+        cache_dir = os.path.join(os.path.expanduser("~"), ".setiastro", "tesscut_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        for dtry in range(1, MAX_RETRIES+1):
+            try:
+                print(f"[DEBUG] Download attempt {dtry}/{MAX_RETRIES}…")
+                cutouts = Tesscut.download_cutouts(
+                    coordinates=coord, size=size, path=cache_dir
+                )
+                if not cutouts:
+                    raise RuntimeError("No cutouts downloaded")
+                print(f"[DEBUG] Downloaded {len(cutouts)} cutout(s).")
+
+                for cutout in cutouts:
+                    original_path = cutout['Local Path']
+                    print(f"[DEBUG] Processing: {original_path}")
+
+                    # Read sector from header
+                    with fits.open(original_path, mode='readonly') as hdul:
+                        sector = hdul[1].header.get('SECTOR', 'unknown')
+
+                    # Cache filename
+                    ext = os.path.splitext(original_path)[1]
+                    cache_key = (
+                        f"tess_sector{sector}_"
+                        f"ra{int(round(ra*10000))}_"
+                        f"dec{int(round(dec*10000))}{ext}"
+                    )
+                    cached_path = os.path.join(cache_dir, cache_key)
+
+                    if not os.path.exists(cached_path):
+                        print(f"[DEBUG] Caching as: {cached_path}")
+                        shutil.move(original_path, cached_path)
+                    else:
+                        print(f"[DEBUG] Already cached: {cached_path}")
+                        os.remove(original_path)
+
+                    # Open with Lightkurve
+                    tpf = TessTargetPixelFile(cached_path)
+
+                    # Custom circular aperture on selected star
+                    xpix, ypix = tpf.wcs.world_to_pixel(coord)
+                    ny, nx = tpf.flux.shape[1], tpf.flux.shape[2]
+                    Y, X = np.mgrid[:ny, :nx]
+                    r_pix = 2.5
+                    aper_mask = ((X - xpix)**2 + (Y - ypix)**2) <= r_pix**2
+
+                    lc = (
+                        tpf.to_lightcurve(aperture_mask=aper_mask)
+                        .remove_nans()
+                        .normalize()
+                    )
+                    # Clip both ends: no points > 5× or < –1×
+                    upper, lower = 5.0, -1.0
+                    mask = (lc.flux < upper) & (lc.flux > lower)
+                    n_clipped = np.sum(~mask)
+                    print(f"[DEBUG] Clipping {n_clipped} points outside [{lower}, {upper}]×")
+                    lc = lc[mask]
+
+                    # then plot the cleaned curve
+                    lc.plot(label=f"Sector {tpf.sector} (clipped)")
+                    plt.title(f"TESS Light Curve - Sector {tpf.sector}")
+                    plt.tight_layout()
+                    plt.show()
+
+                self.status_label.setText("TESScut fetch complete.")
+                return
+
+            except Exception as de:
+                print(f"[ERROR] Download attempt {dtry} failed: {de}")
+                self.status_label.setText(
+                    f"TESScut attempt {dtry}/{MAX_RETRIES} failed."
+                )
+                QApplication.processEvents()
+                if dtry == MAX_RETRIES:
+                    QMessageBox.critical(
+                        self, "TESScut Error",
+                        f"TESScut failed after {MAX_RETRIES} attempts.\n\n{de}"
+                    )
+                    self.status_label.setText("TESScut fetch failed.")
+                else:
+                    time.sleep(2)
+
+    def get_selected_star_radec(self):
+        selected_items = self.star_list.selectedItems()
+        if not selected_items:
+            return None
+
+        selected_index = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        x, y = self.star_positions[selected_index]
+
+        # Need WCS to convert
+        if hasattr(self.parent().wimi_tab, 'wcs'):
+            wcs = self.parent().wimi_tab.wcs
+            sky = wcs.pixel_to_world(x, y)
+            return sky.ra.degree, sky.dec.degree
+        return None                         
 
 class BackgroundNeutralizationDialog(QDialog):
     def __init__(self, image_manager, parent=None):
         super().__init__(parent)
         self.image_manager = image_manager
         self.setWindowTitle("Background Neutralization")
-        self.setGeometry(100, 100, 800, 600)  # Set appropriate size
+        self.setGeometry(100, 100, 800, 600)
+        
+        # new flag for auto-stretch
+        self.auto_stretch = False
+        self.zoom_factor = 1.0        
         self.initUI()
-        self.selection_rect_item = None  # To store the QGraphicsRectItem
+        self.selection_rect_item = None
 
     def initUI(self):
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
 
         # Instruction Label
-        instruction_label = QLabel("Draw a sample box on the image to define the neutralization region.")
+        instruction_label = QLabel("Draw a sample box or use Find Background to auto-select.")
         layout.addWidget(instruction_label)
 
         # Graphics View for Image Display
@@ -25355,58 +32575,281 @@ class BackgroundNeutralizationDialog(QDialog):
         self.graphics_view.setScene(self.scene)
         layout.addWidget(self.graphics_view)
 
-        # Load and Display Image
-        self.load_image()
+        # Buttons: Apply, Cancel, Auto-Stretch, Find Background
+        btn_row = QHBoxLayout()
+        apply_btn = QPushButton("Apply Neutralization")
+        apply_btn.clicked.connect(self.apply_neutralization)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        self.toggle_stretch_btn = QPushButton("Enable Auto-Stretch")
+        self.toggle_stretch_btn.clicked.connect(self.toggle_auto_stretch)
+        find_bg_btn = QPushButton("Find Background")
+        find_bg_btn.clicked.connect(self.find_background)
 
-        # Initialize Variables for Drawing
+        btn_row.addWidget(apply_btn)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.toggle_stretch_btn)
+        btn_row.addWidget(find_bg_btn)
+        layout.addLayout(btn_row)
+
+        # Zoom controls
+        zoom_row = QHBoxLayout()
+        zoom_in_btn  = QPushButton("Zoom In ＋")
+        zoom_out_btn = QPushButton("Zoom Out －")
+        fit_btn      = QPushButton("Fit to View")
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        fit_btn.clicked.connect(self.fit_to_view)
+        zoom_row.addWidget(zoom_out_btn)
+        zoom_row.addWidget(fit_btn)
+        zoom_row.addWidget(zoom_in_btn)
+        layout.addLayout(zoom_row)
+
+        # Prepare for drawing rectangle
         self.origin = QPointF()
         self.current_rect = QRectF()
         self.drawing = False
-
-        # Connect Mouse Events
         self.graphics_view.viewport().installEventFilter(self)
 
-        # Apply and Cancel Buttons
-        button_layout = QVBoxLayout()
-        apply_button = QPushButton("Apply Neutralization")
-        apply_button.clicked.connect(self.apply_neutralization)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(apply_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
+        # finally load
+        self.load_image()
 
-        self.setLayout(layout)
 
     def load_image(self):
-        """Loads the current image from the ImageManager and displays it."""
-        image = self.image_manager.image
-        if image is not None:
-            # Assuming image is a NumPy array normalized to [0,1]
-            height, width, channels = image.shape
-            if channels == 3:
-                q_image = QImage(
-                    (image * 255).astype(np.uint8).tobytes(),
-                    width,
-                    height,
-                    3 * width,
-                    QImage.Format.Format_RGB888
-                )
-            else:
-                # Handle other channel numbers if necessary
-                q_image = QImage(
-                    (image * 255).astype(np.uint8).tobytes(),
-                    width,
-                    height,
-                    QImage.Format.Format_Grayscale8
-                )
-            pixmap = QPixmap.fromImage(q_image)
-            self.pixmap_item = QGraphicsPixmapItem(pixmap)
-            self.scene.addItem(self.pixmap_item)
-            self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-        else:
+        """Loads the current image, applies auto-stretch, resets zoom & displays it."""
+        self.scene.clear()
+        self.selection_rect_item = None
+        img = self.image_manager.image
+        if img is None:
             QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
             self.reject()
+            return
+
+        display = img.copy()
+        if self.auto_stretch:
+            display = stretch_color_image(display, 0.25, linked=False, normalize=False)
+
+        h, w, ch = display.shape
+        data = (display * 255).astype(np.uint8).tobytes()
+        if ch == 3:
+            qimg = QImage(data, w, h, 3*w, QImage.Format.Format_RGB888)
+        else:
+            qimg = QImage(data, w, h, w,   QImage.Format.Format_Grayscale8)
+        pix = QPixmap.fromImage(qimg)
+
+        # reset zoom & show
+        self.zoom_factor = 1.0
+        self.graphics_view.resetTransform()
+        self.pixmap_item = QGraphicsPixmapItem(pix)
+        self.scene.addItem(self.pixmap_item)
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def zoom_in(self):
+        """Zoom in by 25%."""
+        if self.zoom_factor < 5.0:
+            self.zoom_factor *= 1.25
+            self.graphics_view.scale(1.25, 1.25)
+
+    def zoom_out(self):
+        """Zoom out by 20%."""
+        if self.zoom_factor > 0.2:
+            self.zoom_factor /= 1.25
+            self.graphics_view.scale(0.8, 0.8)
+
+    def fit_to_view(self):
+        """Reset zoom so the image fits in the view."""
+        self.zoom_factor = 1.0
+        self.graphics_view.resetTransform()
+        self.graphics_view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def toggle_auto_stretch(self):
+        """Toggle between normal and auto-stretched display."""
+        self.auto_stretch = not self.auto_stretch
+        self.toggle_stretch_btn.setText(
+            "Disable Auto-Stretch" if self.auto_stretch else "Enable Auto-Stretch"
+        )
+        self.load_image()
+
+    def toggle_auto_stretch(self):
+        """Toggle between normal and auto-stretched display."""
+        self.auto_stretch = not self.auto_stretch
+        self.toggle_stretch_btn.setText(
+            "Disable Auto-Stretch" if self.auto_stretch else "Enable Auto-Stretch"
+        )
+        # re-load the image so we immediately see the effect
+        self.load_image()
+
+    def find_background(self):
+        """Locate the best 50×50 background patch (≥100px from edges), allow small shifts to avoid stars, and draw it."""
+        img = self.image_manager.image
+        if img is None:
+            QMessageBox.warning(self, "No Image", "No image loaded to neutralize.")
+            return
+
+        h, w, ch = img.shape
+        if ch != 3:
+            QMessageBox.warning(self, "Not RGB", "Only 3-channel RGB supported.")
+            return
+
+        # work on luminance
+        lum = img.mean(axis=2)
+
+        # 1) find the raw best center by downhill‐walk search
+        best_y, best_x = self._find_best_patch_center(lum)
+
+        # 2) enforce a 100px border so a 50×50 never touches edges
+        margin = 100
+        half   = 25
+        min_cx = margin + half
+        max_cx = w - (margin + half)
+        min_cy = margin + half
+        max_cy = h - (margin + half)
+        best_x = int(np.clip(best_x, min_cx, max_cx))
+        best_y = int(np.clip(best_y, min_cy, max_cy))
+
+        # 3) refine by testing shifts of ±half pix in both directions
+        best_val = np.inf
+        cx, cy   = best_x, best_y
+        for dy in (-half, 0, +half):
+            for dx in (-half, 0, +half):
+                ty = int(np.clip(best_y + dy, min_cy, max_cy))
+                tx = int(np.clip(best_x + dx, min_cx, max_cx))
+                y0, y1 = ty - half, ty + half
+                x0, x1 = tx - half, tx + half
+                m = np.median(lum[y0:y1, x0:x1])
+                if m < best_val:
+                    best_val = m
+                    cy, cx   = ty, tx
+
+        # 4) build the final 50×50 in image coords
+        ix0, ix1 = cx - half, cx + half
+        iy0, iy1 = cy - half, cy + half
+
+        # 5) map to scene coords and draw
+        scene_rect = self.scene.sceneRect()
+        sx = scene_rect.width()  / w
+        sy = scene_rect.height() / h
+        x0, y0 = ix0 * sx, iy0 * sy
+        x1, y1 = ix1 * sx, iy1 * sy
+
+        if self.selection_rect_item:
+            self.scene.removeItem(self.selection_rect_item)
+
+        pen = QPen(QColor(255, 215, 0), 2)  # gold
+        rect = QRectF(QPointF(x0, y0), QPointF(x1, y1))
+        self.selection_rect_item = QGraphicsRectItem(rect)
+        self.selection_rect_item.setPen(pen)
+        self.scene.addItem(self.selection_rect_item)
+
+        # store so Apply uses same region (in image coords!)
+        self.current_rect = QRectF(ix0, iy0, ix1 - ix0, iy1 - iy0)
+
+
+
+
+    def _find_best_patch_center(self, plane: np.ndarray):
+        """
+        1) tile medians 10×10
+        2) pick two darkest tiles
+        3) 100 downhill walks per tile → finals
+        4) for each final point compute median in a 50×50 square
+        5) pick the point with the smallest such median
+        """
+        h, w = plane.shape
+        th, tw = h//10, w//10
+
+        # 1) tile medians
+        meds = np.zeros((10,10), float)
+        for i in range(10):
+            for j in range(10):
+                y0, x0 = i*th, j*tw
+                y1 = (i+1)*th if i<9 else h
+                x1 = (j+1)*tw if j<9 else w
+                meds[i,j] = np.median(plane[y0:y1, x0:x1])
+
+        # 2) two darkest
+        flat = meds.flatten()
+        idxs = np.argsort(flat)[:2]
+
+        # 3) downhill from random in each tile
+        finals = []
+        for idx in idxs:
+            ti, tj = divmod(idx, 10)
+            y0, x0 = ti*th, tj*tw
+            y1 = (ti+1)*th if ti<9 else h
+            x1 = (tj+1)*tw if tj<9 else w
+            for _ in range(200):
+                y = np.random.randint(y0, y1)
+                x = np.random.randint(x0, x1)
+                while True:
+                    mv, mpos = plane[y,x], (y,x)
+                    for dy in (-1,0,1):
+                        for dx in (-1,0,1):
+                            if dy==0 and dx==0: continue
+                            ny, nx = y+dy, x+dx
+                            if 0<=ny<h and 0<=nx<w and plane[ny,nx] < mv:
+                                mv, mpos = plane[ny,nx], (ny,nx)
+                    if mpos == (y,x):
+                        break
+                    y, x = mpos
+                finals.append(mpos)
+
+        # 4) compute each 50×50 median
+        best_val = np.inf
+        best_pt = (h//2, w//2)
+        for (y,x) in finals:
+            y0 = max(0, y-25); y1 = min(h, y+25)
+            x0 = max(0, x-25); x1 = min(w, x+25)
+            m = np.median(plane[y0:y1, x0:x1])
+            if m < best_val:
+                best_val, best_pt = m, (y,x)
+
+        return best_pt
+
+    def _compute_bg_median(self, plane: np.ndarray) -> float:
+        """Implements your PI‐style finder on a single channel."""
+        h, w = plane.shape
+        th, tw = h//10, w//10
+        # 1) tile medians
+        tile_meds = np.zeros((10,10), float)
+        for i in range(10):
+            for j in range(10):
+                y0, x0 = i*th, j*tw
+                y1 = (i+1)*th if i<9 else h
+                x1 = (j+1)*tw if j<9 else w
+                tile_meds[i,j] = np.median(plane[y0:y1, x0:x1])
+        # 2) pick two darkest tiles
+        idxs = np.argsort(tile_meds.flatten())[:2]
+        # 3) random walks
+        finals = []
+        for idx in idxs:
+            ti, tj = divmod(idx, 10)
+            y0, x0 = ti*th, tj*tw
+            y1 = (ti+1)*th if ti<9 else h
+            x1 = (tj+1)*tw if tj<9 else w
+            for _ in range(100):
+                y = np.random.randint(y0, y1)
+                x = np.random.randint(x0, x1)
+                # downhill walk
+                while True:
+                    mv, mpos = plane[y,x], (y,x)
+                    for dy in (-1,0,1):
+                        for dx in (-1,0,1):
+                            if dy==0 and dx==0: continue
+                            ny, nx = y+dy, x+dx
+                            if 0<=ny<h and 0<=nx<w and plane[ny,nx] < mv:
+                                mv, mpos = plane[ny,nx], (ny,nx)
+                    if mpos == (y,x):
+                        break
+                    y, x = mpos
+                finals.append((y,x))
+        # 4) medians of 50×50 around each final point
+        square_meds = []
+        for (y,x) in finals:
+            y0, y1 = max(0,y-25), min(h,y+25)
+            x0, x1 = max(0,x-25), min(w,x+25)
+            square_meds.append(np.median(plane[y0:y1, x0:x1]))
+        return float(min(square_meds))
 
     def eventFilter(self, source, event):
         """Handles mouse events for drawing the sample box."""
@@ -25535,7 +32978,7 @@ class BackgroundNeutralizationDialog(QDialog):
         )
 
         # Inform the user
-        QMessageBox.information(self, "Success", "Background neutralization applied successfully.")
+        print("Background neutralization applied successfully.")
 
         # Close the dialog
         self.accept()
@@ -25652,7 +33095,7 @@ class RemoveGreenDialog(QDialog):
                     )
 
                 # Inform the user of the successful operation
-                QMessageBox.information(self, "Success", f"Remove Green applied with amount {amount:.2f}")
+                print(f"Remove Green applied with amount {amount:.2f}")
 
                 # Close the dialog
                 self.accept()
@@ -25997,7 +33440,7 @@ class CLAHEDialog(QDialog):
                 )
 
             # Inform the user of the successful operation
-            QMessageBox.information(self, "Success", "CLAHE applied successfully.")
+            print("CLAHE applied successfully.")
 
             # Close the dialog
             self.accept()
@@ -26100,7 +33543,7 @@ class MorphologyDialog(QDialog):
         self.preview_view.setScene(self.preview_scene)
 
         self.preview_view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Enable panning
-        self.preview_view.setFixedSize(780, 400)  # Adjusted size to fit layout
+        #self.preview_view.setFixedSize(780, 400)  # Adjusted size to fit layout
 
         # Initialize QGraphicsPixmapItem
         self.pixmap_item = QGraphicsPixmapItem()
@@ -26655,6 +34098,2295 @@ class WhiteBalanceDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to apply White Balance:\n{e}")
             self.reject()
+
+class SaspViewer(QMainWindow):
+    def __init__(self, sasp_data_path, user_custom_path):
+        super().__init__()
+        self.setWindowTitle("SASP Viewer (Pickles + RGB Responses)")
+
+        # 1) Open both FITS:
+        self.base_hdul   = fits.open(sasp_data_path,   mode="readonly", memmap=False)
+        self.custom_hdul = fits.open(user_custom_path, mode="readonly", memmap=False)
+
+        # 2) Build master lists from both
+        self.pickles_templates = []
+        self.filter_list       = []
+        self.sensor_list       = []
+        for hdul in (self.custom_hdul, self.base_hdul):
+            for hdu in hdul:
+                if not isinstance(hdu, fits.BinTableHDU):
+                    continue
+                c = hdu.header.get("CTYPE","").upper()
+                e = hdu.header.get("EXTNAME","")
+                if c == "SED":
+                    self.pickles_templates.append(e)
+                elif c == "FILTER":
+                    self.filter_list.append(e)
+                elif c == "SENSOR":
+                    self.sensor_list.append(e)
+
+        for lst in (self.pickles_templates, self.filter_list, self.sensor_list):
+            lst.sort()
+
+        self.rgb_filter_choices = ["(None)"] + self.filter_list
+
+        # 4) Build the UI
+        central = QWidget()
+        self.setCentralWidget(central)
+        vbox = QVBoxLayout()
+        central.setLayout(vbox)
+
+        row = QHBoxLayout()
+        vbox.addLayout(row)
+
+        # Star Template dropdown
+        row.addWidget(QLabel("Star Template:"))
+        self.star_combo = QComboBox()
+        self.star_combo.addItems(self.pickles_templates)
+        row.addWidget(self.star_combo)
+
+        # R‐Filter dropdown
+        row.addWidget(QLabel("R‐Filter:"))
+        self.r_filter_combo = QComboBox()
+        self.r_filter_combo.addItems(self.rgb_filter_choices)
+        row.addWidget(self.r_filter_combo)
+
+        # G‐Filter dropdown
+        row.addWidget(QLabel("G‐Filter:"))
+        self.g_filter_combo = QComboBox()
+        self.g_filter_combo.addItems(self.rgb_filter_choices)
+        row.addWidget(self.g_filter_combo)
+
+        # B‐Filter dropdown
+        row.addWidget(QLabel("B‐Filter:"))
+        self.b_filter_combo = QComboBox()
+        self.b_filter_combo.addItems(self.rgb_filter_choices)
+        row.addWidget(self.b_filter_combo)
+
+        # ——— LP/Cut filter & Sensor go on their own second row ———
+        row2 = QHBoxLayout()
+        vbox.addLayout(row2)
+
+        row2.addWidget(QLabel("LP/Cut Filter1:"))
+        self.lp_filter_combo = QComboBox()
+        self.lp_filter_combo.addItems(self.rgb_filter_choices)
+        row2.addWidget(self.lp_filter_combo)
+
+        row2.addWidget(QLabel("LP/Cut Filter2:"))
+        self.lp_filter_combo2 = QComboBox()
+        self.lp_filter_combo2.addItems(self.rgb_filter_choices)
+        row2.addWidget(self.lp_filter_combo2)
+
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("Sensor (QE):"))
+        self.sens_combo = QComboBox()
+        self.sens_combo.addItems(self.sensor_list)
+        row2.addWidget(self.sens_combo)
+
+        # Plot button
+        self.plot_btn = QPushButton("Plot")
+        self.plot_btn.clicked.connect(self.update_plot)
+        row.addWidget(self.plot_btn)
+
+        # Matplotlib FigureCanvas
+        self.figure = Figure(figsize=(9, 6))
+        self.canvas = FigureCanvas(self.figure)
+        vbox.addWidget(self.canvas)
+
+        # 5) Initial plot
+        self.update_plot()
+
+    def load_any(self, extname, field):
+        """
+        Look for `extname` in custom_hdul first, then base_hdul.
+        Returns the data[field] array as float.
+        """
+        for hdul in (self.custom_hdul, self.base_hdul):
+            if extname in hdul:
+                return hdul[extname].data[field].astype(float)
+        raise KeyError(f"Extension '{extname}' not found")
+
+    def update_plot(self):
+        star_ext = self.star_combo.currentText()
+        r_filt   = self.r_filter_combo.currentText()
+        g_filt   = self.g_filter_combo.currentText()
+        b_filt   = self.b_filter_combo.currentText()
+        sens_ext = self.sens_combo.currentText()
+        lp_ext1  = self.lp_filter_combo.currentText()      # ① first LP
+        lp_ext2  = self.lp_filter_combo2.currentText()     # ② second LP  (NEW)
+
+        # -- Load star SED --
+
+        wl_star = self.load_any(star_ext, "WAVELENGTH")
+        fl_star = self.load_any(star_ext, "FLUX")
+
+        # -- Load sensor QE --
+        wl_sens = self.load_any(sens_ext, "WAVELENGTH")
+        qe_sens = self.load_any(sens_ext, "THROUGHPUT")
+
+        # -- Build common 1 Å grid from 1150 to 10620 Å --
+        wl_min, wl_max = 1150.0, 10620.0
+        common_wl = np.arange(wl_min, wl_max + 1.0, 1.0)
+
+        # -- Interpolate SED and QE onto common grid --
+        sed_interp  = interp1d(wl_star, fl_star, kind="linear",
+                               bounds_error=False, fill_value=0.0)
+        sens_interp = interp1d(wl_sens, qe_sens, kind="linear",
+                               bounds_error=False, fill_value=0.0)
+
+        fl_common   = sed_interp(common_wl)    # star flux on common grid
+        sens_common = sens_interp(common_wl)   # QE on common grid
+
+        # -- For each of R, G, B, load filter if selected and build filter×QE×LP & response --
+        rgb_data = {}
+        for color, filt_name in (("red",   r_filt),
+                                ("green", g_filt),
+                                ("blue",  b_filt)):
+
+            if filt_name == "(None)":
+                rgb_data[color] = None
+                continue
+
+            # ---- channel filter -------------------------------------------------
+            wl_filt = self.load_any(filt_name, "WAVELENGTH")
+            tr_filt = self.load_any(filt_name, "THROUGHPUT")
+            filt_interp = interp1d(wl_filt, tr_filt, bounds_error=False,
+                                fill_value=0.0)
+            filt_common = filt_interp(common_wl)
+
+            # ---- LP / Cut filters (may be zero, one or two) ---------------------
+            def lp_curve(ext):
+                if ext == "(None)":
+                    return np.ones_like(common_wl)
+                wl_lp  = self.load_any(ext, "WAVELENGTH")
+                tr_lp  = self.load_any(ext, "THROUGHPUT")
+                return interp1d(wl_lp, tr_lp, bounds_error=False,
+                                fill_value=0.0)(common_wl)
+
+            T_LP = lp_curve(lp_ext1) * lp_curve(lp_ext2)    # ③ cascade the two curves
+
+            # ---- system throughput & response -----------------------------------
+            T_sys = filt_common * sens_common * T_LP
+            resp  = fl_common * T_sys
+
+            rgb_data[color] = {
+                "filter_name": filt_name,
+                "wl_filter":   wl_filt,
+                "tr_filter":   tr_filt,
+                "T_sys":       T_sys,
+                "response":    resp
+            }
+
+        # -- Compute synthetic magnitudes for each channel relative to A0V --
+        mag_texts = []
+        if "A0V" in self.pickles_templates:
+            # load_any will look in custom_hdul first, then base_hdul
+            wl_veg = self.load_any("A0V", "WAVELENGTH")
+            fl_veg = self.load_any("A0V", "FLUX")
+            veg_interp = interp1d(wl_veg, fl_veg, kind="linear",
+                                bounds_error=False, fill_value=0.0)
+            fl_veg_c = veg_interp(common_wl)
+
+            # Loop over color AND now correctly retrieve "filter_name" from rgb_data
+            for color in ("red", "green", "blue"):
+                data = rgb_data[color]
+                if data is not None:
+                    chan_filter = data["filter_name"]
+                    resp_star = data["response"]
+                    resp_veg  = fl_veg_c * data["T_sys"]
+                    S_star = np.trapz(resp_star, x=common_wl)
+                    S_veg  = np.trapz(resp_veg, x=common_wl)
+                    if (S_veg > 0) and (S_star > 0):
+                        mag = -2.5 * np.log10(S_star / S_veg)
+                        mag_texts.append(f"{color[0].upper()}→{chan_filter}: {mag:.2f}")
+                    else:
+                        mag_texts.append(f"{color[0].upper()}→{chan_filter}: N/A")
+
+        title_text = " | ".join(mag_texts) if mag_texts else "No channels selected"
+
+        # -- Plotting --
+        self.figure.clf()
+        ax1 = self.figure.add_subplot(111)
+
+        # (a) Plot star SED on left axis (in black)
+        ax1.plot(common_wl, fl_common,
+                 color="black", linewidth=1, label=f"{star_ext} SED")
+        ax1.set_xlabel("Wavelength (Å)")
+        ax1.set_ylabel("Flux (erg s⁻¹ cm⁻² Å⁻¹)", color="black")
+        ax1.tick_params(axis="y", labelcolor="black")
+
+        # (b) Plot each selected channel’s response (SED×Filter×QE) in yellow
+        for color, data in rgb_data.items():
+            if data is not None:
+                ax1.plot(common_wl, data["response"],
+                         color="gold", linewidth=1.5,
+                         label=f"{color.upper()} Response")
+
+        # Right‐hand axis for throughput curves
+        ax2 = ax1.twinx()
+        ax2.set_ylabel("Relative Throughput", color="red")
+        ax2.tick_params(axis="y", labelcolor="red")
+        ax2.set_ylim(0.0, 1.0)
+
+        # (c) Plot each channel’s throughput (filter×QE) in matching dashed color
+        if rgb_data["red"] is not None:
+            ax2.plot(common_wl, rgb_data["red"]["T_sys"],
+                     color="red", linestyle="--", linewidth=1,
+                     label="R filter×QE")
+        if rgb_data["green"] is not None:
+            ax2.plot(common_wl, rgb_data["green"]["T_sys"],
+                     color="green", linestyle="--", linewidth=1,
+                     label="G filter×QE")
+        if rgb_data["blue"] is not None:
+            ax2.plot(common_wl, rgb_data["blue"]["T_sys"],
+                     color="blue", linestyle="--", linewidth=1,
+                     label="B filter×QE")
+
+        ax1.set_xlim(wl_min, wl_max)
+        ax1.grid(True, which="both", linestyle="--", alpha=0.3)
+        self.figure.suptitle(title_text, fontsize=10)
+
+        # Combine legends from both axes
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+
+        self.canvas.draw()
+
+
+    def closeEvent(self, event):
+        self.base_hdul.close()
+        self.custom_hdul.close()
+        super().closeEvent(event)
+
+def pickles_match_for_simbad(simbad_sp: str, available_extnames: List[str]) -> List[str]:
+    """
+    Given a SIMBAD‐style spectral type (e.g. "A", "A3", "A3V", "M0V", "kA3hF0mF3", etc.)
+    and a list of available Pickles EXTNAMEs (like ["A5III","A5V","A7III","B0V","G5V","M0V",...]),
+    return a **list** of one or more EXTNAMEs that best match.
+
+    Strategy:
+
+      1) Normalize SIMBAD string to uppercase, strip whitespace.
+      2) Use regex to extract:
+         - letter_class:  O, B, A, F, G, K, M, …  (first letter),
+         - numeric_subtype: integer 0–9 (if present),
+         - lum_class: one of I, II, III, IV, V, etc. (if present—commonly 'V' or 'III').
+      3) Search in available_extnames for:
+         a)  Exact match: e.g.  SIMBAD="A3V"  →  look for `"A3V"` in available_extnames.
+         b)  If no exact lif it, try “same letter+luminosity, nearest numeric.” E.g. SIMBAD="A3V"
+             → collect all `ext for ext in available_extnames if ext.startswith("A") and ext.endswith("V")`,
+             parse their numeric part, pick whichever numeric is closest to 3.
+         c)  If still nothing (maybe no “A?V” templates exist), try “same letter, any luminosity”—
+             pick nearest numeric. E.g. SIMBAD="A3V" but you only have “A3III” or “A0III” or “A7III” or “A0V”:
+             compare absolute difference |3 – subtype|.
+         d)  If SIMBAD gave you only a single letter (e.g. “A”), gather all extnames that begin with “A” (e.g. “A0V”, “A3V”, “A5III”…). 
+             You could return them all (and average their SEDs), or choose a canonical one (e.g. “A0V”). Here we return _all_ of them so the caller can decide to average. 
+      4) Return a list of 0, 1, or multiple EXTNAME strings. (0 only if literally no “A…” templates exist.)
+    """
+
+    sp = simbad_sp.strip().upper()
+
+    # Step 1: Early bail if not a “classic” stellar type
+    # For example, “SN” or “WD” or “C?” might not match Pickles. You can decide to skip them.
+    # Here we just try to parse anything that starts with [OBAFGKMLT]…
+    if not sp:
+        return []
+
+    # Regular expression to capture: letter (A–Z), optional digit (0–9), optional luminosity (I, II, III, IV, V)
+    # e.g. "A3V", "K0III", "M1V", "F", "B9", "G5III", etc.
+    m = re.match(r"^([OBAFGKMLT])(\d?)(I{1,3}|IV|V)?", sp)
+    if not m:
+        # Could not parse into letter+digit+lum, so return empty
+        return []
+
+    letter_class = m.group(1)    # e.g. "A"
+    digit_part   = m.group(2)    # e.g. "3" or "" if none
+    lum_part     = m.group(3)    # e.g. "V", "III", or None
+
+    # Convert digit to integer or None
+    if digit_part != "":
+        subclass = int(digit_part)
+    else:
+        subclass = None
+
+    # Make a helper to parse an EXTNAME like “A5V” → (letter="A", subtype=5, lum="V")
+    def parse_pickles_extname(ext: str):
+        ext = ext.strip().upper()
+        # Pickles EXTNAMEs in your SASP_data should be like: "A5III", "A5V", "B0I", "B0V", "F5V", "G5V", “M0V”, etc.
+        m2 = re.match(r"^([OBAFGKMLT])(\d+)(I{1,3}|IV|V)$", ext)
+        if not m2:
+            return None, None, None
+        letter2  = m2.group(1)            # e.g. "A"
+        digit2   = int(m2.group(2))       # e.g. 5
+        lum2     = m2.group(3)            # e.g. "V", "III", ...
+        return letter2, digit2, lum2
+
+    # Build a list of all (extname, (letter2, digit2, lum2)) for quick lookup
+    parsed_templates = []
+    for ext in available_extnames:
+        letter2, digit2, lum2 = parse_pickles_extname(ext)
+        if letter2 is None:
+            continue
+        parsed_templates.append((ext, letter2, digit2, lum2))
+
+    # STEP 2: look for an **exact** extname match if SIMBAD gave one
+    if subclass is not None and lum_part is not None:
+        attempt_exact = f"{letter_class}{subclass}{lum_part}"
+        if attempt_exact in available_extnames:
+            return [attempt_exact]
+
+    # STEP 3: collect all candidates that have the same “letter_class.” We will score by numeric closeness.
+    #    If SIMBAD gave a lum_part (e.g. "V"), first try to match that subset.
+    same_letter_and_lum = []
+    same_letter_any_lum   = []
+    for (ext, letter2, digit2, lum2) in parsed_templates:
+        if letter2 != letter_class:
+            continue
+        if lum_part is not None and lum2 == lum_part:
+            same_letter_and_lum.append((ext, digit2))
+        else:
+            same_letter_any_lum.append((ext, digit2))
+
+    def pick_nearest(candidates: List[tuple[str,int]], target_sub: int) -> List[str]:
+        """
+        Given a list of (extname, subtype_int) and an integer target_sub,
+        return the extname(s) whose subtype_int is closest to target_sub.
+        If multiple templates tie at equal distance, return all of them.
+        """
+        if not candidates or target_sub is None:
+            return []
+
+        # Compute absolute distance for each
+        arr = np.array([abs(digit2 - target_sub) for (_, digit2) in candidates])
+        min_dist = np.min(arr)
+        # Return all extnames whose distance == min_dist
+        return [candidates[i][0] for i in np.where(arr == min_dist)[0]]
+
+    # A) If we have letter + digit + lum, try step‐3a:
+    if subclass is not None and lum_part is not None:
+        if same_letter_and_lum:
+            # pick the one(s) with nearest numeric subclass
+            best = pick_nearest(same_letter_and_lum, subclass)
+            return best
+        # else: no same‐letter same‐lum candidates exist → fall back to same letter any lum
+        if same_letter_any_lum:
+            return pick_nearest(same_letter_any_lum, subclass)
+
+    # B) If we have letter + digit but NO lum (e.g. SIMBAD="A3"):
+    if subclass is not None and lum_part is None:
+        # first try to find all templates of that letter that have a numeric digit (any lum)
+        if same_letter_any_lum:
+            return pick_nearest(same_letter_any_lum, subclass)
+
+    # C) If SIMBAD gave only a letter (e.g. "A"):
+    #    Return all “letter_class” templates for caller to average or pick one arbitrarily.
+    #    (If you want a canonical single pick, you could choose to return only the one with digit closest to 0 or 5.)
+    if subclass is None and lum_part is None:
+        # all extnames whose letter2 == letter_class
+        all_same_letter = [ext for (ext, letter2, _, _) in parsed_templates if letter2 == letter_class]
+        return sorted(all_same_letter)
+
+    # D) If SIMBAD gave letter+lum but no digit (e.g. "M V")—very rare—treat same as case C except filter by lum:
+    if subclass is None and lum_part is not None:
+        candidates = [ (ext, digit2) for (ext, letter2, digit2, lum2) in parsed_templates
+                       if letter2 == letter_class and lum2 == lum_part ]
+        if candidates:
+            # If there are multiple subtypes, return them all (caller may average or pick median)
+            return sorted([ext for (ext, _) in candidates])
+        # otherwise fall back to “letter only” case:
+        return sorted([ext for (ext, letter2, _, _) in parsed_templates if letter2 == letter_class])
+
+    # Fallback: no match at all
+    return []
+
+def compute_gradient_map(sources, delta_flux, shape, method="poly2"):
+    """
+    sources:    Nx2 array of (x_i, y_i)
+    delta_flux: length-N array of measured/expected ratio or Δ values
+    shape:      (H, W) of the image
+    method:     "poly2", "poly3", or "rbf"
+    returns:    background_map of shape (H, W)
+    """
+    H, W = shape
+    xs, ys = sources[:, 0], sources[:, 1]
+
+    # 2nd-order polynomial
+    if method == "poly2":
+        A = np.vstack([
+            np.ones_like(xs), xs, ys,
+            xs**2, xs*ys, ys**2
+        ]).T
+        coeffs, *_ = np.linalg.lstsq(A, delta_flux, rcond=None)
+        YY, XX = np.mgrid[0:H, 0:W]
+        B = (
+            coeffs[0]
+          + coeffs[1] * XX + coeffs[2] * YY
+          + coeffs[3] * XX**2 + coeffs[4] * XX * YY + coeffs[5] * YY**2
+        )
+        return B
+
+    # 3rd-order polynomial
+    elif method == "poly3":
+        A = np.vstack([
+            np.ones_like(xs), xs, ys,
+            xs**2, xs*ys, ys**2,
+            xs**3, xs**2 * ys, xs * ys**2, ys**3
+        ]).T
+        coeffs, *_ = np.linalg.lstsq(A, delta_flux, rcond=None)
+        YY, XX = np.mgrid[0:H, 0:W]
+        B = (
+            coeffs[0]
+          + coeffs[1] * XX + coeffs[2] * YY
+          + coeffs[3] * XX**2 + coeffs[4] * XX * YY + coeffs[5] * YY**2
+          + coeffs[6] * XX**3 + coeffs[7] * XX**2 * YY
+          + coeffs[8] * XX * YY**2 + coeffs[9] * YY**3
+        )
+        return B
+
+    # radial basis function interpolation (fast, smooth)
+    elif method == "rbf":
+        # use the newer RBFInterpolator for speed and smoothing
+        pts = np.vstack([xs, ys]).T  # shape (N,2)
+        # smoothing >0 yields faster, smoother fits; tweak as needed
+        rbfi = RBFInterpolator(pts, delta_flux,
+                               kernel="thin_plate_spline",
+                               smoothing=1.0)
+        YY, XX = np.mgrid[0:H, 0:W]
+        grid_pts = np.vstack([XX.ravel(), YY.ravel()]).T
+        B = rbfi(grid_pts).reshape(H, W)
+        return B
+
+    else:
+        raise ValueError(f"Unknown method '{method}', must be 'poly2','poly3', or 'rbf'")
+
+class SFCCDialog(QDialog):
+    """
+    A dialog for Spectral Flux Color Calibration (SFCC).
+    Allows:
+      1. Fetching stars via Simbad (populate star dropdown),
+      2. Selecting R, G, B filters and a sensor QE curve,
+      3. Running the SFCC algorithm and plotting results.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Spectral Flux Color Calibration")
+        self.setMinimumSize(800, 600)
+
+        # ——— Fetch “active slot” image & header from the parent’s ImageManager ———
+        self.current_image = None
+        self.current_header = None
+
+        # Orientation label (just for debugging)
+        self.orientation_label = QLabel("Orientation: N/A")
+        self.sasp_viewer_window = None
+
+        self.main_win = parent
+
+        # Keep a handle back to the main SASP_data HDUList
+        # (we assume the parent has already opened SASP_data.fits in self.hdul)
+        # Make sure `sasp_data_path` is defined somewhere earlier
+        self.sasp_data_path = sasp_data_path
+
+
+        # open (or create) a user‐writable FITS in ~/.local/share/…
+
+        app_data = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation
+        )
+        os.makedirs(app_data, exist_ok=True)
+        self.user_custom_path = os.path.join(app_data, "usercustomcurves.fits")
+        if not os.path.exists(self.user_custom_path):
+            # create an empty FITS if it doesn't exist yet
+            fits.HDUList([fits.PrimaryHDU()]).writeto(self.user_custom_path)
+        # open for update
+
+
+        # now build your lists off both:
+        self._reload_hdu_lists()
+
+        # Placeholder: will be populated by fetch_stars()
+        self.star_list = []
+
+        # Build the UI (all combo-boxes get created inside _build_ui())
+        self._build_ui()
+
+        # ——— After UI is built, load any saved QSettings for these dropdowns ———
+        self.load_settings()
+
+        # ——— Connect signals so that changing any combo immediately writes to QSettings ———
+        self.r_filter_combo.currentIndexChanged.connect(self.save_r_filter_setting)
+        self.g_filter_combo.currentIndexChanged.connect(self.save_g_filter_setting)
+        self.b_filter_combo.currentIndexChanged.connect(self.save_b_filter_setting)
+        self.lp_filter_combo.currentIndexChanged.connect(self.save_lp_setting)
+        self.lp_filter_combo2.currentIndexChanged.connect(self.save_lp2_setting)
+        self.sens_combo.currentIndexChanged.connect(self.save_sensor_setting)
+        # (If you also want to remember which “White Reference” star was chosen, connect star_combo as well)
+        self.star_combo.currentIndexChanged.connect(self.save_star_setting)
+
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # ——— Row 1: “Fetch Stars” button + “Select White Reference” dropdown ———
+        row1 = QHBoxLayout()
+        layout.addLayout(row1)
+
+        # “Fetch Stars” button
+        self.fetch_stars_btn = QPushButton("Step1: Fetch Stars from Image")
+        self.fetch_stars_btn.clicked.connect(self.fetch_stars)
+        # make the text bold:
+        font = self.fetch_stars_btn.font()
+        font.setBold(True)
+        self.fetch_stars_btn.setFont(font)
+        row1.addWidget(self.fetch_stars_btn)
+
+        row1.addSpacing(20)
+
+        # “Open SASP Viewer” button
+        self.open_sasp_btn = QPushButton("Open SASP Viewer")
+        self.open_sasp_btn.clicked.connect(self.open_sasp_viewer)
+        row1.addWidget(self.open_sasp_btn)
+
+        # Spacing
+        row1.addSpacing(40)
+
+        row1.addWidget(QLabel("Select White Reference:"))
+        self.star_combo = QComboBox()
+        # 1) First item is always Vega (A0V)
+        self.star_combo.addItem("Vega (A0V)", userData="A0V")
+        # 2) Then add all other Pickles‐SED templates, skipping “A0V” itself
+        for sed in self.sed_list:
+            if sed.upper() == "A0V":
+                continue
+            self.star_combo.addItem(sed, userData=sed)
+        row1.addWidget(self.star_combo)
+        idx_g2v = self.star_combo.findData("G2V")
+        if idx_g2v >= 0:
+            self.star_combo.setCurrentIndex(idx_g2v)
+        # ——— Row 2: Filter dropdowns for R, G, B ———
+        row2 = QHBoxLayout()
+        layout.addLayout(row2)
+
+        row2.addWidget(QLabel("R Filter:"))
+        self.r_filter_combo = QComboBox()
+        self.r_filter_combo.addItem("(None)")
+        self.r_filter_combo.addItems(self.filter_list)
+        row2.addWidget(self.r_filter_combo)
+
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("G Filter:"))
+        self.g_filter_combo = QComboBox()
+        self.g_filter_combo.addItem("(None)")
+        self.g_filter_combo.addItems(self.filter_list)
+        row2.addWidget(self.g_filter_combo)
+
+        row2.addSpacing(20)
+        row2.addWidget(QLabel("B Filter:"))
+        self.b_filter_combo = QComboBox()
+        self.b_filter_combo.addItem("(None)")
+        self.b_filter_combo.addItems(self.filter_list)
+        row2.addWidget(self.b_filter_combo)
+
+        # ——— Row 3: Sensor/QE dropdown ———
+        row3 = QHBoxLayout()
+        layout.addLayout(row3)
+        row3.addStretch()
+        row3.addWidget(QLabel("Sensor (QE):"))
+        self.sens_combo = QComboBox()
+        self.sens_combo.addItem("(None)")
+        self.sens_combo.addItems(self.sensor_list)
+        row3.addWidget(self.sens_combo)
+
+        # ——— Stacked LP/Cut filter dropdown ———
+        row3.addSpacing(20)
+        row3.addWidget(QLabel("LP/Cut Filter1:"))
+        self.lp_filter_combo = QComboBox()
+        self.lp_filter_combo.addItem("(None)")
+        self.lp_filter_combo.addItems(self.filter_list)
+        row3.addWidget(self.lp_filter_combo)
+        row3.addSpacing(20)
+        row3.addWidget(QLabel("LP/Cut Filter2:"))
+        self.lp_filter_combo2 = QComboBox()
+        self.lp_filter_combo2.addItem("(None)")
+        self.lp_filter_combo2.addItems(self.filter_list)
+        row3.addWidget(self.lp_filter_combo2)        
+        row3.addStretch()
+
+
+        # ——— Row 4: “Run Calibration” + “Close” ———
+        row4 = QHBoxLayout()
+        layout.addLayout(row4)
+
+        self.run_spcc_btn = QPushButton("Step2: Run Color Calibration")
+        self.run_spcc_btn.clicked.connect(self.run_spcc)
+        # make the text bold:
+        font2 = self.run_spcc_btn.font()
+        font2.setBold(True)
+        self.run_spcc_btn.setFont(font2)
+        row4.addWidget(self.run_spcc_btn)
+
+        self.neutralize_chk = QCheckBox("Background Neutralization")
+        self.neutralize_chk.setChecked(True)          # default = ON  (pick what you like)
+        row4.addWidget(self.neutralize_chk)
+
+        # NEW: Run Gradient Extraction
+        self.run_grad_btn = QPushButton("Run Gradient Extraction (Beta)")
+        font3 = self.run_grad_btn.font()
+        font3.setBold(True)
+        self.run_grad_btn.setFont(font3)
+        self.run_grad_btn.clicked.connect(self.run_gradient_extraction)
+        row4.addWidget(self.run_grad_btn)
+
+        #row4.addWidget(QLabel("Gradient Model:"))
+        self.grad_method_combo = QComboBox()
+        self.grad_method_combo.addItems(["poly2", "poly3", "rbf"])
+        self.grad_method_combo.setCurrentText("poly3")          # default
+        row4.addWidget(self.grad_method_combo)
+
+        row4.addStretch()
+        self.add_curve_btn = QPushButton("Add Custom Filter/Sensor Curve…")
+        self.add_curve_btn.clicked.connect(self.add_custom_curve)
+        row4.addWidget(self.add_curve_btn)
+
+        self.remove_curve_btn = QPushButton("Remove Filter/Sensor Curve…")
+        self.remove_curve_btn.clicked.connect(self.remove_custom_curve)
+        row4.addWidget(self.remove_curve_btn)        
+
+        row4.addStretch()
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        row4.addWidget(self.close_btn)
+
+        # ——— Count label (number of stars fetched) ———
+        self.count_label = QLabel("")  # Will be updated after fetch_stars()
+        layout.addWidget(self.count_label)
+
+        # ——— Bottom: Matplotlib canvas for showing result curves / histogram ———
+        self.figure = Figure(figsize=(5, 4))
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setVisible(False)      # hide it initially
+        layout.addWidget(self.canvas, stretch=1)
+
+        self.reset_btn = QPushButton("Reset SFCC")
+        self.reset_btn.clicked.connect(self.reset_sfcc)
+        layout.addWidget(self.reset_btn)        
+
+        # 1)  Simply hide or show on demand
+        self.run_grad_btn.hide()          # not drawn, doesn’t take layout space
+        self.grad_method_combo.hide()
+        self.grad_method = "poly3"
+        self.grad_method_combo.currentTextChanged.connect(
+            lambda m: setattr(self, "grad_method", m))
+
+    # ——— QSettings helpers ———
+
+    def _reload_hdu_lists(self):
+        # 1) pickles SEDs come only from the main SASP_data.fits
+        self.sed_list = []
+        with fits.open(self.sasp_data_path, mode="readonly", memmap=False) as base:
+            for hdu in base:
+                if isinstance(hdu, fits.BinTableHDU) and hdu.header.get("CTYPE","").upper()=="SED":
+                    self.sed_list.append(hdu.header["EXTNAME"])
+        # 2) filters/sensors come from BOTH files
+        self.filter_list = []
+        self.sensor_list = []
+        for path in (self.sasp_data_path, self.user_custom_path):
+            with fits.open(path, mode="readonly", memmap=False) as hdul:
+                for hdu in hdul:
+                    if not isinstance(hdu, fits.BinTableHDU):
+                        continue
+                    c = hdu.header.get("CTYPE","").upper()
+                    e = hdu.header.get("EXTNAME","")
+                    if c=="FILTER":
+                        self.filter_list.append(e)
+                    elif c=="SENSOR":
+                        self.sensor_list.append(e)
+        # sort them
+        self.sed_list.sort()
+        self.filter_list.sort()
+        self.sensor_list.sort()
+
+    def load_settings(self):
+        """
+        Read previously saved comboBox selections from QSettings
+        and apply them (if they still exist in the list).
+        """
+        settings = QSettings()
+
+        # 1) Star selection (white reference)
+        saved_star = settings.value("SFCC/WhiteReference", "")
+        if saved_star:
+            idx = self.star_combo.findText(saved_star)
+            if idx != -1:
+                self.star_combo.setCurrentIndex(idx)
+
+        # 2) R filter
+        saved_r = settings.value("SFCC/RFilter", "")
+        if saved_r:
+            idx = self.r_filter_combo.findText(saved_r)
+            if idx != -1:
+                self.r_filter_combo.setCurrentIndex(idx)
+
+        # 3) G filter
+        saved_g = settings.value("SFCC/GFilter", "")
+        if saved_g:
+            idx = self.g_filter_combo.findText(saved_g)
+            if idx != -1:
+                self.g_filter_combo.setCurrentIndex(idx)
+
+        # 4) B filter
+        saved_b = settings.value("SFCC/BFilter", "")
+        if saved_b:
+            idx = self.b_filter_combo.findText(saved_b)
+            if idx != -1:
+                self.b_filter_combo.setCurrentIndex(idx)
+
+        # 5) Sensor/QE
+        saved_sensor = settings.value("SFCC/Sensor", "")
+        if saved_sensor:
+            idx = self.sens_combo.findText(saved_sensor)
+            if idx != -1:
+                self.sens_combo.setCurrentIndex(idx)
+
+        # 6) LP/Cut filter
+        saved_lp = settings.value("SFCC/LPFilter", "")
+        if saved_lp:
+            idx = self.lp_filter_combo.findText(saved_lp)
+            if idx != -1:
+                self.lp_filter_combo.setCurrentIndex(idx)
+
+        saved_lp2 = settings.value("SFCC/LPFilter2", "")
+        if saved_lp2:
+            idx = self.lp_filter_combo2.findText(saved_lp2)
+            if idx != -1:
+                self.lp_filter_combo2.setCurrentIndex(idx)
+
+    def save_lp_setting(self, index):
+        """Write the currently selected LP/Cut filter into QSettings."""
+        current = self.lp_filter_combo.currentText()
+        QSettings().setValue("SFCC/LPFilter", current)
+
+    def save_lp2_setting(self, index):
+        """Write the currently selected LP/Cut filter into QSettings."""
+        current = self.lp_filter_combo2.currentText()
+        QSettings().setValue("SFCC/LPFilter2", current)
+
+    def save_star_setting(self, index):
+        """
+        Write the currently selected “White Reference” star into QSettings.
+        """
+        current = self.star_combo.currentText()
+        QSettings().setValue("SFCC/WhiteReference", current)
+
+
+    def save_r_filter_setting(self, index):
+        """
+        Write the currently selected R‐filter into QSettings.
+        """
+        current = self.r_filter_combo.currentText()
+        QSettings().setValue("SFCC/RFilter", current)
+
+
+    def save_g_filter_setting(self, index):
+        """
+        Write the currently selected G‐filter into QSettings.
+        """
+        current = self.g_filter_combo.currentText()
+        QSettings().setValue("SFCC/GFilter", current)
+
+
+    def save_b_filter_setting(self, index):
+        """
+        Write the currently selected B‐filter into QSettings.
+        """
+        current = self.b_filter_combo.currentText()
+        QSettings().setValue("SFCC/BFilter", current)
+
+
+    def save_sensor_setting(self, index):
+        """
+        Write the currently selected sensor/QE curve into QSettings.
+        """
+        current = self.sens_combo.currentText()
+        QSettings().setValue("SFCC/Sensor", current)
+
+    def interpolate_bad_points(self, wl, tr):
+        """
+        Finds indices where tr < 0 or tr > 1.
+        Interpolates only those indices (bad points) based on their two nearest good neighbors.
+        Returns a corrected transmission array.
+        """
+        tr = tr.copy()
+        bad = (tr < 0.0) | (tr > 1.0)
+        good = ~bad
+
+        if not np.any(bad):
+            # No anomalies to fix
+            return tr, np.array([], dtype=int)
+
+        # If there are fewer than 2 good points, we can't interpolate
+        if np.sum(good) < 2:
+            raise RuntimeError("Not enough valid data to interpolate anomalies. Need at least 2 good points.")
+
+        # Perform 1-D linear interpolation at the bad wavelengths only:
+        #   - np.interp(wl[bad], wl[good], tr[good]) will give corrected values for the bad indices.
+        tr_corr = tr.copy()
+        tr_corr[bad] = np.interp(wl[bad], wl[good], tr[good])
+
+        return tr_corr, np.where(bad)[0]
+
+
+    def smooth_curve(self, tr, window_size=5):
+        """
+        Applies a median filter of specified window_size (must be odd).
+        Only to remove isolated single‐pixel spikes, not to overly blur the entire curve.
+        Returns the smoothed array.
+        """
+        # medfilt pads edges automatically in SciPy ≥1.6; 
+        # if you get a warning, ensure window_size is odd.
+        return medfilt(tr, kernel_size=window_size)
+
+    def get_calibration_points(self, rgb_img: np.ndarray):
+        """
+        Show the RGB image and let the user click exactly three points:
+        1) (λ_min, resp_min)  [bottom‐left]
+        2) (λ_max, resp_min)  [bottom‐right]
+        3) (λ_min, resp_max)  [top‐left]
+
+        Returns:
+            (px_bl, py_bl), (px_br, py_br), (px_tl, py_tl)
+        """
+        print("\nClick three calibration points in this order:")
+        print("  1) λ_min / resp_min  [bottom‐left]")
+        print("  2) λ_max / resp_min  [bottom‐right]")
+        print("  3) λ_min / resp_max  [top‐left]\n")
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.imshow(rgb_img)
+        ax.set_title("Click 3 calibration points, then close this window")
+
+        pts = plt.ginput(3, timeout=-1)
+        plt.close(fig)
+
+        if len(pts) != 3:
+            raise RuntimeError("Error: Need exactly three clicks for calibration.")
+        return pts[0], pts[1], pts[2]
+
+
+    def build_transforms(self, px_bl, py_bl, px_br, py_br, px_tl, py_tl,
+                        λ_min, λ_max, resp_min, resp_max):
+        """
+        Build two linear mapping functions:
+        px_to_λ(px)    → wavelength (nm)
+        py_to_resp(py) → response (0..1)
+
+        Calibration points:
+        (px_bl, py_bl) → (λ_min, resp_min)
+        (px_br, py_br) → (λ_max, resp_min)
+        (px_tl, py_tl) → (λ_min, resp_max)
+        """
+        nm_per_px = (λ_max - λ_min) / (px_br - px_bl)
+        resp_per_px = (resp_max - resp_min) / (py_bl - py_tl)
+
+        def px_to_λ(px):
+            return λ_min + (px - px_bl) * nm_per_px
+
+        def py_to_resp(py):
+            return resp_max - (py - py_tl) * resp_per_px
+
+        return px_to_λ, py_to_resp
+
+
+    def extract_curve(self, gray_img: np.ndarray,
+                    λ_mapper: callable,
+                    resp_mapper: callable,
+                    λ_min: float,
+                    λ_max: float,
+                    threshold: int = 50):
+        """
+        For each column x = 0..(W-1):
+        1) Find py_min = argmin(gray_img[:, x])  → the darkest pixel in that column.
+        2) If gray_img[py_min, x] < threshold and λ = λ_mapper(x) is in [λ_min, λ_max]:
+            keep (λ, response = resp_mapper(py_min))
+        3) Otherwise, skip that column.
+
+        Returns a DataFrame with columns:
+        'wavelength_nm' (float), 'response' (float 0..1),
+        clipped to [λ_min, λ_max] and containing endpoints exactly at (λ_min, 0) and (λ_max, 0).
+        """
+        H, W = gray_img.shape
+        data = []
+
+        for px in range(W):
+            column = gray_img[:, px]
+            py_min = int(np.argmin(column))
+            val_min = int(column[py_min])
+
+            if val_min < threshold:
+                λ = λ_mapper(px)
+                if λ_min <= λ <= λ_max:
+                    resp = resp_mapper(py_min)
+                    data.append((λ, resp))
+
+        if not data:
+            raise RuntimeError(
+                "No dark pixels found within threshold. "
+                "Try raising `threshold` or adjusting your clicks."
+            )
+
+        df = pd.DataFrame(data, columns=["wavelength_nm", "response"])
+        df = df.sort_values("wavelength_nm").reset_index(drop=True)
+
+        # Clip strictly to [λ_min, λ_max]
+        df = df[(df["wavelength_nm"] >= λ_min) & (df["wavelength_nm"] <= λ_max)].copy()
+
+        # Ensure endpoints (λ_min, 0.0) and (λ_max, 0.0) exist
+        if df["wavelength_nm"].iloc[0] > λ_min:
+            df = pd.concat(
+                [pd.DataFrame([[λ_min, 0.0]], columns=["wavelength_nm", "response"]), df],
+                ignore_index=True
+            )
+
+        if df["wavelength_nm"].iloc[-1] < λ_max:
+            df = pd.concat(
+                [df,
+                pd.DataFrame([[λ_max, 0.0]], columns=["wavelength_nm", "response"])],
+                ignore_index=True
+            )
+
+        df = df.sort_values("wavelength_nm").reset_index(drop=True)
+        return df
+
+    def add_custom_curve(self):
+        """
+        Add a custom filter / sensor curve via one of two methods:
+
+        • Import from a 2-column CSV   (λ_nm , response 0-1)
+        • Digitize an image (existing 3-click workflow)
+
+        The user first chooses the method; the rest proceeds accordingly.
+        """
+
+        # ──────────────────────────────────────────────────────────────────
+        # 0)  Ask user which method
+        # -----------------------------------------------------------------
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Add Custom Curve")
+        msg.setText("Choose how you want to add the curve:")
+
+        csv_btn = msg.addButton("Import CSV",
+                                QMessageBox.ButtonRole.AcceptRole)
+        img_btn = msg.addButton("Digitize Image",
+                                QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = msg.addButton(QMessageBox.StandardButton.Cancel)
+
+        msg.exec()
+
+        if msg.clickedButton() == csv_btn:
+            self._import_curve_from_csv()
+        elif msg.clickedButton() == img_btn:
+            self._digitize_curve_from_image()
+        else:
+            return  # user cancelled
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # 1)  CSV ROUTE  (complete)
+    # --------------------------------------------------------------------
+    def _import_curve_from_csv(self):
+        csv_path, _ = QFileDialog.getOpenFileName(
+            self, "Select 2-column CSV (λ_nm, response)", "",
+            "CSV Files (*.csv);;All Files (*)")
+        if not csv_path:
+            return                                     # user cancelled
+
+        # --- read CSV (no header, ignore comments) ----------------------
+        try:
+            # 1st attempt: assume NO header
+            df = (pd.read_csv(csv_path, comment="#", header=None)
+                    .iloc[:, :2]                   # keep first two cols
+                    .dropna())
+            df.columns = ["wavelength_nm", "response"]
+            # make sure cast to float succeeds; will raise if header words present
+            wl_nm = df["wavelength_nm"].astype(float).to_numpy()
+            tp    = df["response"].astype(float).to_numpy()
+
+        except ValueError:
+            # retry assuming the FIRST row *is* a header
+            try:
+                df = (pd.read_csv(csv_path, comment="#", header=0)
+                        .iloc[:, :2]
+                        .dropna())
+                df.columns = ["wavelength_nm", "response"]
+                wl_nm = df["wavelength_nm"].astype(float).to_numpy()
+                tp    = df["response"].astype(float).to_numpy()
+            except Exception as e2:
+                QMessageBox.critical(self, "CSV Error",
+                    f"Could not read CSV (even with header row):\n{e2}")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "CSV Error",
+                f"Could not read CSV:\n{e}")
+            return
+
+        # --- ask name / channel ----------------------------------------
+        ok, extname_base, channel_val = self._query_name_channel()
+        if not ok:
+            return
+
+        # --- nm → Å arrays ---------------------------------------------
+        wl_ang   = (wl_nm * 10.0).astype(np.float32)
+        tr_final = tp.astype(np.float32)
+
+        # --- build HDU & append ----------------------------------------
+        self._append_curve_hdu(
+            wl_ang   = wl_ang,
+            tr_final = tr_final,
+            extname  = extname_base,
+            ctype    = "SENSOR" if channel_val == "Q" else "FILTER",
+            origin   = f"CSV:{os.path.basename(csv_path)}"
+        )
+
+        # refresh UI
+        self._reload_hdu_lists()
+        self.refresh_filter_sensor_lists()
+        QMessageBox.information(
+            self, "Done",
+            f"CSV curve '{extname_base}' added."
+        )
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # 2)  IMAGE-DIGITIZE ROUTE  (original workflow, intact)
+    # --------------------------------------------------------------------
+    def _digitize_curve_from_image(self):
+        # Step 1: pick image
+        img_path_str, _ = QFileDialog.getOpenFileName(
+            self, "Select Curve Image to Digitize", "",
+            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)")
+        if not img_path_str:
+            return
+        img_filename = os.path.basename(img_path_str)
+
+        # Step 2: load image
+        try:
+            bgr = cv2.imread(img_path_str)
+            if bgr is None:
+                raise RuntimeError(f"cv2.imread returned None for '{img_path_str}'")
+            rgb_img  = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            gray_img = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not load image:\n{e}")
+            return
+
+        # Step 3: Digitize 3 calibration points
+        try:
+            (px_bl, py_bl), (px_br, py_br), (px_tl, py_tl) = self.get_calibration_points(rgb_img)
+        except Exception as e:
+            QMessageBox.critical(self, "Digitization Error", str(e))
+            return
+
+        # Step 4: λ_min / λ_max
+        λ_min_str, ok1 = QInputDialog.getText(self, "λ_min", "Enter λ_min (in nm):")
+        λ_max_str, ok2 = QInputDialog.getText(self, "λ_max", "Enter λ_max (in nm):")
+        if not (ok1 and ok2 and λ_min_str.strip() and λ_max_str.strip()):
+            return
+        try:
+            λ_min = float(λ_min_str);  λ_max = float(λ_max_str)
+        except ValueError:
+            QMessageBox.critical(self, "Input Error", "λ_min and λ_max must be numbers.")
+            return
+
+        # Step 5: name / channel
+        ok, extname_base, channel_val = self._query_name_channel()
+        if not ok:
+            return
+
+        # Step 6: Build transforms
+        px_to_λ, py_to_resp = self.build_transforms(
+            px_bl, py_bl, px_br, py_br, px_tl, py_tl,
+            λ_min, λ_max, 0.0, 1.0)
+
+        # Step 7: extract curve points
+        try:
+            df_curve = self.extract_curve(gray_img, px_to_λ, py_to_resp,
+                                        λ_min, λ_max, threshold=50)
+        except Exception as e:
+            QMessageBox.critical(self, "Extraction Error", str(e))
+            return
+
+        # Step 8: aggregate, interpolate, smooth
+        df_curve["wl_int"] = df_curve["wavelength_nm"].round().astype(int)
+        grp = (df_curve.groupby("wl_int")["response"]
+                    .median()
+                    .reset_index()
+                    .sort_values("wl_int"))
+        wl = grp["wl_int"].to_numpy(dtype=int)
+        tr = grp["response"].to_numpy(dtype=float)
+
+        try:
+            tr_corr, _ = self.interpolate_bad_points(wl, tr)
+        except Exception as e:
+            QMessageBox.critical(self, "Interpolation Error", str(e))
+            return
+
+        tr_smoothed = self.smooth_curve(tr_corr, window_size=5)
+
+        # Step 9: nm → Å  arrays
+        wl_ang   = (wl.astype(float) * 10.0).astype(np.float32)
+        tr_final = tr_smoothed.astype(np.float32)
+
+        # Step 10: append HDU
+        self._append_curve_hdu(
+            wl_ang   = wl_ang,
+            tr_final = tr_final,
+            extname  = extname_base,
+            ctype    = "SENSOR" if channel_val == "Q" else "FILTER",
+            origin   = f"UserDefined:{img_filename}"
+        )
+
+        self._reload_hdu_lists()
+        self.refresh_filter_sensor_lists()
+        QMessageBox.information(
+            self, "Done",
+            f"Added curve '{extname_base}'."
+        )
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # Helper: ask for name / channel
+    # --------------------------------------------------------------------
+    def _query_name_channel(self):
+        name_str, ok1 = QInputDialog.getText(
+            self, "Curve Name", "Enter curve name (EXTNAME):")
+        if not (ok1 and name_str.strip()):
+            return False, None, None
+        extname = name_str.strip().upper().replace(" ", "_")
+
+        ch_str, ok2 = QInputDialog.getText(
+            self, "Channel", "Enter channel (R,G,B or Q for sensor):")
+        if not (ok2 and ch_str.strip()):
+            return False, None, None
+        return True, extname, ch_str.strip().upper()
+
+
+
+    # ────────────────────────────────────────────────────────────────────
+    # Helper: append HDU to user_custom_path
+    # --------------------------------------------------------------------
+    def _append_curve_hdu(self, wl_ang, tr_final, extname, ctype, origin):
+        col_wl = fits.Column(name="WAVELENGTH", format="E", unit="Angstrom", array=wl_ang)
+        col_tr = fits.Column(name="THROUGHPUT", format="E", unit="REL",      array=tr_final)
+        new_hdu = fits.BinTableHDU.from_columns([col_wl, col_tr])
+        new_hdu.header["EXTNAME"] = extname
+        new_hdu.header["CTYPE"]   = ctype
+        new_hdu.header["ORIGIN"]  = origin
+        with fits.open(self.user_custom_path, mode="update", memmap=False) as hdul:
+            hdul.append(new_hdu)
+            hdul.flush()
+
+    def remove_custom_curve(self):
+        """
+        1) Offer the user a list of all current FILTER+SENSOR names.
+        2) If they pick one, rebuild the FITS without that EXTNAME.
+        3) Atomically replace the old file, then reload.
+        """
+        all_curves = self.filter_list + self.sensor_list
+        if not all_curves:
+            QMessageBox.information(self, "Remove Curve", "No custom curves to remove.")
+            return
+
+        curve, ok = QInputDialog.getItem(
+            self,
+            "Remove Curve",
+            "Select a FILTER or SENSOR curve to delete:",
+            all_curves, 0, False
+        )
+        if not ok or not curve:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Delete '{curve}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        temp_path = self.user_custom_path + ".tmp"
+        try:
+            # 1) Read entire file into memory
+            with fits.open(self.user_custom_path, memmap=False) as old_hdul:
+                # 2) Build a fresh list of HDUs we want to keep
+                new_hdus = []
+                for hdu in old_hdul:
+                    # always keep primary HDU
+                    if hdu is old_hdul[0]:
+                        new_hdus.append(hdu.copy())
+                    else:
+                        # drop only the one whose EXTNAME matches `curve`
+                        if hdu.header.get("EXTNAME") != curve:
+                            new_hdus.append(hdu.copy())
+
+            # 3) Write to a temp file
+            fits.HDUList(new_hdus).writeto(temp_path, overwrite=True)
+            # 4) Atomically replace the original
+            os.replace(temp_path, self.user_custom_path)
+
+        except Exception as e:
+            # cleanup temp file if something went wrong
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            QMessageBox.critical(self, "Write Error", f"Could not remove curve:\n{e}")
+            return
+
+        # 5) Reload and refresh
+        self._reload_hdu_lists()
+        self.refresh_filter_sensor_lists()
+        QMessageBox.information(self, "Removed", f"Deleted curve '{curve}'.")
+
+
+
+
+    def refresh_filter_sensor_lists(self):
+        """
+        Re-scan both SASP_data.fits and the user-custom FITS for
+        CTYPE=FILTER/SENSOR and repopulate self.filter_list, self.sensor_list,
+        and all the R/G/B + sensor combo-boxes.
+        """
+        # 1) Rebuild the lists from disk
+        self._reload_hdu_lists()
+
+        # 2) Now self.filter_list & self.sensor_list are up to date—
+        #    do exactly the same combo-box clearing/filling you already have:
+        current_r = self.r_filter_combo.currentText()
+        current_g = self.g_filter_combo.currentText()
+        current_b = self.b_filter_combo.currentText()
+        current_s = self.sens_combo.currentText()
+        current_lp  = self.lp_filter_combo.currentText()
+        current_lp2 = self.lp_filter_combo2.currentText()
+
+        for cb, lst, prev in [
+            (self.r_filter_combo, self.filter_list, current_r),
+            (self.g_filter_combo, self.filter_list, current_g),
+            (self.b_filter_combo, self.filter_list, current_b),
+        ]:
+            cb.clear()
+            cb.addItem("(None)")
+            cb.addItems(lst)
+            idx = cb.findText(prev)
+            if idx != -1:
+                cb.setCurrentIndex(idx)
+
+        for cb, prev in [(self.lp_filter_combo,  current_lp),
+                            (self.lp_filter_combo2, current_lp2)]:
+            cb.clear()
+            cb.addItem("(None)")
+            cb.addItems(self.filter_list)
+            idx = cb.findText(prev)
+            if idx != -1:
+                cb.setCurrentIndex(idx)
+
+        self.sens_combo.clear()
+        self.sens_combo.addItem("(None)")
+        self.sens_combo.addItems(self.sensor_list)
+        idx = self.sens_combo.findText(current_s)
+        if idx != -1:
+            self.sens_combo.setCurrentIndex(idx)
+
+
+    def initialize_wcs_from_header(self, header):
+        """Initialize a 2D WCS from a genuine fits.Header."""
+        if header is None:
+            print("No FITS header available; cannot build WCS.")
+            return
+
+        try:
+            # Force n‐dimensional → 2D by telling Astropy “naxis=2, relax=True”
+            self.wcs = WCS(header, naxis=2, relax=True)
+
+            # pixel_scale_matrix → arcsec/pixel
+            psm = self.wcs.pixel_scale_matrix
+            self.pixscale = (np.hypot(psm[0, 0], psm[1, 0]) * 3600.0)
+
+            self.center_ra, self.center_dec = self.wcs.wcs.crval
+            self.wcs_header = self.wcs.to_header(relax=True)
+
+            self.print_corner_coordinates()
+
+            # Orientation: prefer CROTA2 if present; else fallback to CD→angle
+            if 'CROTA2' in header:
+                try:
+                    self.orientation = float(header['CROTA2'])
+                except Exception:
+                    self.orientation = None
+            else:
+                self.orientation = self.calculate_orientation(header)
+
+            if self.orientation is not None:
+                print(f"Orientation = {self.orientation:.2f}°")
+                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+            else:
+                self.orientation_label.setText("Orientation: N/A")
+
+            print(f"WCS OK: RA={self.center_ra:.6f}, Dec={self.center_dec:.6f}, Pixscale={self.pixscale:.3f}\"/px")
+        except Exception as e:
+            print("WCS initialization error (no pop‐up):\n", e)
+            import traceback; traceback.print_exc()
+            return
+
+    def calculate_orientation(self, header):
+        """
+        Fallback calculation of rotation angle (°) from the CD‐matrix if CROTA2 is missing.
+        We'll use CD1_1 and CD1_2 to compute arctan2(CD1_2, CD1_1) in degrees.
+        """
+        try:
+            cd1_1 = float(header.get("CD1_1", 0.0))
+            cd1_2 = float(header.get("CD1_2", 0.0))
+            angle = math.degrees(math.atan2(cd1_2, cd1_1))
+            return angle
+        except Exception:
+            return None
+
+    def print_corner_coordinates(self):
+        """Print the RA/Dec of each of the four corners, for debugging."""
+        if not hasattr(self, "wcs") or self.current_image is None:
+            print("Cannot print corners: WCS or image is missing.")
+            return
+
+        h, w = self.current_image.shape[:2]
+        corners = {
+            "Top-Left":    (0, 0),
+            "Top-Right":   (w, 0),
+            "Bottom-Left": (0, h),
+            "Bottom-Right":(w, h),
+        }
+        print("Corner RA/Dec coordinates:")
+        for name, (x, y) in corners.items():
+            ra, dec = self.calculate_ra_dec_from_pixel(x, y)
+            if ra is None:
+                continue
+            ra_hms = self.convert_ra_to_hms(ra)
+            dec_dms = self.convert_dec_to_dms(dec)
+            print(f"  {name}: RA={ra_hms}, Dec={dec_dms}")
+
+    def calculate_ra_dec_from_pixel(self, x, y):
+        """Convert pixel coordinates (x, y) to RA/Dec via the 2D WCS."""
+        if not hasattr(self, "wcs"):
+            return None, None
+        ra, dec = self.wcs.all_pix2world(x, y, 0)
+        return ra, dec
+
+    def convert_ra_to_hms(self, ra_deg):
+        """Convert Right Ascension in degrees to Hours:Minutes:Seconds format."""
+        ra_hours = ra_deg / 15.0  # Convert degrees to hours
+        hours = int(ra_hours)
+        minutes = int((ra_hours - hours) * 60)
+        seconds = (ra_hours - hours - minutes / 60.0) * 3600
+        return f"{hours:02d}h{minutes:02d}m{seconds:05.2f}s"
+
+    def convert_dec_to_dms(self, dec_deg):
+        """Convert Declination in degrees to Degrees:Minutes:Seconds format."""
+        sign = "-" if dec_deg < 0 else "+"
+        dec_deg = abs(dec_deg)
+        degrees = int(dec_deg)
+        minutes = int((dec_deg - degrees) * 60)
+        seconds = (dec_deg - degrees - minutes / 60.0) * 3600
+        degree_symbol = "\u00B0"
+        return f"{sign}{degrees:02d}{degree_symbol}{minutes:02d}m{seconds:05.2f}s"
+
+    def _neutralize_background(self,
+                            rgb_img: np.ndarray,
+                            patch_size: int = 50) -> np.ndarray:
+        """
+        Linear background-neutralisation:
+        1. Split the image into a patch_size×patch_size grid.
+        2. Pick the patch with the *lowest* sum of RGB medians
+            (≈ darkest, least signal).
+        3. Let  best_med = [mR, mG, mB]  for that patch and
+            target      = mean(best_med).
+        4. For every channel           new = (old – diff) / (1 – diff)
+            with diff = mC – target.
+        5. Clip to [0,1] and return.
+
+        The transform is linear, therefore
+        old = 0   ⇒   new = 0
+        old = 1   ⇒   new = 1
+        so neither the black- nor white-point is touched; only the
+        *colour* of the background drifts toward neutral gray.
+        """
+        img = rgb_img.copy()
+        h, w = img.shape[:2]
+        ph, pw = h // patch_size, w // patch_size
+
+        # ── 1 · locate darkest patch ─────────────────────────────────────────
+        min_sum, best_med = np.inf, None
+        for i in range(patch_size):
+            for j in range(patch_size):
+                y0, x0 = i * ph, j * pw
+                patch = img[y0:min(y0+ph, h), x0:min(x0+pw, w), :]
+                med   = np.median(patch, axis=(0, 1))        # [R,G,B]
+                s     = med.sum()
+                if s < min_sum:
+                    min_sum, best_med = s, med
+
+        if best_med is None:          # shouldn’t happen, but be safe
+            return img
+
+        # ── 2 · linear shift/scale per channel ──────────────────────────────
+        target = float(best_med.mean())
+        eps    = 1e-8
+        for c in range(3):
+            diff = float(best_med[c] - target)
+            if abs(diff) < eps:
+                continue                           # already on target
+            img[..., c] = np.clip((img[..., c] - diff) / (1.0 - diff),
+                                0.0, 1.0)
+
+        return img
+
+    def fetch_stars(self):
+        """
+        1) Ensure plate-solved header & image exist.
+        2) Build 2-D WCS and compute on-sky radius (deg).
+        3) Query SIMBAD for SP_TYPE + B / V / R.
+        4) Infer spectral class from B–V if SP_TYPE missing.
+        5) Populate self.star_list and draw a histogram of Pickles matches.
+        """
+
+        # ─── 0) Grab current image + header ────────────────────────────
+        if self.main_win is not None and hasattr(self.main_win, "image_manager"):
+            img, meta = self.main_win.image_manager.get_current_image_and_metadata()
+            self.current_image  = img
+            self.current_header = meta.get("original_header", None)
+        else:
+            self.current_image  = None
+            self.current_header = None
+
+        if self.current_header is None or self.current_image is None:
+            QMessageBox.warning(self, "No Plate Solution",
+                                "Please plate-solve the image first.")
+            return
+
+        # ─── 1) Ensure we have Pickles templates loaded only once ──────
+        if not hasattr(self, "pickles_templates"):
+            self.pickles_templates = []
+            for p in (self.user_custom_path, self.sasp_data_path):
+                try:
+                    with fits.open(p) as hd:
+                        for hdu in hd:
+                            if (isinstance(hdu, fits.BinTableHDU)
+                                    and hdu.header.get("CTYPE", "").upper() == "SED"):
+                                extname = hdu.header.get("EXTNAME", None)
+                                if extname and extname not in self.pickles_templates:
+                                    self.pickles_templates.append(extname)
+                except Exception as e:
+                    print(f"[fetch_stars] Could not load Pickles templates from {p}: {e}")
+
+        # ─── 2) Build 2-D WCS and search radius ───────────────────────
+        try:
+            self.initialize_wcs_from_header(self.current_header)
+        except Exception:
+            QMessageBox.critical(self, "WCS Error",
+                                "Could not build a 2-D WCS from header.")
+            return
+
+        H, W = self.current_image.shape[:2]
+        pix = np.array([[W/2, H/2], [0,0], [W,0], [0,H], [W,H]])
+        try:
+            sky = self.wcs.all_pix2world(pix, 0)
+        except Exception as e:
+            QMessageBox.critical(self, "WCS Conversion Error", str(e))
+            return
+
+        center_sky  = SkyCoord(ra=sky[0,0]*u.deg, dec=sky[0,1]*u.deg, frame="icrs")
+        corners_sky = SkyCoord(ra=sky[1:,0]*u.deg, dec=sky[1:,1]*u.deg, frame="icrs")
+        radius_deg  = center_sky.separation(corners_sky).max().deg
+        print(f"[fetch_stars] Center = {center_sky.to_string('hmsdms')}, "
+            f"Radius = {radius_deg:.4f}°")
+
+        # ─── 3) Configure SIMBAD TAP ───────────────────────────────────
+        Simbad.reset_votable_fields()
+        for attempt in range(1, 11):
+            try:
+                Simbad.add_votable_fields('sp', 'flux(B)', 'flux(V)', 'flux(R)')
+                break
+            except DALServiceError as e:
+                self.count_label.setText(f"Attempt {attempt}/10 to fetch stars…")
+                QApplication.processEvents()
+                if attempt < 10:
+                    time.sleep(3)
+                else:
+                    QMessageBox.critical(self, "SIMBAD TAP Error",
+                                        "Could not retrieve SIMBAD fields.")
+                    return
+
+        Simbad.ROW_LIMIT = 10000
+
+        # ─── 4) Query SIMBAD ───────────────────────────────────────────
+        for attempt in range(1, 11):
+            try:
+                result = Simbad.query_region(center_sky, radius=radius_deg * u.deg)
+                break
+            except Exception as e:
+                self.count_label.setText(f"Attempt {attempt}/10 to query SIMBAD…")
+                QApplication.processEvents()
+                if attempt < 10:
+                    time.sleep(3)
+                else:
+                    QMessageBox.critical(self, "SIMBAD Error",
+                                        f"Query failed:\n{e}")
+                    return
+
+        if result is None or len(result) == 0:
+            QMessageBox.information(self, "No Stars Found",
+                                    "SIMBAD returned zero objects in that region.")
+            self.star_list = []
+            self.star_combo.clear()
+            self.star_combo.addItem("Vega (A0V)", userData="A0V")
+            return
+        # helper: infer spectral letter from B–V
+        def infer_letter(bv):
+            if bv is None or (isinstance(bv, float) and np.isnan(bv)):
+                return None
+            if   bv < 0.00: return "B"
+            elif bv < 0.30: return "A"
+            elif bv < 0.58: return "F"
+            elif bv < 0.81: return "G"
+            elif bv < 1.40: return "K"
+            elif bv > 1.40: return "M"
+            else:           return "U"
+
+        # ─── 5) Build star list + histogram items ──────────────────────
+        self.star_list = []
+        templates_for_hist = []       # only Pickles names (no None)
+
+        for row in result:
+            raw_sp = row['sp_type']
+            bmag, vmag, rmag = row['B'], row['V'], row['R']
+            ra_deg, dec_deg  = float(row['ra']), float(row['dec'])
+
+            try:
+                sc = SkyCoord(ra=ra_deg*u.deg, dec=dec_deg*u.deg, frame="icrs")
+            except Exception:
+                continue
+
+            # ── Determine spectral string (sp_clean) ──────────────────
+            sp_clean = None
+            if raw_sp and str(raw_sp).strip():
+                sp = str(raw_sp).strip().upper()
+                if not (sp.startswith("SN") or sp.startswith("KA")):
+                    sp_clean = sp
+            elif bmag is not None and vmag is not None:
+                try:
+                    sp_clean = infer_letter(float(bmag) - float(vmag))
+                except Exception:
+                    pass
+
+            if not sp_clean:
+                continue
+
+            # ── Match to Pickles template ─────────────────────────────
+            match_list   = pickles_match_for_simbad(sp_clean, self.pickles_templates)
+            best_template = match_list[0] if match_list else None
+
+            # Project to pixel coords and store star
+            xpix, ypix = self.wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
+            if 0 <= xpix < W and 0 <= ypix < H:
+                self.star_list.append({
+                    "ra": sc.ra.deg,
+                    "dec": sc.dec.deg,
+                    "sp_clean": sp_clean,
+                    "pickles_match": best_template,
+                    "x": xpix,
+                    "y": ypix,
+                    "Bmag": float(bmag) if bmag else None,
+                    "Vmag": float(vmag) if vmag else None,
+                    "Rmag": float(rmag) if rmag else None,
+                })
+                if best_template is not None:
+                    templates_for_hist.append(best_template)
+
+        # ─── 6) Histogram / UI update ─────────────────────────────────
+        self.figure.clf()
+        if templates_for_hist:
+            uniq, cnt = np.unique(templates_for_hist, return_counts=True)
+            types_str = ", ".join(uniq)
+            self.count_label.setText(
+                f"Found {len(templates_for_hist)} stars; templates: {types_str}"
+            )
+
+            ax = self.figure.add_subplot(111)
+            ax.bar(uniq, cnt, edgecolor="black")
+            ax.set_xlabel("Spectral Type")
+            ax.set_ylabel("Count")
+            ax.set_title("Spectral Distribution")
+            ax.tick_params(axis='x', rotation=90)
+            ax.grid(axis="y", linestyle="--", alpha=0.3)
+            self.canvas.setVisible(True)
+            self.canvas.draw()
+        else:
+            self.count_label.setText("Found 0 stars with Pickles matches.")
+            self.canvas.setVisible(False)
+            self.canvas.draw()
+
+    def run_spcc(self):
+        """
+        Run a *color‐ratio* SFCC (Spectral Photometric Color Calibration):
+        1) Use SEP to detect star centroids (x,y).
+        2) Match each Simbad star to the nearest SEP centroid.
+        3) At that pixel, read (R_meas, G_meas, B_meas).
+        4) Integrate each star’s Pickles SED → (S_star_R, S_star_G, S_star_B).
+        5) Compute exp_RG = S_star_R/S_star_G, exp_BG = S_star_B/S_star_G.
+        6) Fit meas_RG = R_meas/G_meas → exp_RG and meas_BG = B_meas/G_meas → exp_BG.
+        7) Apply R_corrected = m_R·R + b_R·G, B_corrected = m_B·B + b_B·G.
+        8) Store per-star Δ-flux for gradient extraction.
+        9) Replace image with calibrated RGB.
+        """
+
+        # — Step 0: Validate user choices —
+        ref_sed_name = self.star_combo.currentData()
+        r_filt = self.r_filter_combo.currentText()
+        g_filt = self.g_filter_combo.currentText()
+        b_filt = self.b_filter_combo.currentText()
+        sens_name = self.sens_combo.currentText()
+        lp_filt = self.lp_filter_combo.currentText()
+        lp_filt2 = self.lp_filter_combo2.currentText()
+
+        if not ref_sed_name:
+            QMessageBox.warning(self, "Error", "Please select a reference spectral type (e.g. “A0V”).")
+            return
+        if r_filt == "(None)" and g_filt == "(None)" and b_filt == "(None)":
+            QMessageBox.warning(self, "Error", "Please pick at least one of R, G or B filters.")
+            return
+        if sens_name == "(None)":
+            QMessageBox.warning(self, "Error", "Please select a sensor QE curve.")
+            return
+
+        # — Step 1A: Convert to float [0..1] & neutralize large pedestals —
+        img, _ = self.main_win.image_manager.get_current_image_and_metadata()
+        if img is None:
+            QMessageBox.critical(self, "Error", "No active image in the current slot.")
+            return
+        H, W, C = img.shape
+        if C != 3:
+            QMessageBox.critical(self, "Error", "Current image is not RGB (3 channels).")
+            return
+        if img.dtype == np.uint8:
+            base = img.astype(np.float32) / 255.0
+        else:
+            base = img.astype(np.float32)
+
+        ch_min = np.min(base, axis=(0, 1))       # shape = (3,)
+        base   = np.clip(base - ch_min, 0.0, None)
+
+        # — record per-channel minima & medians before neutralization —
+        orig_min    = np.min(base, axis=(0,1))    # shape (3,)
+        orig_median = np.median(base, axis=(0,1)) # shape (3,)
+        orig_median_scalar = float(np.median(orig_median)) # single float
+
+        # initial patch‐based neutralization
+        patch_size = 10
+        h, w = base.shape[:2]
+        ph, pw = h//patch_size, w//patch_size
+
+        min_sum = np.inf
+        best_med = None
+        for i in range(patch_size):
+            for j in range(patch_size):
+                y0, x0 = i*ph, j*pw
+                y1, x1 = min(y0+ph, h), min(x0+pw, w)
+                patch = base[y0:y1, x0:x1, :]
+                meds  = np.median(patch, axis=(0,1))   # [R_med, G_med, B_med]
+                s     = meds.sum()
+                if s < min_sum:
+                    min_sum, best_med = s, meds
+
+        if best_med is not None:
+            avg = best_med.mean()
+            for c in range(3):
+                diff  = best_med[c] - avg
+                denom = 1.0 - diff if abs(1.0-diff)>1e-8 else 1e-8
+                base[:,:,c] = np.clip((base[:,:,c] - diff)/denom, 0.0, 1.0)
+
+
+        # — restore the original median via your stretch helper —
+        # assumes you have a method stretch_color_image(img, target_median, linked=True)
+        #base = stretch_color_image(base, orig_median_scalar, linked=False)
+
+
+        # — Step 1B: SEP extraction on grayscale image —
+        gray = np.mean(base, axis=2)
+        self.count_label.setText("Detecting stars (SEP)…")
+        QApplication.processEvents()
+        bkg = sep.Background(gray)
+        data_sub = gray - bkg.back()
+        err = bkg.globalrms
+        sources = sep.extract(data_sub, 5.0, err=err)
+        if sources.size == 0:
+            QMessageBox.critical(self, "SEP Error", "SEP found no sources in the image.")
+            return
+
+        r_fluxrad, _ = sep.flux_radius(
+            gray,
+            sources["x"], sources["y"],
+            2.0 * sources["a"], 0.5,
+            normflux=sources["flux"],
+            subpix=5
+        )
+        mask = (r_fluxrad > .2) & (r_fluxrad <= 10)
+        sources = sources[mask]
+        if sources.size == 0:
+            QMessageBox.critical(self, "SEP Error",
+                                 "All SEP‐detected sources were rejected by radius filter.")
+            return
+
+        # — Step 2: Match Simbad stars to SEP centroids —
+        if not getattr(self, "star_list", None):
+            QMessageBox.warning(self, "Error",
+                                "You must Fetch Stars (and plate‐solve) before running SFCC.")
+            return
+        raw_matches = []
+        for i, star in enumerate(self.star_list):
+            dx = sources["x"] - star["x"]
+            dy = sources["y"] - star["y"]
+            j = np.argmin(dx*dx + dy*dy)
+            if (dx[j]**2 + dy[j]**2) < 3.0**2:
+                xi, yi = int(round(sources["x"][j])), int(round(sources["y"][j]))
+                if 0 <= xi < W and 0 <= yi < H:
+                    raw_matches.append({
+                        "sim_index": i,
+                        # Use the exact Pickles template if we have one,
+                        # else fall back to the full SIMBAD string.
+                        "template":  star.get("pickles_match") or star["sp_clean"],
+                        "ra":        star["ra"],
+                        "dec":       star["dec"],
+                        "x_pix":     xi,
+                        "y_pix":     yi
+                    })
+        if not raw_matches:
+            QMessageBox.warning(self, "No Matches",
+                                "Could not match any Simbad star to SEP detections.")
+            return
+
+        # — Step 3: Build throughput curves & reference SED —
+        wl_min, wl_max = 3000, 11000
+        wl_grid = np.arange(wl_min, wl_max+1)
+
+        def load_curve(ext):
+            for p in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(p) as hd:
+                    if ext in hd:
+                        d = hd[ext].data
+                        return d["WAVELENGTH"], d["THROUGHPUT"]
+            raise KeyError(f"Curve '{ext}' not found")
+
+        def load_sed(ext):
+            for p in (self.user_custom_path, self.sasp_data_path):
+                with fits.open(p) as hd:
+                    if ext in hd:
+                        d = hd[ext].data
+                        return d["WAVELENGTH"], d["FLUX"]
+            raise KeyError(f"SED '{ext}' not found")
+
+        def interp(wl_o, tp_o):
+            return np.interp(wl_grid, wl_o, tp_o, left=0., right=0.)
+
+        # system throughput
+        T_R = interp(*load_curve(r_filt)) if r_filt!="(None)" else np.ones_like(wl_grid)
+        T_G = interp(*load_curve(g_filt)) if g_filt!="(None)" else np.ones_like(wl_grid)
+        T_B = interp(*load_curve(b_filt)) if b_filt!="(None)" else np.ones_like(wl_grid)
+        QE  = interp(*load_curve(sens_name)) if sens_name!="(None)" else np.ones_like(wl_grid)
+        LP1 = interp(*load_curve(lp_filt))   if lp_filt != "(None)"  else np.ones_like(wl_grid)
+        LP2 = interp(*load_curve(lp_filt2))  if lp_filt2!= "(None)"  else np.ones_like(wl_grid)
+        LP  = LP1 * LP2
+
+        T_sys_R = T_R * QE * LP
+        T_sys_G = T_G * QE * LP
+        T_sys_B = T_B * QE * LP
+
+        # reference SED integrals
+        wl_ref, fl_ref = load_sed(ref_sed_name)
+        fr_i = np.interp(wl_grid, wl_ref, fl_ref, left=0., right=0.)
+        S_ref_R = np.trapz(fr_i * T_sys_R, x=wl_grid)
+        S_ref_G = np.trapz(fr_i * T_sys_G, x=wl_grid)
+        S_ref_B = np.trapz(fr_i * T_sys_B, x=wl_grid)
+
+        # ——— Step 4: Measure each star, compute expected ratios & collect diagnostics ———
+        diag_meas_RG = []; diag_exp_RG = []
+        diag_meas_BG = []; diag_exp_BG = []
+        enriched     = []
+
+
+        # (you should already have S_ref_G from your reference‐SED integration)
+        # …
+        for m in raw_matches:
+            xi, yi, sp = m["x_pix"], m["y_pix"], m["template"]
+            star_src = self.star_list[m["sim_index"]]
+            if img.dtype == np.uint8:
+                Rm = img[yi, xi, 0] / 255.0
+                Gm = img[yi, xi, 1] / 255.0
+                Bm = img[yi, xi, 2] / 255.0
+            else:
+                Rm = float(base[yi, xi, 0])
+                Gm = float(base[yi, xi, 1])
+                Bm = float(base[yi, xi, 2])
+            if Gm <= 0:
+                continue
+
+            cands = pickles_match_for_simbad(sp, self.pickles_templates)
+            if not cands:
+                continue
+            wl_s, fl_s = load_sed(cands[0])
+            fs_i = np.interp(wl_grid, wl_s, fl_s, left=0., right=0.)
+            S_sr = np.trapz(fs_i * T_sys_R, x=wl_grid)
+            S_sg = np.trapz(fs_i * T_sys_G, x=wl_grid)
+            S_sb = np.trapz(fs_i * T_sys_B, x=wl_grid)
+            if S_sg <= 0:
+                continue
+
+            exp_RG = S_sr / S_sg
+            exp_BG = S_sb / S_sg
+
+            meas_RG = Rm / Gm
+            meas_BG = Bm / Gm
+
+            diag_meas_RG.append(meas_RG)
+            diag_exp_RG .append(exp_RG)
+            diag_meas_BG.append(meas_BG)
+            diag_exp_BG .append(exp_BG)
+
+            enriched.append({
+                **m,
+                "R_meas":   Rm,
+                "G_meas":   Gm,
+                "B_meas":   Bm,
+                "S_star_R": S_sr,
+                "S_star_G": S_sg,
+                "S_star_B": S_sb,
+                "exp_RG":   exp_RG,
+                "exp_BG":   exp_BG,
+                "R_mag":    star_src.get("Rmag"),
+                "V_mag":    star_src.get("Vmag"),
+                "B_mag":    star_src.get("Bmag"),                
+            })
+
+        # convert diagnostics to arrays and bail if none
+        diag_meas_RG = np.array(diag_meas_RG)
+        diag_exp_RG  = np.array(diag_exp_RG)
+        diag_meas_BG = np.array(diag_meas_BG)
+        diag_exp_BG  = np.array(diag_exp_BG)
+        if diag_meas_RG.size == 0 or diag_meas_BG.size == 0:
+            QMessageBox.information(self, "No Valid Stars",
+                                    "Could not find any stars with valid measured vs expected.")
+            return
+
+        # how many stars?
+        n_stars = diag_meas_RG.size
+
+        # compute median of all G_meas
+        all_G = np.array([e["G_meas"] for e in enriched])
+        medG  = np.median(all_G)
+
+        # now compute per‐channel delta‐flux
+        for e in enriched:
+            # expected G ratio relative to reference SED
+            exp_GG = e["S_star_G"] / S_ref_G
+
+            e["delta_R"] = e["R_meas"] - (e["exp_RG"] * e["G_meas"])
+            e["delta_G"] = (e["G_meas"] - (exp_GG * e["G_meas"])) * exp_GG
+            e["delta_B"] = e["B_meas"] - (e["exp_BG"] * e["G_meas"])
+
+        self._last_matched = enriched
+
+        # ---------- Step-5 : choose best colour-ratio model --------------------
+        def rms_frac(pred, exp):
+            """Fractional RMS of (pred/exp – 1)."""
+            return np.sqrt(np.mean(((pred/exp) - 1.0) ** 2))
+
+        # helpers ---------------------------------------------------------------
+        slope_only = lambda x, m:            m*x
+        affine     = lambda x, m, b:         m*x + b
+        quad       = lambda x, a, b, c:      a*x**2 + b*x + c
+
+        # --- candidate-1 : slope-only  (b = 0)
+        mR_s = np.sum(diag_meas_RG * diag_exp_RG) / np.sum(diag_meas_RG**2)
+        mB_s = np.sum(diag_meas_BG * diag_exp_BG) / np.sum(diag_meas_BG**2)
+
+        rms_s = rms_frac(slope_only(diag_meas_RG, mR_s), diag_exp_RG) + \
+                rms_frac(slope_only(diag_meas_BG, mB_s), diag_exp_BG)
+
+        # --- candidate-2 : affine  y = m·x + b
+        mR_a, bR_a = np.linalg.lstsq(
+                        np.vstack([diag_meas_RG, np.ones_like(diag_meas_RG)]).T,
+                        diag_exp_RG, rcond=None)[0]
+        mB_a, bB_a = np.linalg.lstsq(
+                        np.vstack([diag_meas_BG, np.ones_like(diag_meas_BG)]).T,
+                        diag_exp_BG, rcond=None)[0]
+
+        rms_a = rms_frac(affine(diag_meas_RG, mR_a, bR_a), diag_exp_RG) + \
+                rms_frac(affine(diag_meas_BG, mB_a, bB_a), diag_exp_BG)
+
+        # --- candidate-3 : quadratic  y = a·x² + b·x + c
+        aR_q, bR_q, cR_q = np.polyfit(diag_meas_RG, diag_exp_RG, 2)
+        aB_q, bB_q, cB_q = np.polyfit(diag_meas_BG, diag_exp_BG, 2)
+
+        rms_q = rms_frac(quad(diag_meas_RG, aR_q, bR_q, cR_q), diag_exp_RG) + \
+                rms_frac(quad(diag_meas_BG, aB_q, bB_q, cB_q), diag_exp_BG)
+
+        # --- pick the winner ---------------------------------------------------
+        idx = np.argmin([rms_s, rms_a, rms_q])
+        if idx == 0:              # slope-only
+            coeff_R, coeff_B = (0, mR_s, 0), (0, mB_s, 0)   # (a,b,c)
+            model_choice = "slope-only"
+        elif idx == 1:            # affine
+            coeff_R, coeff_B = (0, mR_a, bR_a), (0, mB_a, bB_a)
+            model_choice = "affine"
+        else:                     # quadratic
+            coeff_R, coeff_B = (aR_q, bR_q, cR_q), (aB_q, bB_q, cB_q)
+            model_choice = "quadratic"
+
+        print(f"SFCC picked {model_choice}   →  RMS = {min(rms_s, rms_a, rms_q):.3f}")
+
+        poly = lambda c, x: c[0]*x**2 + c[1]*x + c[2]        # universal evaluator
+
+        # ─── 6 · Diagnostics ────────────────────────────────────────────────
+        self.figure.clf()
+
+        # ---------------- panel 1 : histograms -----------------------------
+        ax1 = self.figure.add_subplot(1, 3, 1)
+        bins = 20
+        ax1.hist(diag_meas_RG, bins=bins, alpha=.65,
+                 label="meas R/G", color="firebrick", edgecolor="black")
+        ax1.hist(diag_exp_RG,  bins=bins, alpha=.55,
+                 label="exp R/G", color="salmon", edgecolor="black")
+        ax1.hist(diag_meas_BG, bins=bins, alpha=.65,
+                 label="meas B/G", color="royalblue", edgecolor="black")
+        ax1.hist(diag_exp_BG,  bins=bins, alpha=.55,
+                 label="exp B/G", color="lightskyblue", edgecolor="black")
+        ax1.set_xlabel("Ratio  (band / G)")
+        ax1.set_ylabel("Number of stars")
+        ax1.set_title("Measured vs expected")
+        ax1.legend(fontsize=7, frameon=False)
+
+        # ---------------- convenience -------------------------------------
+        res0_RG = (diag_meas_RG / diag_exp_RG) - 1.0
+        res0_BG = (diag_meas_BG / diag_exp_BG) - 1.0
+        res1_RG = (poly(coeff_R, diag_meas_RG) / diag_exp_RG) - 1.0
+        res1_BG = (poly(coeff_B, diag_meas_BG) / diag_exp_BG) - 1.0
+
+        def rms(a): return np.sqrt(np.mean(a**2))
+
+        #  full vertical span from *un-corrected* residuals -----------------
+        ymin = np.min(np.concatenate([res0_RG, res0_BG]))
+        ymax = np.max(np.concatenate([res0_RG, res0_BG]))
+        pad  = 0.05 * (ymax - ymin) if ymax > ymin else 0.02
+        y_lim = (ymin - pad, ymax + pad)
+
+        # helper: horizontal IQR shading -----------------------------------
+        def shade_iqr_y(ax, y_vals, color):
+            q1, q3 = np.percentile(y_vals, [25, 75])
+            ax.axhspan(q1, q3, color=color, alpha=.10, zorder=0)
+
+        # --------------- panel 2 : BEFORE fit ------------------------------
+        ax2 = self.figure.add_subplot(1, 3, 2)
+        ax2.axhline(0, color="0.65", ls="--", lw=1)
+        shade_iqr_y(ax2, res0_RG, "firebrick")
+        shade_iqr_y(ax2, res0_BG, "royalblue")
+        ax2.scatter(diag_exp_RG, res0_RG,
+                    c="firebrick",  marker="o", alpha=.7, label="R/G residual")
+        ax2.scatter(diag_exp_BG, res0_BG,
+                    c="royalblue", marker="s", alpha=.7, label="B/G residual")
+        ax2.set_ylim(*y_lim)                      # auto-range from residuals
+        ax2.set_xlabel("Expected ratio  (band / G)")
+        ax2.set_ylabel("Fractional residual  (meas/exp − 1)")
+        ax2.set_title("Residuals  •  BEFORE fit", pad=10)
+        ax2.legend(frameon=False, fontsize=7, loc="lower right")
+        ax2.text(.04, .95, f"σ(R/G) = {rms(res0_RG)*100:.1f} %",
+                 transform=ax2.transAxes, va="top", color="firebrick")
+        ax2.text(.04, .88, f"σ(B/G) = {rms(res0_BG)*100:.1f} %",
+                 transform=ax2.transAxes, va="top", color="royalblue")
+
+        # --------------- panel 3 : AFTER fit -------------------------------
+        ax3 = self.figure.add_subplot(1, 3, 3)
+        ax3.axhline(0, color="0.65", ls="--", lw=1)
+        shade_iqr_y(ax3, res1_RG, "firebrick")
+        shade_iqr_y(ax3, res1_BG, "royalblue")
+        ax3.scatter(diag_exp_RG, res1_RG,
+                    c="firebrick",  marker="o", alpha=.7, label="R/G residual")
+        ax3.scatter(diag_exp_BG, res1_BG,
+                    c="royalblue", marker="s", alpha=.7, label="B/G residual")
+        ax3.set_ylim(*y_lim)                      # same scale as BEFORE panel
+        ax3.set_xlabel("Expected ratio  (band / G)")
+        ax3.set_ylabel("Fractional residual  (corrected/exp − 1)")
+        ax3.set_title("Residuals  •  AFTER fit", pad=10)
+        ax3.legend(frameon=False, fontsize=7, loc="lower right")
+        ax3.text(.04, .95, f"σ(R/G) = {rms(res1_RG)*100:.1f} %",
+                 transform=ax3.transAxes, va="top", color="firebrick")
+        ax3.text(.04, .88, f"σ(B/G) = {rms(res1_BG)*100:.1f} %",
+                 transform=ax3.transAxes, va="top", color="royalblue")
+
+        # -------------------------------------------------------------------
+        self.canvas.setVisible(True)
+        self.figure.tight_layout(w_pad=2.)
+        self.canvas.draw()
+
+
+        # ——— Step 7: Apply the color‐ratio fit to the entire image ———
+        self.count_label.setText("Applying SFCC color scales to image…")
+        QApplication.processEvents()
+
+        if img.dtype == np.uint8:
+            img_float = (img.astype(np.float32) / 255.0).copy()
+        else:
+            img_float = img.astype(np.float32).copy()
+
+        # ratios in the raw image
+        RG = img_float[..., 0] / np.maximum(img_float[..., 1], 1e-8)
+        BG = img_float[..., 2] / np.maximum(img_float[..., 1], 1e-8)
+
+        # predicted correct ratios from the chosen model
+        aR, bR, cR = coeff_R
+        aB, bB, cB = coeff_B
+        RG_corr = aR*RG**2 + bR*RG + cR
+        BG_corr = aB*BG**2 + bB*BG + cB
+
+        calibrated = img_float.copy()
+        calibrated[..., 0] = RG_corr * img_float[..., 1]   # R = (R/G)_corr × G
+        calibrated[..., 2] = BG_corr * img_float[..., 1]   # B = (B/G)_corr × G
+        calibrated = np.clip(calibrated, 0, 1)
+
+        # ─── Step 8: optional background neutralization ───────────────
+        if self.neutralize_chk.isChecked():
+            calibrated = self._neutralize_background(calibrated, patch_size=10)
+
+        # ——— Convert back to uint8 if needed and push calibrated image onward ———
+        if img.dtype == np.uint8:
+            calibrated = (calibrated * 255.0).astype(np.uint8)
+        print(img.dtype)    
+
+        # ——— Step 9: Push the calibrated (and neutralized) image back into the current slot ———
+        if not hasattr(self, "main_win") or self.main_win is None:
+            QMessageBox.critical(self, "Internal Error", "Cannot find parent to store calibrated image.")
+            return
+
+        _, old_meta = self.main_win.image_manager.get_current_image_and_metadata()
+        new_meta = (old_meta or {}).copy()
+        new_meta["SFCC_applied"]   = True
+        new_meta["SFCC_timestamp"] = datetime.now().isoformat()
+        new_meta["SFCC_model"]     = model_choice
+        new_meta["SFCC_coeff_R"]   = [float(v) for v in coeff_R]   # (a,b,c)
+        new_meta["SFCC_coeff_B"]   = [float(v) for v in coeff_B]
+
+        self.main_win.image_manager.set_image(
+            calibrated,
+            new_meta,
+            step_name="SFCC Calibrated"
+        )
+
+        self.count_label.setText(f"Applied SFCC color calibration using {n_stars} stars")
+        QApplication.processEvents()
+
+        # ——— Step 10: Final summary dialog ———
+        # ---------- final summary dialog ---------------------------------------
+        def pretty(coeff):
+            """return y at x=1  (easy-to-interpret overall scale)"""
+            return coeff[0] + coeff[1] + coeff[2]          # a*1² + b*1 + c
+
+        ratio_R = pretty(coeff_R)
+        ratio_B = pretty(coeff_B)
+
+        QMessageBox.information(
+            self, "SFCC Complete",
+            f"Applied SFCC colour calibration using {n_stars} stars\n"
+            f"  Model chosen : {model_choice}\n"
+            f"  R ratio (at x=1) = {ratio_R:.4f}\n"
+            f"  B ratio (at x=1) = {ratio_B:.4f}\n"
+            "\n"
+            "Background neutralisation " +
+            ("ENABLED" if self.neutralize_chk.isChecked() else "skipped") + "."
+        )
+        self.current_image = calibrated
+
+    def run_gradient_extraction(self):
+        """
+        Chromatic-gradient removal using only Pickles-based colour ratios.
+        * No catalog magnitudes
+        * No sky probes
+        * Work on ¼-res copy for speed, upscale the result.
+        """
+        # ─── 0. prerequisites ───────────────────────────────────────────────
+        if not getattr(self, "_last_matched", None):
+            QMessageBox.warning(self, "No Star Matches",
+                                "Run colour calibration first.")
+            return
+
+        img, meta = self.main_win.image_manager.get_current_image_and_metadata()
+        if img is None or img.ndim != 3 or img.shape[2] != 3:
+            QMessageBox.critical(self, "Error", "Current image must be RGB.")
+            return
+
+        is_u8  = img.dtype == np.uint8
+        img_f  = img.astype(np.float32) / (255. if is_u8 else 1.)
+        H, W   = img_f.shape[:2]
+
+        # ─── 1. down-sample working copy ────────────────────────────────────
+        down_fact = 4                                     # <— tweak if needed
+        Hs, Ws    = H // down_fact, W // down_fact
+        small     = cv2.resize(img_f, (Ws, Hs), interpolation=cv2.INTER_AREA)
+
+        # helper → convert star’s full-res coords to small
+        def to_small(x, y): return x / down_fact, y / down_fact
+
+        # quick luminance for σ-clipping later
+        gray_s = np.mean(small, axis=2)
+
+        # ─── 2. re-measure every star’s colour ratios ───────────────────────
+        pts, dRG, dBG = [], [], []
+        eps, box = 1e-8, 3                       # box → 7×7 median @ ¼-res
+
+        for st in self._last_matched:
+            xs_full, ys_full = st["x_pix"], st["y_pix"]
+            xs, ys           = to_small(xs_full, ys_full)
+            xs_c, ys_c       = int(round(xs)), int(round(ys))
+            if not (0 <= xs_c < Ws and 0 <= ys_c < Hs):   # off-frame?
+                continue
+
+            # median in 7×7 patch (clamped to edges)
+            xsl = slice(max(0, xs_c-box), min(Ws, xs_c+box+1))
+            ysl = slice(max(0, ys_c-box), min(Hs, ys_c+box+1))
+            Rm  = np.median(small[ysl, xsl, 0])
+            Gm  = np.median(small[ysl, xsl, 1])
+            Bm  = np.median(small[ysl, xsl, 2])
+            if Gm <= 0: continue
+
+            exp_RG = st["exp_RG"];   exp_BG = st["exp_BG"]
+            if exp_RG is None or exp_BG is None:   # shouldn’t happen
+                continue
+
+            meas_RG = Rm / Gm
+            meas_BG = Bm / Gm
+
+            dm_RG = -2.5 * np.log10((meas_RG+eps)/(exp_RG+eps))
+            dm_BG = -2.5 * np.log10((meas_BG+eps)/(exp_BG+eps))
+
+            pts.append([xs, ys])
+            dRG.append(dm_RG)
+            dBG.append(dm_BG)
+
+        pts  = np.asarray(pts);   dRG = np.asarray(dRG);   dBG = np.asarray(dBG)
+        if pts.shape[0] < 5:
+            QMessageBox.warning(self, "Too Few Stars",
+                                "Need ≥5 stars after clipping.")
+            return
+
+        # σ-clip
+        def sclip(arr, p, s=2.5):
+            m, sd = np.median(arr), np.std(arr)
+            keep  = np.abs(arr-m) < s*sd
+            return p[keep], arr[keep]
+
+        ptsRG, dRG = sclip(dRG, pts)
+        ptsBG, dBG = sclip(dBG, pts)
+
+        # ─── 3. fit 2-D surfaces (¼-res) ────────────────────────────────────
+        mode = getattr(self, "grad_method", "poly2")      # poly2/poly3/rbf
+        bgRG_s = compute_gradient_map(ptsRG, dRG, (Hs, Ws), method=mode)
+        bgBG_s = compute_gradient_map(ptsBG, dBG, (Hs, Ws), method=mode)
+
+        # centre & clamp to ±0.2 mag
+        for bg in (bgRG_s, bgBG_s):
+            bg -= np.median(bg)
+            peak = np.max(np.abs(bg))
+            if peak > 0.2: bg *= 0.2/peak
+
+        # ─── 4. upscale to full res ─────────────────────────────────────────
+        bgRG = cv2.resize(bgRG_s, (W, H), interpolation=cv2.INTER_CUBIC)
+        bgBG = cv2.resize(bgBG_s, (W, H), interpolation=cv2.INTER_CUBIC)
+
+        scale_R = 10**(-0.4*bgRG)
+        scale_B = 10**(-0.4*bgBG)
+
+        # ─── 5. visualisation ───────────────────────────────────────────────
+        self.figure.clf()
+        for i,(surf,lbl) in enumerate(((bgRG,"Δm R/G"),(bgBG,"Δm B/G"))):
+            ax  = self.figure.add_subplot(1,2,i+1)
+            im  = ax.imshow(surf, origin="lower", cmap="RdBu")
+            ax.scatter(pts[:,0]*down_fact, pts[:,1]*down_fact,
+                    s=25, facecolors='none', edgecolors='k', lw=.6)
+            ax.set_title(lbl); ax.set_ylim(H,0)
+            self.figure.colorbar(im, ax=ax)
+        self.canvas.setVisible(True)
+        self.figure.tight_layout(); self.canvas.draw()
+
+        # ─── 6. apply correction (only R & B) ───────────────────────────────
+        corrected        = img_f.copy()
+        corrected[...,0] = np.clip(corrected[...,0] / scale_R, 0, 1.0)
+        corrected[...,2] = np.clip(corrected[...,2] / scale_B, 0, 1.0)
+        if is_u8: corrected = (corrected*255.).astype(np.uint8)
+
+        meta = meta.copy() if meta else {}
+        meta["ColourGradRemoved"] = True
+        self.main_win.image_manager.set_image(
+            corrected, meta,
+            step_name="Colour-Gradient (star spectra, ¼-res fit)"
+        )
+        self.count_label.setText("Chromatic gradient removed ✓")
+        QApplication.processEvents()
+
+    def open_sasp_viewer(self):
+        """
+        Called when the “Open SASP Viewer” button is clicked.
+        Instantiates SaspViewer and shows it as a separate window.
+        """
+        # If it’s already open, just bring it to the front
+        if self.sasp_viewer_window is not None:
+            if self.sasp_viewer_window.isVisible():
+                # It’s already open and visible → just bring to front
+                self.sasp_viewer_window.raise_()
+            else:
+                # It exists but was closed (hidden) → show it again
+                self.sasp_viewer_window.show()
+            return
+
+        # Create and show a new SaspViewer using the same SASP_data path
+        self.sasp_viewer_window = SaspViewer(sasp_data_path=sasp_data_path, user_custom_path=self.user_custom_path)
+        self.sasp_viewer_window.show()
+
+        # When the SaspViewer is closed, clear the reference so we can reopen later
+        self.sasp_viewer_window.destroyed.connect(self._on_sasp_closed)
+
+    def reset_sfcc(self):
+        """
+        Close & delete this dialog, clear the parent’s pointer, 
+        then call SFCC_show() to build an entirely new one.
+        """
+        parent = self.main_win
+        # 1) Close and schedule this dialog for deletion
+        self.close()
+        self.deleteLater()
+
+        # 2) Clear the parent’s reference so SFCC_show will make a fresh one
+        parent.SFCC_window = None
+
+        # 3) Call the same show method you use to open it initially
+        parent.SFCC_show()
+
+
+    def _on_sasp_closed(self, obj):
+        # Called when the SaspViewer window is closed
+        self.sasp_viewer_window = None
+
+    def closeEvent(self, event):
+        # Make sure to close the FITS file on exit
+
+        super().closeEvent(event)
+
 
 class PixelImage:
     def __init__(self, array):
@@ -27325,11 +37057,26 @@ class PixelMathDialog(QDialog):
                     new_img = result
 
                 # If it's a scalar, fill the current image shape
-                current_img = self.image_manager.image
-                if current_img.ndim == 2:
-                    current_img = np.stack([current_img]*3, axis=-1)
+                ref = self.image_manager.image
+                if ref is None:
+                    # fall back to the first non-empty slot variable
+                    for i in range(self.image_manager.max_slots):
+                        slot_img = self.image_manager._images.get(i)
+                        if slot_img is not None:
+                            ref = slot_img
+                            break
+                if ref is None:
+                    raise ValueError("No image or slot referenced; cannot infer output size.")
+
+                # normalize ref to 3-channel if needed
+                if ref.ndim == 2:
+                    ref_arr = np.stack([ref]*3, axis=-1)
+                else:
+                    ref_arr = ref
+
+                # if scalar, broadcast
                 if np.isscalar(new_img):
-                    new_img = np.full(current_img.shape, new_img, dtype=current_img.dtype)
+                    new_img = np.full(ref_arr.shape, new_img, dtype=ref_arr.dtype)
 
                 # Update the image
                 current_slot = self.image_manager.current_slot
@@ -27466,11 +37213,10 @@ class PixelMathDialog(QDialog):
 
         # Insert current image as 'img'
         current_img = self.image_manager.image
-        if current_img is None:
-            raise ValueError("No current image loaded.")
-        if current_img.ndim == 2:
-            current_img = np.stack([current_img]*3, axis=-1)
-        safe_namespace["img"] = PixelImage(current_img)
+        if current_img is not None:
+            if current_img.ndim == 2:
+                current_img = np.stack([current_img]*3, axis=-1)
+            safe_namespace["img"] = PixelImage(current_img)
 
         # Insert image slots as slot0, slot1, ...
         max_slots = self.image_manager.max_slots
@@ -27490,10 +37236,7 @@ class PixelMathDialog(QDialog):
         # Evaluate
             # Instead of a direct `eval`, we now do:
         return self.evaluate_multiline_expression(expr, safe_namespace)
-        if isinstance(result, PixelImage):
-            return result
-        else:
-            return result  # Could be scalar or ndarray
+
 
 class TransformHandle(QGraphicsEllipseItem):
     def __init__(self, parent_item, scene):
@@ -28062,6 +37805,2232 @@ class SignatureInsertWindow(QMainWindow):
         arr = arr[:, :w * 4].reshape((h, w, 4))
         return arr.astype(np.float32) / 255.0
 
+class InteractiveGraphicsView(QGraphicsView):
+    """
+    A QGraphicsView that captures Shift+Click to define a Larson–Sekanina center.
+    Draws a small crosshair at the chosen point.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ls_center = None    # (x, y) in scene coordinates
+        self.cross_items = []    # To hold the QGraphicsLineItem(s) for the marker
+
+    def mousePressEvent(self, event):
+        # If Shift is held during a left‐click, record the LS center:
+        if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) and event.button() == Qt.MouseButton.LeftButton:
+            scene_pt = self.mapToScene(event.position().toPoint())
+            x, y = scene_pt.x(), scene_pt.y()
+            self.ls_center = (x, y)
+            self._draw_crosshair_at(x, y)
+            # Don’t propagate further, so we don’t start panning:
+            return
+
+        # Otherwise, fallback to normal panning behavior:
+        super().mousePressEvent(event)
+
+    def _draw_crosshair_at(self, x: float, y: float):
+        # Remove any existing crosshair
+        for item in self.cross_items:
+            self.scene().removeItem(item)
+        self.cross_items.clear()
+
+        size = 10  # crosshair half‐length in pixels
+        pen = QPen(QColor(255, 0, 0), 2)
+        # Horizontal line
+        hline = self.scene().addLine(x - size, y, x + size, y, pen)
+        # Vertical line
+        vline = self.scene().addLine(x, y - size, x, y + size, pen)
+        self.cross_items.extend([hline, vline])
+
+class FloatSliderWithEdit(QWidget):
+    """
+    A composite widget combining a QSlider (integer) and a QLineEdit (float).
+    Internally maps the slider’s integer range [min_int … max_int] → float range
+    [min_float … max_float] in fixed steps.  Emits valueChanged(float).
+    """
+
+    # Signal with the new float value whenever it changes.
+    valueChanged = pyqtSignal(float)
+
+    def __init__(
+        self,
+        *,
+        minimum: float,
+        maximum: float,
+        step: float,
+        initial: float,
+        suffix: str = "",
+        parent = None
+    ):
+        """
+        - minimum, maximum: the float range.
+        - step: the smallest increment (e.g. 0.1).
+        - initial: starting float value (must lie between [minimum..maximum]).
+        - suffix: e.g. " px" or "°", appended in the QLineEdit.
+        """
+        super().__init__(parent)
+
+        self._min = minimum
+        self._max = maximum
+        self._step = step
+        self._suffix = suffix
+
+        # Compute integer mapping factor = 1/step
+        self._factor = 1.0 / step
+        # So slider integer range:
+        self._int_min = int(round(minimum * self._factor))
+        self._int_max = int(round(maximum * self._factor))
+
+        # Layout: QSlider on the left, QLineEdit on the right
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # 1) Build QSlider
+        self.slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider.setRange(self._int_min, self._int_max)
+        layout.addWidget(self.slider, stretch=1)
+
+        # 2) Build QLineEdit with validator for float
+        self.edit = QLineEdit(self)
+        self.edit.setFixedWidth(60)
+        validator = QDoubleValidator(minimum, maximum, int(abs(np.log10(step))), self)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.edit.setValidator(validator)
+        layout.addWidget(self.edit)
+
+        # 3) Initialize both to the given initial value
+        self.setValue(initial)
+
+        # 4) Connect slider→edit
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        # 5) Connect edit→slider (when editing is finished)
+        self.edit.editingFinished.connect(self._on_edit_finished)
+
+    def _on_slider_changed(self, int_val: int):
+        """
+        Called whenever the slider moves.  Convert int_val → float,
+        update the text field, and emit valueChanged(float).
+        """
+        f = int_val / self._factor
+        # Clamp to [min..max] in case of rounding
+        if f < self._min: f = self._min
+        if f > self._max: f = self._max
+        text = f"{f:.{max(0, int(-np.log10(self._step)))}f}{self._suffix}"
+        # Block signals on edit so we don’t re-enter _on_edit_finished
+        self.edit.blockSignals(True)
+        self.edit.setText(text)
+        self.edit.blockSignals(False)
+        self.valueChanged.emit(f)
+
+    def _on_edit_finished(self):
+        """
+        Called when the user types a number and presses Enter (or leaves the field).
+        Parse the float (ignoring suffix), clamp it, update the slider.
+        """
+        txt = self.edit.text().rstrip(self._suffix)
+        try:
+            f = float(txt)
+        except ValueError:
+            # If parsing fails, reset to slider’s current float
+            current_int = self.slider.value()
+            f = current_int / self._factor
+
+        if f < self._min:
+            f = self._min
+        elif f > self._max:
+            f = self._max
+
+        int_val = int(round(f * self._factor))
+        self.slider.blockSignals(True)
+        self.slider.setValue(int_val)
+        self.slider.blockSignals(False)
+        # Setting the slider will trigger _on_slider_changed, which updates the text & emits.
+
+    def value(self) -> float:
+        """Return the current float value."""
+        return self.slider.value() / self._factor
+
+    def setValue(self, f: float):
+        """Programmatically set to a given float f (clamped & rounded)."""
+        if f < self._min:
+            f = self._min
+        elif f > self._max:
+            f = self._max
+        int_val = int(round(f * self._factor))
+        self.slider.blockSignals(True)
+        self.slider.setValue(int_val)
+        self.slider.blockSignals(False)
+        # Also update the text explicitly:
+        s = f"{(int_val / self._factor):.{max(0, int(-np.log10(self._step)))}f}{self._suffix}"
+        self.edit.setText(s)
+        # Finally, emit that value
+        self.valueChanged.emit(int_val / self._factor)
+
+class ConvoDeconvoDialog(QDialog):
+    """
+    Convolution / Deconvolution dialog with a two‐column layout:
+     - Left column: parameter tabs + action buttons (Preview, Undo, Push, Close)
+     - Right column: a QGraphicsView showing the preview, with Zoom In/Out/Fit controls
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Convolution / Deconvolution")
+        self.resize(1000, 650)
+        self._use_custom_psf = False
+        self._custom_psf = None
+        # Make it a top‐level window (won't minimize with parent)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window)
+
+        # Keep track of original & preview images for Undo/Push
+        self._original_image = None
+        self._preview_result = None
+
+        # ─── Build the two‐column layout ───────────────────────────────────
+        main_layout = QHBoxLayout(self)
+        # Left panel (controls) will be fixed‐width
+        left_panel = QFrame()
+        left_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        left_panel.setFixedWidth(350)
+        left_layout = QVBoxLayout(left_panel)
+        main_layout.addWidget(left_panel)
+
+        # Right panel (preview) will expand
+        preview_panel = QFrame()
+        preview_layout = QVBoxLayout(preview_panel)
+        main_layout.addWidget(preview_panel, stretch=1)
+
+        # ─── LEFT PANEL: TABS + Action Buttons ────────────────────────────
+        # 1) Tab widget
+        self.tabs = QTabWidget()
+        left_layout.addWidget(self.tabs)
+
+        self.deconv_param_stack = {}
+        self.deconv_stack_container = QWidget()
+        self.deconv_stack_layout = QVBoxLayout(self.deconv_stack_container)
+
+        # Build both tabs (as before)
+        self._build_convolution_tab()
+        self._build_deconvolution_tab()
+        self._build_psf_estimator_tab()
+        self._build_tv_denoise_tab()
+        self.sep_use_button.clicked.connect(self._on_use_stellar_psf)
+
+        # 2) PSF preview label (64×64)
+        self.conv_psf_label = QLabel()
+        self.conv_psf_label.setFixedSize(64, 64)
+        self.conv_psf_label.setStyleSheet("border: 1px solid #888;")
+        left_layout.addWidget(self.conv_psf_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # (strength)
+        self.strength_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=1.0, suffix=""
+        )
+        strength_layout = QHBoxLayout()
+        strength_layout.addWidget(QLabel("Strength:"))
+        strength_layout.addWidget(self.strength_slider)
+        left_layout.addLayout(strength_layout)
+
+        # 2) Action buttons
+        btn_layout = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview")
+        self.undo_btn    = QPushButton("Undo")
+        self.push_btn    = QPushButton("Push to Slot")
+        self.close_btn   = QPushButton("Close")
+        btn_layout.addWidget(self.preview_btn)
+        btn_layout.addWidget(self.undo_btn)
+        left_layout.addLayout(btn_layout)
+
+        btn_layout2 = QHBoxLayout()
+        btn_layout2.addWidget(self.push_btn)
+        btn_layout2.addWidget(self.close_btn)
+        left_layout.addLayout(btn_layout2)
+
+        # Add stretch so these stay at the bottom of left panel
+        left_layout.addStretch()
+
+        self.rl_status_label = QLabel("")
+        self.rl_status_label.setStyleSheet("color: #ffffff; background-color: #333333; padding: 4px;")
+        self.rl_status_label.setFixedHeight(24)
+        left_layout.addWidget(self.rl_status_label)
+
+        # ─── RIGHT PANEL: Zoom Controls + QGraphicsView ───────────────────
+        # 1) Zoom toolbar (in a horizontal layout)
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addStretch()
+        self.zoom_in_btn  = QToolButton()
+        self.zoom_in_btn.setIcon(QIcon.fromTheme("zoom-in"))
+        self.zoom_in_btn.setToolTip("Zoom In")
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setIcon(QIcon.fromTheme("zoom-out"))
+        self.zoom_out_btn.setToolTip("Zoom Out")
+        self.fit_btn      = QToolButton()
+        self.fit_btn.setIcon(QIcon.fromTheme("zoom-fit-best"))
+        self.fit_btn.setToolTip("Fit to Preview")
+        zoom_layout.addWidget(self.zoom_in_btn)
+        zoom_layout.addWidget(self.zoom_out_btn)
+        zoom_layout.addWidget(self.fit_btn)
+        preview_layout.addLayout(zoom_layout)
+
+        # 2) QGraphicsView + QGraphicsScene for the preview
+        self.scene = QGraphicsScene()
+        self.view = InteractiveGraphicsView(self.scene)
+        self.view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.pixmap_item)
+        preview_layout.addWidget(self.view)
+
+        self._load_original_on_startup()
+
+        # ─── Connect signals for buttons ───────────────────────────────────
+        self.preview_btn.clicked.connect(self._on_preview)
+        self.undo_btn.clicked.connect(self._on_undo)
+        self.push_btn.clicked.connect(self._on_push_to_slot)
+        self.close_btn.clicked.connect(self.close)
+
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        self.fit_btn.clicked.connect(self._on_fit_clicked)
+
+        # 4) Whenever the user switches tabs, or changes Algorithm, or any PSF slider:
+        self.tabs.currentChanged.connect(self._update_psf_preview)
+        self.deconv_algo_combo.currentTextChanged.connect(self._update_psf_preview)
+
+        self.sep_run_button.clicked.connect(self._on_run_sep)
+        #self.sep_use_button.clicked.connect(self._on_use_stellar_psf)
+        self.sep_save_button.clicked.connect(self._on_save_stellar_psf)
+
+        # 5) Connect all convolution sliders to the same updater:
+        for s in (
+            self.conv_radius_slider,
+            self.conv_shape_slider,
+            self.conv_aspect_slider,
+            self.conv_rotation_slider
+        ):
+            s.valueChanged.connect(self._update_psf_preview)
+
+        # 6) Connect all RL‐decon sliders to the same updater:
+        for s in (
+            self.rl_psf_radius_slider,
+            self.rl_psf_shape_slider,
+            self.rl_psf_aspect_slider,
+            self.rl_psf_rotation_slider
+        ):
+            s.valueChanged.connect(self._update_psf_preview)
+
+        # 7) Finally, initialize the preview once
+        self._update_psf_preview()
+
+    def showEvent(self, event):
+        """
+        Whenever this dialog is shown (or re‐shown), pull in the current active
+        slot’s image and reset preview. This way it won’t “remember” the old one.
+        """
+        super().showEvent(event)
+        # Clear any previous preview so we start fresh:
+        self._preview_result = None
+
+        # Reload the “original” from the active slot:
+        self._load_original_on_startup()
+
+        # Also clear PSF‐preview label (if you want it blank on open):
+        self.conv_psf_label.clear()
+        self.sep_psf_preview.clear()
+
+    def closeEvent(self, event):
+        """
+        When the user closes this dialog, clear out all large arrays,
+        custom-PSF flags, and any QLabel pixmaps so nothing “sticks”
+        for the next time you open it.
+        """
+        # 1) Clear Larson–Sekanina center (if set)
+        if hasattr(self.view, "ls_center"):
+            self.view.ls_center = None
+
+        # 2) Drop references to NumPy arrays
+        self._original_image   = None
+        self._preview_result   = None
+
+        # 3) Clear any SEP-derived PSF
+        self._last_stellar_psf = None
+        self._custom_psf       = None
+        self._use_custom_psf   = False
+
+        # 4) Clear all QLabel pixmaps so they don’t linger
+        self.conv_psf_label.clear()
+        self.sep_psf_preview.clear()
+
+        # 5) Clear the RL status bar text
+        self.rl_status_label.setText("")
+
+        # 6) Un‐check any “Using Stellar PSF” UI elements
+        self.rl_custom_label.setVisible(False)
+        self.rl_disable_custom_btn.setVisible(False)
+        self.custom_psf_bar.setVisible(False)
+
+        # 7) (Optional) Reset any TV-Denoise sliders to their defaults if you want
+        self.tv_weight_slider.setValue(0.1)
+        self.tv_iter_slider.setValue(10)
+        self.tv_multichannel_checkbox.setChecked(True)
+
+        # 8) Finally call the base implementation so it actually closes
+        super().closeEvent(event)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _load_original_on_startup(self):
+        """
+        Called once during __init__ to fetch the current active slot’s image
+        and display it. Also stores it as self._original_image for Undo.
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            return
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            return
+
+        # Store as “original” so Undo can revert to this
+        self._original_image = img.copy()
+        # We want to fit on first display, so set flag:
+        self._auto_fit = True
+        self._display_in_view(img)
+
+    def _build_convolution_tab(self):
+        conv_tab = QWidget()
+        layout = QVBoxLayout(conv_tab)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # ── Radius (0.1 … 500.0, step=0.1) ─────────────────────────
+        self.conv_radius_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=200.0,
+            step=0.1,
+            initial=5.0,
+            suffix=" px"
+        )
+        form.addRow("Radius:", self.conv_radius_slider)
+
+        # ── Kurtosis (σ) (0.1 … 10.0, step=0.1) ─────────────────────
+        self.conv_shape_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=10.0,
+            step=0.1,
+            initial=2.0,
+            suffix="σ"
+        )
+        form.addRow("Kurtosis (σ):", self.conv_shape_slider)
+
+        # ── Aspect Ratio (0.1 … 10.0, step=0.1) ────────────────────
+        self.conv_aspect_slider = FloatSliderWithEdit(
+            minimum=0.1,
+            maximum=10.0,
+            step=0.1,
+            initial=1.0,
+            suffix=""
+        )
+        form.addRow("Aspect Ratio:", self.conv_aspect_slider)
+
+        # ── Rotation (0.0 … 360.0, step=1.0) ───────────────────────
+        self.conv_rotation_slider = FloatSliderWithEdit(
+            minimum=0.0,
+            maximum=360.0,
+            step=1.0,
+            initial=0.0,
+            suffix="°"
+        )
+        form.addRow("Rotation:", self.conv_rotation_slider)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        self.tabs.addTab(conv_tab, "Convolution")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _build_deconvolution_tab(self):
+        deconv_tab = QWidget()
+        outer_layout = QVBoxLayout(deconv_tab)
+
+        # ── (1) Algorithm selector ─────────────────────────────────────────
+        algo_layout = QHBoxLayout()
+        algo_label = QLabel("Algorithm:")
+        self.deconv_algo_combo = QComboBox()
+        self.deconv_algo_combo.addItems([
+            "Richardson-Lucy",
+            "Wiener",
+            "Larson-Sekanina",
+            "Van Cittert",
+        ])
+        self.deconv_algo_combo.currentTextChanged.connect(self._on_deconv_algo_changed)
+        algo_layout.addWidget(algo_label)
+        algo_layout.addWidget(self.deconv_algo_combo)
+        algo_layout.addStretch()
+        outer_layout.addLayout(algo_layout)
+
+        # ── (2) Shared PSF slider group (radius/kurtosis/aspect/rotation) ──
+        self.psf_param_group = QWidget()
+        psf_group_layout = QFormLayout(self.psf_param_group)
+        psf_group_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.rl_psf_radius_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=100.0, step=0.1, initial=3.0, suffix=" px"
+        )
+        psf_group_layout.addRow("PSF Radius:", self.rl_psf_radius_slider)
+
+        self.rl_psf_shape_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=10.0, step=0.1, initial=2.0, suffix="σ"
+        )
+        psf_group_layout.addRow("PSF Kurtosis (σ):", self.rl_psf_shape_slider)
+
+        self.rl_psf_aspect_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=10.0, step=0.1, initial=1.0, suffix=""
+        )
+        psf_group_layout.addRow("PSF Aspect Ratio:", self.rl_psf_aspect_slider)
+
+        self.rl_psf_rotation_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=360.0, step=1.0, initial=0.0, suffix="°"
+        )
+        psf_group_layout.addRow("PSF Rotation:", self.rl_psf_rotation_slider)
+
+        outer_layout.addWidget(self.psf_param_group)
+        # Hide PSF sliders if not in RL or Wiener initially
+        if self.deconv_algo_combo.currentText() not in ("Richardson-Lucy", "Wiener"):
+            self.psf_param_group.setVisible(False)
+
+        # ── (2b) Shared “Using Stellar PSF” bar ────────────────────────────
+        self.custom_psf_bar = QWidget()
+        bar_layout = QHBoxLayout(self.custom_psf_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(4)
+
+        self.rl_custom_label = QLabel("Using Stellar PSF")
+        self.rl_custom_label.setStyleSheet(
+            "color: #ffffff; background-color: #007acc; padding: 2px;"
+        )
+        self.rl_custom_label.setVisible(False)
+
+        self.rl_disable_custom_btn = QPushButton("Disable Stellar PSF")
+        self.rl_disable_custom_btn.setToolTip(
+            "Revert to using the Gaussian defined by the PSF sliders"
+        )
+        self.rl_disable_custom_btn.setVisible(False)
+
+        bar_layout.addWidget(self.rl_custom_label)
+        bar_layout.addWidget(self.rl_disable_custom_btn)
+        bar_layout.addStretch()
+
+        outer_layout.addWidget(self.custom_psf_bar)
+        # Hide that bar completely unless stellar PSF is active AND algo is RL or Wiener
+        self.custom_psf_bar.setVisible(False)
+
+        # ── (3) Stacked parameter panels ───────────────────────────────────
+        self.deconv_param_stack.clear()
+        self.deconv_stack_container = QWidget()
+        self.deconv_stack_layout = QVBoxLayout(self.deconv_stack_container)
+
+        # ---- (3a) RL panel (iterations, clip, L* only) ----
+        rl_widget = QWidget()
+        rl_form = QFormLayout(rl_widget)
+        rl_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.rl_iterations_slider = FloatSliderWithEdit(
+            minimum=1.0, maximum=100.0, step=1.0, initial=30.0, suffix=""
+        )
+        rl_form.addRow("Iterations:", self.rl_iterations_slider)
+
+        # ── Regularization Type (None vs. Tikhonov vs. TV) ───────────
+        self.rl_reg_combo = QComboBox()
+        self.rl_reg_combo.addItems([
+            "None (Plain R–L)",
+            "Tikhonov (L2)",
+            "Total Variation (TV)"
+        ])
+        rl_form.addRow("Regularization:", self.rl_reg_combo)
+
+        self.rl_clip_checkbox = QCheckBox("Enable de‐ring")
+        self.rl_clip_checkbox.setChecked(True)
+        rl_form.addRow("", self.rl_clip_checkbox)
+
+        self.rl_luminance_only_checkbox = QCheckBox("Deconvolve L* Only")
+        self.rl_luminance_only_checkbox.setChecked(True)
+        self.rl_luminance_only_checkbox.setToolTip(
+            "If checked and the image is color, RL runs only on the L* channel."
+        )
+        rl_form.addRow("", self.rl_luminance_only_checkbox)
+
+        rl_widget.setLayout(rl_form)
+        self.deconv_param_stack["Richardson-Lucy"] = rl_widget
+
+        # ---- (3b) Wiener panel (λ slider, regularization, L* only) ----
+        wiener_widget = QWidget()
+        wiener_layout = QVBoxLayout(wiener_widget)
+
+        wiener_form = QFormLayout()
+        wiener_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.wiener_nsr_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.001, initial=0.01, suffix=""
+        )
+        wiener_form.addRow("Noise/Signal (λ):", self.wiener_nsr_slider)
+
+        self.wiener_reg_combo = QComboBox()
+        self.wiener_reg_combo.addItems([
+            "None (Classical Wiener)",
+            "Tikhonov (L2)"
+        ])
+        wiener_form.addRow("Regularization:", self.wiener_reg_combo)
+
+        self.wiener_luminance_only_checkbox = QCheckBox("Deconvolve L* Only")
+        self.wiener_luminance_only_checkbox.setChecked(True)
+        self.wiener_luminance_only_checkbox.setToolTip(
+            "If checked and the image is color, Wiener runs only on the L* channel."
+        )
+        wiener_form.addRow("", self.wiener_luminance_only_checkbox)
+
+
+        # Add “Enable de-ring” checkbox here
+        self.wiener_dering_checkbox = QCheckBox("Enable de-ring")
+        self.wiener_dering_checkbox.setChecked(True)
+        self.wiener_dering_checkbox.setToolTip(
+            "If checked, apply a single bilateral denoise pass after Wiener deconvolution"
+        )
+        wiener_form.addRow("", self.wiener_dering_checkbox)
+
+        wiener_layout.addLayout(wiener_form)
+        wiener_widget.setLayout(wiener_layout)
+        self.deconv_param_stack["Wiener"] = wiener_widget
+
+        # ---- (3c) Larson–Sekanina panel (no PSF or stellar bar) ----
+        ls_widget = QWidget()
+        ls_form = QFormLayout(ls_widget)
+        ls_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.ls_radial_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=50.0, step=0.1, initial=0.0, suffix=" px"
+        )
+        ls_form.addRow("Radial Step (px):", self.ls_radial_slider)
+
+        self.ls_angular_slider = FloatSliderWithEdit(
+            minimum=0.1, maximum=360.0, step=0.1, initial=1.0, suffix="°"
+        )
+        ls_form.addRow("Angular Step (°):", self.ls_angular_slider)
+
+        self.ls_operator_combo = QComboBox()
+        self.ls_operator_combo.addItems(["Divide", "Subtract"])
+        ls_form.addRow("LS Operator:", self.ls_operator_combo)
+
+        self.ls_blend_combo = QComboBox()
+        self.ls_blend_combo.addItems(["SoftLight", "Screen"])
+        ls_form.addRow("Blend Mode:", self.ls_blend_combo)
+
+        ls_widget.setLayout(ls_form)
+        self.deconv_param_stack["Larson-Sekanina"] = ls_widget
+
+        # ---- (3d) Van Cittert panel (no PSF or stellar bar) ----
+        vc_widget = QWidget()
+        vc_form = QFormLayout(vc_widget)
+        vc_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self.vc_iterations_slider = FloatSliderWithEdit(
+            minimum=1, maximum=1000, step=1, initial=10, suffix=""
+        )
+        vc_form.addRow("Iterations:", self.vc_iterations_slider)
+
+        self.vc_relax_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=0.0, suffix=""
+        )
+        vc_form.addRow("Relaxation (0–1):", self.vc_relax_slider)
+
+        vc_widget.setLayout(vc_form)
+        self.deconv_param_stack["Van Cittert"] = vc_widget
+
+        # ── Add all panels (hidden initially) ─────────────────────────────────
+        for name, widget in self.deconv_param_stack.items():
+            widget.setVisible(False)
+            self.deconv_stack_layout.addWidget(widget)
+
+        # Show only the starting algorithm’s panel
+        first_algo = self.deconv_algo_combo.currentText()
+        if first_algo in self.deconv_param_stack:
+            self.deconv_param_stack[first_algo].setVisible(True)
+
+        outer_layout.addWidget(self.deconv_stack_container)
+        outer_layout.addStretch()
+        self.tabs.addTab(deconv_tab, "Deconvolution")
+
+        # ── Connect “Disable Stellar PSF” and PSF‐slider changes to clear custom flag ──
+        self.rl_disable_custom_btn.clicked.connect(self._clear_custom_psf_flag)
+        for s in (
+            self.rl_psf_radius_slider,
+            self.rl_psf_shape_slider,
+            self.rl_psf_aspect_slider,
+            self.rl_psf_rotation_slider
+        ):
+            s.valueChanged.connect(self._clear_custom_psf_flag)
+
+    def _build_psf_estimator_tab(self):
+        """
+        Build the UI for the “PSF Estimator” tab (SEP‐based), using only
+        CustomSpinBox (no QSpinBox).
+        """
+        psf_tab = QWidget()
+        layout = QVBoxLayout(psf_tab)
+
+        # — Image picker / label showing current image —
+        h_image = QHBoxLayout()
+        h_image.addWidget(QLabel("Image for PSF Estimate:"))
+        self.sep_image_label = QLabel("(Current Active Image)")
+        h_image.addWidget(self.sep_image_label)
+        layout.addLayout(h_image)
+
+        # — SEP Detection Parameters —
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Detection σ (float)
+        self.sep_threshold_slider = FloatSliderWithEdit(
+            minimum=1.0, maximum=5.0, step=0.1, initial=2.5, suffix=" σ"
+        )
+        form.addRow("Detection σ:", self.sep_threshold_slider)
+
+        # Min Area (px²) → use CustomSpinBox
+        self.sep_minarea_spin = CustomSpinBox(
+            minimum=1, maximum=100, initial=5, step=1
+        )
+        form.addRow("Min Area (px²):", self.sep_minarea_spin)
+
+        # Saturation Cutoff (float)
+        self.sep_sat_slider = FloatSliderWithEdit(
+            minimum=1000, maximum=100000, step=500, initial=50000, suffix=" ADU"
+        )
+        form.addRow("Saturation Cutoff:", self.sep_sat_slider)
+
+        # Max Stars → use CustomSpinBox
+        self.sep_maxstars_spin = CustomSpinBox(
+            minimum=1, maximum=500, initial=50, step=1
+        )
+        form.addRow("Max Stars:", self.sep_maxstars_spin)
+
+        # Half‐Width (px) → use CustomSpinBox
+        self.sep_stamp_spin = CustomSpinBox(
+            minimum=5, maximum=50, initial=15, step=1
+        )
+        form.addRow("Half‐Width (px):", self.sep_stamp_spin)
+
+        layout.addLayout(form)
+
+        # — Buttons: Run SEP & Use / Save PSF —
+        h_buttons = QHBoxLayout()
+        self.sep_run_button = QPushButton("Run SEP Extraction")
+        self.sep_save_button = QPushButton("Save PSF…")
+        self.sep_use_button  = QPushButton("Use as Current PSF")
+        h_buttons.addWidget(self.sep_run_button)
+        h_buttons.addWidget(self.sep_save_button)
+        h_buttons.addWidget(self.sep_use_button)
+        layout.addLayout(h_buttons)
+
+        # — PSF Preview (64×64 QLabel) —
+        self.psf_estimate_title = QLabel("Estimated PSF (64×64):")
+        layout.addWidget(self.psf_estimate_title, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        self.sep_psf_preview = QLabel()
+        self.sep_psf_preview.setFixedSize(64, 64)
+        self.sep_psf_preview.setStyleSheet("border: 1px solid #888;")
+        layout.addWidget(self.sep_psf_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        layout.addStretch()
+        self.tabs.addTab(psf_tab, "PSF Estimator")
+
+        # Placeholder for the last computed PSF
+        self._last_stellar_psf = None
+
+    def _build_tv_denoise_tab(self):
+        """
+        Build the UI for a “TV Denoise” tab, allowing the user to choose
+        total‐variation denoising parameters and apply them.
+        """
+        tvd_tab = QWidget()
+        layout = QVBoxLayout(tvd_tab)
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # TV weight (0.0 … 1.0)
+        self.tv_weight_slider = FloatSliderWithEdit(
+            minimum=0.0, maximum=1.0, step=0.01, initial=0.1, suffix=""
+        )
+        form.addRow("TV Weight:", self.tv_weight_slider)
+
+        # Max iterations for TV algorithm (1 … 100, step=1)
+        self.tv_iter_slider = FloatSliderWithEdit(
+            minimum=1, maximum=100, step=1, initial=10, suffix=""
+        )
+        form.addRow("Max Iterations:", self.tv_iter_slider)
+
+        # Multichannel checkbox
+        self.tv_multichannel_checkbox = QCheckBox("Multi‐channel")
+        self.tv_multichannel_checkbox.setChecked(True)
+        self.tv_multichannel_checkbox.setToolTip(
+            "If checked and the image is color, run TV on all channels jointly"
+        )
+        form.addRow("", self.tv_multichannel_checkbox)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        self.tabs.addTab(tvd_tab, "TV Denoise")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_deconv_algo_changed(self, selected: str):
+        # Hide all panels, then show the one for `selected`
+        for name, widget in self.deconv_param_stack.items():
+            widget.setVisible(False)
+        if selected in self.deconv_param_stack:
+            self.deconv_param_stack[selected].setVisible(True)
+
+        # 1) Always clear stellar‐PSF bar if we’re not in RL or Wiener
+        if selected not in ("Richardson-Lucy", "Wiener"):
+            self._use_custom_psf = False
+            self.custom_psf_bar.setVisible(False)
+        else:
+            # If user had already clicked “Use Stellar PSF,” show it
+            if self._use_custom_psf and (self._custom_psf is not None):
+                self.custom_psf_bar.setVisible(True)
+            else:
+                self.custom_psf_bar.setVisible(False)
+
+        # 2) Show PSF sliders group only for RL or Wiener
+        self.psf_param_group.setVisible(selected in ("Richardson-Lucy", "Wiener"))
+
+    def _on_ls_operator_changed(self, op_text: str):
+        """
+        Whenever the user picks “Subtract” or “Divide” in the LS Operator dropdown,
+        this forces the Blend‐Mode dropdown to the matching mode:
+          Subtract → Screen
+          Divide   → SoftLight
+        """
+        if op_text == "Divide":
+            # If the user explicitly chose Divide, auto‐select SoftLight
+            self.ls_blend_combo.setCurrentText("SoftLight")
+        else:
+            # Otherwise (Subtract), force Screen
+            self.ls_blend_combo.setCurrentText("Screen")
+
+    def _make_psf_pixmap(self, radius, kurtosis, aspect, rotation_deg) -> QPixmap:
+        """
+        Build a float32 PSF via make_elliptical_gaussian_psf(...),
+        convert to 0–255 grayscale, wrap in QImage, scale to 64×64,
+        center it in a 64×64 QPixmap, and return that QPixmap.
+        """
+        psf = make_elliptical_gaussian_psf(radius, kurtosis, aspect, rotation_deg)
+        h, w = psf.shape
+
+        if psf.max() > 0:
+            norm = (psf / psf.max()) * 255.0
+        else:
+            norm = psf
+        img8 = norm.astype(np.uint8)
+
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        return final
+
+    def _make_stellar_psf_pixmap(self, psf_kernel: np.ndarray) -> QPixmap:
+        """
+        Given a 2D float32 PSF (sum=1), produce a 64×64 QPixmap centered in a transparent background.
+        """
+        h, w = psf_kernel.shape
+        maxval = psf_kernel.max()
+        if maxval > 0:
+            img8 = (psf_kernel / maxval * 255.0).astype(np.uint8)
+        else:
+            img8 = np.zeros_like(psf_kernel, dtype=np.uint8)
+
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        return final
+
+
+    def _update_psf_preview(self):
+        current_tab = self.tabs.tabText(self.tabs.currentIndex())
+        algo = self.deconv_algo_combo.currentText()
+
+        if current_tab == "Convolution":
+            r, k, a, rot = (
+                self.conv_radius_slider.value(),
+                self.conv_shape_slider.value(),
+                self.conv_aspect_slider.value(),
+                self.conv_rotation_slider.value(),
+            )
+            pix = self._make_psf_pixmap(r, k, a, rot)
+            self.conv_psf_label.setPixmap(pix)
+
+        elif current_tab == "Deconvolution" and algo in ("Richardson-Lucy", "Wiener"):
+            if self._use_custom_psf and (self._custom_psf is not None):
+                stellar_pix = self._make_stellar_psf_pixmap(self._custom_psf)
+                self.conv_psf_label.setPixmap(stellar_pix)
+            else:
+                r, k, a, rot = (
+                    self.rl_psf_radius_slider.value(),
+                    self.rl_psf_shape_slider.value(),
+                    self.rl_psf_aspect_slider.value(),
+                    self.rl_psf_rotation_slider.value(),
+                )
+                pix = self._make_psf_pixmap(r, k, a, rot)
+                self.conv_psf_label.setPixmap(pix)
+        else:
+            self.conv_psf_label.clear()
+
+    def get_active_mask(self) -> Optional[np.ndarray]:
+        """
+        Retrieves the currently applied mask from MaskManager (if any),
+        normalizes it to [0..1], and makes sure the shape matches
+        the active image’s dimensions.  Returns None if no mask is
+        applied or if shapes mismatch.
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            return None
+
+        mask_manager = self.parent().image_manager.mask_manager
+        if mask_manager is None:
+            return None
+
+        mask = mask_manager.get_applied_mask()
+        if mask is None:
+            return None
+
+        # Convert to float32 [0..1]
+        if mask.dtype not in (np.float32, np.float64):
+            mask = mask.astype(np.float32) / 255.0
+
+        # If active image is color (H×W×3) but mask is 2D (H×W), broadcast to 3 channels
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            return None
+
+        H_img, W_img = img.shape[:2]
+        if mask.shape[:2] != (H_img, W_img):
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Mask dimensions do not match the image dimensions."
+            )
+            return None
+
+        if img.ndim == 3 and img.shape[2] == 3 and mask.ndim == 2:
+            mask = np.expand_dims(mask, axis=-1)  # now (H×W×1)
+            mask = np.repeat(mask, 3, axis=2)      # (H×W×3)
+
+        return mask
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_preview(self):
+        """
+        1) Get active image from ImageManager
+        2) Perform convolution or deconvolution (with optional L* only)
+        3) If a mask is applied, blend processed & original via mask
+        4) Display the final blended result in QGraphicsView
+        """
+        if not hasattr(self.parent(), "image_manager"):
+            self._show_message("Error: No ImageManager found")
+            return
+
+        img, metadata = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            self._show_message("No active image to process.")
+            return
+
+        # Save original for Undo (only the very first time)
+        if self._original_image is None:
+            self._original_image = img.copy()
+
+        tab = self.tabs.currentIndex()
+        current_tab_name = self.tabs.tabText(self.tabs.currentIndex())
+
+        if current_tab_name == "Convolution":
+            # ─── CONVOLUTION ───────────────────────────────────────────
+            radius  = self.conv_radius_slider.value()
+            kurtosis = self.conv_shape_slider.value()
+            aspect  = self.conv_aspect_slider.value()
+            rotation = self.conv_rotation_slider.value()
+
+            psf_kernel = make_elliptical_gaussian_psf(
+                radius, kurtosis, aspect, rotation
+            ).astype(np.float32)
+
+            processed = self._convolve_color(img, psf_kernel)
+            processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+        elif current_tab_name == "Deconvolution":
+            # ─── DECONVOLUTION ─────────────────────────────────────────
+            algo = self.deconv_algo_combo.currentText()
+
+            if algo == "Richardson-Lucy":
+                iters = self.rl_iterations_slider.value()
+                reg_type = self.rl_reg_combo.currentText()
+                pr    = self.rl_psf_radius_slider.value()
+                ps    = self.rl_psf_shape_slider.value()
+                pa    = self.rl_psf_aspect_slider.value()
+                pt    = self.rl_psf_rotation_slider.value()
+
+                psf_kernel = make_elliptical_gaussian_psf(
+                    pr, ps, pa, pt
+                ).astype(np.float32)
+
+                clip_flag = self.rl_clip_checkbox.isChecked()
+
+                # If “L* only” & image is color, extract L*, run RL on L*, then recombine
+                if getattr(self, "rl_luminance_only_checkbox", None) is not None \
+                   and self.rl_luminance_only_checkbox.isChecked() \
+                   and img.ndim == 3 and img.shape[2] == 3:
+                    # Convert RGB→Lab, scale L* to [0..1]
+                    lab = rgb2lab(img.astype(np.float32))
+                    L  = (lab[:, :, 0] / 100.0).astype(np.float32)
+
+                    # Run R–L on the L* channel only
+                    deconv_L = self._richardson_lucy_color(L, psf_kernel, iterations=iters, reg_type=reg_type, clip_flag=clip_flag)
+
+                    # Put deconv_L back into L* (scale up to [0..100])
+                    lab[:, :, 0] = deconv_L * 100.0
+
+                    # Convert Lab→RGB
+                    rgb_deconv = lab2rgb(lab.astype(np.float32))
+                    processed = np.clip(rgb_deconv.astype(np.float32), 0.0, 1.0)
+                    processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+                else:
+                    # Just run R–L on full (grayscale or 3-channel)
+                    processed = self._richardson_lucy_color(
+                        img.astype(np.float32),
+                        psf_kernel,
+                        iterations=iters,
+                        reg_type=reg_type,
+                        clip_flag=clip_flag
+                    )
+                    processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+            # ── 2) WIENER (CLASSICAL) ────────────────────────────────────
+            elif algo == "Wiener":
+                # 1) Decide which PSF to use: stellar (if flagged) or Gaussian from sliders
+                if self._use_custom_psf and (self._custom_psf is not None):
+                    small_psf = self._custom_psf.astype(np.float32)
+                else:
+                    pr = self.rl_psf_radius_slider.value()
+                    ps = self.rl_psf_shape_slider.value()
+                    pa = self.rl_psf_aspect_slider.value()
+                    pt = self.rl_psf_rotation_slider.value()
+                    small_psf = make_elliptical_gaussian_psf(pr, ps, pa, pt).astype(np.float32)
+
+                # 2) Read lambda and regularization choice
+                nsr = self.wiener_nsr_slider.value()
+                reg_choice = self.wiener_reg_combo.currentText()
+                if reg_choice == "None (Classical Wiener)":
+                    reg_type = "Wiener"
+                else:
+                    reg_type = "Tikhonov"
+
+                do_dering = self.wiener_dering_checkbox.isChecked()
+
+                # 3) Apply Wiener on L* only or all channels
+                if getattr(self, "wiener_luminance_only_checkbox", None) is not None \
+                and self.wiener_luminance_only_checkbox.isChecked() \
+                and img.ndim == 3 and img.shape[2] == 3:
+
+                    lab = rgb2lab(img.astype(np.float32))
+                    L = (lab[:, :, 0] / 100.0).astype(np.float32)
+
+                    deconv_L = self._wiener_deconv_with_kernel(L, small_psf, nsr, reg_type, do_dering)
+                    lab[:, :, 0] = np.clip(deconv_L * 100.0, 0.0, 100.0)
+                    rgb_deconv = lab2rgb(lab.astype(np.float32))
+                    processed = np.clip(rgb_deconv.astype(np.float32), 0.0, 1.0)
+                    processed = processed * self.strength_slider.value() \
+                                + (1 - self.strength_slider.value()) * img
+                else:
+                    processed = self._wiener_deconv_with_kernel(img, small_psf, nsr, reg_type, do_dering)
+                    processed = np.clip(processed, 0.0, 1.0)
+                    processed = processed * self.strength_slider.value() \
+                                + (1 - self.strength_slider.value()) * img
+            elif algo == "Larson-Sekanina":
+                if not hasattr(self.view, "ls_center") or self.view.ls_center is None:
+                    QMessageBox.information(
+                        self,
+                        "Hold Shift + Click",
+                        "To choose a Larson–Sekanina center, "
+                        "please hold Shift and click on the preview."
+                    )
+                    return
+
+                center = self.view.ls_center
+                rstep  = self.ls_radial_slider.value()
+                astep  = self.ls_angular_slider.value()
+                operator = self.ls_operator_combo.currentText()
+                blend_mode = self.ls_blend_combo.currentText()
+
+                B = larson_sekanina(
+                    image=img,
+                    center=center,
+                    radial_step=rstep,
+                    angular_step_deg=astep,
+                    operator=operator
+                )
+                A = img
+                if A.ndim == 3 and A.shape[2] == 3:
+                    # Color‐input path: B is 2D → replicate into 3 channels
+                    B_rgb = np.repeat(B[:, :, np.newaxis], 3, axis=2)
+                    A_rgb = A
+                else:
+                    # Grayscale‐input path: keep A and B as 2D, but we'll work in a dummy 3rd axis
+                    A_rgb = A[..., np.newaxis]   # shape = (H, W, 1)
+                    B_rgb = B[..., np.newaxis]   # shape = (H, W, 1)
+
+                if blend_mode == "Screen":
+                    C = A_rgb + B_rgb - (A_rgb * B_rgb)
+                else:  # SoftLight
+                    C = (1 - 2 * B_rgb) * (A_rgb**2) + 2 * B_rgb * A_rgb
+
+                clipped = np.clip(C, 0.0, 1.0)
+
+                # If the original was grayscale (2D), squeeze back to 2D
+                if img.ndim == 2:
+                    processed = clipped[..., 0]   # shape = (H, W)
+                else:
+                    processed = clipped           # shape = (H, W, 3)
+
+                # Now blend with the original img (they match shapes)
+                strength = self.strength_slider.value()
+                processed = processed * strength + (1 - strength) * img
+            elif algo == "Van Cittert":
+                iters2 = self.vc_iterations_slider.value()
+                relax  = self.vc_relax_slider.value()
+                if img.ndim == 3 and img.shape[2] == 3:
+                    chans = []
+                    for c in range(3):
+                        ch = img[:, :, c]
+                        deconv_ch = van_cittert_deconv(ch, iters2, relax)
+                        chans.append(deconv_ch)
+                    processed = np.stack(chans, axis=2)
+                else:
+                    processed = van_cittert_deconv(img, iters2, relax)
+                processed = np.clip(processed, 0.0, 1.0)
+                processed = processed*self.strength_slider.value()+(1-self.strength_slider.value())*img
+            else:
+                self._show_message("Unknown deconvolution algorithm")
+                return
+
+        elif current_tab_name == "TV Denoise":
+            weight = self.tv_weight_slider.value()
+            max_iter = int(self.tv_iter_slider.value())
+            multichannel = self.tv_multichannel_checkbox.isChecked()
+
+            if img.ndim == 3 and multichannel:
+                # TV on all channels jointly
+                processed = denoise_tv_chambolle(
+                    img.astype(np.float32),
+                    weight=weight,
+                    max_num_iter=max_iter,
+                    channel_axis=-1
+                ).astype(np.float32)
+            else:
+                # Grayscale or per‐channel
+                if img.ndim == 3 and img.shape[2] == 3:
+                    # Apply TV to each channel separately
+                    channels_out = []
+                    for c in range(3):
+                        ch = img[:, :, c].astype(np.float32)
+                        denoised_ch = denoise_tv_chambolle(
+                            ch,
+                            weight=weight,
+                            max_num_iter=max_iter,
+                            channel_axis=None
+                        ).astype(np.float32)
+                        channels_out.append(denoised_ch)
+                    processed = np.stack(channels_out, axis=2)
+                else:
+                    gray = img.astype(np.float32) if img.ndim == 2 else img
+                    processed = denoise_tv_chambolle(
+                        gray,
+                        weight=weight,
+                        max_num_iter=max_iter,
+                        channel_axis=None
+                    ).astype(np.float32)
+
+            processed = np.clip(processed, 0.0, 1.0)
+            processed = (
+                processed * self.strength_slider.value()
+                + (1 - self.strength_slider.value()) * img
+            )
+
+
+        # ─── If there is an active mask, blend “processed” & “original” via the mask ─────
+        mask = self.get_active_mask()
+        if mask is not None:
+            # Ensure the mask is broadcast to same channels as `processed`
+            if processed.ndim == 3 and mask.ndim == 2:
+                mask = np.expand_dims(mask, axis=-1)
+            # Blend: processed * mask + original * (1 - mask)
+            blended = processed * mask + self._original_image * (1.0 - mask)
+            blended = np.clip(blended, 0.0, 1.0)
+            final_result = blended
+        else:
+            final_result = processed
+
+        # 3) Store & show the final_result
+        self._preview_result = final_result
+        self._display_in_view(final_result)
+
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_undo(self):
+        """Revert to the original image (clears preview)."""
+        if self._original_image is not None:
+            self._preview_result = None
+            self._display_in_view(self._original_image)
+        else:
+            self._show_message("Nothing to undo.")
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_push_to_slot(self):
+        """
+        Push the last preview into the current slot via ImageManager.set_image(),
+        which automatically handles undo history. Then pop up a small dialog
+        and reload the new slot image into the preview area so the user can
+        continue iterating.
+        """
+        if self._preview_result is None:
+            QMessageBox.warning(self, "No Preview", "No preview to push. Click Preview first.")
+            return
+
+        # 1) Grab current image and metadata (prior to overwrite)
+        _, metadata = self.parent().image_manager.get_current_image_and_metadata()
+        new_meta = metadata.copy()
+        new_meta["source"] = "ConvoDeconvo"
+
+        # 2) Commit the preview into the same slot (ImageManager will push the old image
+        #    onto its undo stack automatically)
+        self.parent().image_manager.set_image(self._preview_result.copy(), new_meta, step_name="ConvoDeconvo")
+
+        # 3) Inform the user with a quick message box
+        QMessageBox.information(self, "Pushed to Slot", "Result has been pushed into the current slot.")
+
+        # 4) Reload from the slot (in case the user wants to iterate further).
+        #    Now “original” becomes the freshly‐pushed image.
+        img_after, _ = self.parent().image_manager.get_current_image_and_metadata()
+        self._original_image = img_after.copy()
+        self._preview_result = None
+
+        # 5) Display it in the QGraphicsView (preserving current zoom/pan if desired).
+        #    Usually you want to keep whatever zoom/pan the user had, so do NOT force a fit.
+        self._display_in_view(self._original_image)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _show_message(self, text: str):
+        """Temporarily show a text placeholder in the preview area."""
+        self.scene.clear()
+        self.pixmap_item = QGraphicsPixmapItem()  # blank
+        self.scene.addItem(self.pixmap_item)
+        self.view.resetTransform()
+        self.preview_label = QLabel(text)
+        # Instead of reusing preview_label, we push a temporary text into the scene:
+        temp_label = QLabel(text)
+        temp_label.setStyleSheet("color: white; background-color: #222;")
+        temp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Convert QLabel to QPixmap:
+        pixmap = temp_label.grab()
+        self.pixmap_item.setPixmap(pixmap)
+        self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _convolve_color(self, image: np.ndarray, psf_kernel: np.ndarray) -> np.ndarray:
+        """
+        If 2D: convolve directly. If 3D (H,W,3): convolve each channel.
+        """
+        if image.ndim == 2:
+            return fftconvolve(image, psf_kernel, mode="same")
+        elif image.ndim == 3 and image.shape[2] == 3:
+            chans = []
+            for c in range(3):
+                ch = image[:, :, c]
+                conv_ch = fftconvolve(ch, psf_kernel, mode="same")
+                chans.append(conv_ch)
+            return np.stack(chans, axis=2)
+        else:
+            return image.copy()
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _richardson_lucy_color(self,
+                            image: np.ndarray,
+                            psf_kernel: np.ndarray,
+                            iterations: int,
+                            reg_type: str = "None (Plain R–L)",
+                            clip_flag: bool = True
+                            ) -> np.ndarray:
+        """
+        Run Richardson–Lucy with optional Tikhonov or TV regularization, in parallel
+        over horizontal strips (with overlap), followed by an optional bilateral‐denoise
+        if clip_flag=True.
+
+        Parameters
+        ----------
+        image : np.ndarray
+            float32 in [0..1], either 2D (H×W) or 3D (H×W×3).
+        psf_kernel : np.ndarray
+            2D float32 PSF (sum=1).
+        iterations : int
+        reg_type : str
+            "None (Plain R–L)", "Tikhonov (L2)", or "Total Variation (TV)".
+        clip_flag : bool
+            If True, apply one bilateral denoise pass on each tile’s output.
+
+        Returns
+        -------
+        deconv : np.ndarray
+            float32 in [0..1], same shape as `image`.
+        """
+        iters = int(round(iterations))
+        psf = psf_kernel.astype(np.float32)
+
+        def _deconv_2d_parallel(gray: np.ndarray) -> np.ndarray:
+            H, W = gray.shape
+            psf_h, psf_w = psf.shape
+            half_psf = max(psf_h, psf_w) // 2
+            extra = 15
+            pad = half_psf + extra
+            overlap = pad
+
+            n_cores = os.cpu_count() or 1
+            n_cores = min(n_cores, H)
+            tile_h = math.ceil(H / n_cores)
+
+            tile_ranges = []
+            for i in range(n_cores):
+                y0 = i * tile_h
+                y1 = min((i + 1) * tile_h, H)
+                if y0 >= H:
+                    break
+                tile_ranges.append((y0, y1))
+
+            accum_image = np.zeros((H, W), dtype=np.float32)
+            accum_weight = np.zeros((H, W), dtype=np.float32)
+
+            def _build_vertical_ramp(L: int, ov: int) -> np.ndarray:
+                w = np.ones(L, dtype=np.float32)
+                if ov <= 0:
+                    return w
+                if 2 * ov >= L:
+                    for i in range(L):
+                        w[i] = 1.0 - abs((i - (L - 1) / 2) / ((L - 1) / 2))
+                    return w
+                for i in range(ov):
+                    w[i] = (i + 1) / float(ov)
+                for i in range(ov):
+                    idx = L - 1 - i
+                    w[idx] = (i + 1) / float(ov)
+                return w
+
+            tile_inputs = []
+            for idx, (y0, y1) in enumerate(tile_ranges):
+                y0_ext = max(0, y0 - overlap)
+                y1_ext = min(H, y1 + overlap)
+                core_tile = gray[y0_ext:y1_ext, :]
+
+                padded = np.pad(
+                    core_tile,
+                    ((pad, pad), (pad, pad)),
+                    mode="reflect"
+                )
+
+                L_ext = y1_ext - y0_ext
+                tile_inputs.append((
+                    idx, padded, psf, iters, clip_flag, pad, reg_type,
+                    y0_ext, y1_ext, L_ext
+                ))
+
+            results = [None] * len(tile_inputs)
+            with ProcessPoolExecutor() as executor:
+                for tile_index, deconv_ext in executor.map(_rl_tile_process_reg, tile_inputs):
+                    results[tile_index] = deconv_ext
+
+            for idx, (y0, y1) in enumerate(tile_ranges):
+                (_, _, _, _, _, _, _, y0_ext, y1_ext, L_ext) = tile_inputs[idx]
+                deconv_ext = results[idx]
+
+                w = _build_vertical_ramp(L_ext, overlap)
+                w2d = np.broadcast_to(w[:, None], (L_ext, W)).astype(np.float32)
+
+                accum_image[y0_ext:y1_ext, :] += deconv_ext * w2d
+                accum_weight[y0_ext:y1_ext, :] += w2d
+
+            final_deconv = np.zeros_like(accum_image, dtype=np.float32)
+            mask_nonzero = accum_weight > 0
+            final_deconv[mask_nonzero] = accum_image[mask_nonzero] / accum_weight[mask_nonzero]
+
+            return final_deconv
+
+        if image.ndim == 2:
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText(f"Running RL for {iters} iterations")
+                QApplication.processEvents()
+            deconv = _deconv_2d_parallel(image.astype(np.float32))
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText("")
+                QApplication.processEvents()
+            return np.clip(deconv, 0.0, 1.0)
+
+        elif image.ndim == 3 and image.shape[2] == 3:
+            channels_out = []
+            for c in range(3):
+                if hasattr(self, "rl_status_label"):
+                    self.rl_status_label.setText(f"Running RL on ch {c+1} for {iters} iterations")
+                    QApplication.processEvents()
+                ch = image[:, :, c].astype(np.float32)
+                deconv_ch = _deconv_2d_parallel(ch)
+                channels_out.append(np.clip(deconv_ch, 0.0, 1.0))
+            if hasattr(self, "rl_status_label"):
+                self.rl_status_label.setText("")
+                QApplication.processEvents()
+            return np.stack(channels_out, axis=2)
+
+        else:
+            return image.copy()
+
+    def _wiener_deconv_with_kernel(self,
+                                image: np.ndarray,
+                                small_psf: np.ndarray,
+                                nsr: float,
+                                reg_type: str,
+                                do_dering: bool
+                                ) -> np.ndarray:
+        """
+        2D Wiener or Tikhonov deconvolution using an explicit small_psf array.
+        - image: 2D float32 or 3D (H×W×3) float32 in [0..1].
+        - small_psf: 2D float32 PSF (normalized so sum=1).
+        - nsr: noise‐to‐signal parameter [0..1].
+        - reg_type: "Wiener" or "Tikhonov".
+        Returns: deconvolved image (same shape as input) clipped to [0..1].
+        """
+        def _deconv_gray(im2d: np.ndarray, do_dering_flag: bool) -> np.ndarray:
+            H, W = im2d.shape
+            psf_h, psf_w = small_psf.shape
+
+            # Zero-pad PSF to image size, centered
+            Hpsf = np.zeros((H, W), dtype=np.float32)
+            cy, cx = H // 2, W // 2
+            y0 = cy - psf_h // 2
+            x0 = cx - psf_w // 2
+            Hpsf[y0:y0+psf_h, x0:x0+psf_w] = small_psf
+
+            # Convert to frequency domain
+            H_f = fft2(ifftshift(Hpsf))
+            H_f_conj = np.conj(H_f)
+            mag2 = np.abs(H_f) ** 2
+
+            # Choose K = nsr (Wiener) or nsr^2 (Tikhonov)
+            if reg_type == "Tikhonov":
+                K = nsr * nsr
+            else:
+                K = nsr
+
+            denom = mag2 + K
+            W_filter = H_f_conj / denom
+
+            I_f = fft2(im2d)
+            deconv_f = W_filter * I_f
+            deconv = np.real(ifft2(deconv_f)).astype(np.float32)
+
+            if do_dering_flag:
+                # One bilateral‐denoise pass on the full deconv image
+                deconv = denoise_bilateral(
+                    deconv,
+                    sigma_color=0.08,
+                    sigma_spatial=1
+                )
+
+            return deconv.clip(0.0, 1.0)
+
+        # If color, run per-channel; else grayscale
+        if image.ndim == 2:
+            return _deconv_gray(image.astype(np.float32), do_dering)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            chans = []
+            for c in range(3):
+                ch = image[:, :, c].astype(np.float32)
+                chans.append(_deconv_gray(ch, do_dering))
+            return np.stack(chans, axis=2)
+        else:
+            # Fallback: return copy
+            return image.copy()
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _display_in_view(self, array: np.ndarray):
+        """
+        Convert `array` → QPixmap and show in the existing QGraphicsView.
+        Does NOT reset the zoom/pan unless self._auto_fit is True.
+        After doing an auto‐fit, sets self._auto_fit = False.
+        """
+        arr = array.copy()
+        # Convert to 8‐bit for display:
+        if arr.dtype in (np.float32, np.float64):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr8 = (arr * 255).astype(np.uint8)
+        elif arr.dtype == np.uint16:
+            arr8 = (np.clip(arr, 0, 65535) // 257).astype(np.uint8)
+        elif arr.dtype == np.uint8:
+            arr8 = arr
+        else:
+            mn, mx = arr.min(), arr.max()
+            if mx > mn:
+                arr8 = ((arr - mn) / (mx - mn) * 255).astype(np.uint8)
+            else:
+                arr8 = np.zeros_like(arr, dtype=np.uint8)
+
+        h, w = arr8.shape[:2]
+        if arr8.ndim == 2:
+            fmt = QImage.Format.Format_Grayscale8
+            bytespp = w
+        else:
+            fmt = QImage.Format.Format_RGB888
+            bytespp = 3 * w
+
+        qimg = QImage(arr8.data, w, h, bytespp, fmt)
+        pix = QPixmap.fromImage(qimg)
+
+        # Update the pixmap item
+        self.pixmap_item.setPixmap(pix)
+        # Resize the scene to match the new image dimensions
+        self.scene.setSceneRect(0, 0, w, h)
+
+        # If self._auto_fit is True, reset any previous zoom, then fit to view.
+        # Otherwise, leave the user’s current zoom/pan alone.
+        if getattr(self, "_auto_fit", False):
+            self.view.resetTransform()
+            self.view.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self._auto_fit = False
+
+    # ─────────────────────────────────────────────────────────────────────
+    def zoom_in(self):
+        """Zoom in by 20%."""
+        self.view.scale(1.2, 1.2)
+
+    def zoom_out(self):
+        """Zoom out by 20%."""
+        self.view.scale(1/1.2, 1/1.2)
+
+    def _on_fit_clicked(self):
+        """
+        Called when the user clicks “Fit to Preview.” We set self._auto_fit = True
+        and then re‐invoke _display_in_view on whichever image is currently shown.
+        """
+        self._auto_fit = True
+        if self._preview_result is not None:
+            # Fit the preview image
+            self._display_in_view(self._preview_result)
+        elif self._original_image is not None:
+            # No preview yet, so fit the original image
+            self._display_in_view(self._original_image)
+        else:
+            # Nothing to fit; clear or do nothing
+            pass
+
+
+
+    def _on_run_sep(self):
+        """
+        Called when “Run SEP Extraction” is clicked.
+        Grabs the active image from `self.parent().image_manager`, runs SEP,
+        shows the preview, and stores the kernel internally.
+        """
+        # 1) Grab the current image array (assume parent has image_manager.get_current_image())
+        img, _ = self.parent().image_manager.get_current_image_and_metadata()
+        if img is None:
+            QMessageBox.warning(self, "No Image", "Please load or select an image before estimating PSF.")
+            return
+
+        if img.ndim == 3:
+            # Convert to grayscale by averaging the three channels (or pick one channel)
+            img_gray = img.mean(axis=2).astype(np.float32)
+        else:
+            img_gray = img.astype(np.float32)
+
+        # 2) Read SEP parameters from the UI
+        sigma   = self.sep_threshold_slider.value()
+        minarea = self.sep_minarea_spin.value
+        sat     = self.sep_sat_slider.value()
+        maxstars= self.sep_maxstars_spin.value
+        half_w  = self.sep_stamp_spin.value
+
+        try:
+            # 3) Call the helper
+            psf_kernel = estimate_psf_from_image(
+                image_array       = img_gray,
+                threshold_sigma   = sigma,
+                min_area          = minarea,
+                saturation_limit  = sat,
+                max_stars         = maxstars,
+                stamp_half_width  = half_w
+            )
+        except RuntimeError as e:
+            QMessageBox.critical(self, "PSF Error", str(e))
+            return
+
+        # 4) Store it
+        self._last_stellar_psf = psf_kernel
+
+        # 5) Show preview in 64×64 QLabel
+        self._show_stellar_psf_preview(psf_kernel)
+
+    def _show_stellar_psf_preview(self, psf_kernel: np.ndarray):
+        """
+        Convert `psf_kernel` → 64×64 QPixmap and show in self.sep_psf_preview.
+        """
+        h, w = psf_kernel.shape
+
+        # Normalize to 0..255
+        maxval = psf_kernel.max()
+        if maxval > 0:
+            img8 = (psf_kernel / maxval * 255.0).astype(np.uint8)
+        else:
+            img8 = np.zeros_like(psf_kernel, dtype=np.uint8)
+
+        # Wrap in QImage
+        qimg = QImage(img8.data, w, h, w, QImage.Format.Format_Grayscale8)
+
+        # Scale to 64×64, keep aspect
+        scaled = QPixmap.fromImage(qimg).scaled(
+            64, 64,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+
+        # Center in 64×64 transparent pixmap
+        final = QPixmap(64, 64)
+        final.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(final)
+        x_off = (64 - scaled.width()) // 2
+        y_off = (64 - scaled.height()) // 2
+        painter.drawPixmap(x_off, y_off, scaled)
+        painter.end()
+
+        self.sep_psf_preview.setPixmap(final)
+
+    def _on_use_stellar_psf(self):
+        """
+        Called when “Use as Current PSF” is clicked.
+        Store the SEP‐derived kernel and enable the “custom” flag.
+        """
+        if self._last_stellar_psf is None:
+            QMessageBox.warning(self, "No PSF", "Please run SEP extraction first.")
+            return
+
+        # 1) Save the custom PSF array and set the flag
+        self._custom_psf = self._last_stellar_psf.copy()
+        self._use_custom_psf = True
+
+        # 1a) Immediately update the 64×64 preview label with the stellar PSF
+        stellar_pix = self._make_stellar_psf_pixmap(self._custom_psf)
+        self.conv_psf_label.setPixmap(stellar_pix)
+
+        # 2) Switch the Deconvolution algorithm to Richardson–Lucy
+        self.deconv_algo_combo.setCurrentText("Richardson-Lucy")
+
+        # 3) Show the “Using Stellar PSF” label
+        self.rl_custom_label.setVisible(True)
+        self.rl_disable_custom_btn.setVisible(True)
+
+        # 4) Inform the user
+        QMessageBox.information(
+            self,
+            "PSF Selected",
+            "Stellar PSF is now active for Richardson–Lucy."
+        )
+
+    def _clear_custom_psf_flag(self, _=None):
+        """
+        Turn off “Use Stellar PSF” mode.
+        """
+        if self._use_custom_psf:
+            self._use_custom_psf = False
+            self._custom_psf = None
+            self.rl_custom_label.setVisible(False)
+            self.rl_disable_custom_btn.setVisible(False)
+
+    def _on_save_stellar_psf(self):
+        """
+        Let the user save the last computed PSF to disk as a FITS or TIFF.
+        """
+        if self._last_stellar_psf is None:
+            QMessageBox.warning(self, "No PSF", "Run SEP extraction before saving.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save PSF as...", "", "TIFF (*.tif);;FITS (*.fits)")
+        if not path:
+            return
+
+        # If the user chose .fits or .tif, write appropriately
+        ext = path.lower().split('.')[-1]
+        if ext == 'fits':
+            hdu = fits.PrimaryHDU(self._last_stellar_psf.astype(np.float32))
+            hdu.writeto(path, overwrite=True)
+        elif ext in ('tif', 'tiff'):
+            # If you have tifffile installed:
+            import tifffile
+            tifffile.imwrite(path, self._last_stellar_psf.astype(np.float32))
+        else:
+            QMessageBox.warning(self, "Invalid Extension", "Please choose .fits or .tif.")
+            return
+        QMessageBox.information(self, "Saved", f"PSF saved to:\n{path}")
+
+def estimate_psf_from_image(image_array: np.ndarray,
+                            threshold_sigma: float,
+                            min_area: int,
+                            saturation_limit: float,
+                            max_stars: int,
+                            stamp_half_width: int) -> np.ndarray:
+    """
+    Given a 2D NumPy image (float or uint16/uint32), run SEP‐based star detection,
+    discard anything brighter than saturation_limit, extract postage stamps of size
+    (2*stamp_half_width+1)² around the star centroids, recast to float32, 
+    align & normalize each stamp, and return their average as a normalized PSF.
+    
+    Returns:
+        psf_kernel: 2D float32 array (sum=1), size = (2*stamp_half_width+1).
+    """
+    # 1) Convert to the SEP‐friendly dtype (float32) if needed
+    data = image_array.astype(np.float32)
+
+    # 2) Estimate background & RMS
+    bkg = sep.Background(data)
+    bkg_sub = data - bkg.back()  # subtract background
+
+    # 3) Run SEP extraction with given σ threshold and min_area
+    #    `err` can be None for now; SEP will estimate it from data.
+    sources = sep.extract(bkg_sub, thresh=threshold_sigma, 
+                          err=bkg.globalrms, minarea=min_area)
+    if len(sources) == 0:
+        raise RuntimeError("No sources found with SEP threshold = %.1f σ." % threshold_sigma)
+
+    # 4) Filter out saturated detections
+    #    SEP’s “peak” column is the maximum pixel value of the detection.
+    valid_sources = []
+    for src in sources:
+        if src['peak'] < saturation_limit:
+            valid_sources.append(src)
+
+    if len(valid_sources) == 0:
+        raise RuntimeError("All detected sources exceed saturation limit %.0f." % saturation_limit)
+
+    # 5) Sort by brightness (peak) descending, take brightest `max_stars`
+    valid_sources.sort(key=lambda s: s['peak'], reverse=True)
+    selected = valid_sources[: max_stars]
+
+    # 6) For each selected source, extract a postage stamp of size (2*w + 1)
+    w = stamp_half_width
+    kernel_size = 2*w + 1
+    psf_sum = np.zeros((kernel_size, kernel_size), dtype=np.float32)
+    count = 0
+
+    for src in selected:
+        x_centroid = src['x']  # float pixel coordinate
+        y_centroid = src['y']
+
+        # Convert to nearest integer for raw indexing
+        xi = int(round(x_centroid))
+        yi = int(round(y_centroid))
+
+        # Define stamp boundaries in image coordinates
+        y0 = yi - w
+        y1 = yi + w + 1   # +1 because Python slices exclude the upper bound
+        x0 = xi - w
+        x1 = xi + w + 1
+
+        # Skip if the stamp would go partially outside the image
+        if y0 < 0 or x0 < 0 or y1 > data.shape[0] or x1 > data.shape[1]:
+            continue
+
+        stamp = bkg_sub[y0:y1, x0:x1].astype(np.float32)
+
+        # 7) Recentroid to subpixel (optional enhancement):
+        #    If you want subpixel alignment, re‐compute the centroid
+        #    of the stamp via a 2D weighted average, then shift the stamp by that offset.
+        #    For simplicity, you can skip subpixel alignment for now.
+
+        # 8) Normalize this stamp so its sum = 1 (or sum of positive values)
+        total_flux = np.sum(stamp)
+        if total_flux <= 0:
+            # Something went wrong; skip it
+            continue
+
+        stamp_normalized = stamp / total_flux
+
+        psf_sum += stamp_normalized
+        count += 1
+
+    if count == 0:
+        raise RuntimeError("No valid postage stamps extracted (all were off‐edge or zero).")
+
+    # 9) Final averaged PSF
+    psf_kernel = (psf_sum / count).astype(np.float32)
+
+    # 10) Normalize one more time to ensure sum(psf)=1 (safety)
+    psf_total = psf_kernel.sum()
+    if psf_total > 0:
+        psf_kernel /= psf_total
+    else:
+        # As a last resort, return a delta‐PSF
+        psf_kernel = np.zeros_like(psf_kernel, dtype=np.float32)
+        center = w
+        psf_kernel[center, center] = 1.0
+
+    return psf_kernel
+
+# ─────────────────────────────────────────────────────────────────────────────
+def make_elliptical_gaussian_psf(radius: float,
+                                 kurtosis: float,
+                                 aspect: float,
+                                 rotation_deg: float) -> np.ndarray:
+    """
+    Build a 2D elliptical generalized‐Gaussian PSF kernel (sum=1):
+    
+      PSF(x,y) = A ⋅ exp( − [ (x'/σ_x)^2 + (y'/σ_y)^2 ]^β )
+    
+    where:
+      σ_x = radius,
+      σ_y = radius / aspect,
+      β   = kurtosis,
+      and (x',y') is the coordinate rotated by rotation_deg (in degrees).
+    
+    Returns a normalized (sum=1) float32 array.
+    """
+    # 1) Compute σ_x and σ_y
+    sigma_x = radius
+    sigma_y = radius / aspect
+
+    # 2) Build a bounding box so we capture essentially all of the PSF
+    #    ~6×sigma_x on each side (force odd so there’s a center pixel).
+    size = int(np.ceil(6 * sigma_x))
+    if size % 2 == 0:
+        size += 1
+    half = size // 2
+
+    # 3) Create (x, y) grid centered at 0
+    xs = np.linspace(-half, half, size)
+    ys = np.linspace(-half, half, size)
+    xv, yv = np.meshgrid(xs, ys)  # shape = (size, size)
+
+    # 4) Rotate coordinates by −rotation_deg to align major axis with x'
+    θ = np.deg2rad(rotation_deg)
+    cos_t, sin_t = np.cos(θ), np.sin(θ)
+    x_rot =  cos_t * xv + sin_t * yv
+    y_rot = -sin_t * xv + cos_t * yv
+
+    # 5) Compute “generalized exponent” = [ (x'/σ_x)^2 + (y'/σ_y)^2 ]^β
+    β = kurtosis
+    squared_sum = (x_rot / sigma_x)**2 + (y_rot / sigma_y)**2
+    exponent = squared_sum ** β
+
+    # 6) Build PSF
+    psf = np.exp(-exponent)
+
+    # 7) Normalize to sum = 1
+    total = psf.sum()
+    if total != 0:
+        psf = (psf / total).astype(np.float32)
+    else:
+        psf = np.zeros_like(psf, dtype=np.float32)
+
+    return psf
+
+
+def _rl_tile_process_reg(tile_and_meta: Tuple[int, np.ndarray]) -> Tuple[int, np.ndarray]:
+    """
+    Worker for a padded tile that implements:
+      - Plain Richardson–Lucy (RL)
+      - RL + Tikhonov (L2) penalty at each iteration
+      - RL + Total Variation (TV) penalty at each iteration
+      followed by an optional single bilateral‐denoise (“dering”).
+
+    Arguments in tile_and_meta:
+      0) tile_index   : int  (to re‐assemble in order)
+      1) padded_tile  : np.ndarray of shape ((L_ext + 2*pad) × (W + 2*pad))
+      2) psf          : np.ndarray (2D, normalized kernel)
+      3) num_iter     : int  (number of RL iterations)
+      4) clip_flag    : bool (if True, apply one bilateral pass at end)
+      5) pad          : int  (how many pixels were padded on each side)
+      6) reg_type     : str  ("None (Plain R–L)", "Tikhonov (L2)", or "Total Variation (TV)")
+      7) y0_ext       : int  (row‐index of top of extended region, in the full image)
+      8) y1_ext       : int  (row‐index of bottom of extended region, in the full image)
+      9) L_ext        : int  (number of rows in the extended region, before padding)
+
+    Returns:
+      (tile_index, deconv_core) where deconv_core.shape = (L_ext, W).
+    """
+    (tile_index,
+     padded_tile,
+     psf,
+     num_iter,
+     clip_flag,
+     pad,
+     reg_type,
+     y0_ext,
+     y1_ext,
+     L_ext) = tile_and_meta
+
+    # === Choose small constants for L2 and TV penalties ===
+    alpha_L2 = 0.01     # Tikhonov weight
+    alpha_tv = 0.01     # TV weight
+
+    # === Initialize f ===
+    # For RL we typically start with sharp initial guess = padded tile itself (clipped to [eps..1])
+    f = np.clip(padded_tile.astype(np.float32), 1e-8, None)
+
+    # Pre‐flip PSF for the “backward” convolution step
+    psf_flipped = psf[::-1, ::-1]
+
+    # === Full RL loop with optional regularization ===
+    for _ in range(num_iter):
+        # 1) Convolve current estimate with PSF
+        estimate_blurred = fftconvolve(f, psf, mode="same")
+
+        # 2) Compute ratio = observed / estimate_blurred
+        ratio = padded_tile / (estimate_blurred + 1e-8)
+
+        # 3) Backproject ratio through PSF^T
+        correction = fftconvolve(ratio, psf_flipped, mode="same")
+
+        # 4) Update f
+        f = f * correction
+
+        # 5) Apply Tikhonov (L2) penalty if requested:
+        if reg_type == "Tikhonov (L2)":
+            # A simple L2 step: subtract a small Laplacian
+            # Note: `laplace(f)` returns the discrete Laplacian of f
+            f = f - alpha_L2 * laplace(f)
+
+        # 6) Apply TV penalty if requested:
+        elif reg_type == "Total Variation (TV)":
+            # Running a single‐iteration TV denoise at each step
+            f = denoise_tv_chambolle(f, weight=alpha_tv, channel_axis=None).astype(np.float32)
+
+        # 7) Ensure non‐negativity and clip to [0..1]
+        f = np.clip(f, 0.0, 1.0)
+
+    # === Optional “deringing” (one bilateral‐denoise) ===
+    if clip_flag:
+        f = denoise_bilateral(
+            f,
+            sigma_color=0.08,
+            sigma_spatial=1
+        ).astype(np.float32)
+
+    # === Crop away padding: return only the core region of size L_ext × W ===
+    full_h, full_w = f.shape
+    Wcore = full_w - 2 * pad
+    deconv_core = f[pad : pad + L_ext, pad : pad + Wcore].astype(np.float32)
+
+    return (tile_index, deconv_core)
+
+# ─────────────────────────────────────────────────────────────────────────────
+def van_cittert_deconv(image: np.ndarray, iterations: int, relaxation: float) -> np.ndarray:
+    """
+    Simple Van Cittert deconvolution:
+      f_0 = image
+      For n in [0..iterations-1]:
+        f_{n+1} = f_n + relaxation * (image - f_n * psf)
+      (Here we assume 'psf' is the same elliptical Gaussian PSF used in RL
+       with default parameters. You may want to pass a PSF separately.)
+
+    For demonstration, we’ll build a small Gaussian PSF with fixed parameters.
+    In practice, you should pass the appropriate PSF (matching how you convolved).
+    """
+    # Example: use a small 1D Gaussian PSF for van Cittert. In practice, match your convolution PSF.
+    sigma = 3.0
+    size = int(np.ceil(6 * sigma))
+    if size % 2 == 0:
+        size += 1
+    xs = np.linspace(-size//2, size//2, size)
+    kernel_1d = np.exp(-(xs**2) / (2*sigma**2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+
+    # Create a separable 2D PSF
+    psf = np.outer(kernel_1d, kernel_1d).astype(np.float32)
+
+    # Initialize f_n
+    f = image.copy().astype(np.float32)
+
+    for _ in range(iterations):
+        conv = fftconvolve(f, psf, mode="same")
+        f = f + relaxation * (image.astype(np.float32) - conv)
+
+    return np.clip(f, 0.0, 1.0)
+
+def rotate_about_center(
+    image: np.ndarray,
+    angle_deg: float,
+    center: Tuple[float, float]
+) -> np.ndarray:
+    """
+    Rotate an image (H×W or H×W×3) by `angle_deg` degrees around a given center (y0, x0).
+    - image: np.ndarray, float32 in [0..1] or uint8/uint16.
+    - angle_deg: positive = CCW rotation (in degrees).
+    - center: (row=y0, col=x0), pivot point in pixel coords.
+    Returns a float32 array in [0..1] of the same shape as input.
+    """
+    # 1) Convert input to float32 [0..1]
+    img_f = img_as_float32(image)
+
+    H, W = img_f.shape[:2]
+    y0, x0 = center
+
+    # 2) Build a 2×3 affine transform that:
+    #    - shifts center to origin
+    #    - rotates by angle
+    #    - shifts back to (x0, y0)
+    theta = np.deg2rad(angle_deg)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    # For a point (x, y), the rotation matrix about the origin is:
+    #   [ cos  -sin ]
+    #   [ sin   cos ]
+    # To pivot about (x0, y0), we do:  Shift(-x0, -y0) → Rotate → Shift(+x0, +y0)
+    # The combined 2×3 matrix M = [ [cos, -sin, tx], [sin, cos, ty] ] where:
+    tx = x0 - ( x0 * cos_t - y0 * sin_t )
+    ty = y0 - ( x0 * sin_t + y0 * cos_t )
+
+    M = np.array([[ cos_t, -sin_t, tx ],
+                  [ sin_t,  cos_t, ty ]], dtype=np.float32)
+
+    # 3) Use skimage.warp with this affine matrix (inverse mapping).
+    #    `warp` expects the inverse transformation, so we feed `np.linalg.inv(A)` or
+    #    simply use `affine_transform=...` via the `inverse_map` argument. However,
+    #    scikit‐image lets us pass a 3×3 homogeneous matrix to `warp` directly:
+    #
+    #    We can embed M into a 3×3 as:
+    #       [ cos  -sin  tx ]
+    #       [ sin   cos  ty ]
+    #       [  0     0    1 ]
+    #
+    #    Then `warp(image, AffineTransform(matrix=inv(M3x3)).inverse)` or simpler: use
+    #    `warp(..., transform=AffineTransform(...))`.
+    #
+    #    But since `warp` also accepts a 2×3 “inverse map” if you pass `inverse_map=M_inv`
+    #    directly, we can do that. In practice, the easiest is to create a 3×3 and invert:
+    from skimage.transform import AffineTransform
+
+    # Build a 3×3 homogeneous transform from M:
+    M3 = np.eye(3, dtype=np.float32)
+    M3[:2, :] = M
+
+    # We want to tell `warp` to use the inverse of M3, so that output(x_out) = input(M3^{-1} * [x_out y_out 1]^T).
+    tform = AffineTransform(matrix=np.linalg.inv(M3))
+
+    # 4) Call warp.  For color images, `warp` applies the same transform to each channel.
+    rotated = warp(
+        img_f,
+        inverse_map=tform,      # warp will apply tform to each output pixel to sample from img_f
+        order=1,                # bilinear interpolation
+        mode='constant',        # pixels outside get filled with cval
+        cval=0.0,
+        preserve_range=True     # keep value range in [0..1]
+    )
+
+    return rotated.astype(np.float32)
+
+def _bilinear_interpolate_gray(
+    gray: np.ndarray,
+    y_coords: np.ndarray,
+    x_coords: np.ndarray,
+    cval: float = 0.0
+) -> np.ndarray:
+    """
+    Perform bilinear interpolation on a single‐channel 2D array `gray` at
+    the (possibly non‐integer) coordinates given by y_coords, x_coords.
+
+    Parameters
+    ----------
+    gray : np.ndarray
+        2D float32 array of shape (H, W), values in [0..1].
+    y_coords, x_coords : np.ndarray
+        1D arrays of the same length N, giving the fractional sample positions.
+    cval : float
+        Value to use for any sample falling outside [0..H-1]×[0..W-1].
+
+    Returns
+    -------
+    samples : np.ndarray
+        1D float32 array of length N, containing the bilinearly‐interpolated
+        values (or cval for out‐of‐bounds).
+    """
+    H, W = gray.shape
+    N = y_coords.size
+
+    # Floor and ceil indices for each coordinate
+    x0 = np.floor(x_coords).astype(int)
+    x1 = x0 + 1
+    y0 = np.floor(y_coords).astype(int)
+    y1 = y0 + 1
+
+    # Compute interpolation weights
+    dx = x_coords - x0
+    dy = y_coords - y0
+
+    # Clip indices to be within [0..W-1] or [0..H-1]
+    x0c = np.clip(x0, 0, W - 1)
+    x1c = np.clip(x1, 0, W - 1)
+    y0c = np.clip(y0, 0, H - 1)
+    y1c = np.clip(y1, 0, H - 1)
+
+    # Gather the four neighbor pixels, but we'll mask out OOB afterward
+    Ia = gray[y0c, x0c]  # top-left
+    Ib = gray[y0c, x1c]  # top-right
+    Ic = gray[y1c, x0c]  # bottom-left
+    Id = gray[y1c, x1c]  # bottom-right
+
+    # Compute the weighted sum
+    wa = (1 - dx) * (1 - dy)
+    wb = dx * (1 - dy)
+    wc = (1 - dx) * dy
+    wd = dx * dy
+    interp = (Ia * wa) + (Ib * wb) + (Ic * wc) + (Id * wd)
+
+    # Now mask out-of-bounds positions:
+    # A point is OOB if x_coords<0 or x_coords>W-1 or y_coords<0 or y_coords>H-1.
+    oob_mask = (
+        (x_coords < 0) | (x_coords >= W) |
+        (y_coords < 0) | (y_coords >= H)
+    )
+    interp[oob_mask] = cval
+
+    return interp.astype(np.float32)
+# ─────────────────────────────────────────────────────────────────────────────
+def larson_sekanina(
+    image: np.ndarray,
+    center: Tuple[float, float],
+    radial_step: Optional[float],
+    angular_step_deg: float,
+    operator: str = "Divide"
+) -> np.ndarray:
+    """
+    Larson–Sekanina implemented entirely via direct Cartesian sampling, WITHOUT warp_polar.
+
+    If radial_step is None or <= 0, falls back to a single global rotation (Δr = 0).
+    Otherwise, for each pixel at (y,x), compute its
+      r = sqrt((x-x0)^2 + (y-y0)^2),  θ = atan2(y-y0, x-x0)
+      →  r' = r + radial_step,   θ' = θ + angular_step_deg*(π/180)
+      →  x' = x0 + r' * cos(θ'),  y' = y0 + r' * sin(θ')
+      Sample J = gray(y', x') by bilinear interpolation.
+      Then either Subtract or Divide (flat‐style) to get B(y,x).
+
+    Parameters
+    ----------
+    image : np.ndarray
+        A float32 array in [0..1], shape (H,W) or (H,W,3).  If color, first converts to grayscale.
+    center : (float, float)
+        (row=y0, col=x0) pivot for polar coordinates (float).
+    radial_step : float or None
+        If <=0 or None, do Δr=0 (pure rotation). Otherwise, Δr = radial_step.
+    angular_step_deg : float
+        How many degrees to rotate CCW for every sample: Δθ in degrees.
+    operator : str, default "Divide"
+        - "Subtract": B = max(gray – J, 0), then normalize so that max(B)=1.
+        - "Divide":   B = gray * (median(J) / (J + ε)), then clip to [0..1].
+
+    Returns
+    -------
+    B : np.ndarray
+        2D float32 array of shape (H, W), values in [0..1], representing
+        the LS result ready to be blended (Screen/SoftLight) or added.
+    """
+
+    # 1) Ensure image is float32 in [0..1], reduce to grayscale if needed
+    if image.dtype != np.float32:
+        raise ValueError("larson_sekanina: input must be float32 in [0..1]")
+    if image.ndim == 3 and image.shape[2] == 3:
+        # Convert RGB → grayscale in [0..1]
+        from skimage.color import rgb2gray
+        gray = rgb2gray(image)
+    else:
+        gray = image  # already float32 [0..1]
+
+    H, W = gray.shape
+    y0, x0 = center
+
+    # Convert Δθ to radians
+    dtheta = (angular_step_deg / 180.0) * np.pi
+
+    # 2) Precompute (r, θ) for each pixel (vectorized)
+    ys = np.arange(H, dtype=np.float32)[:, None]  # shape (H,1)
+    xs = np.arange(W, dtype=np.float32)[None, :]  # shape (1,W)
+    dy = ys - y0         # shape (H,1)
+    dx = xs - x0         # shape (1,W)
+    # Broadcast to (H,W):
+    dy = np.broadcast_to(dy, (H, W))
+    dx = np.broadcast_to(dx, (H, W))
+    r  = np.sqrt(dx*dx + dy*dy)             # radius for each pixel
+    θ  = np.arctan2(dy, dx)                 # angle in [-π..π]
+    θ[θ < 0] += 2*np.pi                     # now θ in [0..2π)
+
+    # 3) Build the target (r', θ') arrays
+    if radial_step is None or radial_step <= 0:
+        # Pure rotation: Δr = 0
+        r2 = r
+    else:
+        r2 = r + radial_step
+
+    θ2 = θ + dtheta
+    θ2 %= (2*np.pi)  # wrap back into [0..2π)
+
+    # 4) Convert (r2, θ2) back to Cartesian sample positions (x2, y2)
+    x2 = x0 + r2 * np.cos(θ2)
+    y2 = y0 + r2 * np.sin(θ2)
+
+    # 5) Flatten to 1D arrays for interpolation
+    x2_flat = x2.ravel()
+    y2_flat = y2.ravel()
+
+    # 6) Bilinear‐interpolate gray at (y2_flat, x2_flat)
+    J_flat = _bilinear_interpolate_gray(gray, y2_flat, x2_flat, cval=0.0)  # shape (H*W,)
+    J = J_flat.reshape(H, W)  # shape (H, W)
+
+    # 7) Form B according to operator
+    if operator == "Divide":
+        eps = 1e-6
+        med = np.median(J)
+        if med <= 0:
+            med = 1e-6
+        B_unclipped = gray * (med / (J + eps))
+        B = np.clip(B_unclipped, 0.0, 1.0)
+    else:  # "Subtract"
+        diff = gray - J
+        B = np.clip(diff, 0.0, None)
+        maxv = B.max()
+        if maxv > 0:
+            B = B / maxv
+        else:
+            B = np.zeros_like(B)
+
+    return B.astype(np.float32)
+
 class XISFViewer(QWidget):
     def __init__(self, image_manager=None):
         super().__init__()
@@ -28095,7 +40064,7 @@ class XISFViewer(QWidget):
         # Left side layout for image display and save button
         left_widget = QWidget()        
         left_layout = QVBoxLayout(left_widget)
-        left_widget.setMinimumSize(600, 600)
+        left_widget.setMinimumSize(400, 400)
         
         self.load_button = QPushButton("Load Image File")
         self.load_button.clicked.connect(self.load_xisf)
@@ -28148,16 +40117,6 @@ class XISFViewer(QWidget):
         self.batch_process_button.clicked.connect(self.open_batch_process_window)
         left_layout.addWidget(self.batch_process_button)
 
-
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
-
         self.load_logo()
 
         # Right side layout for metadata display
@@ -28179,7 +40138,7 @@ class XISFViewer(QWidget):
         # Add left widget and metadata tree to the splitter
         splitter.addWidget(left_widget)
         splitter.addWidget(right_widget)
-        splitter.setSizes([800, 200])  # Initial sizes for the left (preview) and right (metadata) sections
+        #splitter.setSizes([800, 200])  # Initial sizes for the left (preview) and right (metadata) sections
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -28374,126 +40333,35 @@ class XISFViewer(QWidget):
         if file_path.lower().endswith(('.fits', '.fit', '.fz', '.fz')):
             print(f"running debayer_image on {file_path}")
             bayer_pattern = header.get('BAYERPAT', None)
-            # If BAYERPAT not found, try iterating through HDUs.
             if bayer_pattern is None:
                 bayer_header = get_bayer_header(file_path)
-                if bayer_header:
-                    bayer_pattern = bayer_header.get('BAYERPAT', None)
+                bayer_pattern = bayer_header.get('BAYERPAT', None) if bayer_header else None
+
             if bayer_pattern:
                 print(f"Debayering FITS image: {file_path} with Bayer pattern {bayer_pattern}")
                 is_mono = False
-                image = self.debayer_fits(image, bayer_pattern)
+                # use numba-accelerated fast version
+                image = debayer_fits_fast(image, bayer_pattern)
             else:
                 print(f"No Bayer pattern found in FITS header: {file_path}")
+
         elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-            # For RAW files, apply debayering (assuming debayer_raw exists)
+            # For RAW files, apply fast debayer_raw_fast
             print(f"Debayering RAW image: {file_path}")
             is_mono = False
-            image = self.debayer_raw(image)
-        
+            image = debayer_raw_fast(image)
+
         return image, is_mono
 
 
     def debayer_fits(self, image_data, bayer_pattern):
-        """Debayer a FITS image using a basic Bayer pattern (2x2)."""
-        if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern
-            r = image_data[::2, ::2]  # Red
-            g1 = image_data[::2, 1::2]  # Green 1
-            g2 = image_data[1::2, ::2]  # Green 2
-            b = image_data[1::2, 1::2]  # Blue
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'BGGR':
-            # BGGR Bayer pattern
-            b = image_data[::2, ::2]  # Blue
-            g1 = image_data[::2, 1::2]  # Green 1
-            g2 = image_data[1::2, ::2]  # Green 2
-            r = image_data[1::2, 1::2]  # Red
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GRBG':
-            # GRBG Bayer pattern
-            g1 = image_data[::2, ::2]  # Green 1
-            r = image_data[::2, 1::2]  # Red
-            b = image_data[1::2, ::2]  # Blue
-            g2 = image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GBRG':
-            # GBRG Bayer pattern
-            g1 = image_data[::2, ::2]  # Green 1
-            b = image_data[::2, 1::2]  # Blue
-            r = image_data[1::2, ::2]  # Red
-            g2 = image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        else:
-            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
-
-
+        """Legacy alias to the fast numba-accelerated debayer."""
+        return debayer_fits_fast(image_data, bayer_pattern)
 
 
     def debayer_raw(self, raw_image_data, bayer_pattern="RGGB"):
-        """Debayer a RAW image based on the Bayer pattern."""
-        if bayer_pattern == 'RGGB':
-            # RGGB Bayer pattern (Debayering logic example)
-            r = raw_image_data[::2, ::2]  # Red
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            b = raw_image_data[1::2, 1::2]  # Blue
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-        
-        elif bayer_pattern == 'BGGR':
-            # BGGR Bayer pattern
-            b = raw_image_data[::2, ::2]  # Blue
-            g1 = raw_image_data[::2, 1::2]  # Green 1
-            g2 = raw_image_data[1::2, ::2]  # Green 2
-            r = raw_image_data[1::2, 1::2]  # Red
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GRBG':
-            # GRBG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            r = raw_image_data[::2, 1::2]  # Red
-            b = raw_image_data[1::2, ::2]  # Blue
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        elif bayer_pattern == 'GBRG':
-            # GBRG Bayer pattern
-            g1 = raw_image_data[::2, ::2]  # Green 1
-            b = raw_image_data[::2, 1::2]  # Blue
-            r = raw_image_data[1::2, ::2]  # Red
-            g2 = raw_image_data[1::2, 1::2]  # Green 2
-
-            # Average green channels
-            g = (g1 + g2) / 2
-            return np.stack([r, g, b], axis=-1)
-
-        else:
-            raise ValueError(f"Unsupported Bayer pattern: {bayer_pattern}")
+        """Legacy alias to the fast numba-accelerated debayer."""
+        return debayer_raw_fast(raw_image_data, bayer_pattern)
 
 
     def display_image(self):
@@ -28560,11 +40428,11 @@ class XISFViewer(QWidget):
         # Accept the event so it isn’t propagated further (e.g. to the scroll area).
         event.accept()
 
-    @announce_zoom
+
     def zoom_in(self):
         self.center_image_on_zoom(1.25)
 
-    @announce_zoom
+
     def zoom_out(self):
         self.center_image_on_zoom(1 / 1.25)
 
@@ -28615,7 +40483,7 @@ class XISFViewer(QWidget):
 
         # 4) announce
         pct = int(self.scale_factor * 100)
-        print(f"Zoom now {pct}%")
+
         vp = self.scroll_area.viewport()
         center_local = vp.rect().center()                    # QPoint in viewport coords
         center_global = vp.mapToGlobal(center_local)         # map to screen coords
@@ -28915,7 +40783,6 @@ class XISFViewer(QWidget):
 
 
     def process_batch(self, input_dir, output_dir, file_format, update_status_callback):
-        import glob
         from pathlib import Path
 
         xisf_files = glob.glob(f"{input_dir}/*.xisf")
@@ -29263,7 +41130,6 @@ class MetricsPanel(QWidget):
         return sentinel “bad” values so the frame will be flagged.
         """
         idx, entry = i_entry
-        import numpy as np, sep
 
         # rebuild normalized mono data
         img = entry['image_data']
@@ -29294,9 +41160,15 @@ class MetricsPanel(QWidget):
             )
 
             if len(cat) > 0:
+                # σ = geometric mean of the two RMS axes
                 sig      = np.sqrt(cat['a'] * cat['b'])
                 fwhm     = np.nanmedian(2.3548 * sig)
-                ecc      = np.nanmedian(1 - (cat['b'] / cat['a']))
+
+                # true eccentricity e = sqrt(1 - (b/a)^2)
+                ratios   = np.clip(cat['b'] / cat['a'], 0, 1)
+                ecc_vals = np.sqrt(1.0 - ratios**2)
+                ecc      = np.nanmedian(ecc_vals)
+
                 star_cnt = len(cat)
             else:
                 fwhm, ecc, star_cnt = np.nan, np.nan, 0
@@ -29304,7 +41176,7 @@ class MetricsPanel(QWidget):
         except Exception as e:
             # catch SEP overflow (or any other) and mark as “bad” frame
             # you can even check `if "internal pixel buffer full" in str(e):`
-            fwhm, ecc, star_cnt = 10.0, 0.5, 0
+            fwhm, ecc, star_cnt = 10.0, 1.0, 0
 
         orig_back = entry.get('orig_background', np.nan)
         return idx, fwhm, ecc, orig_back, star_cnt
@@ -29456,7 +41328,7 @@ class MetricsPanel(QWidget):
 class MetricsWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self._thresholds_per_group: dict[str, list[float|None]] = {}
+        self._thresholds_per_group: dict[str, List[float|None]] = {}
         self.setWindowTitle("Frame Metrics")
         self.resize(800, 600)
 
@@ -29495,7 +41367,7 @@ class MetricsWindow(QWidget):
 
         # internal storage
         self._all_images = []
-        self._current_indices: list[int] | None = None
+        self._current_indices: List[int] | None = None
 
     def _update_status(self, *args):
         """Recompute and show: Flagged Items X / Y (Z%)."""
@@ -29599,9 +41471,10 @@ class BlinkTab(QWidget):
         self.zoom_level = 0.5  # Default zoom level
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
-        self.thresholds_by_group: dict[str, list[float|None]] = {}
+        self.thresholds_by_group: dict[str, List[float|None]] = {}
         self.aggressive_stretch_enabled = False
         self.current_sigma = 3.7
+        self.current_pixmap = None
 
         self.initUI()
         self.init_shortcuts()
@@ -30074,7 +41947,6 @@ class BlinkTab(QWidget):
         Split a filename into text and integer chunks so that 
         “…_2.fit” sorts before “…_10.fit”.
         """
-        import re
         name = os.path.basename(path)
         return [int(tok) if tok.isdigit() else tok.lower()
                 for tok in re.split(r'(\d+)', name)]
@@ -30088,7 +41960,7 @@ class BlinkTab(QWidget):
         file_paths = sorted(file_paths, key=lambda p: self._natural_key(os.path.basename(p)))
 
         # 1) pick dtype based on RAM
-        mem   = psutil.virtual_memory()
+        mem = psutil.virtual_memory()
         avail = mem.available / (1024**3)
         if avail <= 16:
             target_dtype = np.uint8
@@ -30098,62 +41970,82 @@ class BlinkTab(QWidget):
             target_dtype = np.float32
 
         total = len(file_paths)
-        self.progress_bar.setRange(0,100)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         QApplication.processEvents()
 
-        # clear old data & tree
         self.image_paths.clear()
         self.loaded_images.clear()
         self.fileTree.clear()
 
-        # 2) fire off all loads in parallel
-        futures    = {}
-        max_workers = min((os.cpu_count() or 1), 60)
-        with ProcessPoolExecutor(max_workers=max_workers) as exe:
-            for p in file_paths:
-                futures[exe.submit(self._load_one_image, p, target_dtype)] = p
+        # ---------- NEW: Retry-aware parallel load ----------
+        MAX_RETRIES = 2
+        RETRY_DELAY = 2
+        remaining = list(file_paths)
+        completed = []
+        attempt = 0
 
-            done = 0
-            for fut in as_completed(futures):
-                try:
-                    path, header, bit_depth, is_mono, stored, back = fut.result()
-                except Exception as e:
-                    print(f"[WARN] {futures[fut]} load failed: {e}")
-                    continue
+        while remaining and attempt <= MAX_RETRIES:
+            
+            total_cpus = os.cpu_count() or 1
+            reserved_cpus = min(4, max(1, int(total_cpus * 0.25)))
+            max_workers = max(1, min(total_cpus - reserved_cpus, 60))
 
-                header = header or {}
+            futures = {}
+            failed = []
 
-                self.image_paths.append(path)
-                self.loaded_images.append({
-                    'file_path':      path,
-                    'image_data':     stored,
-                    'header':         header,
-                    'bit_depth':      bit_depth,
-                    'is_mono':        is_mono,
-                    'flagged':        False,
-                    'orig_background': back
-                })
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                for path in remaining:
+                    futures[executor.submit(self._load_one_image, path, target_dtype)] = path
 
-                done += 1
-                self.progress_bar.setValue(int(100 * done / total))
-                QApplication.processEvents()
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    try:
+                        result = fut.result()
+                        completed.append(result)
+                        done = len(completed)
+                        self.progress_bar.setValue(int(100 * done / total))
+                        QApplication.processEvents()
+                    except Exception as e:
+                        print(f"[WARN][Attempt {attempt}] Failed to load {path}: {e}")
+                        failed.append(path)
 
-        # 3) (optional) reorder to input order — in this case file_paths is already sorted
-        #    so image_paths/loaded_images follow that same sorted order
+            remaining = failed
+            attempt += 1
+            if remaining:
+                print(f"[Retry] {len(remaining)} images will be retried after {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
 
-        # 4) build a nested grouping: Object -> Filter -> Exposure -> [paths]
+        if remaining:
+            print(f"[FAILURE] These files failed to load after {MAX_RETRIES} retries:")
+            for path in remaining:
+                print(f"  - {path}")
+
+        # ---------- Unpack completed results ----------
+        for path, header, bit_depth, is_mono, stored, back in completed:
+            header = header or {}
+            self.image_paths.append(path)
+            self.loaded_images.append({
+                'file_path':      path,
+                'image_data':     stored,
+                'header':         header,
+                'bit_depth':      bit_depth,
+                'is_mono':        is_mono,
+                'flagged':        False,
+                'orig_background': back
+            })
+
+        # 3) rebuild object/filter/exposure tree
         grouped = defaultdict(list)
         for entry in self.loaded_images:
-            hdr  = entry['header']
-            obj  = hdr.get('OBJECT',   'Unknown')
-            filt = hdr.get('FILTER',   'Unknown')
-            exp  = hdr.get('EXPOSURE', 'Unknown')
+            hdr = entry['header']
+            obj = hdr.get('OBJECT', 'Unknown')
+            filt = hdr.get('FILTER', 'Unknown')
+            exp = hdr.get('EXPOSURE', 'Unknown')
             grouped[(obj, filt, exp)].append(entry['file_path'])
-        # ——— NEW: for each group, sort the file list by natural filename order ———
+
         for key, paths in grouped.items():
             paths.sort(key=lambda p: self._natural_key(os.path.basename(p)))
-        # 5) rebuild the tree in sorted key order:
         by_object = defaultdict(lambda: defaultdict(dict))
         for (obj, filt, exp), paths in grouped.items():
             by_object[obj][filt][exp] = paths
@@ -30173,12 +42065,10 @@ class BlinkTab(QWidget):
                     filt_item.addChild(exp_item)
                     exp_item.setExpanded(True)
 
-                    # leaves: these were already sorted via file_paths/natural sort
                     for p in by_object[obj][filt][exp]:
                         leaf = QTreeWidgetItem([os.path.basename(p)])
                         exp_item.addChild(leaf)
 
-        # 6) final UI touch-ups
         self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
         self.progress_bar.setValue(100)
         if self.metrics_window and self.metrics_window.isVisible():
@@ -30542,15 +42432,6 @@ class BlinkTab(QWidget):
             (scaled.height() - self.scroll_area.viewport().height()) // 2
         )
 
-        # 3) announce zoom
-        pct = int(self.zoom_level * 100)
-        print(f"Zoom now {pct}%")
-        vp = self.scroll_area.viewport()
-        center_local = vp.rect().center()                    # QPoint in viewport coords
-        center_global = vp.mapToGlobal(center_local)         # map to screen coords
-
-        QToolTip.showText(center_global, f"{pct}%")
-
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
         if event.angleDelta().y() > 0:
@@ -30566,7 +42447,7 @@ class BlinkTab(QWidget):
         self.zoom_level = min(self.zoom_level * 1.2, 3.0)  # Cap at 3x
         self.apply_zoom()
 
-    @announce_zoom
+
     def zoom_out(self):
         """Decrease the zoom level and refresh the image."""
         self.zoom_level = max(self.zoom_level / 1.2, 0.05)  # Cap at 0.2x
@@ -30799,46 +42680,58 @@ class BlinkTab(QWidget):
 
 
     def move_items(self):
-        """Allow the user to move selected images to a different directory."""
+        """Move selected images *and* remove them from the tree+metrics."""
         selected_items = self.fileTree.selectedItems()
-        
         if not selected_items:
             QMessageBox.warning(self, "Warning", "No items selected for moving.")
             return
 
-        # Open file dialog to select a new directory
-        new_directory = QFileDialog.getExistingDirectory(self, "Select Destination Folder", "")
-        if not new_directory:
-            return  # User canceled the directory selection
+        # Ask where to move
+        new_dir = QFileDialog.getExistingDirectory(self,
+                                                "Select Destination Folder",
+                                                "")
+        if not new_dir:
+            return
+
+        # Keep track of which on‐disk paths we actually moved
+        moved_old_paths = []
 
         for item in selected_items:
-            current_name = item.text(0).lstrip("⚠️ ")
-            file_path = next((path for path in self.image_paths if os.path.basename(path) == current_name), None)
+            name = item.text(0).lstrip("⚠️ ")
+            old_path = next((p for p in self.image_paths 
+                            if os.path.basename(p) == name), None)
+            if not old_path:
+                continue
 
-            if file_path:
-                new_file_path = os.path.join(new_directory, current_name)
+            new_path = os.path.join(new_dir, name)
+            try:
+                os.rename(old_path, new_path)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to move {old_path}: {e}")
+                continue
 
-                try:
-                    # Move the file
-                    os.rename(file_path, new_file_path)
-                    print(f"File moved from {file_path} to {new_file_path}")
-                    
-                    # Update the image paths
-                    self.image_paths[self.image_paths.index(file_path)] = new_file_path
-                    item.setText(0, current_name)  # Update the tree view item's text (if needed)
+            moved_old_paths.append(old_path)
 
-                except Exception as e:
-                    print(f"Failed to move {file_path}: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to move the file: {e}")
+            # 1) Remove the leaf from the tree
+            parent = item.parent() or self.fileTree.invisibleRootItem()
+            parent.removeChild(item)
 
-        # Update the tree view to reflect the moved items
-        self.fileTree.clear()
-        for file_path in self.image_paths:
-            file_name = os.path.basename(file_path)
-            item = QTreeWidgetItem([file_name])
-            self.fileTree.addTopLevelItem(item)
+        # 2) Purge them from your internal lists
+        for old in moved_old_paths:
+            idx = self.image_paths.index(old)
+            del self.image_paths[idx]
+            del self.loaded_images[idx]
 
-        print(f"Moved {len(selected_items)} items.")
+        # 3) Update your “loaded X images” label
+        self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
+
+        # 4) Tell metrics to re-initialize on the new list
+        if self.metrics_window and self.metrics_window.isVisible():
+            self.metrics_window.update_metrics(self.loaded_images)
+
+        print(f"Moved and removed {len(moved_old_paths)} items.")
+
+
 
     def push_image_to_manager(self, item):
         """Push the selected image to the ImageManager."""
@@ -31110,6 +43003,12 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.sharpen_channels_label)
         left_layout.addWidget(self.sharpen_channels_dropdown)
 
+        self.auto_detect_psf_checkbox = QCheckBox("Auto Detect PSF", self)
+        self.auto_detect_psf_checkbox.setToolTip("Automatically measure PSF per chunk and choose the two nearest radius models")
+        self.auto_detect_psf_checkbox.setChecked(True)
+        left_layout.addWidget(self.auto_detect_psf_checkbox)
+        self.auto_detect_psf_checkbox.toggled.connect(self._on_auto_detect_toggled)
+
         # Non-Stellar Sharpening PSF Slider
         self.psf_slider_label = QLabel("Non-Stellar Sharpening PSF (1-8): 3")
         self.psf_slider = QSlider(Qt.Orientation.Horizontal)
@@ -31157,6 +43056,13 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.denoise_mode_label)
         left_layout.addWidget(self.denoise_mode_dropdown)
 
+        self.denoise_separate_checkbox = QCheckBox("Process RGB channels separately")
+        self.denoise_separate_checkbox.setToolTip(
+            "Run the mono model on each of R, G, B independently instead of the full‐color model"
+        )
+        self.denoise_separate_checkbox.setChecked(False)
+        left_layout.addWidget(self.denoise_separate_checkbox)
+
         # Scale factor dropdown (initially hidden)
         self.scale_label = QLabel("Scale Factor:")
         self.scale_dropdown = QComboBox()
@@ -31180,7 +43086,7 @@ class CosmicClarityTab(QWidget):
         #left_layout.addWidget(self.save_button)  
 
         # Spacer to push the wrench button to the bottom
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Cosmic Clarity folder path label
         self.cosmic_clarity_folder_label = QLabel("No folder selected")
@@ -31199,18 +43105,9 @@ class CosmicClarityTab(QWidget):
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)  
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)   
 
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Right panel for image preview with zoom controls
         right_layout = QVBoxLayout()
@@ -31339,6 +43236,20 @@ class CosmicClarityTab(QWidget):
 
         self.base_pixmap = QPixmap.fromImage(qimage)
         print("Base pixmap updated.")
+
+    def _on_auto_detect_toggled(self, checked):
+        # whenever the box changes, re-show or hide the PSF slider
+        self._update_psf_visibility()
+
+    def _update_psf_visibility(self):
+        if self.auto_detect_psf_checkbox.isChecked():
+            self.psf_slider_label.hide()
+            self.psf_slider.hide()
+        else:
+            # only show it when we’re in a sharpen mode
+            if self.sharpen_radio.isChecked() or self.both_radio.isChecked():
+                self.psf_slider_label.show()
+                self.psf_slider.show()
 
     def update_psf_slider_label(self):
         """Update the label text to display the current value of the PSF slider as a non-integer."""
@@ -31728,7 +43639,6 @@ class CosmicClarityTab(QWidget):
         """Save the current image to the specified path in TIF format."""
         if self.image is not None:
             try:
-                from tifffile import imwrite
                 # Force saving as `.tif` format
                 if not file_path.endswith(".tif"):
                     file_path += ".tif"
@@ -31748,6 +43658,7 @@ class CosmicClarityTab(QWidget):
         if self.superres_radio.isChecked():
             self.hide_sharpen_controls()
             self.hide_denoise_controls()
+            self.hide_superres_controls()
             self.show_superres_controls()
             self.gpu_label.hide()
             self.gpu_dropdown.hide()
@@ -31769,40 +43680,42 @@ class CosmicClarityTab(QWidget):
 
 
     def show_sharpen_controls(self):
-        self.sharpen_mode_label.show()
-        self.sharpen_mode_dropdown.show()
-        self.psf_slider_label.show()
-        self.psf_slider.show()
-        self.stellar_amount_label.show()
-        self.stellar_amount_slider.show()
-        self.nonstellar_amount_label.show()
-        self.nonstellar_amount_slider.show()
-        self.sharpen_channels_label.show()
-        self.sharpen_channels_dropdown.show()
+        for w in (
+            self.sharpen_mode_label, self.sharpen_mode_dropdown,
+            self.psf_slider_label, self.psf_slider,
+            self.stellar_amount_label, self.stellar_amount_slider,
+            self.nonstellar_amount_label, self.nonstellar_amount_slider,
+            self.sharpen_channels_label, self.sharpen_channels_dropdown,
+            self.auto_detect_psf_checkbox
+        ):
+            w.show()
+        # now hide or show PSF slider depending on checkbox state
+        self._update_psf_visibility()
 
     def hide_sharpen_controls(self):
-        self.sharpen_mode_label.hide()
-        self.sharpen_mode_dropdown.hide()
-        self.psf_slider_label.hide()
-        self.psf_slider.hide()
-        self.stellar_amount_label.hide()
-        self.stellar_amount_slider.hide()
-        self.nonstellar_amount_label.hide()
-        self.nonstellar_amount_slider.hide()
-        self.sharpen_channels_label.hide()
-        self.sharpen_channels_dropdown.hide()
+        for w in (
+            self.sharpen_mode_label, self.sharpen_mode_dropdown,
+            self.psf_slider_label, self.psf_slider,
+            self.stellar_amount_label, self.stellar_amount_slider,
+            self.nonstellar_amount_label, self.nonstellar_amount_slider,
+            self.sharpen_channels_label, self.sharpen_channels_dropdown,
+            self.auto_detect_psf_checkbox
+        ):
+            w.hide()
 
     def show_denoise_controls(self):
         self.denoise_strength_label.show()
         self.denoise_strength_slider.show()
         self.denoise_mode_label.show()
         self.denoise_mode_dropdown.show()
+        self.denoise_separate_checkbox.show()
 
     def hide_denoise_controls(self):
         self.denoise_strength_label.hide()
         self.denoise_strength_slider.hide()
         self.denoise_mode_label.hide()
         self.denoise_mode_dropdown.hide()
+        self.denoise_separate_checkbox.hide()
 
     def show_superres_controls(self):
         self.scale_label.show()
@@ -32489,11 +44402,15 @@ class CosmicClarityTab(QWidget):
             ]
             if self.sharpen_channels_dropdown.currentText() == "Yes":
                 cmd.append("--sharpen_channels_separately")
+            if self.auto_detect_psf_checkbox.isChecked():
+                cmd.append("--auto_detect_psf")
         elif mode == "denoise":
             cmd += [
                 "--denoise_strength", f"{self.denoise_strength_slider.value() / 100:.2f}",
                 "--denoise_mode", self.denoise_mode_dropdown.currentText()
             ]
+            if self.denoise_separate_checkbox.isChecked():
+                cmd.append("--separate_channels")            
 
         # GPU option
         if self.gpu_dropdown.currentText() == "No":
@@ -33031,15 +44948,6 @@ class CosmicClaritySatelliteTab(QWidget):
         self.wrench_button.clicked.connect(self.select_cosmic_clarity_folder)
         left_layout.addWidget(self.wrench_button)
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
         # Right layout for TreeBoxes
         right_layout = QVBoxLayout()
@@ -33745,17 +45653,8 @@ class StatisticalStretchTab(QWidget):
 
 
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -34307,11 +46206,11 @@ class StarStretchTab(QWidget):
         self.scnrCheckBox = QCheckBox("Remove Green via SCNR (Optional)", self)
         left_layout.addWidget(self.scnrCheckBox)
 
-        # **Create a horizontal layout for Refresh Preview, Undo, and Redo buttons**
+        # **Create a horizontal layout for Apply, Undo, and Redo buttons**
         action_buttons_layout = QHBoxLayout()
 
-        # Refresh Preview button
-        self.refreshButton = QPushButton("Refresh Preview", self)
+        # Apply button
+        self.refreshButton = QPushButton("Apply", self)
         self.refreshButton.clicked.connect(self.generatePreview)
         action_buttons_layout.addWidget(self.refreshButton)
 
@@ -34344,17 +46243,8 @@ class StarStretchTab(QWidget):
         left_layout.addWidget(self.spinnerLabel)
 
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -34743,6 +46633,97 @@ class StarStretchTab(QWidget):
             print(f"Applying stretch: {self.stretch_factor}, Color Boost: {self.sat_amount:.2f}, SCNR: {self.scnrCheckBox.isChecked()}")
             self.generatePreview()
 
+class CommaToDotLineEdit(QLineEdit):
+    def keyPressEvent(self, event: QKeyEvent):
+        print("C2D got:", event.key(), repr(event.text()), event.modifiers())
+        # if they hit comma (and it's not a Ctrl+Comma shortcut), turn it into a dot
+        if event.text() == "," and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            # synthesize a “.” keypress instead
+            event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_Period,
+                event.modifiers(),
+                "."
+            )
+        super().keyPressEvent(event)
+
+class CurveDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Curves Editor")
+        self.setMinimumSize(400, 400)
+
+        layout = QVBoxLayout(self)
+
+        # 1) Curve editor canvas
+        self.curveEditor = CurveEditor(self)
+        layout.addWidget(self.curveEditor)
+
+        # 2) Pixel info row
+        info_row = QHBoxLayout()
+        self.xLabel = QLabel("X:0");    info_row.addWidget(self.xLabel)
+        self.yLabel = QLabel("Y:0");    info_row.addWidget(self.yLabel)
+        self.kLabel = QLabel("K:0.000"); info_row.addWidget(self.kLabel)
+        self.rLabel = QLabel("R:0.000");info_row.addWidget(self.rLabel)
+        self.gLabel = QLabel("G:0.000");info_row.addWidget(self.gLabel)
+        self.bLabel = QLabel("B:0.000");info_row.addWidget(self.bLabel)
+        info_row.addStretch(1)
+        layout.addLayout(info_row)
+        self.kLabel.hide()
+
+        # 3) Status-message line
+        self.statusMsg = QLabel("", self)
+        self.statusMsg.setStyleSheet("color: gray;")
+        layout.addWidget(self.statusMsg)
+
+        # 4) Instructions
+        self.instructions = QLabel(
+            "Double-click to add, right-click to remove, shift-click on image to add at brightness.",
+            self
+        )
+        self.instructions.setStyleSheet("color:gray; font-style:italic;")
+        layout.addWidget(self.instructions)
+
+        # 5) Apply / Undo / Reset bar
+        bar = QHBoxLayout()
+        self.applyBtn = QPushButton("Apply Curve");  bar.addWidget(self.applyBtn)
+        self.undoBtn  = QPushButton("Undo");         bar.addWidget(self.undoBtn)
+        self.resetBtn = QPushButton("Reset");        bar.addWidget(self.resetBtn)
+        self.undoBtn.setEnabled(False)
+        layout.addLayout(bar)
+
+        # wire up external callbacks
+        self.applyBtn.clicked.connect(lambda: parent.startProcessing())
+        self.undoBtn .clicked.connect(lambda: parent.undo())
+        self.resetBtn.clicked.connect(lambda: parent.resetCurve())
+        self.curveEditor.setSymmetryCallback(parent.onCurveSymmetryPoint)
+        self.curveEditor.setPreviewCallback(
+            lambda lut: parent.updatePreviewLUT(lut,
+                                               parent.curve_mode,
+                                               parent.currentGhsChannel)
+        )
+
+    def updatePixelInfo(self, x, y, r, g, b, is_mono=False):
+        self.xLabel.setText(f"X:{x}")
+        self.yLabel.setText(f"Y:{y}")
+
+        if is_mono:
+            self.kLabel.setText(f"K:{r:.3f}")
+            self.kLabel.show()
+            self.rLabel.hide()
+            self.gLabel.hide()
+            self.bLabel.hide()
+        else:
+            self.rLabel.setText(f"R:{r:.3f}")
+            self.gLabel.setText(f"G:{g:.3f}")
+            self.bLabel.setText(f"B:{b:.3f}")
+            self.rLabel.show()
+            self.gLabel.show()
+            self.bLabel.show()
+            self.kLabel.hide()
+
+    def updateStatusMessage(self, text: str):
+        self.statusMsg.setText(text)
 
 
 class FullCurvesTab(QWidget):
@@ -34761,11 +46742,25 @@ class FullCurvesTab(QWidget):
         self.curve_mode = "K (Brightness)"  # Default curve mode
         self.current_lut = np.linspace(0, 255, 256, dtype=np.uint8)  # Initialize with identity LUT
         self.ghs_sym_pt = None
+        self._base_pixmap = None
+        self.curveDialog = CurveDialog(parent=self)
+        self.curveEditor = self.curveDialog.curveEditor
+        self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
+        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(
+            lut, self.curve_mode, self.currentGhsChannel
+        ))        
 
         # Initialize the Undo stack with a limited size
         self.undo_stack = []
         self.max_undo = 10  # Maximum number of undo steps        
-
+        self.ghsParams = {
+            "α": 1.0,
+            "β": 1.0,
+            "γ": 1.0,
+            "LP": 0.0,
+            "HP": 0.0,
+            "sym_pt": None
+        }
         # Precompute transformation matrices
         self.M = np.array([
             [0.4124564, 0.3575761, 0.1804375],
@@ -34791,14 +46786,10 @@ class FullCurvesTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_widget.setFixedWidth(400)
 
-        # File label
-        self.fileLabel = QLabel('', self)
-        left_layout.addWidget(self.fileLabel)
-
         # ——— stretch‐type toggle ———
         self.stretchTypeGroup = QButtonGroup(self)
         h = QHBoxLayout()
-        for text in ("Traditional Curves", "Generalized Hyperbolic"):
+        for text in ("Traditional Curves", "Universal Hyperbolic"):
             btn = QRadioButton(text, self)
             h.addWidget(btn)
             self.stretchTypeGroup.addButton(btn)
@@ -34833,69 +46824,168 @@ class FullCurvesTab(QWidget):
         left_layout.addLayout(curve_mode_layout)
         self.set_curve_mode()
 
-        # Curve editor
-        self.curveEditor = CurveEditor(self)
-        self.curveEditor.setSymmetryCallback(self.onCurveSymmetryPoint)
-        left_layout.addWidget(self.curveEditor)
-        self.curveEditor.setPreviewCallback(lambda lut: self.updatePreviewLUT(lut, self.curve_mode))
-
-        # Status
-        self.statusLabel = QLabel('X:0 Y:0', self)
-        left_layout.addWidget(self.statusLabel)
-
         # ——— GHS controls ———
         self.ghsControls = QWidget(self)
         vbox = QVBoxLayout(self.ghsControls)
-        # α/β sliders
-        slider_row = QHBoxLayout()
-        self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.alphaSlider.setRange(1, 300); self.alphaSlider.setValue(50)
-        self.alphaLabel = QLabel("1.00")
-        slider_row.addWidget(QLabel("α")); slider_row.addWidget(self.alphaSlider); slider_row.addWidget(self.alphaLabel)
-        self.betaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.betaSlider.setRange(1, 300); self.betaSlider.setValue(50)
-        self.betaLabel = QLabel("1.00")
-        slider_row.addWidget(QLabel("β")); slider_row.addWidget(self.betaSlider); slider_row.addWidget(self.betaLabel)
-        vbox.addLayout(slider_row)
-        self.alphaSlider.valueChanged.connect(self.updateGhsCurve)
-        self.betaSlider.valueChanged.connect(self.updateGhsCurve)
-        # γ slider
-        gamma_row = QHBoxLayout()
-        gamma_row.addStretch()
-        self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
-        self.gammaSlider.setRange(0, 500); self.gammaSlider.setValue(100)
-        self.gammaLabel = QLabel("1.00")
-        gamma_row.addWidget(QLabel("γ")); gamma_row.addWidget(self.gammaSlider); gamma_row.addWidget(self.gammaLabel)
-        gamma_row.addStretch()
-        vbox.addLayout(gamma_row)
-        self.gammaSlider.valueChanged.connect(self.updateGhsCurve)
-        # histogram & reset
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        histBtn = QPushButton("Show Histogram")
+
+        # ——— Channel selector + histogram/reset buttons on one line ———
+        ch_row = QHBoxLayout()
+        ch_row.addWidget(QLabel("Channel:"))
+        self.ghsChannelCombo = QComboBox()
+        for ch in ("K (Brightness)", "R", "G", "B"):
+            self.ghsChannelCombo.addItem(ch)
+        ch_row.addWidget(self.ghsChannelCombo)
+        ch_row.addStretch()
+
+        # histogram & reset buttons in the same row
+        histBtn = QPushButton("Histogram")
+        histBtn.setFixedHeight(self.ghsChannelCombo.sizeHint().height())
         histBtn.clicked.connect(self.openHistogram)
-        btn_row.addWidget(histBtn)
+        ch_row.addWidget(histBtn)
+
         resetInfBtn = QPushButton("Reset Inflection")
+        resetInfBtn.setFixedHeight(self.ghsChannelCombo.sizeHint().height())
         resetInfBtn.clicked.connect(self.clearGhsPivot)
-        btn_row.addWidget(resetInfBtn)
-        btn_row.addStretch()
-        vbox.addLayout(btn_row)
+        ch_row.addWidget(resetInfBtn)
+
+        vbox.addLayout(ch_row)
+
+        self.ghsChannelCombo.currentTextChanged.connect(self._onGhsChannelChanged)
+        self.currentGhsChannel = "K (Brightness)"
+
+
+        # ——— α/β controls —————————————————————
+        alpha_beta_group = QVBoxLayout()
+
+        # α row
+        alpha_row = QHBoxLayout()
+        alpha_row.addWidget(QLabel("α"))
+
+        self.alphaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.alphaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.alphaSlider.setRange(1, 500)
+        self.alphaSlider.setValue(50)            # ← put this back!
+        alpha_row.addWidget(self.alphaSlider, 1)
+
+        self.alphaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
+        )
+        self.alphaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        alpha_row.addWidget(self.alphaSpin, 0)
+
+        alpha_beta_group.addLayout(alpha_row)
+
+        # β row
+        beta_row = QHBoxLayout()
+        beta_row.addWidget(QLabel("β"))
+
+        self.betaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.betaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.betaSlider.setRange(1, 500)
+        self.betaSlider.setValue(50)             # ← and this back
+        beta_row.addWidget(self.betaSlider, 1)
+
+        self.betaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.02, parent=self
+        )
+        self.betaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        beta_row.addWidget(self.betaSpin, 0)
+
+        alpha_beta_group.addLayout(beta_row)
+
+        vbox.addLayout(alpha_beta_group)
+
+        # ——— γ + help row —————————————————————
+        gamma_row = QHBoxLayout()
+
+        gamma_row.addWidget(QLabel("γ"))
+
+        self.gammaSlider = QSlider(Qt.Orientation.Horizontal)
+        self.gammaSlider.setRange(1, 500)
+        self.gammaSlider.setValue(100)                              # keep your default
+        # give the slider room to expand
+        self.gammaSlider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        gamma_row.addWidget(self.gammaSlider, 1)                    # stretch factor 1
+
+        self.gammaSpin = CustomDoubleSpinBox(
+            minimum=0.01, maximum=10.0, initial=1.0, step=0.01, parent=self
+        )
+        self.gammaSpin.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        gamma_row.addWidget(self.gammaSpin, 0)                       # no stretch
+
+        # help button
+        self.ghsHelpBtn = QToolButton(self)
+        self.ghsHelpBtn.setText("?")
+        self.ghsHelpBtn.setToolTip("GHS instructions")
+        self.ghsHelpBtn.setFixedSize(20, 20)
+        self.ghsHelpBtn.clicked.connect(self.showGhsHelp)
+        gamma_row.addWidget(self.ghsHelpBtn, 0)
+
+        vbox.addLayout(gamma_row)
+
+
+        # ——— wiring ————————————————————————
+        # α
+        def _onAlphaSlider(v):
+            val = v / 50.0
+            self.alphaSpin.blockSignals(True)
+            self.alphaSpin.setValue(val)
+            self.alphaSpin.blockSignals(False)
+            self.ghsParams["α"] = val
+            self.updateGhsCurve()
+        self.alphaSlider.valueChanged.connect(_onAlphaSlider)
+        self.alphaSpin.valueChanged.connect(lambda v: self.alphaSlider.setValue(int(v * 50)))
+
+        # β
+        def _onBetaSlider(v):
+            val = v / 50.0
+            self.betaSpin.blockSignals(True)
+            self.betaSpin.setValue(val)
+            self.betaSpin.blockSignals(False)
+            self.ghsParams["β"] = val
+            self.updateGhsCurve()
+        self.betaSlider.valueChanged.connect(_onBetaSlider)
+        self.betaSpin.valueChanged.connect(lambda v: self.betaSlider.setValue(int(v * 50)))
+
+        # γ
+        def _onGammaSlider(v):
+            val = v / 100.0
+            self.gammaSpin.blockSignals(True)
+            self.gammaSpin.setValue(val)
+            self.gammaSpin.blockSignals(False)
+            self.ghsParams["γ"] = val
+            self.updateGhsCurve()
+        self.gammaSlider.valueChanged.connect(_onGammaSlider)
+        self.gammaSpin.valueChanged.connect(lambda v: self.gammaSlider.setValue(int(v * 100)))
+
+
+        # ─── low‐light protection LP ───────────────────────────
+        lp_row = QHBoxLayout()
+        self.lpSlider = QSlider(Qt.Orientation.Horizontal)
+        self.lpSlider.setRange(0, 360)
+        self.lpSlider.setValue(0)
+        self.lpLabel = QLabel("LP:0.00")
+        lp_row.addWidget(QLabel("LP"))
+        lp_row.addWidget(self.lpSlider)
+        lp_row.addWidget(self.lpLabel)
+        vbox.addLayout(lp_row)
+        self.lpSlider.valueChanged.connect(self.updateGhsCurve)
+
+        # ─── high‐light protection HP ──────────────────────────
+        hp_row = QHBoxLayout()
+        self.hpSlider = QSlider(Qt.Orientation.Horizontal)
+        self.hpSlider.setRange(0, 360)
+        self.hpSlider.setValue(0)
+        self.hpLabel = QLabel("HP:0.00")
+        hp_row.addWidget(QLabel("HP"))
+        hp_row.addWidget(self.hpSlider)
+        hp_row.addWidget(self.hpLabel)
+        vbox.addLayout(hp_row)
+        self.hpSlider.valueChanged.connect(self.updateGhsCurve)
 
         left_layout.addWidget(self.ghsControls)
         self.ghsControls.hide()
-
-        # ——— GHS instructions ———
-        self.ghsInstructions = QLabel(self)
-        self.ghsInstructions.setWordWrap(True)
-        self.ghsInstructions.setStyleSheet("color: gray; font-style: italic;")
-        self.ghsInstructions.setText(
-            "α controls the main S-curve shape.\n"
-            "β controls the slope at the inflection point.\n"
-            "γ adjusts overall brightness.\n"
-            "Ctrl-click image, curve grid or histogram to set inflection."
-        )
-        self.ghsInstructions.hide()
-        left_layout.addWidget(self.ghsInstructions)
+        left_layout.addStretch(1)
 
         # Traditional-mode Instructions
         self.tradInstructions = QLabel(self)
@@ -34908,6 +46998,7 @@ class FullCurvesTab(QWidget):
         )
         self.tradInstructions.show()
         left_layout.addWidget(self.tradInstructions)
+        left_layout.addStretch(1)
 
         # ——— Apply/Undo/Reset ———
         button_layout = QHBoxLayout()
@@ -34933,20 +47024,14 @@ class FullCurvesTab(QWidget):
         self.loadCurveBtn.clicked.connect(self.loadCurve)
         saveloadbutton_layout.addWidget(self.loadCurveBtn)
         left_layout.addLayout(saveloadbutton_layout)
-
-        # spinner & spacer & footer
+        # -------- Spinner Label --------
         self.spinnerLabel = QLabel(self)
+        self.spinnerLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spinnerMovie = QMovie("spinner.gif")
+        self.spinnerLabel.setMovie(self.spinnerMovie)
         self.spinnerLabel.hide()
         left_layout.addWidget(self.spinnerLabel)
-        left_layout.addSpacerItem(QSpacerItem(20,40,QSizePolicy.Policy.Minimum,QSizePolicy.Policy.Expanding))
-        footer_label = QLabel(
-            "Written by Franklin Marek<br>"
-            "<a href='http://www.setiastro.com'>www.setiastro.com</a>"
-        )
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size:10px;")
-        left_layout.addWidget(footer_label)
+
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -34985,7 +47070,6 @@ class FullCurvesTab(QWidget):
         self.scrollArea.setWidget(self.imageLabel)
         self.scrollArea.setMinimumSize(400, 400)
         self.scrollArea.setWidgetResizable(True)
-        self.imageLabel.mouseMoved.connect(self.handleImageMouseMove)
 
         right_layout.addWidget(self.scrollArea)
 
@@ -35012,11 +47096,47 @@ class FullCurvesTab(QWidget):
         self.spinnerLabel.hide()
         self.spinnerMovie.stop()
 
+    def showGhsHelp(self):
+        QMessageBox.information(
+            self,
+            "Universal Hyperbolic (GHS) Help",
+            "α controls the main S-curve shape.\n"
+            "β controls the slope at the inflection point.\n"
+            "γ adjusts overall brightness.\n"
+            "LP/HP blend into shadows/highlights.\n"
+            "Ctrl-click image, curve grid or histogram to set inflection.\n\n"
+            "Use the channel dropdown to select which channel to stretch."
+        )
+
+    def _onAlphaChanged(self, value: float):
+        # called whenever α spinbox changes
+        self.ghsParams["α"] = value
+        self.updateGhsCurve()
+
+    def _onBetaChanged(self, value: float):
+        # called whenever β spinbox changes
+        self.ghsParams["β"] = value
+        self.updateGhsCurve()
+
+    def _onGammaChanged(self, value: float):
+        # called whenever γ spinbox changes
+        self.ghsParams["γ"] = value
+        self.updateGhsCurve()
+
+    #def showEvent(self, e):
+    #    super().showEvent(e)
+    #    self.curveDialog.show()
+
+    #def hideEvent(self, e):
+    #    super().hideEvent(e)
+    #    self.curveDialog.hide()
+
+
     def onStretchTypeChanged(self, btn, checked):
         if not checked:
             return
 
-        is_ghs = (btn.text() == "Generalized Hyperbolic")
+        is_ghs = (btn.text() == "Universal Hyperbolic")
 
         # Show / hide the curve-mode UI vs GHS UI
         self.curveModeLabel.setVisible(not is_ghs)
@@ -35025,7 +47145,6 @@ class FullCurvesTab(QWidget):
         self.curveEditor.setInteractive(not is_ghs)
 
         self.ghsControls.setVisible(is_ghs)
-        self.ghsInstructions.setVisible(is_ghs)
 
         self.tradInstructions.setVisible(not is_ghs)
 
@@ -35035,6 +47154,85 @@ class FullCurvesTab(QWidget):
             self.curveEditor.setControlHandles(pts)
         else:
             self.curveEditor.initCurve()
+
+    # ——— handlers for α/β/γ ———
+    def _onAlphaSliderChanged(self, v):
+        val = v / 50.0
+        self.alphaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+    def _onAlphaEditFinished(self):
+        # replace any comma -> dot
+        txt = self.alphaEdit.text().replace(",", ".")
+        try:
+            v = float(txt)
+        except ValueError:
+            return
+
+        # clamp and sync slider
+        v = max(0.01, min(v, 10.0))
+        self.alphaEdit.setText(f"{v:.2f}")
+        self.alphaSlider.setValue(int(v * 50))
+        self.updateGhsCurve()
+
+    def _onBetaSliderChanged(self, v):
+        val = v / 50.0
+        self.betaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+
+    def _onBetaEditFinished(self):
+        txt = self.betaEdit.text().replace(",", ".")
+        try:
+            v = float(txt)
+        except ValueError:
+            return
+        v = max(0.01, min(v, 10.0))
+        self.betaEdit.setText(f"{v:.2f}")
+        self.betaSlider.setValue(int(v * 50))
+        self.updateGhsCurve()
+
+    def _onGammaSliderChanged(self, v):
+        val = max(0.01, v / 100.0)
+        self.gammaEdit.setText(f"{val:.2f}")
+        self.updateGhsCurve()
+
+    def _onGammaEditFinished(self):
+        txt = self.gammaEdit.text().replace(",", ".")
+        try:
+            v = float(txt)
+        except ValueError:
+            return
+        v = max(0.01, v)
+        self.gammaEdit.setText(f"{v:.2f}")
+        self.gammaSlider.setValue(int(v * 100))
+        self.updateGhsCurve()
+
+    def _onGhsChannelChanged(self, ch_name):
+        self.currentGhsChannel = ch_name
+        if self.stretchTypeGroup.checkedButton().text() != "Universal Hyperbolic":
+            return
+
+        # clear any pivot line if you like
+        self.curveEditor.clearSymmetryLine()
+
+        # fetch and re-overlay the *same* curve
+        lut = self.curveEditor.get8bitLUT()
+
+        # recolor the spline
+        color_map = {
+            "K (Brightness)": Qt.GlobalColor.white,
+            "R":               Qt.GlobalColor.red,
+            "G":               Qt.GlobalColor.green,
+            "B":               Qt.GlobalColor.blue,
+        }
+        pen = QPen(color_map[ch_name])
+        pen.setWidth(3)
+        if getattr(self.curveEditor, "curve_item", None):
+            self.curveEditor.curve_item.setPen(pen)
+
+        # re-apply that LUT in the preview
+        self.updatePreviewLUT(lut, self.curve_mode, ch_name)
 
     def openHistogram(self):
         # 1) If we already have one open, just raise it
@@ -35066,7 +47264,6 @@ class FullCurvesTab(QWidget):
                 return
             if new_img.ndim == 2:
                 new_img = np.stack([new_img]*3, axis=-1)
-            self._hist_dialog.updateHistogram(new_img)
 
         self.image_manager.image_changed.connect(_update_hist)
 
@@ -35089,64 +47286,89 @@ class FullCurvesTab(QWidget):
         return [(x*360, (1-y)*360) for x,y in zip(xs, ys)]
 
     def updateGhsCurve(self):
-        # read sliders
-        α = self.alphaSlider.value() / 50.0
-        β = self.betaSlider.value() / 50.0
-        G = max(0.01, self.gammaSlider.value() / 100.0)
-        self.gammaLabel.setText(f"{G:.2f}")
-        self.alphaLabel.setText(f"{α:.2f}")
-        self.betaLabel .setText(f"{β:.2f}")
+        # ─── read sliders ────────────────────────────────────────────
+        α = self.ghsParams["α"]
+        β = self.ghsParams["β"]
+        G = self.ghsParams["γ"]
+
+        LP = self.lpSlider.value()      / 360.0         # low protect [0…1]
+        HP = self.hpSlider.value()      / 360.0         # high protect[0…1]
+        SP = 0.5 if self.ghs_sym_pt is None else self.ghs_sym_pt
+
+        self.lpLabel   .setText(f"LP:{LP:.2f}")
+        self.hpLabel   .setText(f"HP:{HP:.2f}")
 
         cps = self.curveEditor.control_points
         N   = len(cps)
         if N < 2:
             return
 
-        # pivot in [0..1]
-        p = 0.5 if self.ghs_sym_pt is None else float(self.ghs_sym_pt)
-
-        # uniform samples
+        # ─── sample domain ───────────────────────────────────────────
         us = np.linspace(0.0, 1.0, N)
 
-        # raw S‐curve over full [0,1]
-        raw_vs = us**α / (us**α + β*(1.0 - us)**α)
-        raw_vs_right = us**α / (us**α + (1/β)*(1.0 - us)**α)
+        # ─── your α/β S‐curve around midpoint 0.5 ────────────────────
+        raw_vs   = us**α / (us**α + β*(1.0 - us)**α)
+        raw_vs_r = us**α / (us**α + (1/β)*(1.0 - us)**α)
+        mid_l = (0.5**α) / (0.5**α + β*(1.0 - 0.5)**α)
+        mid_r = (0.5**α) / (0.5**α + (1/β)*(1.0 - 0.5)**α)
 
-        # mid‐height at u=0.5
-        mid_raw = (0.5**α) / (0.5**α + β*(1.0 - 0.5)**α)
-        mid_raw_right = (0.5**α) / (0.5**α + (1/β)*(1.0 - 0.5)**α)
-
-        # remap so (0.5,mid_raw) → (p,p)
+        # ─── remap so (0.5,mid) → (SP,SP) ───────────────────────────
         up = np.empty_like(us)
         vp = np.empty_like(us)
+
         left  = us <= 0.5
         right = ~left
 
-        up[left]  =   2*p*us[left]
-        vp[left]  =  raw_vs[left] * (p / mid_raw)
+        up[left]  =   2 * SP * us[left]
+        vp[left]  = raw_vs[left]   * (SP / mid_l)
 
-        up[right] =   p + 2*(1-p)*(us[right] - 0.5)
-        vp[right] =  p + (raw_vs_right[right] - mid_raw_right) * ((1-p)/(1-mid_raw_right))
+        up[right] =   SP + 2*(1 - SP)*(us[right] - 0.5)
+        vp[right] =   SP + (raw_vs_r[right] - mid_r)*((1 - SP)/(1 - mid_r))
 
-        # apply gamma lift across *all* points
-        vp = vp ** (1.0 / G)
+        # ─── PROTECT shadows/highlights by BLENDING ────────────────
+        # instead of hard-clipping, mix toward the identity line:
+        #   LP=0 → no blend (full curve), LP=1 → full identity
+        if LP > 0:
+            mask_left = up <= SP
+            # mix vp toward the identity line vp=up
+            vp[mask_left] = (1 - LP) * vp[mask_left] + LP * up[mask_left]
 
-        # map into scene coords and slide handles
+        if HP > 0:
+            mask_right = up >= SP
+            vp[mask_right] = (1 - HP) * vp[mask_right] + HP * up[mask_right]
+
+        # ─── LOCAL FOCUS AROUND SP (b) ──────────────────────────────
+
+        # ─── GAMMA LIFT ──────────────────────────────────────────────
+        if abs(G - 1.0) > 1e-6:
+            vp = vp ** (1.0 / G)
+
+        # ─── write back into your handles ────────────────────────────
         pts = [(u * 360.0, (1.0 - v) * 360.0) for u, v in zip(up, vp)]
         for handle, (x, y) in zip(cps, pts):
             handle.setPos(x, y)
 
-        # redraw
-        self.curveEditor.updateCurve()
-
-
+        # ─── trigger redraw ──────────────────────────────────────────
+        color_map = {
+            "K (Brightness)": Qt.GlobalColor.white,
+            "R":               Qt.GlobalColor.red,
+            "G":               Qt.GlobalColor.green,
+            "B":               Qt.GlobalColor.blue,
+        }
+        pen = QPen(color_map[self.currentGhsChannel])
+        pen.setWidth(3)
+        if getattr(self.curveEditor, "curve_item", None):
+            self.curveEditor.curve_item.setPen(pen)
+        # ─── finally update the real-time preview for THIS channel ────
+        lut = self.curveEditor.get8bitLUT()
+        self.updatePreviewLUT(lut, self.curve_mode, self.currentGhsChannel)
 
 
     def onCurveSymmetryPoint(self, u, v):
         # u is the brightness fraction, v == u on the true inflection point
         self.ghs_sym_pt = u
         # update your status label however you like:
-        self.statusLabel.setText(f"Inflection @ K={u:.3f}")
+        self.curveDialog.updateStatusMessage(f"Inflection @ K={u:.3f}")
         # regenerate the GHS curve around this pivot:
         self.updateGhsCurve()
 
@@ -35159,7 +47381,7 @@ class FullCurvesTab(QWidget):
         # redraw the GHS handles around the default pivot=0.5
         # regenerate with pivot=0.5
         self.updateGhsCurve()
-        self.statusLabel.setText("Symmetry reset to center (p=0.5)")
+        self.curveDialog.updateStatusMessage("Symmetry reset to center (p=0.5)")
 
     def saveCurve(self):
         fname, _ = QFileDialog.getSaveFileName(self, "Save Curve As","", "SASC Curve (*.sasc)")
@@ -35224,13 +47446,25 @@ class FullCurvesTab(QWidget):
         return x, y, w, h
 
 
-    def updatePreviewLUT(self, lut, curve_mode):
+    def updatePreviewLUT(self, lut, curve_mode, ghschannel=None):
         """Apply the 8-bit LUT to the preview image for real-time updates on slot 0."""
 
         # Access slot0 (recombined image) from ImageManager
         if self.image is None:
-            print("No preview image loaded.")
-            QMessageBox.warning(self, "No Image", "Preview image is not loaded.")
+            return
+
+        if ghschannel is None:
+            ghschannel = self.currentGhsChannel
+
+        if (self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic"
+                and ghschannel in ("R","G","B")):
+            # grab the existing LUT (which was built for K)
+            # and apply it just to the selected channel:
+            idx = {"R":0, "G":1, "B":2}[ghschannel]
+            img8 = (self.image*255).astype(np.uint8)
+            out = img8.copy()
+            out[...,idx] = lut[out[...,idx]]
+            self.show_image(out.astype(np.float32)/255.0)
             return
 
         try:
@@ -35588,52 +47822,34 @@ class FullCurvesTab(QWidget):
                 return mask
         return None
 
-    def handleImageMouseMove(self, x, y):
-        if self.image is None:
-            return
-
-        h, w = self.image.shape[:2]
-        img_x = int(x / self.zoom_factor)
-        img_y = int(y / self.zoom_factor)
-
-        if 0 <= img_x < w and 0 <= img_y < h:
-            pixel_value = self.image[img_y, img_x]
-            if self.image.ndim == 3:
-                # RGB pixel: assuming pixel values are in 0-1
-                r, g, b = pixel_value
-                text = f"X:{img_x} Y:{img_y} R:{r:.3f} G:{g:.3f} B:{b:.3f}"
-                self.curveEditor.updateValueLines(r, g, b, grayscale=False)
-            else:
-                # Grayscale pixel: value is in 0-1
-                text = f"X:{img_x} Y:{img_y} Val:{pixel_value:.3f}"
-                # Pass the grayscale value for all channels and set grayscale flag to True
-                self.curveEditor.updateValueLines(pixel_value, pixel_value, pixel_value, grayscale=True)
-            self.statusLabel.setText(text)
-
-
-
     def startProcessing(self):
         if self.original_image is None:
-            QMessageBox.warning(self, "Warning", "No image loaded to apply curve.")
+            
             return
 
-        curve_mode = self.curveModeGroup.checkedButton().text()
-        curve_func = self.curveEditor.getCurveFunction()
-
-
+        is_ghs = (self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic")
         source_image = self.original_image.copy()
 
-        # Push the current image to the undo stack before modifying
-        self.pushUndo(self.original_image.copy())
-
-        # Show the spinner before starting processing
+        # Push onto undo stack
+        self.pushUndo(source_image.copy())
         self.showSpinner()
 
-        # Initialize and start the processing thread
-        self.processing_thread = FullCurvesProcessingThread(source_image, curve_mode, curve_func)
+        curve_func = self.curveEditor.getCurveFunction()
+        # for GHS mode, the “curve_mode” is just which channel to apply:
+        if is_ghs:
+            curve_mode = self.currentGhsChannel  # “K (Brightness)”, “R”, “G” or “B”
+        else:
+            curve_mode = self.curveModeGroup.checkedButton().text()
+
+        self.processing_thread = FullCurvesProcessingThread(
+            source_image,
+            curve_mode=curve_mode,
+            curve_func=curve_func
+        )
+ 
         self.processing_thread.result_ready.connect(self.finishProcessing)
         self.processing_thread.start()
-        print("Started FullCurvesProcessingThread.")
+        print("Started processing thread.")
 
     def finishProcessing(self, adjusted_image):
         self.hideSpinner()
@@ -35653,8 +47869,12 @@ class FullCurvesTab(QWidget):
             if mask.shape[:2] != self.original_image.shape[:2]:
                 QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
                 return
-            if mask.ndim == 2:
+            if mask.ndim == 2 and self.original_image.ndim == 3:
+                # RGB image, need mask shape (H, W, 1) or (H, W, 3)
                 mask = mask[..., None]
+            elif mask.ndim == 3 and self.original_image.ndim == 2:
+                # mono image, but mask is (H, W, 1) — squeeze to (H, W)
+                mask = np.squeeze(mask, axis=2)
             if self.original_image.ndim == 3 and mask.shape[2] == 1:
                 mask = np.repeat(mask, self.original_image.shape[2], axis=2)
 
@@ -35669,30 +47889,12 @@ class FullCurvesTab(QWidget):
         self.image          = self.preview_image.copy()
         self.show_image(self.image)
 
-        # — Rebuild curve editor state instead of wiping it —
-        is_ghs = (self.stretchTypeGroup.checkedButton().text()
-                == "Generalized Hyperbolic")
-        if is_ghs:
-            # current α, β (and γ if you add it)
-            α = self.alphaSlider.value() / 50.0
-            β = self.betaSlider.value() / 50.0
-
-            # how many handles do we want? preserve existing count or default 20
-            n = len(self.curveEditor.control_points) or 20
-            # rebuild the *raw* handles at the correct α/β
-            pts = self.generate_ghs_control_points(α, β, n=n)
-            self.curveEditor.setControlHandles(pts)
-
-            # now *always* run the GHS remapping (γ + pivot) so the handles
-            # end up exactly where the preview curve was
-            self.curveEditor.clearSymmetryLine()   # clear any old line
-            if self.ghs_sym_pt is not None:
-                # restore the yellow pivot line
-                self.curveEditor.setSymmetryPoint(self.ghs_sym_pt*360.0, 0)
-            # this will apply the γ-lift + remap around p
-            self.updateGhsCurve()
+        # — Reset the GHS UI when in GHS mode, otherwise re-init a Bézier curve —
+        if self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic":
+            # This will zero out α/β/γ/LP/HP, clear the pivot line, 
+            # and rebuild the default 20-point GHS handles.
+            self.resetCurve()
         else:
-            # Traditional Bézier → back to default
             self.curveEditor.initCurve()
 
         # finally push it back into ImageManager
@@ -35755,14 +47957,19 @@ class FullCurvesTab(QWidget):
         and redraws exactly 20 GHS handles.
         """
         try:
-            is_ghs = self.stretchTypeGroup.checkedButton().text() == "Generalized Hyperbolic"
+            is_ghs = self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic"
 
             if is_ghs:
-                # 1) reset sliders & labels
+                # 1) reset α/β/γ sliders & labels
                 self.alphaSlider.setValue(50)
                 self.betaSlider .setValue(50)
-                self.alphaLabel .setText("1.00")
-                self.betaLabel  .setText("1.00")
+                self.gammaSlider.setValue(100)
+
+                # 2) reset LP/HP sliders & labels
+                self.lpSlider.setValue(0)
+                self.hpSlider.setValue(0)
+                self.lpLabel.setText("LP:0.00")
+                self.hpLabel.setText("HP:0.00")
 
                 # 2) clear any inflection pivot
                 self.ghs_sym_pt = None
@@ -35787,6 +47994,8 @@ class FullCurvesTab(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to reset curve: {e}")
 
     def eventFilter(self, source, event):
+        if self.image is None:
+            return super().eventFilter(source, event)        
         # ——— 1) Histogram Ctrl-click to set inflection ———
         hist = getattr(self, "_hist_dialog", None)
         if ( hist is not None
@@ -35812,7 +48021,7 @@ class FullCurvesTab(QWidget):
             # store pivot and redraw GHS
             self.ghs_sym_pt = k
             self.curveEditor.setSymmetryPoint(k*360.0, 0)
-            self.statusLabel.setText(f"Symmetry K={k:.4f}")
+            self.curveDialog.updateStatusMessage(f"Symmetry K={k:.4f}")
             self.updateGhsCurve()
             return True
 
@@ -35834,7 +48043,7 @@ class FullCurvesTab(QWidget):
                     k = float(np.mean(pv))
                     self.ghs_sym_pt = k
                     self.curveEditor.setSymmetryPoint(k * 360.0, 0)
-                    self.statusLabel.setText(f"Symmetry at K={k:.3f}")
+                    self.curveDialog.updateStatusMessage(f"Symmetry at K={k:.3f}")
                     self.updateGhsCurve()
                     return True
 
@@ -35856,7 +48065,7 @@ class FullCurvesTab(QWidget):
                     avg = float(np.mean(pv))
                     new_x, new_y = avg * 360.0, (1 - avg) * 360.0
                     self.curveEditor.addControlPoint(new_x, new_y)
-                    self.statusLabel.setText(f"Added control point @ X:{new_x:.1f} Y:{new_y:.1f}")
+                    self.curveDialog.updateStatusMessage(f"Added control point @ X:{new_x:.1f} Y:{new_y:.1f}")
                     return True
 
         # ——— 4) Fall back to pan/drag ———
@@ -35875,7 +48084,48 @@ class FullCurvesTab(QWidget):
             )
             self.last_pos = event.pos()
 
+        # ——— 5) Hover-move for pixel readout ———
+        if source is self.scrollArea.viewport() and event.type() == QEvent.Type.MouseMove:
+            # 1) get viewport coords
+            vp_pt = event.pos()
+            # 2) map to label coords
+            lbl_pt = self.imageLabel.mapFrom(self.scrollArea.viewport(), vp_pt)
+
+            pix = self.imageLabel.pixmap()
+            if pix is None:
+                return super().eventFilter(source, event)
+
+            pw, ph = pix.width(), pix.height()
+            iw, ih = self.image.shape[1], self.image.shape[0]
+
+            x, y = lbl_pt.x(), lbl_pt.y()
+            if not (0 <= x < pw and 0 <= y < ph):
+                return super().eventFilter(source, event)
+
+            # 3) un-scale into image coords
+            img_x = int(x * iw / pw)
+            img_y = int(y * ih / ph)
+
+            pv = self.image[img_y, img_x]
+            if self.image.ndim == 3:
+                r, g, b = pv
+                self.curveEditor.updateValueLines(r, g, b, grayscale=False)
+                self.curveDialog.updatePixelInfo(img_x, img_y, r, g, b, is_mono=False)
+
+                self.curveDialog.updateStatusMessage("")  # clear older messages
+            else:
+                v = float(pv)
+                self.curveEditor.updateValueLines(v, v, v, grayscale=True)
+                # fallback r=g=b=v for grayscale
+                self.curveDialog.updatePixelInfo(img_x, img_y, v, v, v, is_mono=True)
+                self.curveDialog.updateStatusMessage("")  # clear older messages
+
+
+            return True
+
         return super().eventFilter(source, event)
+
+
 
 
     def refresh(self):
@@ -35920,7 +48170,7 @@ class FullCurvesTab(QWidget):
             
             if not isinstance(self.loaded_image_path, str):
                 self.loaded_image_path = ""
-            self.fileLabel.setText(self.loaded_image_path)
+            #self.fileLabel.setText(self.loaded_image_path)
             
             # Update the UI elements (buttons, etc.)
             self.show_image(image)
@@ -35986,18 +48236,26 @@ class FullCurvesTab(QWidget):
                 return
 
             pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(
-                pixmap.size() * self.zoom_factor,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.imageLabel.setPixmap(scaled_pixmap)
+            # 2) keep the un-zoomed copy
+            self._base_pixmap = pixmap
+
+            # 3) actually display it scaled to current zoom
+            self._update_displayed_pixmap()
 
         except Exception as e:
             print(f"Error displaying image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
 
 
+    def _update_displayed_pixmap(self):
+        """Take _base_pixmap × zoom_factor → self.imageLabel."""
+        if self._base_pixmap is None:
+            return
+        sz = self._base_pixmap.size() * self.zoom_factor
+        scaled = self._base_pixmap.scaled(
+            sz, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        self.imageLabel.setPixmap(scaled)
 
     def update_image_display(self):
         if self.image is not None:
@@ -36036,76 +48294,49 @@ class FullCurvesTab(QWidget):
         event.accept()
 
     def zoom_in(self):
-        """
-        Zoom into the image by increasing the zoom factor.
-        """
-        if self.image is not None:
-            self.zoom_factor *= 1.2
-            self.show_image(self.image)
-            zoom_pct = self.zoom_factor * 100
-            print(f"Zoomed in. New zoom: {zoom_pct:.0f}%")
+        """Zoom into the image by increasing zoom_factor and re‐drawing."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to zoom in.")
+            return
 
-            # Show tooltip at the center of the scrollArea’s viewport
-            vp = self.scrollArea.viewport()
-            center_local = vp.rect().center()                      # QPoint in viewport coords
-            center_global = vp.mapToGlobal(center_local)           # QPoint in screen coords
-            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+        self.zoom_factor *= 1.2
+        self._update_displayed_pixmap()
 
-        else:
-            print("No stretched image to zoom in.")
-            QMessageBox.warning(self, "Warning", "No stretched image to zoom in.")
-
+        pct = int(self.zoom_factor * 100)
+        vp = self.scrollArea.viewport()
+        global_pt = vp.mapToGlobal(vp.rect().center())
+        QToolTip.showText(global_pt, f"{pct}%")
+        print(f"Zoomed in → {pct}%")
 
     def zoom_out(self):
-        """
-        Zoom out of the image by decreasing the zoom factor.
-        """
-        if self.image is not None:
-            self.zoom_factor /= 1.2
-            self.show_image(self.image)
-            zoom_pct = self.zoom_factor * 100
-            print(f"Zoomed out. New zoom: {zoom_pct:.0f}%")
+        """Zoom out of the image by decreasing zoom_factor and re‐drawing."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to zoom out.")
+            return
 
-            # Show tooltip at the center of the scrollArea’s viewport
-            vp = self.scrollArea.viewport()
-            center_local = vp.rect().center()
-            center_global = vp.mapToGlobal(center_local)
-            QToolTip.showText(center_global, f"{zoom_pct:.0f}%")
+        self.zoom_factor /= 1.2
+        self._update_displayed_pixmap()
 
-        else:
-            print("No stretched image to zoom out.")
-            QMessageBox.warning(self, "Warning", "No stretched image to zoom out.")
+        pct = int(self.zoom_factor * 100)
+        vp = self.scrollArea.viewport()
+        global_pt = vp.mapToGlobal(vp.rect().center())
+        QToolTip.showText(global_pt, f"{pct}%")
+        print(f"Zoomed out → {pct}%")
 
     def fit_to_preview(self):
-        """Adjust the zoom factor so that the image's width fits within the preview area's width."""
-        if self.image is not None:
-            # Get the width of the scroll area's viewport (preview area)
-            preview_width = self.scrollArea.viewport().width()
-            
-            # Get the original image width from the numpy array
-            # Assuming self.image has shape (height, width, channels) or (height, width) for grayscale
-            if self.image.ndim == 3:
-                image_width = self.image.shape[1]
-            elif self.image.ndim == 2:
-                image_width = self.image.shape[1]
-            else:
-                print("Unexpected image dimensions!")
-                QMessageBox.warning(self, "Warning", "Cannot fit image to preview due to unexpected dimensions.")
-                return
-            
-            # Calculate the required zoom factor to fit the image's width into the preview area
-            new_zoom_factor = preview_width / image_width
-            
-            # Update the zoom factor without enforcing any limits
-            self.zoom_factor = new_zoom_factor
-            
-            # Apply the new zoom factor to update the display
-            self.show_image(self.image)
-            
-            print(f"Fit to preview applied. New zoom factor: {self.zoom_factor:.2f}")
-        else:
-            print("No image loaded. Cannot fit to preview.")
-            QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
+        """Set zoom_factor so the image width exactly fits the viewport."""
+        if not hasattr(self, "_base_pixmap") or self._base_pixmap is None:
+            QMessageBox.warning(self, "Warning", "Nothing to fit.")
+            return
+
+        vpw = self.scrollArea.viewport().width()
+        imgw = self._base_pixmap.width()
+        if imgw == 0:
+            return
+
+        self.zoom_factor = vpw / imgw
+        self._update_displayed_pixmap()
+        print(f"Fit to preview → zoom_factor={self.zoom_factor:.2f}")
 
     def refresh_display(self):
         """
@@ -36487,8 +48718,6 @@ class CurveEditor(QGraphicsView):
         self.preview_callback = callback
 
     def get8bitLUT(self):
-        import numpy as np
-
         # 8-bit LUT size
         lut_size = 256
 
@@ -36604,8 +48833,6 @@ class CurveEditor(QGraphicsView):
         return [(pt.x(), pt.y()) for pt in self.curve_points]
 
     def getLUT(self):
-        import numpy as np
-
         # 16-bit LUT size
         lut_size = 65536
 
@@ -36753,12 +48980,12 @@ class FullCurvesProcessingThread(QThread):
         self.curve_func = curve_func
 
     def run(self):
+        print("Full curves thread started")
         adjusted_image = self.process_curve(self.image, self.curve_mode, self.curve_func)
         self.result_ready.emit(adjusted_image)
 
     @staticmethod
     def process_curve(image, curve_mode, curve_func):
-        import numpy as np
 
         if image is None or curve_func is None:
             return image
@@ -37039,10 +49266,10 @@ class FrequencySeperationTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
 
         # 1) Load image
-        self.loadButton = QPushButton("Load Image", self)
-        self.loadButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
-        self.loadButton.clicked.connect(self.selectImage)
-        left_layout.addWidget(self.loadButton)
+        #self.loadButton = QPushButton("Load Image", self)
+        #self.loadButton.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
+        #self.loadButton.clicked.connect(self.selectImage)
+        #left_layout.addWidget(self.loadButton)
 
         self.fileLabel = QLabel("", self)
         left_layout.addWidget(self.fileLabel)
@@ -37208,7 +49435,7 @@ class FrequencySeperationTab(QWidget):
         left_layout.addWidget(self.spinnerLabel)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # -----------------------------
@@ -38450,12 +50677,6 @@ class PerfectPalettePickerTab(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_widget.setFixedWidth(300)
 
-        # Title label
-        title_label = QLabel("Perfect Palette Picker", self)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setFont(QFont("Helvetica", 14, QFont.Weight.Bold))
-        left_layout.addWidget(title_label)
-
         # Instruction label
         instruction_label = QLabel(self)
         instruction_label.setText(
@@ -38473,7 +50694,7 @@ class PerfectPalettePickerTab(QWidget):
         instruction_label.setStyleSheet(
             "font-size: 8pt; padding: 10px;"
         )
-        instruction_label.setFixedHeight(200)
+        #instruction_label.setFixedHeight(200)
         left_layout.addWidget(instruction_label)
 
         # "Linear Input Data" checkbox
@@ -38533,30 +50754,20 @@ class PerfectPalettePickerTab(QWidget):
         left_layout.addWidget(create_palettes_button)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         self.push_palette_button = QPushButton("Push Final Palette for Further Processing")
         self.push_palette_button.clicked.connect(self.push_final_palette_to_image_manager)
         left_layout.addWidget(self.push_palette_button)
 
         # Spacer
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Add a "Clear All Images" button
         self.clear_all_button = QPushButton("Clear All Images", self)
         self.clear_all_button.clicked.connect(self.clear_all_images)
         left_layout.addWidget(self.clear_all_button)
 
-
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setFont(QFont("Helvetica", 8))
-        left_layout.addWidget(footer_label)
 
         # Add the left widget to the main layout
         main_layout.addWidget(left_widget)
@@ -38590,7 +50801,7 @@ class PerfectPalettePickerTab(QWidget):
         self.image_label.setMouseTracking(True)
 
         self.scroll_area.setWidget(self.image_label)
-        self.scroll_area.setMinimumSize(400, 250)
+        self.scroll_area.setMinimumHeight(100)
         right_layout.addWidget(self.scroll_area, stretch=1)
 
 
@@ -38795,64 +51006,61 @@ class PerfectPalettePickerTab(QWidget):
             print(f"An unexpected error occurred while loading {image_type} image: {e}")
 
     def load_image_from_slot(self, image_type):
+        """
+        Prompt the user to pick one of the ImageManager’s slots (using
+        custom names if defined) and load that image.
+        """
         if not self.image_manager:
             QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
-            print("ImageManager is not initialized. Cannot load image from slot.")
             return None
 
-        # Build the list using the parent's slot_names dictionary.
-        available_slots = []
-        # Access parent's slot_names dictionary.
-        slot_names = self.parent_window.slot_names if self.parent_window else {}
-        for i in range(self.image_manager.max_slots):
-            slot_name = slot_names.get(i, f"Slot {i+1}")
-            available_slots.append(slot_name)
+        # Look up the main window’s custom slot names
+        parent = self.parent_window or self.window()
+        slot_names = getattr(parent, "slot_names", {})
 
-        slot_choice, ok = QInputDialog.getItem(
+        # Build the list of display names (zero-based)
+        display_names = [
+            slot_names.get(i, f"Slot {i}")
+            for i in range(self.image_manager.max_slots)
+        ]
+
+        # Ask the user to choose one
+        choice, ok = QInputDialog.getItem(
             self,
-            f"Select Slot for {image_type} Image",
+            f"Select Slot for {image_type}",
             "Choose a slot:",
-            available_slots,
+            display_names,
             editable=False
         )
-
-        if not ok or not slot_choice:
-            QMessageBox.warning(self, "Cancelled", f"{image_type} image loading cancelled.")
-            print(f"{image_type} image loading cancelled by the user.")
+        if not ok:
             return None
 
-        # Find the slot index that matches the chosen display name.
-        target_slot_num = None
-        for i in range(self.image_manager.max_slots):
-            current_name = slot_names.get(i, f"Slot {i+1}")
-            if current_name == slot_choice:
-                target_slot_num = i
-                break
+        # Map back to the numeric index
+        idx = display_names.index(choice)
 
-        if target_slot_num is None:
-            QMessageBox.critical(self, "Error", f"Invalid slot selection: {slot_choice}")
-            print(f"Error: Could not map slot name '{slot_choice}' to a slot number.")
-            return None
-
-        image = self.image_manager._images.get(target_slot_num, None)
+        # Retrieve the image and metadata
+        image = self.image_manager._images.get(idx)
         if image is None:
-            QMessageBox.warning(self, "Empty Slot", f"{slot_choice} does not contain an image.")
-            print(f"{slot_choice} is empty. Cannot load {image_type} image.")
+            QMessageBox.warning(self, "Empty Slot", f"{choice} is empty.")
             return None
 
-        print(f"{image_type} image selected from {slot_choice}.")
+        metadata = self.image_manager._metadata.get(idx, {})
+        original_header = metadata.get("header", None)
+        bit_depth       = metadata.get("bit_depth", "Unknown")
+        is_mono         = metadata.get("is_mono", False)
+        file_path       = metadata.get("file_path", None)
 
-        # Retrieve metadata.
-        metadata = self.image_manager._metadata.get(target_slot_num, {})
-        original_header = metadata.get('header', None)
-        bit_depth = metadata.get('bit_depth', "Unknown")
-        is_mono = metadata.get('is_mono', False)
-        file_path = metadata.get('file_path', None)
+        # Only collapse multi-channel down to mono for NB slots,
+        # but keep full RGB for OSC1/OSC2
+        if image.ndim == 3 and image_type not in ("OSC1", "OSC2"):
+            # if it's truly grayscale stored in 3 channels, or just NB RGB
+            # we only want a single plane for NB
+            print(f"[DEBUG] {image_type}: collapsing 3-channel image → channel 0 only")
+            image = image[:, :, 0]
+            is_mono = True
 
+        print(f"[DEBUG] {image_type} final shape = {image.shape}, is_mono = {is_mono}")
         return image, original_header, bit_depth, is_mono, file_path
-
-
-
 
     def load_image_from_file(self, image_type):
         """
@@ -38864,32 +51072,36 @@ class PerfectPalettePickerTab(QWidget):
         Returns:
             tuple: (image, original_header, bit_depth, is_mono, file_path) or None on failure.
         """
-
-
         file_filter = "Images (*.png *.tif *.tiff *.fits *.fit *.xisf)"
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             f"Select {image_type} Image File",
             "",
             file_filter
-
         )
-        
         if not file_path:
             QMessageBox.warning(self, "No File Selected", f"No {image_type} image file selected. Operation cancelled.")
             print(f"No {image_type} image file selected.")
             return None
-        
+
         print(f"{image_type} image file selected: {file_path}")
-        
+
         # Load the image using your existing load_image function
         image, original_header, bit_depth, is_mono = load_image(file_path)
         if image is None:
             QMessageBox.critical(self, "Error", f"Failed to load {image_type} image from file.")
             print(f"Failed to load {image_type} image from file: {file_path}")
             return None
-        
+
+        # Only collapse to single‐channel for NB slots; preserve full RGB for OSC1/OSC2
+        if image.ndim == 3 and image_type not in ("OSC1", "OSC2"):
+            print(f"[DEBUG] {image_type}: collapsing 3-channel image → channel 0 only")
+            image = image[:, :, 0]
+            is_mono = True
+
+        print(f"[DEBUG] {image_type} final shape = {image.shape}, is_mono = {is_mono}")
         return image, original_header, bit_depth, is_mono, file_path
+
 
     def get_image_shape(self, image):
         """Returns the shape of the image or None if not set."""
@@ -38909,6 +51121,17 @@ class PerfectPalettePickerTab(QWidget):
 
         print(f"prepare_preview_palettes() => Ha: {have_ha} | OIII: {have_oiii} | SII: {have_sii} | OSC1: {have_osc1} | OSC2: {have_osc2}")
 
+        # ———————————————————————————————————————————————————————
+        # 0) Force all loaded images down to single-channel if they’re 3-channel arrays
+        # ———————————————————————————————————————————————————————
+        def squeeze_to_mono(img):
+            if img is not None and img.ndim == 3:
+                return img[:, :, 0]
+            return img
+
+        self.ha_image   = squeeze_to_mono(self.ha_image)
+        self.oiii_image = squeeze_to_mono(self.oiii_image)
+        self.sii_image  = squeeze_to_mono(self.sii_image)
 
         # 🔹 **NEW: Check for image size mismatches**
         image_shapes = {
@@ -39628,7 +51851,6 @@ class PerfectPalettePickerTab(QWidget):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -40028,17 +52250,11 @@ class NBtoRGBstarsTab(QWidget):
         # **Remove Zoom Buttons from Left Panel (Not present)**
         # No existing zoom buttons to remove in the left panel
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
+        self.clearButton = QPushButton("Clear All Inputs", self)
+        self.clearButton.clicked.connect(self.clearInputs)
+        left_layout.addWidget(self.clearButton)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -40082,6 +52298,42 @@ class NBtoRGBstarsTab(QWidget):
         self.setLayout(main_layout)
         self.scrollArea.viewport().setMouseTracking(True)
         self.scrollArea.viewport().installEventFilter(self)
+
+    def clearInputs(self):
+        # 1) Drop all loaded data
+        self.ha_image = None
+        self.oiii_image = None
+        self.sii_image = None
+        self.osc_image = None
+        self.combined_image = None
+
+        # 2) Clear filenames
+        self.ha_filename = None
+        self.oiii_filename = None
+        self.sii_filename = None
+        self.osc_filename = None
+
+        # 3) Reset headers/metadata
+        self.original_header = None
+        self.bit_depth = "Unknown"
+        self.is_mono = False
+
+        # 4) Reset labels
+        self.haLabel.setText("No Ha image selected")
+        self.oiiiLabel.setText("No OIII image selected")
+        self.siiLabel.setText("No SII image selected")
+        self.oscLabel.setText("No OSC stars image selected")
+        self.fileLabel.clear()
+
+        # 5) Clear preview
+        self.imageLabel.clear()
+        self.original_pixmap = None
+
+        # 6) Reset controls to defaults
+        self.haToOiiRatioSlider.setValue(30)
+        self.starStretchCheckBox.setChecked(True)
+        self.stretchSlider.setValue(500)      # assuming default 5.0 → 500
+        self.zoom_factor = 1.0
 
     def refresh(self):
         if self.image_manager:
@@ -40777,17 +53029,8 @@ class HaloBGonTab(QWidget):
         # zoom_layout.addWidget(self.zoomOutButton)
         # left_layout.addLayout(zoom_layout)
 
-        # Footer
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_layout.addWidget(footer_label)
 
-        left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        #left_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         main_layout.addWidget(left_widget)
 
         # **Create Right Panel Layout**
@@ -41386,8 +53629,9 @@ class HaloProcessingThread(QThread):
 
 
 class ContinuumSubtractTab(QWidget):
-    def __init__(self, image_manager):
-        super().__init__()
+    def __init__(self, image_manager, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
         self.image_manager = image_manager
         self.initUI()
         self._threads = []
@@ -41620,35 +53864,54 @@ class ContinuumSubtractTab(QWidget):
         return image, header, bit_depth, is_mono, path
 
     def loadImageFromSlot(self, channel: str):
+        """
+        Prompt the user to pick one of the ImageManager’s slots (using custom names if defined)
+        and load that image.
+        """
         if not self.image_manager:
-            QMessageBox.critical(self, "Error", "No ImageManager; cannot load from slot.")
+            QMessageBox.critical(self, "Error", "ImageManager is not initialized. Cannot load image from slot.")
             return None
 
-        # build the list of display names
-        slots = []
-        for i in range(self.image_manager.max_slots):
-            name = getattr(self.parent(), "slot_names", {}).get(i, f"Slot {i+1}")
-            slots.append(name)
+        # Look up the main window’s custom slot names
+        main_win = getattr(self, "parent_window", None) or self.window()
+        slot_names = getattr(main_win, "slot_names", {})
 
+        # Build the list of display names (zero-based)
+        display_names = [
+            slot_names.get(i, f"Slot {i}") 
+            for i in range(self.image_manager.max_slots)
+        ]
+
+        # Ask the user to choose one
         choice, ok = QInputDialog.getItem(
-            self, f"Select Slot for {channel}", "Choose slot:", slots, editable=False
+            self,
+            f"Select Slot for {channel}",
+            "Choose a slot:",
+            display_names,
+            0,
+            False
         )
-        if not ok:
+        if not ok or not choice:
             return None
 
-        # map back to index
-        idx = slots.index(choice)
-        img = self.image_manager._images.get(idx, None)
+        # Map back to the numeric index
+        idx = display_names.index(choice)
+
+        # Retrieve the image and metadata
+        img = self.image_manager._images.get(idx)
         if img is None:
             QMessageBox.warning(self, "Empty Slot", f"{choice} is empty.")
             return None
 
         meta = self.image_manager._metadata.get(idx, {})
-        return img, \
-               meta.get("original_header"), \
-               meta.get("bit_depth", "Unknown"), \
-               meta.get("is_mono", False), \
-               meta.get("file_path", None)
+        return (
+            img,
+            meta.get("original_header"),
+            meta.get("bit_depth", "Unknown"),
+            meta.get("is_mono", False),
+            meta.get("file_path", None)
+        )
+
 
     def startContinuumSubtraction(self):
         # — build continuum channels with explicit None checks —
@@ -42099,6 +54362,393 @@ class ContinuumProcessingThread(QThread):
         result_image = red_channel - Q * (green_channel - median_green)
         
         return np.clip(result_image, 0, 1)  # Ensure values stay within [0, 1]
+
+
+class ImageCombineTab(QWidget):
+    def __init__(self, image_manager=None):
+        super().__init__()
+        self.image_manager = image_manager
+        self.zoom_factor = 1.0
+        self.current_pixmap = None
+
+        if self.image_manager:
+            # re-populate slot names whenever images change
+            self.image_manager.image_changed.connect(lambda *a: self.populateSlots())
+
+        self._pan_start = None
+        self._hstart    = 0
+        self._vstart    = 0
+        self.initUI()        
+
+    def initUI(self):
+        layout = QVBoxLayout(self)
+
+        # 1) Source selectors
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Source A:"))
+        self.srcA = QComboBox()
+        src_row.addWidget(self.srcA)
+        src_row.addWidget(QLabel("Source B:"))
+        self.srcB = QComboBox()
+        src_row.addWidget(self.srcB)
+        layout.addLayout(src_row)
+
+        # 2) Blend mode + opacity
+        blend_row = QHBoxLayout()
+        blend_row.addWidget(QLabel("Mode:"))
+        self.blendMode = QComboBox()
+        self.blendMode.addItems([
+            "Average","Add","Subtract","Blend","Multiply","Divide",
+            "Screen","Overlay","Difference"
+        ])
+        blend_row.addWidget(self.blendMode)
+        blend_row.addWidget(QLabel("Opacity:"))
+        self.opacity = QSlider(Qt.Orientation.Horizontal)
+        self.opacity.setRange(0, 100)
+        self.opacity.setValue(100)
+        blend_row.addWidget(self.opacity)
+        layout.addLayout(blend_row)
+
+        # 3) Preview widget
+        # 3) Preview in scroll area
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.imageLabel = ImageLabel(self)            # or your ImagePreviewWidget
+        self.imageLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.scrollArea.setWidget(self.imageLabel)
+        layout.addWidget(self.scrollArea, stretch=1)
+
+        # 6) Zoom buttons
+        zoom_row = QHBoxLayout()
+        zoom_in_btn  = QPushButton("Zoom In ＋")
+        zoom_out_btn = QPushButton("Zoom Out －")
+        fit_btn      = QPushButton("⧉ Fit to Preview")
+        zoom_in_btn.clicked.connect(self.zoom_in)
+        zoom_out_btn.clicked.connect(self.zoom_out)
+        fit_btn.clicked.connect(self.fit_to_preview)
+        zoom_row.addWidget(zoom_out_btn)
+        zoom_row.addWidget(fit_btn)
+        zoom_row.addWidget(zoom_in_btn)
+        layout.addLayout(zoom_row)
+
+        # 5) Output & apply
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("Output →"))
+        self.outSlot = QComboBox()
+        out_row.addWidget(self.outSlot)
+        self.applyBtn = QPushButton("Apply Combination")
+        out_row.addWidget(self.applyBtn)
+        layout.addLayout(out_row)
+
+        # hookups
+        self.srcA     .currentIndexChanged.connect(self.updatePreview)
+        self.srcB     .currentIndexChanged.connect(self.updatePreview)
+        self.blendMode.currentIndexChanged.connect(self.updatePreview)
+        self.opacity  .valueChanged     .connect(self.updatePreview)
+
+        self.applyBtn.clicked.connect(self.commitCombination)
+        self.scrollArea.viewport().installEventFilter(self)
+
+    def populateSlots(self):
+        if not self.image_manager:
+            return
+
+        # block those currentIndexChanged -> updatePreview calls
+        for cb in (self.srcA, self.srcB, self.outSlot):
+            cb.blockSignals(True)
+            cb.clear()
+
+        main_win   = self.window()
+        slot_names = getattr(main_win, "slot_names", {})
+
+        for i in range(self.image_manager.max_slots):
+            name = slot_names.get(i, f"Slot {i}")
+            for cb in (self.srcA, self.srcB, self.outSlot):
+                cb.addItem(name, userData=i)
+
+        for cb in (self.srcA, self.srcB, self.outSlot):
+            cb.blockSignals(False)
+
+        # if this tab is visible, manually trigger a single update
+        if self.isVisible():
+            self.updatePreview()
+
+
+    def refresh(self):
+        """Called each time the tab becomes active."""
+        self.populateSlots()
+        # also re-draw the preview in case A/B/mode/opacity didn't change
+        self.updatePreview()
+
+    def updatePreview(self, *_):
+        # bail out if we're not the current tab
+        tabwidget = self.parent()  # should be the QTabWidget
+        if hasattr(tabwidget, "currentWidget") and tabwidget.currentWidget() is not self:
+            return
+
+        idxA = self.srcA.currentData()
+        idxB = self.srcB.currentData()
+        if idxA is None or idxB is None:
+            return
+
+        imgA = self.image_manager.get_image_for_slot(idxA)
+        imgB = self.image_manager.get_image_for_slot(idxB)
+        if imgA is None or imgB is None:
+            return
+
+        A = imgA.astype(np.float32, copy=False)
+        B = imgB.astype(np.float32, copy=False)
+        alpha = self.opacity.value() / 100.0
+        mode  = self.blendMode.currentText()
+
+
+        # right after loading A and B...
+        orig_ndim = A.ndim
+
+        # if grayscale, make them H×W×1 so Numba will be happy
+        if A.ndim == 2:
+            A = A[..., None]
+            B = B[..., None]
+
+        # now you can safely do the Numba blend
+        result = self.dispatch_blend(A, B, mode, alpha)
+
+        # if you originally had a 2-D image, squeeze the channel back out
+        if orig_ndim == 2:
+            result = result[..., 0]
+
+        blended = result
+        # — Blend with mask if present —
+        mask = self.get_active_mask()
+        if mask is not None:
+            h, w = blended.shape[:2]
+
+            # expand 2D → 3D if needed
+            if mask.ndim == 2:
+                mask = mask[..., None]
+
+            # check shape
+            if mask.shape[0] != h or mask.shape[1] != w:
+                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                return
+
+            # if it's single-channel but blended is 3-channel, replicate
+            if blended.ndim == 3 and mask.shape[2] == 1:
+                mask = np.repeat(mask, blended.shape[2], axis=2)
+
+            # blend: inside mask use `blended`, outside use original A
+            blended = blended * mask + A * (1.0 - mask)
+            blended = np.clip(blended, 0.0, 1.0)
+
+        # convert to 8-bit preview
+        h, w = blended.shape[:2]
+        arr8 = (blended*255).astype(np.uint8)
+        if arr8.ndim == 2:
+            qimg = QImage(arr8.data, w, h, w, QImage.Format.Format_Grayscale8)
+        else:
+            qimg = QImage(arr8.data, w, h, 3*w, QImage.Format.Format_RGB888)
+
+        pix = QPixmap.fromImage(qimg)
+        # store for zoom/pan, then just reapply the current zoom
+        self.current_pixmap = pix
+        self.apply_zoom()
+
+    def apply_zoom(self):
+        """Scale the stored pixmap by zoom_factor and set on the label."""
+        if self.current_pixmap is None:
+            return
+        scaled = self.current_pixmap.scaled(
+            self.current_pixmap.size() * self.zoom_factor,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.imageLabel.setPixmap(scaled)
+
+    @announce_zoom
+    def zoom_in(self):
+        self.zoom_factor *= 1.25
+        self.apply_zoom()
+
+    @announce_zoom
+    def zoom_out(self):
+        self.zoom_factor /= 1.25
+        self.apply_zoom()
+
+
+    def eventFilter(self, source, event):
+        # only intercept on the scrollArea’s viewport
+        if source is self.scrollArea.viewport():
+            # mouse-down: start panning
+            if (event.type() == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self._pan_start = event.pos()
+                self._hstart   = self.scrollArea.horizontalScrollBar().value()
+                self._vstart   = self.scrollArea.verticalScrollBar().value()
+                return True
+
+            # mouse-move: drag
+            elif (event.type() == QEvent.Type.MouseMove
+                  and self._pan_start is not None):
+                delta = event.pos() - self._pan_start
+                self.scrollArea.horizontalScrollBar().setValue(self._hstart - delta.x())
+                self.scrollArea.verticalScrollBar().setValue(self._vstart - delta.y())
+                return True
+
+            # mouse-up: stop panning
+            elif (event.type() == QEvent.Type.MouseButtonRelease
+                  and event.button() == Qt.MouseButton.LeftButton):
+                self._pan_start = None
+                return True
+
+            # any other event on this source: explicitly don’t handle
+            return False
+
+        # for everything else, fallback to default
+        return super().eventFilter(source, event)
+
+    def fit_to_preview(self):
+        """Reset zoom so the image fits the available viewport."""
+        if self.current_pixmap is None:
+            return
+        area = self.scrollArea.viewport().size()
+        pix = self.current_pixmap.size()
+        # choose the smaller scale factor that fits both dims
+        sx = area.width()  / pix.width()
+        sy = area.height() / pix.height()
+        self.zoom_factor = min(sx, sy, 1.0)
+        self.apply_zoom()
+
+    def get_active_mask(self):
+        """
+        Retrieves the currently applied mask from MaskManager, normalized to [0..1].
+        Returns None if no mask is applied.
+        """
+        if not (self.image_manager and self.image_manager.mask_manager):
+            return None
+
+        mask = self.image_manager.mask_manager.get_applied_mask()
+        if mask is None:
+            return None
+
+        # normalize to float [0..1]
+        if mask.dtype not in (np.float32, np.float64):
+            mask = mask.astype(np.float32) / 255.0
+        return mask
+
+    def commitCombination(self):
+        """Run the exact same blend (full-res, njit) and shove into outSlot."""
+        idxA   = self.srcA.currentData()
+        idxB   = self.srcB.currentData()
+        outIdx = self.outSlot.currentData()
+        if None in (idxA, idxB, outIdx):
+            return
+
+        # 1) fetch & prepare
+        A     = self.image_manager.get_image_for_slot(idxA).astype(np.float32, copy=False)
+        B     = self.image_manager.get_image_for_slot(idxB).astype(np.float32, copy=False)
+        alpha = self.opacity.value() / 100.0
+        mode  = self.blendMode.currentText()
+
+        # right after loading A and B...
+        orig_ndim = A.ndim
+
+        # if grayscale, make them H×W×1 so Numba will be happy
+        if A.ndim == 2:
+            A = A[..., None]
+            B = B[..., None]
+
+        # now you can safely do the Numba blend
+        result = self.dispatch_blend(A, B, mode, alpha)
+
+        # if you originally had a 2-D image, squeeze the channel back out
+        if orig_ndim == 2:
+            result = result[..., 0]
+
+        blended = result
+
+        # 3) mask post-processing
+        mask = self.get_active_mask()
+        if mask is not None:
+            m = mask.astype(np.float32)
+            # normalize
+            if m.max() > 1.0:
+                m /= 255.0
+            # make it (H,W,1) if needed
+            if m.ndim == 2:
+                m = m[..., None]
+            # broadcast to all channels
+            if result.ndim == 3 and m.shape[2] == 1:
+                m = np.repeat(m, result.shape[2], axis=2)
+            # shape check
+            if m.shape[:2] != result.shape[:2]:
+                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                return
+            # inside mask = blended, outside = original A
+            result = result * m + A * (1.0 - m)
+            result = np.clip(result, 0.0, 1.0)
+
+        # 4) build metadata
+        meta = {
+            'file_path': f"Combined_{mode}",
+            'is_mono':   (result.ndim == 2),
+            'bit_depth': "32-bit floating point",
+            'source':    f"Combine: {mode}"
+        }
+
+        # 5) store into slot (emits image_changed)
+        self.image_manager.set_image_for_slot(outIdx, result, meta)
+
+        # 6) rename that slot in the UI, just like ContinuumSubtract
+        mw   = self.window()  # AstroEditingSuite
+        name = f"{mode} Combine"
+        mw.slot_names[outIdx] = name
+
+        # toolbar
+        if outIdx in mw.slot_actions:
+            btn = mw.slot_actions[outIdx]
+            btn.setText(name)
+            btn.setStatusTip(f"Open preview for {name}")
+
+        # menubar
+        if outIdx in mw.menubar_slot_actions:
+            act = mw.menubar_slot_actions[outIdx]
+            act.setText(name)
+            act.setStatusTip(f"Open preview for {name}")
+
+        mw.menuBar().update()
+
+        print(f"Combined → slot {outIdx+1}: {name}")
+
+
+    def dispatch_blend(self, A, B, mode, alpha):
+        """
+        Blend two float32 images A and B according to the selected mode.
+        'Average'    : simple (A + B) / 2
+        'Blend'      : standard alpha blend A*(1−alpha) + B*alpha
+        other modes  : various NumPy/Numba-accelerated operations
+        """
+        # Average mode: ignore the alpha slider
+        if mode == "Average":
+            out = (A + B) * 0.5
+            return np.clip(out, 0.0, 1.0)
+
+        # Blend mode: use the alpha slider
+        if mode == "Blend":
+            out = A * (1.0 - alpha) + B * alpha
+            return np.clip(out, 0.0, 1.0)
+
+        # All the existing specialized modescha
+        if   mode == "Add":        return blend_add_numba(A, B, alpha)
+        elif mode == "Subtract":   return blend_subtract_numba(A, B, alpha)
+        elif mode == "Multiply":   return blend_multiply_numba(A, B, alpha)
+        elif mode == "Divide":     return blend_divide_numba(A, B, alpha)
+        elif mode == "Screen":     return blend_screen_numba(A, B, alpha)
+        elif mode == "Overlay":    return blend_overlay_numba(A, B, alpha)
+        elif mode == "Difference": return blend_difference_numba(A, B, alpha)
+
+        # Fallback: simple add-blend
+        out = A * (1.0 - alpha) + B * alpha
+        return np.clip(out, 0.0, 1.0)
 
 def preprocess_narrowband_image(image):
     """
@@ -42604,6 +55254,11 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     # ---------------------------------------------------------------------
                     image = np.squeeze(image)
 
+                    if image.dtype == np.float32:
+                        max_val = image.max()
+                        if max_val > 1.0:
+                            print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                            image = image / max_val
                     # ---------------------------------------------------------------------
                     # 3) Interpret final shape to decide if mono or color
                     # ---------------------------------------------------------------------
@@ -42645,6 +55300,12 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     image = image_data
                 else:
                     raise ValueError("Unsupported TIFF format!")
+
+                if image.dtype == np.float32:
+                    max_val = image.max()
+                    if max_val > 1.0:
+                        print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                        image = image / max_val
 
                 # Handle mono or RGB TIFFs
                 if image_data.ndim == 2:  # Mono
@@ -42720,6 +55381,12 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     "file_meta": file_meta,
                     "image_meta": image_meta
                 }
+
+                if image.dtype == np.float32:
+                    max_val = image.max()
+                    if max_val > 1.0:
+                        print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
+                        image = image / max_val
 
                 print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                 return image, original_header, bit_depth, is_mono
@@ -43035,6 +55702,10 @@ def save_image(img_array, filename, original_format, bit_depth=None, original_he
 
             fits_header['NAXIS1'] = img_array.shape[1]
             fits_header['NAXIS2'] = img_array.shape[0]
+
+            # force 32-bit floats and update header
+            img_array_fits = img_array_fits.astype(np.float32)
+            fits_header['BITPIX'] = -32
 
             # **💾 Save the FITS File**
             hdu = fits.PrimaryHDU(img_array_fits, header=fits_header)
@@ -43641,7 +56312,6 @@ otype_long_name_lookup = {
     "QSO": "Quasar"
 }
 
-from PyQt6.QtGui import QColor
 
 # ────────────────────────────────────────────────
 # 1a) Map each SIMBAD otype → one of our high-level categories
@@ -45106,6 +57776,126 @@ class ThreeDSettingsDialog(QDialog):
             }
         return None
 
+class HRSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("H-R Diagram Settings")
+        layout = QVBoxLayout(self)
+
+        # 1) Star Color Mode
+        layout.addWidget(QLabel("Star Color Mode:"))
+        self.color_mode_cb = QComboBox()
+        self.color_mode_cb.addItems(["Realistic (blackbody)", "Solid (Custom)"])
+        layout.addWidget(self.color_mode_cb)
+
+        self.color_btn = QPushButton("Choose Solid Color…")
+        self.custom_color = QColor(255, 255, 255)
+        self.color_btn.setVisible(False)
+        layout.addWidget(self.color_btn)
+        self.color_btn.clicked.connect(self._choose_color)
+        self.color_mode_cb.currentIndexChanged.connect(
+            lambda idx: self.color_btn.setVisible(
+                self.color_mode_cb.currentText().startswith("Solid")
+            )
+        )
+
+        # 2) Background Choice
+        layout.addWidget(QLabel("Background:"))
+        self.bg_mode_cb = QComboBox()
+        self.bg_mode_cb.addItems(["HR Diagram Image", "Solid Black"])
+        layout.addWidget(self.bg_mode_cb)
+
+        # 3) Axis Range Mode
+        layout.addWidget(QLabel("Axis Range:"))
+        self.range_mode_cb = QComboBox()
+        self.range_mode_cb.addItems(["Default (–0.3→2.25, –9→19)", "Custom"])
+        layout.addWidget(self.range_mode_cb)
+
+        self.custom_range_widget = QWidget()
+        cr_layout = QHBoxLayout(self.custom_range_widget)
+        cr_layout.addWidget(QLabel("X Min:"))
+        self.xmin_spin = QDoubleSpinBox()
+        self.xmin_spin.setRange(-10.0, 10.0)
+        self.xmin_spin.setDecimals(3)
+        self.xmin_spin.setValue(-0.3)
+        cr_layout.addWidget(self.xmin_spin)
+
+        cr_layout.addWidget(QLabel("X Max:"))
+        self.xmax_spin = QDoubleSpinBox()
+        self.xmax_spin.setRange(-10.0, 10.0)
+        self.xmax_spin.setDecimals(3)
+        self.xmax_spin.setValue(2.25)
+        cr_layout.addWidget(self.xmax_spin)
+
+        cr_layout.addWidget(QLabel("Y Min:"))
+        self.ymin_spin = QDoubleSpinBox()
+        self.ymin_spin.setRange(-50.0, 50.0)
+        self.ymin_spin.setDecimals(3)
+        self.ymin_spin.setValue(-9.0)
+        cr_layout.addWidget(self.ymin_spin)
+
+        cr_layout.addWidget(QLabel("Y Max:"))
+        self.ymax_spin = QDoubleSpinBox()
+        self.ymax_spin.setRange(-50.0, 50.0)
+        self.ymax_spin.setDecimals(3)
+        self.ymax_spin.setValue(19.0)
+        cr_layout.addWidget(self.ymax_spin)
+
+        layout.addWidget(self.custom_range_widget)
+        self.custom_range_widget.setVisible(False)
+        self.range_mode_cb.currentIndexChanged.connect(
+            lambda idx: self.custom_range_widget.setVisible(
+                self.range_mode_cb.currentText().startswith("Custom")
+            )
+        )
+
+        layout.addWidget(QLabel("Show Sun:"))
+        self.show_sun_cb = QCheckBox("Include Sun on diagram")
+        self.show_sun_cb.setChecked(True)       # default ON
+        layout.addWidget(self.show_sun_cb)
+
+        # 4) OK / Cancel Buttons
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _choose_color(self):
+        col = QColorDialog.getColor(self.custom_color, self, "Select Marker Color")
+        if col.isValid():
+            self.custom_color = col
+
+    def getSettings(self):
+        """
+        Pops up the dialog. Returns a dict:
+        {
+            "color_mode":    "Realistic (blackbody)" or "Solid (Custom)",
+            "custom_color":  QColor,
+            "bg_mode":       "HR Diagram Image" or "Solid Black",
+            "range_mode":    "Default" or "Custom",
+            "x_min":         float,
+            "x_max":         float,
+            "y_min":         float,
+            "y_max":         float
+        }
+        or None if the user canceled.
+        """
+        if self.exec() == QDialog.DialogCode.Accepted:
+            return {
+                "color_mode": self.color_mode_cb.currentText(),
+                "custom_color": self.custom_color,
+                "bg_mode": self.bg_mode_cb.currentText(),
+                "range_mode": self.range_mode_cb.currentText(),
+                "x_min": self.xmin_spin.value(),
+                "x_max": self.xmax_spin.value(),
+                "y_min": self.ymin_spin.value(),
+                "y_max": self.ymax_spin.value(),
+                "show_sun":      self.show_sun_cb.isChecked(),
+            }
+        return None
+
 class LegendDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -45186,7 +57976,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("What's In My Image")
-        self.setGeometry(100, 100, 800, 600)
+        #self.setGeometry(100, 100, 800, 600)
         # Track the theme status
         self.is_dark_mode = True
         self.metadata = {}
@@ -45215,7 +58005,7 @@ class MainWindow(QMainWindow):
         logo_pixmap = QPixmap(wimilogo_path)
 
         # Scale the pixmap to fit within a desired size, maintaining the aspect ratio
-        scaled_pixmap = logo_pixmap.scaled(200, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled_pixmap = logo_pixmap.scaled(100, 50, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
         # Set the scaled pixmap to the label
         self.logo_label.setPixmap(scaled_pixmap)
@@ -45224,7 +58014,7 @@ class MainWindow(QMainWindow):
         self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Optionally, you can set a fixed size for the label (this is for layout purposes)
-        self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
+        #self.logo_label.setFixedSize(200, 100)  # Adjust the size as needed
 
         # Add the logo_label to your layout
         left_panel.addWidget(self.logo_label)
@@ -45358,7 +58148,7 @@ class MainWindow(QMainWindow):
 
         # Mini Preview
         self.mini_preview = QLabel("Mini Preview")
-        self.mini_preview.setFixedSize(300, 300)
+        self.mini_preview.setMaximumSize(300, 300)
         self.mini_preview.mousePressEvent = self.on_mini_preview_press
         self.mini_preview.mouseMoveEvent = self.on_mini_preview_drag
         self.mini_preview.mouseReleaseEvent = self.on_mini_preview_release
@@ -45366,14 +58156,6 @@ class MainWindow(QMainWindow):
 
   
 
-        footer_label = QLabel("""
-            Written by Franklin Marek<br>
-            <a href='http://www.setiastro.com'>www.setiastro.com</a>
-        """)
-        footer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_label.setOpenExternalLinks(True)
-        footer_label.setStyleSheet("font-size: 10px;")
-        left_panel.addWidget(footer_label)
 
         # Right Column Layout
         right_panel = QVBoxLayout()
@@ -45638,7 +58420,7 @@ class MainWindow(QMainWindow):
         self.selected_color = QColor(Qt.GlobalColor.red)  # Default annotation color
         self.selected_font = QFont("Arial", 12)  # Default font for text annotations   
         self.populate_object_tree()     
-        self._legend_dock = QDockWidget("Object Type Legend", self)
+        #self._legend_dock = QDockWidget("Object Type Legend", self)
         legend = LegendDialog(self)
         legend.setModal(False)
     
@@ -46424,14 +59206,34 @@ class MainWindow(QMainWindow):
 
 
     def show_hr_diagram(self):
-        """H-R Diagram: B–V vs Abs V, ticks showing B–V and T_eff together, BB colors."""
-        # 1) Sanity
+        """H-R Diagram: B–V vs Abs V, with selectable color, background, and axis ranges."""
+        # Pop up the settings dialog
+        settings = HRSettingsDialog(self).getSettings()
+        if settings is None:
+            return
+
+        use_realistic = settings["color_mode"].startswith("Realistic")
+        use_image_bg = settings["bg_mode"].startswith("HR Diagram")
+        solid_qcolor = settings["custom_color"]
+        show_sun = settings["show_sun"]
+
+        # Determine axis bounds
+        if settings["range_mode"].startswith("Default"):
+            x0, x1 = -0.3, 2.25
+            y0, y1 = -9.0, 19.0
+        else:
+            x0 = settings["x_min"]
+            x1 = settings["x_max"]
+            y0 = settings["y_min"]
+            y1 = settings["y_max"]
+
+        # Sanity: ensure query_results exist
         if not getattr(self, 'query_results', None):
             QMessageBox.information(self, "No Data",
                 "Run a SIMBAD query first to gather B, V, and distance data.")
             return
 
-        # 2) Collect data
+        # Collect data
         B, V, Mv, names = [], [], [], []
         for obj in self.query_results:
             try:
@@ -46446,12 +59248,16 @@ class MainWindow(QMainWindow):
                 "No objects have valid B-mag, V-mag and absolute magnitude.")
             return
 
-        # 3) Compute B−V & T_eff & colors
+        # Compute B−V & T_eff & colors
         bv = [b - v for b, v in zip(B, V)]
         T_eff = [4600.0 * (1/(0.92*x + 1.7) + 1/(0.92*x + 0.62)) for x in bv]
-        colors = [kelvin_to_rgb(T) for T in T_eff]
+        if use_realistic:
+            colors = [kelvin_to_rgb(T) for T in T_eff]
+        else:
+            hex_color = solid_qcolor.name()
+            colors = [hex_color] * len(bv)
 
-        # 4) Prepare hover & URLs, now including T_eff
+        # Prepare hover & URLs
         hover_texts, urls = [], []
         for nm, b, v, m, T in zip(names, B, V, Mv, T_eff):
             hover_texts.append(
@@ -46466,7 +59272,7 @@ class MainWindow(QMainWindow):
                 f"Ident={enc}&submit=SIMBAD+search"
             )
 
-        # 5) Scatter with bigger markers
+        # Create scatter
         scatter = go.Scatter(
             x=bv, y=Mv, mode='markers',
             marker_color=colors, marker_size=20,
@@ -46475,21 +59281,57 @@ class MainWindow(QMainWindow):
         )
         fig = go.Figure(scatter)
 
-        # 6) Build custom tick labels combining B–V & T_eff
-        # choose nice tick positions
-        bv_ticks = [-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
-        # compute corresponding T
+
+        # 1) Dense BV grid over x0→x1
+        bv_grid = np.linspace(x0, x1, 300)
+        # 2) Compute Teff at each BV
+        T_grid = 4600.0 * (1.0/(0.92*bv_grid + 1.7) + 1.0/(0.92*bv_grid + 0.62))
+        # 3) Solar Teff for normalization
+        T_sun = 5772.0
+
+        # 4) Radii in R_sun
+        radii = [0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+        # 5) Corresponding gray shades for each contour
+        gray_colors = [
+            "#444444",  # darkest gray for R=0.01
+            "#666666",  # R=0.1
+            "#888888",  # R=1.0
+            "#AAAAAA",  # R=10
+            "#CCCCCC",  # R=100
+            "#EEEEEE"   # R=1000 (lightest)
+        ]
+
+        for idx, R_rs in enumerate(radii):
+            # compute L/L_sun
+            L_over_Lsun = (R_rs**2) * (T_grid / T_sun)**4
+            # convert to M_V
+            MV_line = 4.83 - 2.5 * np.log10(L_over_Lsun)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=bv_grid,
+                    y=MV_line,
+                    mode='lines',
+                    line=dict(
+                        color=gray_colors[idx],
+                        dash='dash'
+                    ),
+                    name=f"R = {R_rs:g} R⊙",   # plain text “R⊙”
+                    hoverinfo='none'
+                )
+            )
+        # ───────────────────────────────────────────────────────────────────
+
+        # Build tick labels
+        bv_ticks = [-0.3, 0.0, 0.5, 1.0, 1.5, 2.0, 2.25]
         t_ticks = [4600.0*(1/(0.92*x+1.7)+1/(0.92*x+0.62)) for x in bv_ticks]
-        # build two-line labels
         tick_labels = [f"{x:.2f}<br>{int(t):,} K" for x,t in zip(bv_ticks, t_ticks)]
 
-        # 7) Style axes & background
-        fig.update_layout(
-            title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
-            plot_bgcolor='black',
-            paper_bgcolor='black',
-            margin=dict(l=40, r=20, t=60, b=60)
-        )
+        # If using image background, load via PIL
+        if use_image_bg:
+            pil_img = Image.open(hrdiagram_path)
+
+        # Force the specified x & y axis ranges
         fig.update_xaxes(
             title_text="B−V color (mag) ↔ Tₑff",
             tickvals=bv_ticks,
@@ -46498,18 +59340,65 @@ class MainWindow(QMainWindow):
             title_font=dict(color='white'),
             gridcolor='gray',
             zerolinecolor='gray',
-            range=[-0.5, 2.5]
+            range=[x0, x1]
         )
         fig.update_yaxes(
             title_text="Absolute V magnitude (mag)",
-            autorange='reversed',
+            range=[y1, y0],         # reversed on purpose: y1 (–9) at top, y0 (19) at bottom
+            autorange=False,
             tickfont_color='white',
             title_font=dict(color='white'),
             gridcolor='gray',
-            zerolinecolor='gray'
+            zerolinecolor='gray',
         )
 
-        # 8) Sidebar & click behaviour
+        # Add the image behind the plot if chosen
+        if use_image_bg:
+            fig.add_layout_image(
+                dict(
+                    source=pil_img,
+                    xref="x", yref="y",
+                    x=x0, y=y0,
+                    sizex=(x1 - x0),
+                    sizey=(y1 - y0),
+                    xanchor="left", yanchor="top",
+                    sizing="stretch",
+                    opacity=1.0,
+                    layer="below"
+                )
+            )
+
+        # Add a special marker for the Sun (B−V=0.66, Mv=4.8)
+        if show_sun:
+            sun_scatter = go.Scatter(
+                x=[0.66], y=[4.8],
+                mode='markers+text',
+                marker=dict(
+                    color='gold',
+                    size=30,
+                    symbol='star'
+                ),
+                name="Sun"
+            )
+            fig.add_trace(sun_scatter)
+
+        # Style axes & background
+        if use_image_bg:
+            fig.update_layout(
+                title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='black',
+                margin=dict(l=40, r=20, t=60, b=60)
+            )
+        else:
+            fig.update_layout(
+                title=dict(text="Hertzsprung–Russell Diagram", font_color='white'),
+                plot_bgcolor='black',
+                paper_bgcolor='black',
+                margin=dict(l=40, r=20, t=60, b=60)
+            )
+
+        # Sidebar & click behaviour
         items = "".join(
             f'<li><a href="{u}" style="color:cyan" target="_blank">{n}</a></li>'
             for n,u in zip(names, urls)
@@ -46532,7 +59421,7 @@ class MainWindow(QMainWindow):
         html = fig.to_html(include_plotlyjs='cdn', full_html=True)
         html = html.replace("</body>", sidebar + js + "</body>")
 
-        # 9) Save & preview
+        # Save & preview
         default = os.path.join(os.path.expanduser("~"), "hr_diagram.html")
         fn, _ = QFileDialog.getSaveFileName(self, "Save H-R Diagram As",
                                             default, "HTML Files (*.html)")
@@ -46546,6 +59435,7 @@ class MainWindow(QMainWindow):
                                         mode='w', encoding='utf-8')
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
+
     
     def search_defined_region(self):
         """Perform a Simbad search for the defined region and filter by selected object types."""
@@ -46854,28 +59744,64 @@ class MainWindow(QMainWindow):
     def on_tree_item_double_clicked(self, item):
         """Handle double-click event on a TreeWidget item to open SIMBAD or NED URL based on source."""
         object_name = item.text(2)  # Assuming 'Name' is in the third column
-        ra = float(item.text(0).strip())  # Assuming RA is in the first column
-        dec = float(item.text(1).strip())  # Assuming Dec is in the second column
-        
-        # Retrieve the entry directly from self.query_results
-        entry = next((result for result in self.query_results if float(result['ra']) == ra and float(result['dec']) == dec), None)
-        source = entry.get('source', 'Simbad') if entry else 'Simbad'  # Default to "Simbad" if entry not found
 
-        if source == "Simbad" and object_name:
-            # Open Simbad URL with encoded object name
-            encoded_name = quote(object_name)
-            simbad_url = f"https://simbad.cds.unistra.fr/simbad/sim-basic?Ident={encoded_name}&submit=SIMBAD+search"
-            webbrowser.open(simbad_url)
-        elif source == "Vizier":
-            # Format the NED search URL with proper RA, Dec, and radius
-            radius = 5 / 60  # Radius in arcminutes (5 arcseconds)
-            dec_sign = "%2B" if dec >= 0 else "-"  # Determine sign for declination
-            ned_url = f"http://ned.ipac.caltech.edu/conesearch?search_type=Near%20Position%20Search&ra={ra:.6f}d&dec={dec_sign}{abs(dec):.6f}d&radius={radius:.3f}&in_csys=Equatorial&in_equinox=J2000.0"
-            webbrowser.open(ned_url)
-        elif source == "Mast":
-            # Open MAST URL using RA and Dec with a small radius for object lookup
-            mast_url = f"https://mast.stsci.edu/portal/Mashup/Clients/Mast/Portal.html?searchQuery={ra}%2C{dec}%2Cradius%3D0.0006"
-            webbrowser.open(mast_url)            
+        # parse only if float() fails
+        def parse_value(txt):
+            try:
+                return float(txt)
+            except ValueError:
+                parts = txt.strip().split()
+                if len(parts) == 3:
+                    a, b, c = parts
+                    sign = -1 if a.startswith('-') else 1
+                    return sign * (abs(float(a)) + float(b)/60 + float(c)/3600)
+                raise
+
+        ra  = parse_value(item.text(0).strip())
+        dec = parse_value(item.text(1).strip())
+
+        # lookup, falling back to string→float only on failure
+        def get_parsed(result, key):
+            try:
+                return float(result[key])
+            except ValueError:
+                return parse_value(result[key])
+
+        entry = next(
+            (r for r in self.query_results
+            if get_parsed(r, 'ra') == ra and get_parsed(r, 'dec') == dec),
+            None
+        )
+        source = (entry.get('source') if entry else 'Simbad') or 'Simbad'
+        print(f"[DEBUG] Matched source: {source!r}")  # ← debug print
+
+        s = source.strip().lower()
+
+        if s == "simbad" and object_name:
+            encoded = quote(object_name)
+            webbrowser.open(
+                f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
+                f"Ident={encoded}&submit=SIMBAD+search"
+            )
+
+        elif "viz" in s:   # catches 'Vizier', etc.
+            radius   = 5/60  # arcminutes
+            dec_sign = "%2B" if dec >= 0 else "-"
+            webbrowser.open(
+                f"http://ned.ipac.caltech.edu/conesearch?"
+                f"search_type=Near%20Position%20Search&"
+                f"ra={ra:.6f}d&"
+                f"dec={dec_sign}{abs(dec):.6f}d&"
+                f"radius={radius:.3f}&"
+                "in_csys=Equatorial&in_equinox=J2000.0"
+            )
+
+        elif s == "mast":
+            webbrowser.open(
+                f"https://mast.stsci.edu/portal/Mashup/Clients/Mast/Portal.html?"
+                f"searchQuery={ra}%2C{dec}%2Cradius%3D0.0006"
+            )
+           
 
     def copy_ra_dec_to_clipboard(self):
         """Copy the currently displayed RA and Dec to the clipboard."""
@@ -46892,109 +59818,123 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Copied", "Current RA/Dec copied to clipboard!")
     
 
+    @pyqtSlot()
     def open_image(self):
-        self.image_path, _ = QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)")
-        if self.image_path:
-            img_array, original_header, bit_depth, is_mono = load_image(self.image_path)
-            if img_array is not None:
+        """Slot for the “Load...” button — always pops up the file dialog."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "", 
+            "Images (*.png *.jpg *.jpeg *.tif *.tiff *.fit *.fits *.xisf)"
+        )
+        if path:
+            self._load_image(path)
 
-                self.image_data = img_array
-                self.original_header = original_header
-                self.bit_depth = bit_depth
-                self.is_mono = is_mono
+    def load_image_path(self, path: str):
+        """Call this when you already know the filename."""
+        if path:
+            self._load_image(path)
 
-                # Prepare image for display
-                if img_array.ndim == 2:  # Single-channel image
-                    img_array = np.stack([img_array] * 3, axis=-1)  # Expand to 3 channels
+    def _load_image(self, path: str):
+        img_array, original_header, bit_depth, is_mono = load_image(path)
+        self.image_path = path
+        if img_array is not None:
+
+            self.image_data = img_array
+            self.original_header = original_header
+            self.bit_depth = bit_depth
+            self.is_mono = is_mono
+
+            # Prepare image for display
+            if img_array.ndim == 2:  # Single-channel image
+                img_array = np.stack([img_array] * 3, axis=-1)  # Expand to 3 channels
 
 
-                # Prepare image for display
-                img = (img_array * 255).astype(np.uint8)
-                height, width, _ = img.shape
-                bytes_per_line = 3 * width
-                qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                pixmap = QPixmap.fromImage(qimg)
+            # Prepare image for display
+            img = (img_array * 255).astype(np.uint8)
+            height, width, _ = img.shape
+            bytes_per_line = 3 * width
+            qimg = QImage(img.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
 
-                self.main_image = pixmap
-                scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self.mini_preview.setPixmap(scaled_pixmap)
+            self.main_image = pixmap
+            scaled_pixmap = pixmap.scaled(self.mini_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.mini_preview.setPixmap(scaled_pixmap)
 
-                self.main_scene.clear()
-                self.main_scene.addPixmap(pixmap)
-                self.main_preview.setSceneRect(QRectF(pixmap.rect()))
-                self.zoom_level = 1.0
-                self.main_preview.resetTransform()
-                self.main_preview.centerOn(self.main_scene.sceneRect().center())
-                self.update_green_box()
+            self.main_scene.clear()
+            self.main_scene.addPixmap(pixmap)
+            self.main_preview.setSceneRect(QRectF(pixmap.rect()))
+            self.zoom_level = 1.0
+            self.main_preview.resetTransform()
+            self.main_preview.centerOn(self.main_scene.sceneRect().center())
+            self.update_green_box()
 
-                # Initialize WCS from FITS header if it is a FITS file
-                if self.image_path.lower().endswith(('.fits', '.fit')):
-                    with fits.open(self.image_path) as hdul:
-                        self.header = hdul[0].header
+            # Initialize WCS from FITS header if it is a FITS file
+            if self.image_path.lower().endswith(('.fits', '.fit')):
+                with fits.open(self.image_path) as hdul:
+                    self.header = hdul[0].header
+                    
+                    try:
+                        # Use only the first two dimensions for WCS
+                        self.wcs = WCS(self.header, naxis=2, relax=True)
                         
-                        try:
-                            # Use only the first two dimensions for WCS
-                            self.wcs = WCS(self.header, naxis=2, relax=True)
-                            
-                            # Calculate and set pixel scale
-                            pixel_scale_matrix = self.wcs.pixel_scale_matrix
-                            self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
-                            self.center_ra, self.center_dec = self.wcs.wcs.crval
-                            self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
-                            self.print_corner_coordinates()
-                            
-                            print(f"Header CROTA2 Value: {self.header.get('CROTA2', 'Not Found')}")
+                        # Calculate and set pixel scale
+                        pixel_scale_matrix = self.wcs.pixel_scale_matrix
+                        self.pixscale = np.sqrt(pixel_scale_matrix[0, 0]**2 + pixel_scale_matrix[1, 0]**2) * 3600  # arcsec/pixel
+                        self.center_ra, self.center_dec = self.wcs.wcs.crval
+                        self.wcs_header = self.wcs.to_header(relax=True)  # Store the full WCS header, including non-standard keywords
+                        self.print_corner_coordinates()
+                        
+                        print(f"Header CROTA2 Value: {self.header.get('CROTA2', 'Not Found')}")
 
-                            # Display WCS information
-                            # Set orientation based on WCS data if available
-                            if 'CROTA2' in self.header:
-                                try:
-                                    self.orientation = float(self.header['CROTA2'])  # Convert to float
-                                except (ValueError, TypeError):
-                                    self.orientation = None
-                                    print("CROTA2 found, but could not convert to float.")
-                            else:
-                                # Use calculate_orientation if CROTA2 is not present
-                                self.orientation = calculate_orientation(self.header)
-                                if self.orientation is None:
-                                    print("Orientation: CD matrix elements not found in WCS header.")
+                        # Display WCS information
+                        # Set orientation based on WCS data if available
+                        if 'CROTA2' in self.header:
+                            try:
+                                self.orientation = float(self.header['CROTA2'])  # Convert to float
+                            except (ValueError, TypeError):
+                                self.orientation = None
+                                print("CROTA2 found, but could not convert to float.")
+                        else:
+                            # Use calculate_orientation if CROTA2 is not present
+                            self.orientation = calculate_orientation(self.header)
+                            if self.orientation is None:
+                                print("Orientation: CD matrix elements not found in WCS header.")
 
-                            # --- ✅ Ensure `self.orientation` is a float before using it ---
-                            if self.orientation is not None:
-                                try:
-                                    self.orientation = float(self.orientation)  # Final conversion check
-                                    print(f"Orientation: {self.orientation:.2f}°")
-                                    self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
-                                except (ValueError, TypeError):
-                                    print(f"Failed to format orientation: {self.orientation}")
-                                    self.orientation_label.setText("Orientation: N/A")
-                            else:
+                        # --- ✅ Ensure `self.orientation` is a float before using it ---
+                        if self.orientation is not None:
+                            try:
+                                self.orientation = float(self.orientation)  # Final conversion check
+                                print(f"Orientation: {self.orientation:.2f}°")
+                                self.orientation_label.setText(f"Orientation: {self.orientation:.2f}°")
+                            except (ValueError, TypeError):
+                                print(f"Failed to format orientation: {self.orientation}")
                                 self.orientation_label.setText("Orientation: N/A")
+                        else:
+                            self.orientation_label.setText("Orientation: N/A")
 
 
-                            print(f"WCS data loaded from FITS header: RA={self.center_ra}, Dec={self.center_dec}, "
-                                f"Pixel Scale={self.pixscale} arcsec/px")
-                            
-                            
-                        except ValueError as e:
-                            print("Error initializing WCS:", e)
-                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
-                elif self.image_path.lower().endswith('.xisf'):
-                    # Load WCS from XISF properties
-                    xisf_meta = self.extract_xisf_metadata(self.image_path)
-                    self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
+                        print(f"WCS data loaded from FITS header: RA={self.center_ra}, Dec={self.center_dec}, "
+                            f"Pixel Scale={self.pixscale} arcsec/px")
+                        
+                        
+                    except ValueError as e:
+                        print("Error initializing WCS:", e)
+                        QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from FITS header.")
+            elif self.image_path.lower().endswith('.xisf'):
+                # Load WCS from XISF properties
+                xisf_meta = self.extract_xisf_metadata(self.image_path)
+                self.metadata = xisf_meta  # Ensure metadata is stored in self.metadata for later use
 
-                    # Construct WCS header from XISF properties
-                    header = self.construct_fits_header_from_xisf(xisf_meta)
-                    if header:
-                        try:
-                            self.initialize_wcs_from_header(header)
-                        except ValueError as e:
-                            print("Error initializing WCS from XISF:", e)
-                            QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
-                else:
-                    # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
-                    self.prompt_blind_solve()
+                # Construct WCS header from XISF properties
+                header = self.construct_fits_header_from_xisf(xisf_meta)
+                if header:
+                    try:
+                        self.initialize_wcs_from_header(header)
+                    except ValueError as e:
+                        print("Error initializing WCS from XISF:", e)
+                        QMessageBox.warning(self, "WCS Error", "Failed to load WCS data from XISF properties.")
+            else:
+                # For non-FITS images (e.g., JPEG, PNG), prompt directly for a blind solve
+                self.prompt_blind_solve()
 
     def extract_xisf_metadata(self, xisf_path):
         """
@@ -47062,24 +60002,32 @@ class MainWindow(QMainWindow):
         """ Convert XISF metadata to a FITS header compatible with WCS """
         header = fits.Header()
 
-        # Define WCS keywords to populate
-        wcs_keywords = ["CTYPE1", "CTYPE2", "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2", 
-                        "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
+        # numeric‐only keys (everything except CTYPE1/2)
+        numeric_keys = {
+            "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+            "CDELT1", "CDELT2", "A_ORDER", "B_ORDER",
+            "AP_ORDER", "BP_ORDER"
+        }
 
-        # Populate WCS and FITS keywords
-        if 'FITSKeywords' in xisf_meta:
-            for keyword, values in xisf_meta['FITSKeywords'].items():
-                for entry in values:
-                    if 'value' in entry:
-                        value = entry['value']
-                        if keyword in wcs_keywords:
-                            try:
-                                value = int(value)
-                            except ValueError:
-                                value = float(value)
-                        header[keyword] = value
+        for keyword, entries in xisf_meta.get('FITSKeywords', {}).items():
+            for entry in entries:
+                if 'value' not in entry:
+                    continue
+                val = entry['value']
+                if keyword in ("CTYPE1", "CTYPE2"):
+                    # always a string
+                    header[keyword] = val
+                elif keyword in numeric_keys:
+                    # try integer, then float
+                    try:
+                        header[keyword] = int(val)
+                    except (ValueError, TypeError):
+                        header[keyword] = float(val)
+                else:
+                    # anything else just store raw
+                    header[keyword] = val
 
-        # Manually add WCS information if missing
+        # ensure CTYPEs exist
         header.setdefault('CTYPE1', 'RA---TAN')
         header.setdefault('CTYPE2', 'DEC--TAN')
 
@@ -47237,6 +60185,83 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.perform_blind_solve()
 
+    def perform_blind_solve2(self):
+        """
+        First attempts to plate-solve the loaded image using ASTAP.
+        If that fails, falls back to performing a blind solve via Astrometry.net.
+        Updates the WCS (self.wcs) and header (self.header) accordingly.
+        """
+        # --- First, try ASTAP plate solve ---
+        solved_header = self.plate_solve_image()  # This method should try to solve via ASTAP and return a header (or None).
+        if solved_header is not None:
+            # instead of manually doing header.update + WCS(...)
+            self.apply_wcs_header(solved_header)
+            return
+
+        # --- If ASTAP plate solve failed, fall back to blind solve via Astrometry.net ---
+
+        # Load or prompt for API key
+        api_key = load_api_key()
+        if not api_key:
+            api_key, ok = QInputDialog.getText(self, "Enter API Key", "Please enter your Astrometry.net API key:")
+            if ok and api_key:
+                save_api_key(api_key)
+            else:
+                self.status_label.setText("API Key Required: Blind solve cannot proceed without an API key.")
+                QApplication.processEvents()
+                return
+
+        try:
+            self.status_label.setText("Status: Logging in to Astrometry.net...")
+            QApplication.processEvents()
+
+            # Step 1: Login to Astrometry.net
+            session_key = self.login_to_astrometry(api_key)
+
+            self.status_label.setText("Status: Uploading image to Astrometry.net...")
+            QApplication.processEvents()
+            
+            # Step 2: Upload the image and get submission ID
+            subid = self.upload_image_to_astrometry(self.image_path, session_key)
+
+            self.status_label.setText("Status: Waiting for job ID...")
+            QApplication.processEvents()
+            
+            # Step 3: Poll for the job ID until it's available
+            job_id = self.poll_submission_status(subid)
+            if not job_id:
+                raise TimeoutError("Failed to retrieve job ID from Astrometry.net after multiple attempts.")
+            
+            self.status_label.setText("Status: Job ID found, processing image...")
+            QApplication.processEvents()
+
+            # Step 4a: Poll for the calibration data, ensuring RA/Dec are available
+            calibration_data = self.poll_calibration_data(job_id)
+            if not calibration_data:
+                raise TimeoutError("Calibration data did not complete in the expected timeframe.")
+            
+            # Set pixscale and other necessary attributes from calibration data
+            self.pixscale = calibration_data.get('pixscale')
+
+            self.status_label.setText("Status: Calibration complete, downloading WCS file...")
+            QApplication.processEvents()
+
+            # Step 4b: Download the WCS FITS file for complete calibration data
+            wcs_header = self.retrieve_and_apply_wcs(job_id)
+            if not wcs_header:
+                raise TimeoutError("Failed to retrieve WCS FITS file from Astrometry.net.")
+
+            self.status_label.setText("Status: Applying astrometric solution to the image...")
+            QApplication.processEvents()
+
+            # Apply calibration data to the WCS
+            self.apply_wcs_header(wcs_header)
+            self.status_label.setText("Status: Blind Solve Complete.")
+            #QMessageBox.information(self, "Blind Solve Complete", "Astrometric solution applied successfully.")
+        except Exception as e:
+            self.status_label.setText("Status: Blind Solve Failed.")
+            #QMessageBox.critical(self, "Blind Solve Failed", f"An error occurred: {str(e)}")
+
     def perform_blind_solve(self):
         """
         First attempts to plate-solve the loaded image using ASTAP.
@@ -47266,7 +60291,8 @@ class MainWindow(QMainWindow):
             if ok and api_key:
                 save_api_key(api_key)
             else:
-                QMessageBox.warning(self, "API Key Required", "Blind solve cannot proceed without an API key.")
+                self.status_label.setText("API Key Required: Blind solve cannot proceed without an API key.")
+                QApplication.processEvents()
                 return
 
         try:
@@ -47327,14 +60353,14 @@ class MainWindow(QMainWindow):
         it falls back to blind solving via Astrometry.net.
         On success, the method updates self.header and initializes self.wcs.
         """
+      
         if not hasattr(self, 'image_path') or not self.image_path:
-            QMessageBox.warning(self, "Plate Solve", "No image loaded.")
+            #QMessageBox.warning(self, "Plate Solve", "No image loaded.")
             return
 
         # Check if the ASTAP executable is set in settings.
         astap_exe = self.settings.value("astap/exe_path", "", type=str)
         if not astap_exe or not os.path.exists(astap_exe):
-            import sys
             if sys.platform.startswith("win"):
                 executable_filter = "Executables (*.exe);;All Files (*)"
             else:
@@ -47345,9 +60371,9 @@ class MainWindow(QMainWindow):
             if new_path:
                 astap_exe = new_path
                 self.settings.setValue("astap/exe_path", astap_exe)
-                QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
+                #QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
             else:
-                QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
+                #QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
                 return None
 
         # Normalize the loaded image.
@@ -47357,21 +60383,21 @@ class MainWindow(QMainWindow):
         try:
             tmp_path = self.save_temp_fits_image(normalized, self.image_path)
         except Exception as e:
-            QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
+            #QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
             return
 
         # Run ASTAP on the temporary file.
-        process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs"]
+        process = QProcess()
+        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
         print("Running ASTAP with arguments:", args)
         process.start(astap_exe, args)
         if not process.waitForStarted(5000):
-            QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
+            #QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
             os.remove(tmp_path)
             self.blind_solve_image()
             return
         if not process.waitForFinished(300000):
-            QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
+            #QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
             os.remove(tmp_path)
             self.blind_solve_image()
             return
@@ -47385,7 +60411,7 @@ class MainWindow(QMainWindow):
         
         if exit_code != 0:
             os.remove(tmp_path)
-            QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
+            #QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
             self.blind_solve_image()
             return
 
@@ -47408,7 +60434,6 @@ class MainWindow(QMainWindow):
         wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
         if os.path.exists(wcs_path):
             try:
-                import re
                 wcs_header = {}
                 with open(wcs_path, "r") as f:
                     text = f.read()
@@ -47477,13 +60502,38 @@ class MainWindow(QMainWindow):
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
-        # Update the main image header and reinitialize WCS.
-        self.header.update(solved_header)
+        # --------------------------------------------------------------------
+        # 1) Make sure A_ORDER/B_ORDER exist in pairs:
+        if "B_ORDER" in solved_header and "A_ORDER" not in solved_header:
+            solved_header["A_ORDER"] = solved_header["B_ORDER"]
+        if "A_ORDER" in solved_header and "B_ORDER" not in solved_header:
+            solved_header["B_ORDER"] = solved_header["A_ORDER"]
+
+        # 2) Convert SIP‐order keywords to ints:
+        for key in ("A_ORDER","B_ORDER","AP_ORDER","BP_ORDER"):
+            if key in solved_header:
+                solved_header[key] = int(float(solved_header[key]))
+
+        # 3) Convert every SIP coefficient to float:
+        for k in list(solved_header):
+            if re.match(r"^(?:A|B|AP|BP)_[0-9]+_[0-9]+$", k):
+                solved_header[k] = float(solved_header[k])
+
+        # --------------------------------------------------------------------
+        # 4) Now rebuild your FITS header from the dict, preserving ordering:
+        new_hdr = fits.Header()
+        for key, val in solved_header.items():
+            # skip any stray non‑FITS metadata
+            if key == "file_path":
+                continue
+            new_hdr[key] = val
+
+        # 5) Finally swap in the new header and re-init WCS (with SIP!)
+        self.header = new_hdr
         try:
             self.wcs = WCS(self.header, naxis=2, relax=True)
-            QMessageBox.information(self, "Plate Solve", "ASTAP plate solve succeeded. WCS updated.")
         except Exception as e:
-            QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header: {e}")
+            QMessageBox.critical(self, "Plate Solve", f"Error initializing WCS from solved header:\n{e}")
             return
 
         return solved_header
@@ -47548,7 +60598,6 @@ class MainWindow(QMainWindow):
         """
         Creates a minimal FITS header when the original header is missing.
         """
-        from astropy.io.fits import Header
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
@@ -47732,6 +60781,15 @@ class MainWindow(QMainWindow):
 
         print(f" -> pixscale = {self.pixscale} arcsec/pixel")
         print(f" -> orientation = {self.orientation}°")
+        try:
+            cr1 = wcs_header.get('CRVAL1')
+            cr2 = wcs_header.get('CRVAL2')
+            if cr1 is not None and cr2 is not None:
+                self.center_ra  = float(cr1)
+                self.center_dec = float(cr2)
+                print(f" -> center RA/Dec = {self.center_ra:.6f}, {self.center_dec:.6f}")
+        except Exception:
+            print("Warning: could not extract CRVAL1/CRVAL2")        
 
 
     def calculate_pixel_from_ra_dec(self, ra, dec):
@@ -48395,7 +61453,8 @@ class MainWindow(QMainWindow):
                             "short_type": type_short,
                             "long_type": long_type,
                             "redshift": redshift,
-                            "comoving_distance": comoving_distance
+                            "comoving_distance": comoving_distance,
+                            "source": "Vizier"
                         }
                     else:
                         existing = unique_entries[key]["diameter"]
@@ -48406,7 +61465,8 @@ class MainWindow(QMainWindow):
                                 "short_type": type_short,
                                 "long_type": long_type,
                                 "redshift": redshift,
-                                "comoving_distance": comoving_distance
+                                "comoving_distance": comoving_distance,
+                                "source": "Vizier"
                             })
 
             # Populate tree & preview
@@ -48567,7 +61627,7 @@ class MainWindow(QMainWindow):
     def force_blind_solve(self, dialog):
         """Force a blind solve on the currently loaded image."""
         dialog.accept()  # Close the settings dialog
-        self.prompt_blind_solve()  # Call the blind solve function
+        self.perform_blind_solve()  # Call the blind solve function
 
 
 def extract_wcs_data(file_path):
@@ -49109,7 +62169,7 @@ class WhatsInMySky(QWidget):
         self.latitude = safe_cast(self.settings.value("latitude", 0.0), 0.0, float)
         self.longitude = safe_cast(self.settings.value("longitude", 0.0), 0.0, float)
         self.date = self.settings.value("date", datetime.now().strftime("%Y-%m-%d"))
-        self.time = self.settings.value("time", "00:00:00")
+        self.time = self.settings.value("time", "00:00")
         self.timezone = self.settings.value("timezone", "UTC")
         self.min_altitude = safe_cast(self.settings.value("min_altitude", 0.0), 0.0, float)
         self.object_limit = safe_cast(self.settings.value("object_limit", 100), 100, int)
@@ -49304,36 +62364,6 @@ if __name__ == '__main__':
     QCoreApplication.setOrganizationName("Seti Astro")
     QCoreApplication.setApplicationName  ("Seti Astro Suite")
 
-    for attempt in range(5):
-        try:
-            from astroquery.simbad import Simbad
-
-            # ——— use the new, non-deprecated field names ———
-            Simbad.add_votable_fields(
-                'otype',         # short object type
-                'otypes',        # verbose object type
-                'mesdiameter',   # was 'diameter'
-                'rvz_redshift',  # was 'z_value'
-                'B',             # was 'flux(B)'
-                'V',             # was 'flux(V)'
-                'plx_value',     # was 'plx'
-                'sp'             # spectral type
-            )
-
-            Simbad.ROW_LIMIT = 0    # no row limit
-            Simbad.TIMEOUT   = 60   # seconds
-
-            # if we get here, everything succeeded—stop retrying
-            break
-
-        except Exception as e:
-            if attempt < 4:
-                # wait a second and try again
-                time.sleep(1)
-            else:
-                # last attempt failed: warn and move on
-                print("Warning: SIMBAD service is currently unavailable. "
-                    "SIMBAD-dependent features may be disabled.")
     try:
         # Initialize main window
         window = AstroEditingSuite()
