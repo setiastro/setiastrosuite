@@ -281,7 +281,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.1"
+VERSION = "2.20.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -7421,6 +7421,31 @@ class MaskCanvas(QGraphicsView):
         self.scene.addItem(poly)
         self.shapes.append(poly)
 
+class LivePreviewDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Live Mask Preview")
+        self.label = QLabel()
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.label)
+        self.resize(300,300)
+
+    def update_mask(self, mask: np.ndarray):
+        img = (mask*255).astype(np.uint8)
+        h, w = img.shape
+        bytes_per_line = w
+        qimg = QImage(
+            img.data, w, h, bytes_per_line,
+            QImage.Format.Format_Grayscale8
+        )
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.label.setPixmap(pix)
+
 class MaskCreationDialog(QDialog):
     """
     Dialog for creating masks with various types and customizations,
@@ -7431,6 +7456,7 @@ class MaskCreationDialog(QDialog):
         self.setWindowTitle("Mask Creation")
         self.image = image.copy()
         self.mask = None
+        self.live_preview = LivePreviewDialog(self)
 
         # Mask parameters
         self.mask_type = "Binary"
@@ -7510,7 +7536,7 @@ class MaskCreationDialog(QDialog):
         controls.addWidget(QLabel("Mask Type:"))
         self.type_dd = QComboBox()
         self.type_dd.addItems([
-            "Binary","Lightness","Chrominance","Star Mask",
+            "Binary","Range Selection","Lightness","Chrominance","Star Mask",
             "Color: Red","Color: Orange","Color: Yellow",
             "Color: Green","Color: Cyan","Color: Blue","Color: Magenta"
         ])
@@ -7529,6 +7555,41 @@ class MaskCreationDialog(QDialog):
 
         layout.addLayout(controls)
 
+        # ── RangeSelection controls (hidden by default) ────────────
+        self.range_box = QGroupBox("Range Selection")
+        g = QGridLayout(self.range_box)
+
+        # helper to build a slider+label
+        def make_slider(row, name, maxv):
+            g.addWidget(QLabel(name+":"), row,0)
+            s = QSlider(Qt.Orientation.Horizontal)
+            s.setRange(0, maxv)
+            s.setValue(0 if name!="Upper" else maxv)
+            lbl = QLabel(f"{0.0:.2f}" if name!="Upper" else f"{1.0:.2f}")
+            g.addWidget(s, row,1)
+            g.addWidget(lbl, row,2)
+            return s,lbl
+
+        self.lower_sl, self.lower_lbl = make_slider(0, "Lower",   100)
+        self.upper_sl, self.upper_lbl = make_slider(1, "Upper",   100)
+        self.fuzz_sl,  self.fuzz_lbl  = make_slider(2, "Fuzziness",100)
+        self.smooth_sl,self.smooth_lbl= make_slider(3, "Smoothness",50)
+
+        # link checkbox
+        self.link_cb  = QCheckBox("Link limits")
+        g.addWidget(self.link_cb, 0,3,2,1)
+
+        # screening / light / invert
+        self.screen_cb = QCheckBox("Screening")
+        self.light_cb  = QCheckBox("Lightness")
+        self.invert_cb = QCheckBox("Invert")
+        for i,cb in enumerate((self.screen_cb,self.light_cb,self.invert_cb),4):
+            g.addWidget(cb, i, 0,1,4)
+
+        layout.addWidget(self.range_box)
+        self.range_box.hide()
+
+
         # ── Preview & Clear ─────────────────────────────────────────
         buttons = QHBoxLayout()
         preview_btn = QPushButton("Preview Mask")
@@ -7538,6 +7599,24 @@ class MaskCreationDialog(QDialog):
         buttons.addWidget(preview_btn)
         buttons.addWidget(clear_btn)
         layout.addLayout(buttons)
+
+        # sliders → labels + live preview
+        for sl, lbl in (
+            (self.lower_sl,  self.lower_lbl),
+            (self.upper_sl,  self.upper_lbl),
+            (self.fuzz_sl,   self.fuzz_lbl),
+            (self.smooth_sl, self.smooth_lbl),
+        ):
+            # read the slider’s own maximum() at runtime
+            sl.valueChanged.connect(
+                lambda v, l=lbl, s=sl: l.setText(f"{v/s.maximum():.2f}")
+            )
+            sl.valueChanged.connect(self._update_live_preview)
+
+        # link lower/upper
+        self.lower_sl.valueChanged.connect(self._on_linked)
+        self.link_cb.toggled.connect(self._on_link_switch)
+        self.type_dd.currentTextChanged.connect(self._on_type_changed)
 
         self.setLayout(layout)
         self.resize(900, 600)
@@ -7554,6 +7633,74 @@ class MaskCreationDialog(QDialog):
         if mode == 'select':
             self.canvas.select_entire_image()
 
+    def _on_type_changed(self, txt):
+        if txt=="Range Selection":
+            self.range_box.show()
+            # bring up live preview
+            if not self.live_preview:
+                self.live_preview = LivePreviewDialog(self)
+                self.live_preview.show()
+            self._update_live_preview()
+        else:
+            self.range_box.hide()
+            if self.live_preview:
+                self.live_preview.close()
+                self.live_preview = None
+
+    def _on_link_switch(self, checked):
+        # if linking, immediately sync upper to lower
+        if checked:
+            self.upper_sl.setValue(self.lower_sl.value())
+
+    def _on_linked(self, v):
+        if self.link_cb.isChecked():
+            self.upper_sl.setValue(v)
+
+
+    def _update_live_preview(self, *_):
+        m = self.generate_mask()
+        if m is None:
+            return
+        if not self.live_preview.isVisible():
+            self.live_preview.show()
+        self.live_preview.update_mask(m)
+
+    def closeEvent(self, event):
+        # ensure live‐preview is closed when this dialog is closed
+        if hasattr(self, 'live_preview') and self.live_preview.isVisible():
+            self.live_preview.close()
+        super().closeEvent(event)
+
+    def _range_selection_mask(self, comp, L, U, fuzz, smooth, screening, invert):
+        # comp: single‐channel image normalized to [0..1]
+        mask = np.zeros_like(comp, dtype=np.float32)
+
+        # 1) Hard clip region
+        inside = (comp >= L) & (comp <= U)
+        mask[inside] = 1.0
+
+        # 2) Fuzziness ramps
+        if fuzz > 0:
+            # ramp‑up below L
+            ramp = (comp - (L - fuzz)) / fuzz
+            mask += np.clip(ramp, 0, 1)
+            # ramp‑down above U
+            ramp2 = ((U + fuzz) - comp) / fuzz
+            mask *= np.clip(ramp2, 0, 1)
+
+        # 3) Screening
+        if screening:
+            mask *= comp
+
+        # 4) Gaussian smooth
+        if smooth > 0:
+            mask = cv2.GaussianBlur(mask, (0,0), smooth)
+
+        # 5) Invert
+        if invert:
+            mask = 1.0 - mask
+
+        return np.clip(mask, 0, 1)
 
     def update_mask_type(self, mask_type):
         """
@@ -7645,6 +7792,41 @@ class MaskCreationDialog(QDialog):
         # apply mask‐type logic
         if self.mask_type == "Binary":
             mask = base_mask
+        elif self.mask_type == "Range Selection":
+            # 1) pick component
+            if self.light_cb.isChecked():
+                comp = self.generate_lightness_mask()
+            else:
+                # grayscale luminance
+                if self.image.ndim == 3:
+                    comp = (self.image[...,0]*0.2989 +
+                            self.image[...,1]*0.5870 +
+                            self.image[...,2]*0.1140)
+                else:
+                    comp = self.image.copy()
+
+            # 2) normalize to [0,1]
+            #comp = (comp - comp.min())/(comp.max() - comp.min() + 1e-12)
+
+            # 3) read slider values as fractions
+            L     = self.lower_sl.value()  / self.lower_sl.maximum()
+            U     = self.upper_sl.value()  / self.upper_sl.maximum()
+            fuzz  = self.fuzz_sl.value()   / self.fuzz_sl.maximum()
+            smooth= self.smooth_sl.value() / (self.smooth_sl.maximum()/10)  # tweak scale as you like
+
+            # 4) build the range‐selection mask
+            rs = self._range_selection_mask(
+                comp=comp,
+                L=L, U=U,
+                fuzz=fuzz,
+                smooth=smooth,
+                screening=self.screen_cb.isChecked(),
+                invert=self.invert_cb.isChecked()
+            )
+
+            # 5) combine with your shape‐based base_mask
+            mask = base_mask * rs
+                 
         elif self.mask_type == "Lightness":
             L = self.generate_lightness_mask()
             mask = np.where(base_mask, L, 0.0)
@@ -12607,7 +12789,7 @@ class StackingSuiteDialog(QDialog):
             QApplication.processEvents()
 
             # (A) Identify reference shape from the first file
-            ref_file = file_List[0]
+            ref_file = file_list[0]
             ref_data, ref_header, bit_depth, is_mono = load_image(ref_file)
             if ref_data is None:
                 self.update_status(f"❌ Failed to load reference {os.path.basename(ref_file)}")
@@ -13007,9 +13189,9 @@ class StackingSuiteDialog(QDialog):
                 self.update_status("DEBUG: No matching Master Dark found.")
 
             # Load reference image
-            ref_data, _, _, _ = load_image(file_List[0])
+            ref_data, _, _, _ = load_image(file_list[0])
             if ref_data is None:
-                self.update_status(f"❌ Failed to load reference {os.path.basename(file_List[0])}")
+                self.update_status(f"❌ Failed to load reference {os.path.basename(file_list[0])}")
                 continue
 
             height, width = ref_data.shape[:2]
@@ -14335,7 +14517,7 @@ class StackingSuiteDialog(QDialog):
                 continue
 
             # 1) Identify the reference file to get shape and header
-            ref_file = file_List[0]
+            ref_file = file_list[0]
             if not os.path.exists(ref_file):
                 self.update_status(f"⚠️ Reference file '{ref_file}' not found, skipping group.")
                 continue
@@ -14757,7 +14939,7 @@ class StackingSuiteDialog(QDialog):
         QApplication.processEvents()
 
         # 3) Load the first file to determine shape + color/mono
-        first_file = file_List[0]
+        first_file = file_list[0]
         first_img, hdr, _, _ = load_image(first_file)
         if first_img is None:
             self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
@@ -14920,7 +15102,7 @@ class StackingSuiteDialog(QDialog):
             return None, {}, None
 
         # 2) Load a reference image to determine dimensions and channels
-        ref_file = file_List[0]
+        ref_file = file_list[0]
         if not os.path.exists(ref_file):
             self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
             return None, {}, None
@@ -14993,7 +15175,7 @@ class StackingSuiteDialog(QDialog):
                         i       = future_to_i[fut]
                         sub_img = fut.result()
                         if sub_img is None:
-                            self.update_status(f"DEBUG: Tile load returned None for file: {file_List[i]}")
+                            self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
                             continue
                         # Normalize shape → (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
@@ -23195,10 +23377,10 @@ class PSFViewer(QDialog):
             edges = np.linspace(0, 1, 51)
         else:
             if self.histogram_mode == 'PSF':
-                data = np.array(self.star_List['HFR'], float)
+                data = np.array(self.star_list['HFR'], float)
                 edges = np.linspace(0, 7.5, 51)
             else:
-                data = np.array(self.star_List['flux'], float)
+                data = np.array(self.star_list['flux'], float)
                 if data.size:
                     edges = np.linspace(data.min(), data.max(), 51)
                 else:
@@ -23255,13 +23437,13 @@ class PSFViewer(QDialog):
             # desired columns
             cols = ['HFR','eccentricity','a','b','theta','flux']
             # compute eccentricity
-            a = np.array(self.star_List['a'], float)
-            b = np.array(self.star_List['b'], float)
+            a = np.array(self.star_list['a'], float)
+            b = np.array(self.star_list['b'], float)
             ecc = np.nan_to_num(np.sqrt(1 - (b/a)**2))
             # insert into table representation
             data_map = {
                 'eccentricity': ecc,
-                **{c: np.array(self.star_List[c], float) for c in self.star_list.colnames}
+                **{c: np.array(self.star_list[c], float) for c in self.star_list.colnames}
             }
         
         # Filter out missing
@@ -35447,7 +35629,7 @@ class SFCCDialog(QDialog):
 
             # ── Match to Pickles template ─────────────────────────────
             match_list   = pickles_match_for_simbad(sp_clean, self.pickles_templates)
-            best_template = match_List[0] if match_list else None
+            best_template = match_list[0] if match_list else None
 
             # Project to pixel coords and store star
             xpix, ypix = self.wcs.all_world2pix(sc.ra.deg, sc.dec.deg, 0)
@@ -35681,7 +35863,7 @@ class SFCCDialog(QDialog):
         # …
         for m in raw_matches:
             xi, yi, sp = m["x_pix"], m["y_pix"], m["template"]
-            star_src = self.star_List[m["sim_index"]]
+            star_src = self.star_list[m["sim_index"]]
             if img.dtype == np.uint8:
                 Rm = img[yi, xi, 0] / 255.0
                 Gm = img[yi, xi, 1] / 255.0
@@ -41484,7 +41666,7 @@ class BlinkTab(QWidget):
         # ensure we have a 4-slot list for this group
         thr_list = self.thresholds_by_group.setdefault(group, [None]*4)
         # store the new threshold for this metric
-        thr_List[metric_idx] = threshold
+        thr_list[metric_idx] = threshold
 
         # build the list of indices to re-evaluate
         if group == "All":
