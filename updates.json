@@ -1,9 +1,9 @@
 {
-  "version": "2.20.1",
+  "version": "2.20.2",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.1/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.2/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.2/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.2/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Toggle in HDR, Aspect ratios for Crop, various bug fixes."
+  "notes": "Mask Creation has Range Selection option! Various Bug Fixes, especially around those with List errors."
 }
