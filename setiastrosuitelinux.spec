@@ -7,6 +7,8 @@ from PyInstaller.utils.hooks import (
     collect_all
 )
 
+sklearn_api_submods = collect_submodules('sklearn.externals.array_api_compat.numpy')
+
 #############################################
 # Collect everything we need
 #############################################
@@ -51,27 +53,29 @@ hiddenimports += [
     'numcodecs',           # ensure the package is there
     'numcodecs.zfpy',      # explicit for the zfpy extension
 ]
+hiddenimports += sklearn_api_submods
 
 #############################################
 # Data collection
 #############################################
 datas=[
     # astroquery citation
-    ('/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/CITATION',
+    ('/home/seti-astro/Desktop/setiastrosuite/venv/lib/python3.12/site-packages/astroquery/CITATION',
         'astroquery'),
     # astroquery simbad data
-    ('/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astroquery/simbad/data',
+    ('/home/seti-astro/Desktop/setiastrosuite/venv/lib/python3.12/site-packages/astroquery/simbad/data',
         'astroquery/simbad/data'),
     # photutils citation
-    ('/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/photutils/CITATION.rst',
+    ('/home/seti-astro/Desktop/setiastrosuite/venv/lib/python3.12/site-packages/photutils/CITATION.rst',
         'photutils'),
     # astropy citation
-    ('/home/setiastroadmin/Desktop/cosmicclarity/env/lib/python3.8/site-packages/astropy/CITATION',
+    ('/home/seti-astro/Desktop/setiastrosuite/venv/lib/python3.12/site-packages/astropy/CITATION',
         'astropy'),
     # local resources
     ('wimilogo.png', '.'),
     ('wrench_icon.png', '.'),
     ('astrosuite.png', '.'),
+    ('exoicon.png', '.'),
     ('LExtract.png', '.'),
     ('LInsert.png', '.'),
     ('slot1.png', '.'),
@@ -83,9 +87,16 @@ datas=[
     ('slot6.png', '.'),
     ('slot7.png', '.'),
     ('slot8.png', '.'),
+    ('HRDiagram.png', '.'),
+    ('gridicon.png', '.'),
+    ('spcc.png', '.'),
+    ('SASP_data.fits', '.'),
+    ('convo.png', '.'),
     ('slot9.png', '.'),
     ('numba_utils.py', '.'),
+    ('livestacking.png', '.'),
     ('stacking.png', '.'),
+    ('dse.png', '.'),
     ('starregistration.png', '.'),
     ('supernova.png', '.'),
     ('pen.png', '.'),
@@ -120,6 +131,7 @@ datas=[
     ('rgbextract.png', '.'),
     ('copyslot.png', '.'),
     ('staradd.png', '.'),
+    ('gridicon.png', ','),
     ('starnet.png', '.'),
     ('clahe.png', '.'),
     ('morpho.png', '.'),
@@ -149,12 +161,13 @@ datas += typingext_datas
 datas += importlib_metadata_datas
 datas += kaleido_datas
 datas += numcodecs_datas    # <-- ensure .so and support files for numcodecs
+datas += collect_data_files('lightkurve', includes=['data/lightkurve.mplstyle'])
 
 #############################################
 # Build the spec
 #############################################
 a = Analysis(
-    ['setiastrosuiteqt6.py'],
+    ['setiastrosuitelinuxQT6.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -175,7 +188,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='setiastrosuite_linux_ubuntu20.04',
+    name='setiastrosuite_linux_ubuntu24.04',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
