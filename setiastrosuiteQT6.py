@@ -60377,13 +60377,12 @@ class MainWindow(QMainWindow):
         if not process.waitForStarted(5000):
             #QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
             os.remove(tmp_path)
-            self.blind_solve_image()
-            return
+            
+            return None
         if not process.waitForFinished(300000):
             #QMessageBox.critical(self, "Plate Solve", "ASTAP process timed out.")
             os.remove(tmp_path)
-            self.blind_solve_image()
-            return
+            return None
 
         exit_code = process.exitCode()
         stdout = process.readAllStandardOutput().data().decode()
@@ -60395,8 +60394,8 @@ class MainWindow(QMainWindow):
         if exit_code != 0:
             os.remove(tmp_path)
             #QMessageBox.warning(self, "Plate Solve", "ASTAP failed. Falling back to blind solve.")
-            self.blind_solve_image()
-            return
+            
+            return None
 
         # --- Retrieve the initial solved header from the temporary FITS file ---
         try:
