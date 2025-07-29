@@ -281,7 +281,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.2"
+VERSION = "2.20.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -2038,7 +2038,27 @@ class AstroEditingSuite(QMainWindow):
         # Clear all tabs that display images.
         self.clear_all_tabs()
 
+
+        # ——— Reset masks ——————————————————————————————
+        # 1) clear out all masks in MaskManager
+        self.mask_manager._masks = {}
+        self.mask_manager.applied_mask = None
+        self.mask_manager.applied_mask_slot = None
+
+       # 2) reset the banner to hidden
+        self.update_mask_banner(-1, None)
+
+        # 3) reset all of the mask‑slot button labels back to "Mask Slot {i}"
+        for slot, btn in self.mask_slot_actions.items():
+            default_name = self.mask_slot_names[slot]
+            btn.setText(default_name)
+            btn.setToolTip(default_name)
+
+        # 4) clear any toolbar highlighting on slots
+        self.update_slot_toolbar_highlight()
+
         print("New project created: All image, mask, and undo/redo data have been cleared.")
+
 
 
     def clear_all_tabs(self):
@@ -7422,29 +7442,56 @@ class MaskCanvas(QGraphicsView):
         self.shapes.append(poly)
 
 class LivePreviewDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, original_image: np.ndarray, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Live Mask Preview")
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(self.label)
-        self.resize(300,300)
+        self.resize(300, 300)
+
+        # 1) build and store your base pixmap once
+        img8 = (original_image * 255).astype(np.uint8)
+        h, w = img8.shape[:2]
+        if original_image.ndim == 3:
+            fmt, stride = QImage.Format.Format_RGB888, 3*w
+        else:
+            fmt, stride = QImage.Format.Format_Grayscale8, w
+        qimg = QImage(img8.data, w, h, stride, fmt)
+        self.base_pixmap = QPixmap.fromImage(qimg)
+        self.max_alpha = 150  # adjust global maximum opacity here
 
     def update_mask(self, mask: np.ndarray):
-        img = (mask*255).astype(np.uint8)
-        h, w = img.shape
-        bytes_per_line = w
-        qimg = QImage(
-            img.data, w, h, bytes_per_line,
-            QImage.Format.Format_Grayscale8
+        """
+        mask: float array [0..1], same shape as original_image
+        """
+        h, w = mask.shape
+        # 2) create an (h×w×4) RGBA array: R=255, G=B=0, A = mask*max_alpha
+        alpha = (mask * self.max_alpha).clip(0,255).astype(np.uint8)
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[...,1] = 255        # red channel
+        rgba[...,3] = alpha      # alpha channel
+
+        # 3) one-shot conversion to QImage/QPixmap
+        overlay_qimg = QImage(rgba.data, w, h, 4*w, QImage.Format.Format_RGBA8888)
+        overlay_pix = QPixmap.fromImage(overlay_qimg)
+
+        # 4) paint overlay onto a copy of the base
+        canvas = QPixmap(self.base_pixmap)
+        painter = QPainter(canvas)
+        
+        painter.drawPixmap(0, 0, overlay_pix)
+        painter.end()
+
+        # 5) show it scaled into your label
+        self.label.setPixmap(
+            canvas.scaled(
+                self.label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
         )
-        pix = QPixmap.fromImage(qimg).scaled(
-            self.label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.label.setPixmap(pix)
+
 
 class MaskCreationDialog(QDialog):
     """
@@ -7456,7 +7503,7 @@ class MaskCreationDialog(QDialog):
         self.setWindowTitle("Mask Creation")
         self.image = image.copy()
         self.mask = None
-        self.live_preview = LivePreviewDialog(self)
+        self.live_preview = LivePreviewDialog(self.image, parent=self)
 
         # Mask parameters
         self.mask_type = "Binary"
@@ -7638,7 +7685,7 @@ class MaskCreationDialog(QDialog):
             self.range_box.show()
             # bring up live preview
             if not self.live_preview:
-                self.live_preview = LivePreviewDialog(self)
+                self.live_preview = LivePreviewDialog(self.image, parent=self)
                 self.live_preview.show()
             self._update_live_preview()
         else:
@@ -7667,7 +7714,7 @@ class MaskCreationDialog(QDialog):
 
     def closeEvent(self, event):
         # ensure live‐preview is closed when this dialog is closed
-        if hasattr(self, 'live_preview') and self.live_preview.isVisible():
+        if getattr(self, 'live_preview', None) is not None and self.live_preview.isVisible():
             self.live_preview.close()
         super().closeEvent(event)
 
@@ -8059,14 +8106,14 @@ class MaskCreationDialog(QDialog):
         event.accept()
 
     # Zoom Methods
-    @announce_zoom
+
     def zoom_in(self):
         """Zoom in on the image."""
         self.previous_scale_factor = self.scale_factor
         self.scale_factor *= 1.2
         self.update_image()
 
-    @announce_zoom
+
     def zoom_out(self):
         """Zoom out of the image."""
         self.previous_scale_factor = self.scale_factor
@@ -8241,14 +8288,14 @@ class MaskPreviewDialog(QDialog):
 
 
     # Zoom Methods
-    @announce_zoom
+
     def zoom_in(self):
         """Zoom in on the mask."""
         self.previous_scale_factor = self.scale_factor
         self.scale_factor *= 1.2
         self.update_image()
 
-    @announce_zoom
+
     def zoom_out(self):
         """Zoom out of the mask."""
         self.previous_scale_factor = self.scale_factor
