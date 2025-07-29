@@ -60409,8 +60409,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Plate Solve", f"Error reading solved header: {e}")
             os.remove(tmp_path)
-            self.blind_solve_image()
-            return
+            
+            return None
 
         # --- Check for a .wcs file and merge its header if present ---
         wcs_path = os.path.splitext(tmp_path)[0] + ".wcs"
