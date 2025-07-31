@@ -28,6 +28,7 @@ import zstandard
 import base64
 import ast
 import platform
+from pathlib import Path
 import glob
 from typing import List, Tuple, Dict, Set
 import time
@@ -281,7 +282,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.3"
+VERSION = "2.20.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -10775,10 +10776,11 @@ class StackingSuiteDialog(QDialog):
         self.session_tags = {}  # 🔑 file_path => session_tag (e.g., "Session1", "Blue Flats", etc.)
         self.deleted_calibrated_files = []
 
+
         # QSettings for your app
         self.settings = QSettings() 
 
-        
+        self.star_trail_mode = self.settings.value("stacking/star_trail_mode", False, type=bool)        
 
         # Load or default these
         self.stacking_directory = self.settings.value("stacking/dir", "", type=str)
@@ -11214,7 +11216,8 @@ class StackingSuiteDialog(QDialog):
             "Trimmed Mean",
             "Extreme Studentized Deviate (ESD)",
             "Biweight Estimator",
-            "Modified Z-Score Clipping"
+            "Modified Z-Score Clipping",
+            "Max Value"
         ])
         saved_algo = self.settings.value("stacking/rejection_algorithm", "Weighted Windsorized Sigma Clipping")
         index = self.rejection_algo_combo.findText(saved_algo)
@@ -11882,9 +11885,21 @@ class StackingSuiteDialog(QDialog):
         ref_layout.addWidget(self.select_ref_frame_btn)
         layout.addLayout(ref_layout)
 
+
+        # ★★ Star-Trail Mode ★★
+        trail_layout = QHBoxLayout()
+        self.trail_cb = QCheckBox("★★ Star-Trail Mode ★★ (Max-Value Stack)")
+        self.trail_cb.setChecked(self.star_trail_mode)
+        self.trail_cb.setToolTip(
+            "Skip registration/alignment and use Maximum-Intensity projection for star trails"
+        )
+        self.trail_cb.stateChanged.connect(self._on_star_trail_toggled)
+        trail_layout.addWidget(self.trail_cb)
+        layout.addLayout(trail_layout)
         # ─────────────────────────────────────────
         # 5) Register & Integrate Buttons
         # ─────────────────────────────────────────
+
         self.register_images_btn = QPushButton("🔥🚀Register and Integrate Images🔥🚀")
         self.register_images_btn.clicked.connect(self.register_images)
         self.register_images_btn.setStyleSheet("""
@@ -11925,6 +11940,18 @@ class StackingSuiteDialog(QDialog):
 
         tab.setLayout(layout)
         return tab
+
+    def _on_star_trail_toggled(self, state):
+        self.star_trail_mode = bool(state)
+        self.settings.setValue("stacking/star_trail_mode", self.star_trail_mode)
+        # if they turn it on, immediately override the rejection combo:
+        if self.star_trail_mode:
+            self.rejection_algorithm = "Maximum Value"
+        else:
+            # reload whatever the user picked
+            self.rejection_algorithm = self.settings.value("stacking/rejection_algorithm",
+                                                          self.rejection_algorithm,
+                                                          type=str)
 
     def select_reference_frame(self):
         """ Opens a file dialog to select the reference frame. """
@@ -12147,6 +12174,7 @@ class StackingSuiteDialog(QDialog):
             try:
                 header = fits.getheader(file_path, ext=0)
                 filter_name = header.get("FILTER", "Unknown")
+                filter_name     = self._sanitize_name(filter_name)
                 exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
                 width = header.get("NAXIS1", 0)
                 height = header.get("NAXIS2", 0)
@@ -12559,7 +12587,12 @@ class StackingSuiteDialog(QDialog):
             if expected_type == "LIGHT":
                 self.assign_best_master_files()
 
-
+    def _sanitize_name(self, name: str) -> str:
+        """
+        Replace any character that isn’t a letter, digit, space, dash or underscore
+        with an underscore so it’s safe to use in filenames, dict-keys, tree labels, etc.
+        """
+        return re.sub(r"[^\w\s\-]", "_", name)
     
     def process_fits_header(self, file_path, tree, expected_type):
         try:
@@ -12649,6 +12682,7 @@ class StackingSuiteDialog(QDialog):
 
             elif expected_type.upper() == "FLAT":
                 filter_name = header.get("FILTER", "Unknown")
+                filter_name = self._sanitize_name(filter_name)
                 flat_key = f"{filter_name} - {exposure_val} ({image_size})"
                 session_tag = getattr(self, "current_session_tag", "Default")
                 composite_key = (flat_key, session_tag)
@@ -12681,6 +12715,7 @@ class StackingSuiteDialog(QDialog):
 
             elif expected_type.upper() == "LIGHT":
                 filter_name = header.get("FILTER", "Unknown")
+                filter_name = self._sanitize_name(filter_name)
                 session_tag = getattr(self, "current_session_tag", "Default")  # ⭐️ Step 1: Get session label
 
                 light_key = f"{filter_name} - {exposure_val} ({image_size})"
@@ -12731,7 +12766,7 @@ class StackingSuiteDialog(QDialog):
                 # Check for both EXPOSURE and EXPTIME
                 exposure = header.get("EXPOSURE", header.get("EXPTIME", "Unknown"))
                 filter_name = header.get("FILTER", "Unknown")
-                
+                filter_name     = self._sanitize_name(filter_name)
                 # Extract image dimensions from header keywords NAXIS1 and NAXIS2
                 width = header.get("NAXIS1")
                 height = header.get("NAXIS2")
@@ -13213,6 +13248,7 @@ class StackingSuiteDialog(QDialog):
                 continue
 
             self.update_status(f"🟢 Processing {len(file_list)} flats for {exposure_time}s ({image_size}) [{filter_name}] in session '{session}'...")
+            QApplication.processEvents()
 
             # Load master dark
             best_diff = float("inf")
@@ -13410,6 +13446,7 @@ class StackingSuiteDialog(QDialog):
         for i in range(self.light_tree.topLevelItemCount()):
             filter_item = self.light_tree.topLevelItem(i)
             filter_name = filter_item.text(0)
+            filter_name     = self._sanitize_name(filter_name)
 
             for j in range(filter_item.childCount()):
                 exposure_item = filter_item.child(j)
@@ -13883,6 +13920,11 @@ class StackingSuiteDialog(QDialog):
         normalize_images function, saves them with a '_n.fit' suffix, and finally
         starts the alignment thread on those normalized files.
         """
+        if self.star_trail_mode:
+            self.update_status("🌠 Star-Trail Mode enabled: skipping registration & using max-value stack")
+            QApplication.processEvents()
+            return self._make_star_trail()
+                
         self.update_status("🔄 Image Registration Started...")
 
         # ── 0) if the user added files “by hand”, use them
@@ -14249,6 +14291,53 @@ class StackingSuiteDialog(QDialog):
             transforms[curr_file] = np.array([[a, b, tx],
                                             [c, d, ty]], dtype=np.float32)
         return transforms
+
+    def _make_star_trail(self):
+        # 1) collect all your calibrated light frames
+        all_files = [f for flist in self.light_files.values() for f in flist]
+        n_frames = len(all_files)
+        if not all_files:
+            self.update_status("⚠️ No calibrated lights available for star trails.")
+            return
+
+        # 2) compute per-frame medians, then pick the "median of medians"
+        frame_medians = []
+        for fn in all_files:
+            data = fits.getdata(fn).astype(np.float32)
+            frame_medians.append(np.median(data))
+        ref_median = float(np.median(frame_medians))
+
+        # 3) normalize each to ref_median + write to a temp dir
+        with tempfile.TemporaryDirectory(prefix="startrail_norm_") as norm_dir:
+            normalized_paths = []
+            for fn in all_files:
+                img, hdr, _, _ = load_image(fn)
+                img = img.astype(np.float32)
+                # guard against divide-by-zero
+                m = np.median(img)
+                scale = ref_median / (m + 1e-12)
+                img_norm = img * scale
+
+                stem = Path(fn).stem
+                out_path = os.path.join(norm_dir, f"{stem}_st.fit")
+                fits.PrimaryHDU(data=img_norm, header=hdr).writeto(out_path, overwrite=True)
+                normalized_paths.append(out_path)
+
+            # 4) stack and do max-value projection
+            stack = np.stack([fits.getdata(p).astype(np.float32) for p in normalized_paths], axis=0)
+            trail_img, _ = max_value_stack(stack)
+
+            # 5) stretch & write final TIFF
+            trail_img = trail_img.astype(np.float32)
+            scaled = (trail_img / (trail_img.max() + 1e-12) * 65535).astype(np.uint16)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"StarTrail_{n_frames:03d}frames_{ts}.tif"
+            out_tif = os.path.join(self.stacking_directory, fname)
+            cv2.imwrite(out_tif, scaled)
+
+        # once we exit the with-block, all the _st.fit files are deleted
+        self.update_status(f"✅ Star‐Trail image written to {out_tif}")
+        return
 
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
@@ -14685,6 +14774,8 @@ class StackingSuiteDialog(QDialog):
                     elif algo == "Modified Z-Score Clipping":
                         tile_result, tile_rej_map = modified_zscore_clip_weighted(tile_stack, weights_list,
                             threshold=self.modz_threshold)
+                    elif algo == "Max Value":
+                        tile_result, tile_rej_map = max_value_stack(tile_stack, weights_list)
                     else:
                         tile_result, tile_rej_map = windsorized_sigma_clip_weighted(tile_stack, weights_list,
                             lower=self.sigma_low, upper=self.sigma_high)
@@ -15273,6 +15364,10 @@ class StackingSuiteDialog(QDialog):
                         tile_stack, weights_array,
                         threshold=self.modz_threshold
                     )
+                elif algo == "Max Value":
+                    tile_result, tile_rej_map = max_value_stack(
+                        tile_stack, weights_array
+                    )
                 else:
                     tile_result, tile_rej_map = windsorized_sigma_clip_weighted(
                         tile_stack, weights_array,
@@ -15687,6 +15782,7 @@ class LiveStackWindow(QDialog):
         self.max_ecc             = s.value("LiveStack/max_ecc",             0.9,    type=float)
         self.min_star_count      = s.value("LiveStack/min_star_count",      5,      type=int)
         self.narrowband_mapping  = s.value("LiveStack/narrowband_mapping",  "Natural", type=str)
+        self.star_trail_mode = s.value("LiveStack/star_trail_mode", False, type=bool)
 
 
         self.total_exposure = 0.0  # seconds
@@ -15736,6 +15832,12 @@ class LiveStackWindow(QDialog):
         )
         # **Connect the toggled(bool) signal** before we ever call it
         self.mono_color_checkbox.toggled.connect(self._on_mono_color_toggled)
+
+        # ** new: Star-Trail mode checkbox **
+        self.star_trail_checkbox = QCheckBox("★★ Star-Trail Mode ★★")
+        self.star_trail_checkbox.setChecked(self.star_trail_mode)
+        self.star_trail_checkbox.setToolTip("If checked, build a max-value trail instead of a running stack")
+        self.star_trail_checkbox.toggled.connect(self._on_star_trail_toggled)
 
         self.process_and_monitor_btn = QPushButton("Process && Monitor")
         self.process_and_monitor_btn.clicked.connect(self.start_and_process)
@@ -15839,6 +15941,7 @@ class LiveStackWindow(QDialog):
         controls.addWidget(self.select_cull_btn)
         controls.addStretch()
         controls.addWidget(self.mono_color_checkbox)
+        controls.addWidget(self.star_trail_checkbox)
         controls.addWidget(self.process_and_monitor_btn)
         controls.addWidget(self.monitor_only_btn)
         controls.addWidget(self.stop_btn)
@@ -15888,6 +15991,14 @@ class LiveStackWindow(QDialog):
 
 
     # ─────────────────────────────────────────────────────────────────────────
+    def _on_star_trail_toggled(self, checked: bool):
+        """Enable/disable star-trail mode."""
+        self.star_trail_mode = checked
+        QSettings().setValue("LiveStack/star_trail_mode", checked)
+        self.mode_label.setText("Mode: Star-Trail" if checked else "Mode: Linear Average")
+        # if you want, disable mono/color checkbox when star-trail is on:
+        self.mono_color_checkbox.setEnabled(not checked)
+
     def _on_mono_color_toggled(self, checked: bool):
         self.mono_color_mode = checked
         self.filter_stacks.clear()
@@ -16449,6 +16560,10 @@ class LiveStackWindow(QDialog):
             self.process_frame(path)
 
     def process_frame(self, path):
+        # if star-trail mode is on, bypass the normal pipeline entirely:
+        if self.star_trail_mode:
+            return self._process_star_trail(path)
+                
         # 1) Load
         # ─── 1) RAW‐file check ────────────────────────────────────────────
         lower = path.lower()
@@ -16824,7 +16939,134 @@ class LiveStackWindow(QDialog):
         self.update_preview(preview)
         QApplication.processEvents()
 
+    def _process_star_trail(self, path: str):
+        """
+        Load/calibrate a single frame (RAW or FITS/TIFF), debayer if needed,
+        normalize, then build a max‐value “star trail” in self.current_stack.
+        """
+        # ─── 1) Load (RAW vs FITS) ─────────────────────────────
+        lower = path.lower()
+        raw_exts = ('.cr2', '.cr3', '.nef', '.arw', '.dng',
+                    '.orf', '.rw2', '.pef')
+        if lower.endswith(raw_exts):
+            try:
+                with rawpy.imread(path) as raw:
+                    img_rgb8 = raw.postprocess(use_camera_wb=True,
+                                               no_auto_bright=True,
+                                               output_bps=16)
+                img = img_rgb8.astype(np.float32) / 65535.0
+                header = fits.Header()
+                header["SIMPLE"]   = True
+                header["BITPIX"]   = 16
+                header["CREATOR"]  = "LiveStack(RAW)"
+                header["IMAGETYP"] = "RAW"
+                header["EXPTIME"]  = "Unknown"
+                # attempt EXIF, same as process_frame…
+                try:
+                    with open(path,'rb') as f:
+                        tags = exifread.process_file(f, details=False)
+                    exp_tag = tags.get("EXIF ExposureTime") \
+                              or tags.get("EXIF ShutterSpeedValue")
+                    if exp_tag:
+                        ev = str(exp_tag.values)
+                        if '/' in ev:
+                            n,d = ev.split('/',1)
+                            header["EXPTIME"] = (float(n)/float(d),
+                                                 "Exposure Time (s)")
+                        else:
+                            header["EXPTIME"] = (float(ev),
+                                                 "Exposure Time (s)")
+                except:
+                    pass
+                bit_depth = 16
+                is_mono   = False
+            except Exception:
+                self.status_label.setText(
+                    f"⚠ Failed to decode RAW: {os.path.basename(path)}"
+                )
+                QApplication.processEvents()
+                return
+        else:
+            # FITS / TIFF / XISF
+            img, header, bit_depth, is_mono = load_image(path)
+            if img is None:
+                self.status_label.setText(
+                    f"⚠ Failed to load {os.path.basename(path)}"
+                )
+                QApplication.processEvents()
+                return
 
+        # ─── 2) Calibration ─────────────────────────────────────
+        mono_key = None
+        if (self.mono_color_mode
+            and is_mono
+            and header.get('FILTER')
+            and 'BAYERPAT' not in header):
+            mono_key = self._get_filter_key(header)
+
+        if self.master_dark is not None:
+            img = img.astype(np.float32) - self.master_dark
+
+        if mono_key and mono_key in self.master_flats:
+            img = apply_flat_division_numba(img,
+                                            self.master_flats[mono_key])
+        elif self.master_flat is not None:
+            img = apply_flat_division_numba(img,
+                                            self.master_flat)
+
+        # ─── 3) Debayer ─────────────────────────────────────────
+        if is_mono and header.get('BAYERPAT'):
+            pat = (header['BAYERPAT'][0]
+                   if isinstance(header['BAYERPAT'], tuple)
+                   else header['BAYERPAT'])
+            img = debayer_fits_fast(img, pat)
+            is_mono = False
+
+        # ─── 4) Force 3-channel if still mono ───────────────────
+        if not mono_key and img.ndim == 2:
+            img = np.stack([img, img, img], axis=2)
+
+        # ─── 5) Normalize ───────────────────────────────────────
+        # for star-trail we want a visible, stretched version:
+        if img.ndim == 2:
+            plane = stretch_mono_image(img, target_median=0.3)
+            norm_color = np.stack([plane]*3, axis=2)
+        else:
+            norm_color = stretch_color_image(img,
+                                             target_median=0.3,
+                                             linked=False)
+
+        # ─── 6) Build max-value stack ───────────────────────────
+        if self.frame_count == 0:
+            self.current_stack = norm_color.copy()
+        else:
+            # elementwise max over all frames so far
+            self.current_stack = np.maximum(self.current_stack,
+                                            norm_color)
+
+        # ─── 7) Update counters and labels ──────────────────────
+        self.frame_count += 1
+        self.frame_count_label.setText(f"Frames: {self.frame_count}")
+
+        exp_val = header.get("EXPOSURE", header.get("EXPTIME", None))
+        if exp_val is not None:
+            try:
+                secs = float(exp_val)
+                self.total_exposure += secs
+                h = int(self.total_exposure // 3600)
+                m = int((self.total_exposure % 3600)//60)
+                s = int(self.total_exposure % 60)
+                self.exposure_label.setText(
+                    f"Total Exp: {h:02d}:{m:02d}:{s:02d}")
+            except:
+                pass
+
+        self.status_label.setText(
+            f"★ Star-Trail frame {self.frame_count}: "
+            f"{os.path.basename(path)}"
+        )
+        self.update_preview(self.current_stack)
+        QApplication.processEvents()
 
 
 
@@ -30743,15 +30985,15 @@ class ExoPlanetWindow(QDialog):
             self,
             "Select Raw Frames",
             start_dir,
-            "FITS TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)"
+            "FITS, TIFF or XISF (*.fit *.fits *.tif *.tiff *.xisf)"
         )
         if not paths:
             return
 
-        # — remember for next time —
+        # remember for next time
         settings.setValue("ExoPlanet/lastRawFolder", os.path.dirname(paths[0]))
 
-        # ——— 1) HEADER PASS: extract DATE-OBS (with progress) ———
+        # ——— PASS 1: extract DATE-OBS & sort ———
         self.status_label.setText("Reading headers…")
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(paths))
@@ -30765,54 +31007,53 @@ class ExoPlanetWindow(QDialog):
 
             if ext == '.xisf':
                 try:
-                    xisf = XISF(p)
+                    xisf     = XISF(p)
                     img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
                     if 'DATE-OBS' in img_meta:
                         ds = img_meta['DATE-OBS'][0]['value']
-                except Exception:
+                except:
                     ds = None
 
             elif ext in ('.fit', '.fits', '.fz'):
                 try:
-                    hdr, _ = get_valid_header(p)
-                    ds = hdr.get('DATE-OBS', None)
-                except Exception:
+                    hdr0, _ = get_valid_header(p)
+                    ds      = hdr0.get('DATE-OBS')
+                except:
                     ds = None
 
-            # parse into an astropy Time or leave None
+            # parse into astropy Time or None
             t = None
             if isinstance(ds, str):
                 try:
                     t = Time(ds, format='isot', scale='utc')
                 except Exception as e:
-                    print(f"[DEBUG]   → parse error for {p}: {e}")
-                    t = None
+                    print(f"[DEBUG] Failed to parse DATE-OBS for {p}: {e}")
 
             datelist.append((p, t))
-
-            # update progress bar
             self.progress_bar.setValue(i)
             QApplication.processEvents()
 
-        # ——— 2) sort by timestamp (None last) or filename ———
-        # (False < True, so entries with real time come first)
+        # sort by (has_time, time or filename)
         datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
-        paths = [p for p, _ in datelist]
+        sorted_paths = [p for p, _ in datelist]
 
-        # ——— 3) IMAGE PASS: load, bin & stash headers (with progress) ———
-        self.image_paths     = paths
+        # ——— PASS 2: load, bin, stash headers, exposure_time & airmass ———
+        self.image_paths     = sorted_paths
         self._cached_images  = []
         self._cached_headers = []
+        self.airmasses       = []
+
+        # clear any old UI elements
         self.star_list.clear()
         self.plot_widget.clear()
 
         self.status_label.setText("Loading raw frames…")
-        self.progress_bar.setMaximum(len(paths))
+        self.progress_bar.setMaximum(len(sorted_paths))
         self.progress_bar.setValue(0)
         QApplication.processEvents()
 
-        for i, p in enumerate(paths, start=1):
-            self.status_label.setText(f"Loading raw frame {i}/{len(paths)}…")
+        for i, p in enumerate(sorted_paths, start=1):
+            self.status_label.setText(f"Loading raw frame {i}/{len(sorted_paths)}…")
             QApplication.processEvents()
 
             img, hdr, bit_depth, is_mono = load_image(p)
@@ -30821,86 +31062,117 @@ class ExoPlanetWindow(QDialog):
                     self, "Load Error",
                     f"Failed to load raw frame:\n{os.path.basename(p)}"
                 )
+                self._cached_images.append(None)
                 self._cached_headers.append(None)
+                am = 1.0
             else:
-                # fast 2×2 binning
+                # bin & cache
                 img_binned = bin2x2_numba(img)
                 self._cached_images.append(img_binned)
+                self._cached_headers.append(hdr)
 
-                # stash header (FITS or XISF keywords dict)
-                ext = os.path.splitext(p)[1].lower()
-                if ext == '.xisf':
-                    try:
-                        xisf = XISF(p)
-                        img_meta = xisf.get_images_metadata()[0].get('FITSKeywords', {})
-                        self._cached_headers.append(img_meta)
-                    except Exception:
-                        self._cached_headers.append(None)
-                elif ext in ('.fit', '.fits', '.fz'):
-                    self._cached_headers.append(hdr)
-                else:
-                    # no header metadata on TIFF/others
-                    self._cached_headers.append(None)
+                # — grab exposure_time once —
+                if self.exposure_time is None:
+                    if isinstance(hdr, fits.Header):
+                        self.exposure_time = hdr.get('EXPOSURE',
+                                                    hdr.get('EXPTIME', None))
+                    elif isinstance(hdr, dict):
+                        img_meta = hdr.get('image_meta', {}) or {}
+                        fits_kw  = img_meta.get('FITSKeywords', {})
+                        val = None
+                        if 'EXPOSURE' in fits_kw:
+                            val = fits_kw['EXPOSURE'][0].get('value')
+                        elif 'EXPTIME' in fits_kw:
+                            val = fits_kw['EXPTIME'][0].get('value')
+                        try:
+                            self.exposure_time = float(val)
+                        except:
+                            print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                    print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
 
-            if self.exposure_time is None:
-                # ——— FITS files ———
+                # — extract airmass —
+                am = None
+                # 1) FITS header
                 if isinstance(hdr, fits.Header):
-                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
-                    self.exposure_time = hdr.get('EXPOSURE',
-                                                hdr.get('EXPTIME', None))
+                    if 'AIRMASS' in hdr:
+                        try:
+                            am = float(hdr['AIRMASS'])
+                        except:
+                            am = None
+                    if am is None:
+                        alt = (hdr.get('OBJCTALT')
+                            or hdr.get('ALT')
+                            or hdr.get('ALTITUDE')
+                            or hdr.get('EL'))
+                        try:
+                            am = self.estimate_airmass_from_altitude(float(alt))
+                        except:
+                            am = 1.0
 
-                # ——— XISF files ———
+                # 2) XISF keywords dict
                 elif isinstance(hdr, dict):
-                    # you already do this for DATE-OBS; same here:
-                    # XISF metadata dict has 'file_meta' and 'image_meta'
                     img_meta = hdr.get('image_meta', {}) or {}
                     fits_kw  = img_meta.get('FITSKeywords', {})
-                    val = None
-                    if 'EXPOSURE' in fits_kw:
-                        val = fits_kw['EXPOSURE'][0].get('value')
-                    elif 'EXPTIME' in fits_kw:
-                        val = fits_kw['EXPTIME'][0].get('value')
-                    try:
-                        self.exposure_time = float(val)
-                    except Exception:
-                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
-                        self.exposure_time = None
+                    if 'AIRMASS' in fits_kw:
+                        try:
+                            am = float(fits_kw['AIRMASS'][0]['value'])
+                        except:
+                            am = None
+                    if am is None:
+                        for key in ('OBJCTALT','ALT','ALTITUDE','EL'):
+                            ent = fits_kw.get(key)
+                            if ent:
+                                try:
+                                    am = self.estimate_airmass_from_altitude(
+                                        float(ent[0]['value'])
+                                    )
+                                    break
+                                except:
+                                    pass
+                        else:
+                            am = 1.0
 
-                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
+                # 3) fallback
+                if am is None:
+                    am = 1.0
 
+            self.airmasses.append(am)
             self.progress_bar.setValue(i)
             QApplication.processEvents()
 
-        # ——— 4) build Time array (masked where none) ———
-        strs = []
-        mask = []
-        for hdr in self._cached_headers:
-            if isinstance(hdr, dict) and 'DATE-OBS' in hdr:
-                val = hdr['DATE-OBS'][0]['value']
-                strs.append(val)
-                mask.append(False)
-            elif isinstance(hdr, Header) and 'DATE-OBS' in hdr:
-                strs.append(hdr['DATE-OBS'])
-                mask.append(False)
+        # ——— build time array from PASS 1 ———
+        iso_strs = []
+        mask_arr = []
+        for _, t in datelist:
+            if t is not None:
+                iso_strs.append(t.isot)
+                mask_arr.append(False)
             else:
-                strs.append('')
-                mask.append(True)
+                iso_strs.append('')
+                mask_arr.append(True)
 
-        ma_strs = np.ma.MaskedArray(strs, mask=mask)
-        # masked entries turn into NaT automatically
-        self.times = Time(ma_strs, format='isot', scale='utc', out_subfmt='date')
+        ma_strs = np.ma.MaskedArray(iso_strs, mask=mask_arr)
+        self.times = Time(
+            ma_strs,
+            format='isot',
+            scale='utc',
+            out_subfmt='date'
+        )
 
-        # — done —
+        # done
         self.progress_bar.setVisible(False)
+        loaded = sum(1 for im in self._cached_images if im is not None)
         self.status_label.setText(
-            f"Loaded {len(self._cached_images)}/{len(paths)} raw frames"
+            f"Loaded {loaded}/{len(sorted_paths)} raw frames"
         )
 
     def load_aligned_subs(self):
         settings = QSettings()
-        start_dir = settings.value("ExoPlanet/lastAlignedFolder",
-                                os.path.expanduser("~"),
-                                type=str)
+        start_dir = settings.value(
+            "ExoPlanet/lastAlignedFolder",
+            os.path.expanduser("~"),
+            type=str
+        )
 
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -30914,7 +31186,7 @@ class ExoPlanetWindow(QDialog):
         # remember for next time
         settings.setValue("ExoPlanet/lastAlignedFolder", os.path.dirname(paths[0]))
 
-        # ——— PASS 1: read headers & extract DATE-OBS with progress ———
+        # ——— PASS 1: read DATE-OBS & sort ———
         self.status_label.setText("Reading metadata from aligned frames…")
         self.progress_bar.setVisible(True)
         self.progress_bar.setMaximum(len(paths))
@@ -30933,14 +31205,14 @@ class ExoPlanetWindow(QDialog):
                     kw       = img_meta.get('FITSKeywords', {})
                     if 'DATE-OBS' in kw:
                         ds = kw['DATE-OBS'][0]['value']
-                except Exception:
+                except:
                     ds = None
 
             elif ext in ('.fit', '.fits', '.fz'):
                 try:
-                    hdr, _ = get_valid_header(p)
-                    ds      = hdr.get('DATE-OBS', None)
-                except Exception:
+                    hdr0, _ = get_valid_header(p)
+                    ds      = hdr0.get('DATE-OBS')
+                except:
                     ds = None
 
             # parse into astropy Time or None
@@ -30950,22 +31222,20 @@ class ExoPlanetWindow(QDialog):
                     t = Time(ds, format='isot', scale='utc')
                 except Exception as e:
                     print(f"[DEBUG] Failed to parse DATE-OBS for {p}: {e}")
-                    t = None
 
             datelist.append((p, t))
-
-            # update progress
             self.progress_bar.setValue(i)
             QApplication.processEvents()
 
-        # ——— sort by (has_time, then time or filename) ———
+        # sort by (has_time, then time or filename)
         datelist.sort(key=lambda x: (x[1] is None, x[1] or x[0]))
         sorted_paths = [p for p, _ in datelist]
 
-        # ——— PASS 2: load & bin images in sorted order ———
+        # ——— PASS 2: load & bin & extract headers, exposure_time, airmass ———
         self.image_paths     = sorted_paths
         self._cached_images  = []
         self._cached_headers = []
+        self.airmasses       = []
 
         self.status_label.setText("Loading aligned frames…")
         self.progress_bar.setMaximum(len(sorted_paths))
@@ -30982,53 +31252,98 @@ class ExoPlanetWindow(QDialog):
                     self, "Load Error",
                     f"Failed to load aligned frame:\n{os.path.basename(p)}"
                 )
+                self._cached_images.append(None)
                 self._cached_headers.append(None)
+                am = 1.0
             else:
+                # bin & cache
                 img_binned = bin2x2_numba(img)
                 self._cached_images.append(img_binned)
                 self._cached_headers.append(hdr)
 
-            if self.exposure_time is None:
-                # ——— FITS files ———
-                if isinstance(hdr, fits.Header):
-                    # look first for AAVSO's 'EXPOSURE' keyword, then 'EXPTIME'
-                    self.exposure_time = hdr.get('EXPOSURE',
-                                                hdr.get('EXPTIME', None))
+                # — extract exposure_time once —
+                if self.exposure_time is None:
+                    if isinstance(hdr, fits.Header):
+                        self.exposure_time = hdr.get('EXPOSURE',
+                                                    hdr.get('EXPTIME', None))
+                    elif isinstance(hdr, dict):
+                        img_meta = hdr.get('image_meta', {}) or {}
+                        fits_kw  = img_meta.get('FITSKeywords', {})
+                        val = None
+                        if 'EXPOSURE' in fits_kw:
+                            val = fits_kw['EXPOSURE'][0].get('value')
+                        elif 'EXPTIME' in fits_kw:
+                            val = fits_kw['EXPTIME'][0].get('value')
+                        try:
+                            self.exposure_time = float(val)
+                        except:
+                            print(f"[DEBUG] Could not parse exposure_time={val!r}")
+                    print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
 
-                # ——— XISF files ———
+                # — extract airmass —
+                am = None
+                if isinstance(hdr, fits.Header):
+                    # 1) explicit AIRMASS
+                    if 'AIRMASS' in hdr:
+                        try:
+                            am = float(hdr['AIRMASS'])
+                        except:
+                            am = None
+                    # 2) fallback: altitude → airmass
+                    if am is None:
+                        alt = (hdr.get('OBJCTALT')
+                            or hdr.get('ALT')
+                            or hdr.get('ALTITUDE')
+                            or hdr.get('EL'))
+                        try:
+                            am = self.estimate_airmass_from_altitude(float(alt))
+                        except:
+                            am = 1.0
+
                 elif isinstance(hdr, dict):
-                    # you already do this for DATE-OBS; same here:
-                    # XISF metadata dict has 'file_meta' and 'image_meta'
                     img_meta = hdr.get('image_meta', {}) or {}
                     fits_kw  = img_meta.get('FITSKeywords', {})
-                    val = None
-                    if 'EXPOSURE' in fits_kw:
-                        val = fits_kw['EXPOSURE'][0].get('value')
-                    elif 'EXPTIME' in fits_kw:
-                        val = fits_kw['EXPTIME'][0].get('value')
-                    try:
-                        self.exposure_time = float(val)
-                    except Exception:
-                        print(f"[DEBUG] Could not parse exposure_time={val!r}")
-                        self.exposure_time = None
+                    # 1) explicit
+                    if 'AIRMASS' in fits_kw:
+                        try:
+                            am = float(fits_kw['AIRMASS'][0]['value'])
+                        except:
+                            am = None
+                    # 2) altitude fallback
+                    if am is None:
+                        for key in ('OBJCTALT','ALT','ALTITUDE','EL'):
+                            ent = fits_kw.get(key)
+                            if ent:
+                                try:
+                                    am = self.estimate_airmass_from_altitude(
+                                        float(ent[0]['value'])
+                                    )
+                                    break
+                                except:
+                                    pass
+                        else:
+                            am = 1.0
+                else:
+                    am = 1.0
 
-                print(f"[DEBUG] Loaded exposure_time = {self.exposure_time}")
+            # store it (even if load failed)
+            self.airmasses.append(am)
 
             self.progress_bar.setValue(i)
             QApplication.processEvents()
 
-        # ——— build Time array from our first‐pass times ———
+        # ——— now build your Time array from PASS 1 ———
         iso_strs = []
-        mask     = []
+        mask_arr = []
         for _, t in datelist:
             if t is not None:
                 iso_strs.append(t.isot)
-                mask.append(False)
+                mask_arr.append(False)
             else:
                 iso_strs.append('')
-                mask.append(True)
+                mask_arr.append(True)
 
-        ma_strs = np.ma.MaskedArray(iso_strs, mask=mask)
+        ma_strs = np.ma.MaskedArray(iso_strs, mask=mask_arr)
         self.times = Time(
             ma_strs,
             format='isot',
@@ -31036,10 +31351,11 @@ class ExoPlanetWindow(QDialog):
             out_subfmt='date'
         )
 
-        # ——— done! ———
+        # done
         self.progress_bar.setVisible(False)
+        loaded = sum(1 for im in self._cached_images if im is not None)
         self.status_label.setText(
-            f"Loaded {len(self._cached_images)}/{len(sorted_paths)} aligned frames"
+            f"Loaded {loaded}/{len(sorted_paths)} aligned frames"
         )
 
     def load_masters(self):
@@ -32156,6 +32472,13 @@ class ExoPlanetWindow(QDialog):
         hdul.writeto(path, overwrite=True)
         QMessageBox.information(self, "Export FITS", f"Wrote FITS →\n{path}")
 
+
+    def estimate_airmass_from_altitude(self, alt_deg):
+        # avoid division by zero at the horizon
+        alt_rad = np.deg2rad(np.clip(alt_deg, 0.1, 90.0))
+        print(f"Estimating airmass for altitude {alt_deg}° → {alt_rad} rad")
+        return 1.0 / np.sin(alt_rad)
+
     def export_to_aavso(self):
         """Export in AAVSO EXTENDED format, converting to apparent magnitudes."""
         # 0) make sure we have photometry
@@ -32176,16 +32499,33 @@ class ExoPlanetWindow(QDialog):
 
         if star_id:
             try:
-                
+                # 1) show what we’re about to do
+                print(f"AAVSO export → VSX lookup for SIMBAD ID: {star_id!r}")
+
                 Vizier.ROW_LIMIT = 1
                 v = Vizier(columns=["Name"], catalog="B/vsx")
+                print(f"  Vizier.query_object parameters: columns={v.columns}, catalog={v.catalog}")
+
+                # 2) do the query
                 tbls = v.query_object(star_id)
-                if tbls and len(tbls) and len(tbls[0]):
-                    # take the VSX “Name” field as the AAVSO STARID
-                    star_id = tbls[0]["Name"][0]
-            except Exception:
-                # if anything goes wrong, silently ignore and keep the Simbad ID
-                pass
+
+                # 3) dump the raw response
+                if tbls is None:
+                    print("  Vizier returned None")
+                else:
+                    for i, tbl in enumerate(tbls):
+                        print(f"  Vizier returned table #{i} with {len(tbl)} row(s):\n{tbl}")
+
+                # 4) extract the VSX “Name” if present
+                if tbls and len(tbls) > 0 and len(tbls[0]) > 0:
+                    new_id = tbls[0]["Name"][0]
+                    print(f"  VSX Name found: {new_id!r} (will use this as STARID)")
+                    star_id = new_id
+                else:
+                    print("  No VSX entry found, keeping SIMBAD ID")
+
+            except Exception as e:
+                print(f"  VSX lookup failed with exception: {e}")
 
         if not star_id:
             # manual fallback
@@ -32238,15 +32578,16 @@ class ExoPlanetWindow(QDialog):
         from astropy.wcs import WCS
         wcs = self.parent().wimi_tab.wcs
 
-        members = self.ensemble_map.get(idx, [])
+        raw_members = self.ensemble_map.get(idx, [])
+        members     = [m for m in raw_members if 0 <= m < len(self.star_positions)]
+
         kname = None
         kmag  = None
 
-        for i in members:
-            x, y = self.star_positions[i]
+        for m in members:
+            x, y = self.star_positions[m]
             sky = wcs.pixel_to_world(x, y)
             name, v = self._query_simbad_name_and_vmag(sky.ra.deg, sky.dec.deg)
-            # require both a name *and* a finite vmag
             if name and (v is not None) and np.isfinite(v):
                 kname, kmag = name, v
                 break
@@ -32286,7 +32627,7 @@ class ExoPlanetWindow(QDialog):
             return
 
         # 8) build header lines
-        hdr = [
+        header_lines = [
             "#TYPE=EXTENDED",
             f"#OBSCODE={code}",
             f"#SOFTWARE=Seti Astro Suite v{VERSION}",
@@ -32303,12 +32644,12 @@ class ExoPlanetWindow(QDialog):
         from astropy.coordinates import SkyCoord
         import astropy.units as u
         c = SkyCoord(ra=radec[0]*u.deg, dec=radec[1]*u.deg, frame="icrs")
-        hdr += [
+        header_lines += [
             "#RA="  + c.ra.to_string(unit=u.hour, sep=":", pad=True, precision=2),
             "#DEC=" + c.dec.to_string(unit=u.degree, sep=":", pad=True,
                                     alwayssign=True, precision=1),
         ]
-        hdr.append("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES")
+        header_lines.append("#NAME,DATE,MAG,MERR,FILT,TRANS,MTYPE,CNAME,CMAG,KNAME,KMAG,AMASS,GROUP,CHART,NOTES")
 
         # 9) prepare your time & magnitudes
         jd = self.times.utc.jd
@@ -32323,12 +32664,10 @@ class ExoPlanetWindow(QDialog):
         else:
             merr = np.full_like(mags, np.nan)
 
-        airmasses = getattr(self, "airmasses", None)    
-
         # 10) write out
         try:
             with open(path, "w") as f:
-                for L in hdr:
+                for L in header_lines:
                     f.write(L + "\n")
                 f.write("\n")
                 for j, t in enumerate(jd):
@@ -32338,11 +32677,12 @@ class ExoPlanetWindow(QDialog):
                     note = "MAG calc via ensemble: m=-2.5 log10(F/Fe)+K"
 
                     # clamp airmass to [1, 40]
-                    if airmasses is not None and j < len(airmasses):
-                        am = airmasses[j]
+                    if j < len(self.airmasses):
+                        am = self.airmasses[j]
                     else:
                         am = 1.0
                     am = float(np.clip(am, 1.0, 40.0))
+
 
                     fields = [
                         star_id,
@@ -40766,7 +41106,7 @@ class XISFViewer(QWidget):
 
 
     def process_batch(self, input_dir, output_dir, file_format, update_status_callback):
-        from pathlib import Path
+        
 
         xisf_files = glob.glob(f"{input_dir}/*.xisf")
         if not xisf_files:
@@ -50609,6 +50949,224 @@ class PalettePickerProcessingThread(QThread):
     def normalize_image(image):
         return image
 
+class PaletteAdjustDialog(QDialog):
+    adjusted_image = pyqtSignal(np.ndarray)
+
+    def __init__(self, base_rgb, palette_name, ha_src, oiii_src, sii_src, owner_tab):
+        super().__init__(owner_tab)
+        self.setWindowTitle("Adjust Palette Intensities")
+        self.setModal(True)
+
+        # store args
+        self.base_rgb     = base_rgb.astype(np.float32)
+        self.palette_name = palette_name
+        self.ha_src       = ha_src
+        self.oiii_src     = oiii_src
+        self.sii_src      = sii_src
+        self.owner        = owner_tab
+
+        # sliders state
+        self.ha_factor   = 1.0
+        self.oiii_factor = 1.0
+        self.sii_factor  = 1.0
+
+        # debounce timer
+        self._debounce = QTimer(self)
+        self._debounce.setInterval(300)
+        self._debounce.setSingleShot(True)
+        self._debounce.timeout.connect(self._update_preview)
+
+        # zoom & pan state
+        self.zoom_factor = 1.0
+        self._dragging = False
+        self._last_pos = QPoint()
+
+        vlayout = QVBoxLayout(self)
+
+        # ─── Zoom / Fit Controls ─────────────────────────
+        zoom_layout = QHBoxLayout()
+        btn_zoom_in  = QPushButton("Zoom In")
+        btn_zoom_out = QPushButton("Zoom Out")
+        btn_fit      = QPushButton("Fit to Preview")
+        btn_zoom_in.clicked.connect(lambda: self._change_zoom(1.25))
+        btn_zoom_out.clicked.connect(lambda: self._change_zoom(0.8))
+        btn_fit.clicked.connect(self._fit_to_preview)
+        zoom_layout.addWidget(btn_zoom_in)
+        zoom_layout.addWidget(btn_zoom_out)
+        zoom_layout.addWidget(btn_fit)
+        vlayout.addLayout(zoom_layout)
+
+        # ─── Preview Area ────────────────────────────────
+        self.preview_area = QScrollArea(self)
+        self.preview_area.setWidgetResizable(True)
+        self.preview_label = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.preview_label.setMouseTracking(True)
+        self.preview_area.setWidget(self.preview_label)
+        vlayout.addWidget(self.preview_area, stretch=1)
+
+        # allow pan & wheel on the label
+        self.preview_label.installEventFilter(self)
+
+        # ─── Sliders ─────────────────────────────────────
+        for name in ("Ha","OIII","SII"):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"{name} Intensity:", self))
+            slider = QSlider(Qt.Orientation.Horizontal, self)
+            slider.setRange(0,200)
+            slider.setValue(100)
+            slider.valueChanged.connect(self._on_slider_change)
+            setattr(self, f"_{name.lower()}_slider", slider)
+            row.addWidget(slider)
+            vlayout.addLayout(row)
+
+        # ─── Accept / Reset / Discard ─────────────────────
+        btns = QHBoxLayout()
+        btns.addStretch()
+        accept  = QPushButton("Accept",  self)
+        reset   = QPushButton("Reset",   self)
+        discard = QPushButton("Discard", self)
+        btns.addWidget(accept); btns.addWidget(reset); btns.addWidget(discard)
+        vlayout.addLayout(btns)
+        accept.clicked.connect(self._on_accept)
+        reset.clicked.connect(self._on_reset)
+        discard.clicked.connect(self.reject)
+
+        # Trigger first draw
+        self._update_preview()
+
+
+    def _on_slider_change(self, _):
+        self.ha_factor   = self._ha_slider.value()   / 100.0
+        self.oiii_factor = self._oiii_slider.value() / 100.0
+        self.sii_factor  = self._sii_slider.value()  / 100.0
+        self._debounce.start()
+
+
+    def _update_preview(self):
+        """ Recompute full‐res image (heavy) and store as self._base_pixmap. """
+        # 1) build scaled mono channels
+        ha = (self.ha_src   * self.ha_factor)   if self.ha_src   is not None else None
+        oo = (self.oiii_src * self.oiii_factor) if self.oiii_src is not None else None
+        si = (self.sii_src  * self.sii_factor)  if self.sii_src  is not None else None
+
+        # 2) map into RGB channels
+        if self.palette_name in self.owner.palette_names[:9]:
+            r,g,b = self.owner.map_channels(self.palette_name, ha, oo, si)
+        else:
+            r,g,b = self.owner.map_special_palettes(self.palette_name, ha, oo, si)
+
+        # 3) pack into float32 array and normalize
+        img = np.zeros_like(self.base_rgb, dtype=np.float32)
+        if r is not None: img[...,0] = r
+        if g is not None: img[...,1] = g
+        if b is not None: img[...,2] = b
+        mx = img.max() or 1.0
+        img = np.clip(img/mx, 0.0, 1.0)
+
+        # 4) convert to QPixmap at native size
+        qimg = self.owner.numpy_to_qimage(img)
+        self._base_pixmap = QPixmap.fromImage(qimg)
+
+        # 5) now do a cheap rescale to current zoom
+        self._rescale_pixmap()
+
+
+    def _rescale_pixmap(self):
+        """ Just rescale last base_pixmap to zoom_factor. """
+        if not hasattr(self, "_base_pixmap"): 
+            return
+        w = int(self._base_pixmap.width()  * self.zoom_factor)
+        h = int(self._base_pixmap.height() * self.zoom_factor)
+        scaled = self._base_pixmap.scaled(
+            w, h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self._current_pixmap = scaled
+        self.preview_label.setPixmap(scaled)
+        self.preview_label.resize(scaled.size())
+
+
+    def _change_zoom(self, factor: float):
+        """ Called by buttons or wheel; just adjust zoom and rescale. """
+        self.zoom_factor = max(0.1, min(10.0, self.zoom_factor * factor))
+        self._rescale_pixmap()
+
+
+    def _fit_to_preview(self):
+        """ Fit the base image to the viewport width. """
+        if not hasattr(self, "_base_pixmap"): return
+        vp_w = self.preview_area.viewport().width()
+        self.zoom_factor = vp_w / self._base_pixmap.width()
+        self._rescale_pixmap()
+
+
+    def _on_reset(self):
+        for s in (self._ha_slider, self._oiii_slider, self._sii_slider):
+            s.setValue(100)
+        self._on_slider_change(None)
+
+
+    def _on_accept(self):
+        """
+        Rebuild final float‐32 image once, emit it, and close.
+        """
+        # same build logic as _update_preview but emit array instead of pixmap
+        ha = (self.ha_src   * self.ha_factor)   if self.ha_src   is not None else None
+        oo = (self.oiii_src * self.oiii_factor) if self.oiii_src is not None else None
+        si = (self.sii_src  * self.sii_factor)  if self.sii_src  is not None else None
+
+        if self.palette_name in self.owner.palette_names[:9]:
+            r,g,b = self.owner.map_channels(self.palette_name, ha, oo, si)
+        else:
+            r,g,b = self.owner.map_special_palettes(self.palette_name, ha, oo, si)
+
+        final = np.zeros_like(self.base_rgb, dtype=np.float32)
+        if r is not None: final[...,0] = r
+        if g is not None: final[...,1] = g
+        if b is not None: final[...,2] = b
+
+        m = final.max() or 1.0
+        final = np.clip(final/m, 0.0, 1.0)
+
+        self.adjusted_image.emit(final)
+        self.accept()
+
+
+    def eventFilter(self, obj, evt):
+        """ Pan & wheel‐zoom on the preview_label. """
+        if obj is self.preview_label:
+            if evt.type() == QEvent.Type.MouseButtonPress and evt.button() == Qt.MouseButton.LeftButton:
+                self._dragging = True
+                self._last_pos = evt.pos()
+                self.preview_label.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return True
+
+            if evt.type() == QEvent.Type.MouseMove and self._dragging:
+                delta = evt.pos() - self._last_pos
+                self._last_pos = evt.pos()
+                self.preview_area.horizontalScrollBar().setValue(
+                    self.preview_area.horizontalScrollBar().value() - delta.x()
+                )
+                self.preview_area.verticalScrollBar().setValue(
+                    self.preview_area.verticalScrollBar().value() - delta.y()
+                )
+                return True
+
+            if evt.type() == QEvent.Type.MouseButtonRelease and evt.button() == Qt.MouseButton.LeftButton:
+                self._dragging = False
+                self.preview_label.setCursor(Qt.CursorShape.OpenHandCursor)
+                return True
+
+            if evt.type() == QEvent.Type.Wheel:
+                delta = evt.angleDelta().y()
+                factor = 1.1 if delta > 0 else 0.9
+                self.zoom_factor = max(0.1, min(10.0, self.zoom_factor * factor))
+                self._rescale_pixmap()
+                return True
+
+        return super().eventFilter(obj, evt)
 
 class PerfectPalettePickerTab(QWidget):
     """
@@ -50886,7 +51444,7 @@ class PerfectPalettePickerTab(QWidget):
                 self,
                 f"Select {image_type} Image Source",
                 "Choose the source of the image:",
-                ["From File", "From Slot"],
+                ["From Slot", "From File"],
                 editable=False
             )
             
@@ -51402,10 +51960,6 @@ class PerfectPalettePickerTab(QWidget):
 
         self.status_label.setText("Preview palettes generated successfully.")
 
-
-
-
-
     def generate_final_palette_image(self, palette_name):
         """
         Generates the final combined image for the selected palette.
@@ -51422,12 +51976,12 @@ class PerfectPalettePickerTab(QWidget):
             if not ha_available and sii_available:
                 # Substitute SII for Ha
                 substituted_ha = self.sii_image
-                substituted_sii = None
+                substituted_sii = self.sii_image
                 print("Substituting SII for Ha.")
             elif not sii_available and ha_available:
                 # Substitute Ha for SII
                 substituted_sii = self.ha_image
-                substituted_ha = None
+                substituted_ha = self.ha_image
                 print("Substituting Ha for SII.")
             else:
                 substituted_ha = self.ha_image
@@ -51939,96 +52493,95 @@ class PerfectPalettePickerTab(QWidget):
         return combined
 
     def push_final_palette_to_image_manager(self):
-        """
-        Pushes the final combined image to the ImageManager for further processing.
-        """
-        if self.combined_image is not None:
-            # Check if any of the loaded file paths have an XISF extension
-            loaded_files = [self.ha_filename, self.oiii_filename, self.sii_filename, self.osc1_filename, self.osc2_filename]
-            was_xisf = any(file_path and file_path.lower().endswith('.xisf') for file_path in loaded_files)
-
-            # Generate a minimal FITS header if the original header is missing or if the format was XISF
-            sanitized_header = self.original_header
-            if was_xisf or sanitized_header is None:
-                sanitized_header = None
-
-            # Determine the valid file path:
-            # Prioritize Ha, then OSC1, then OSC2
-            file_path = None
-            if self.ha_image is not None and self.ha_filename:
-                file_path = self.ha_filename
-                print("Using Ha filename as file_path.")
-            elif self.osc1_image is not None and self.osc1_filename:
-                file_path = self.osc1_filename
-                print("Using OSC1 filename as file_path.")
-            elif self.osc2_image is not None and self.osc2_filename:
-                file_path = self.osc2_filename
-                print("Using OSC2 filename as file_path.")
-            else:
-                # No valid source file, save combined_image to a temporary file
-                try:
-                    temp_dir = tempfile.gettempdir()
-                    timestamp = int(time.time())
-                    temp_file_path = os.path.join(temp_dir, f"combined_image_{timestamp}.tif")
-                    
-                    # Save the combined image using your existing save_image function
-                    save_image(
-                        img_array=self.combined_image,
-                        filename=temp_file_path,
-                        original_format='tif',
-                        bit_depth=self.bit_depth,
-                        original_header=self.original_header,
-                        is_mono=self.is_mono
-                    )
-                    
-                    file_path = temp_file_path
-                    print(f"Combined image saved to temporary file: {file_path}")
-                except Exception as e:
-                    print(f"Failed to save combined image to temporary file: {e}")
-                    QMessageBox.critical(
-                        self, 
-                        "Error", 
-                        f"Failed to save combined image to temporary file:\n{e}"
-                    )
-                    return
-
-            # Create metadata for the combined image
-            metadata = {
-                'file_path': file_path,
-                'original_header': sanitized_header,  # Use the sanitized or minimal header
-                'bit_depth': self.bit_depth if hasattr(self, 'bit_depth') else "Unknown",
-                'is_mono': False,
-                'processing_parameters': {
-                    'zoom_factor': self.zoom_factor,
-                    'preview_scale': self.preview_scale
-                },
-                'processing_timestamp': datetime.now().isoformat(),
-                'source_images': {
-                    'Ha': self.ha_filename if self.ha_image is not None else "Not Provided",
-                    'OIII': self.oiii_filename if self.oiii_image is not None else "Not Provided",
-                    'SII': self.sii_filename if self.sii_image is not None else "Not Provided",
-                    'OSC1': self.osc1_filename if self.osc1_image is not None else "Not Provided",
-                    'OSC2': self.osc2_filename if self.osc2_image is not None else "Not Provided"
-                }
-            }
-
-            # Push the image and metadata into the ImageManager
-            if self.image_manager:
-                try:
-                    self.image_manager.update_image(
-                        updated_image=self.combined_image, metadata=metadata
-                    )
-                    print(f"Image pushed to ImageManager with metadata: {metadata}")
-                    self.status_label.setText("Final palette image pushed for further processing.")
-                except Exception as e:
-                    print(f"Error updating ImageManager: {e}")
-                    QMessageBox.critical(self, "Error", f"Failed to update ImageManager:\n{e}")
-            else:
-                print("ImageManager is not initialized.")
-                QMessageBox.warning(self, "Warning", "ImageManager is not initialized. Cannot store the combined image.")
-        else:
+        if self.combined_image is None:
             QMessageBox.warning(self, "Warning", "No final palette image to push.")
-            self.status_label.setText("No final palette image to push.")
+            return
+
+        dlg = PaletteAdjustDialog(
+            base_rgb      = self.combined_image,
+            palette_name  = self.selected_palette,
+            ha_src        = self.ha_image,
+            oiii_src      = self.oiii_image,
+            sii_src       = self.sii_image,
+            owner_tab     = self
+        )
+        dlg.adjusted_image.connect(self._on_palette_adjusted)
+        dlg.exec()
+
+    def _on_palette_adjusted(self, adjusted_rgb: np.ndarray):
+        # show it live
+        self.combined_image = adjusted_rgb
+        self.update_main_preview()
+        # and finally hand it off exactly as before:
+        self._do_push(self.combined_image)
+
+    def _do_push(self, final_rgb: np.ndarray):
+        """
+        This contains all of your previous “temp‐file, metadata, image_manager.update_image” logic.
+        It writes out a temp TIFF if needed, builds the metadata dict, and calls the ImageManager.
+        """
+        # 1) decide header drop
+        loaded = [self.ha_filename, self.oiii_filename, self.sii_filename,
+                  self.osc1_filename, self.osc2_filename]
+        was_xisf = any(fp and fp.lower().endswith(".xisf") for fp in loaded)
+        header = None if was_xisf or self.original_header is None else self.original_header
+
+        # 2) pick a source file path or write temp TIFF
+        file_path = None
+        for src in ("ha", "osc1", "osc2"):
+            fn = getattr(self, f"{src}_filename")
+            img = getattr(self, f"{src}_image")
+            if img is not None and fn:
+                file_path = fn
+                break
+
+        if file_path is None:
+            temp_dir = tempfile.gettempdir()
+            ts = int(time.time())
+            file_path = os.path.join(temp_dir, f"palette_{ts}.tif")
+            save_image(
+                img_array=final_rgb,
+                filename=file_path,
+                original_format="tif",
+                bit_depth=self.bit_depth,
+                original_header=header,
+                is_mono=self.is_mono
+            )
+
+        # 3) build metadata
+        metadata = {
+            "file_path": file_path,
+            "original_header": header,
+            "bit_depth": getattr(self, "bit_depth", "Unknown"),
+            "is_mono": False,
+            "processing_parameters": {
+                "zoom_factor": self.zoom_factor,
+                "preview_scale": self.preview_scale,
+            },
+            "processing_timestamp": datetime.now().isoformat(),
+            "source_images": {
+                "Ha":   self.ha_filename   or "Not Provided",
+                "OIII": self.oiii_filename or "Not Provided",
+                "SII":  self.sii_filename  or "Not Provided",
+                "OSC1": self.osc1_filename or "Not Provided",
+                "OSC2": self.osc2_filename or "Not Provided",
+            },
+        }
+
+        # 4) hand off to the ImageManager
+        if self.image_manager:
+            try:
+                self.image_manager.update_image(
+                    updated_image=final_rgb,
+                    metadata=metadata
+                )
+                self.status_label.setText("Final palette image pushed for further processing.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error",
+                                     f"Failed to update ImageManager:\n{e}")
+        else:
+            QMessageBox.warning(self, "Warning",
+                                "ImageManager is not initialized.")
 
 
 
