@@ -64,6 +64,7 @@ if sys.stdout is not None:
     sys.stdout.reconfigure(encoding='utf-8')
 
 from astropy.stats import sigma_clipped_stats
+from collections.abc import MutableMapping
 from astropy.io.votable import parse_single_table
 from astropy.timeseries import LombScargle, BoxLeastSquares
 from photutils.detection import DAOStarFinder
@@ -466,7 +467,7 @@ class AstroEditingSuite(QMainWindow):
         self._convo_deconvo_window = None
 
         # NEW: Dictionary to store custom slot names (default names)
-        self.slot_names = {i: f"Slot {i}" for i in range(self.image_manager.max_slots)}
+        self.slot_names = SlotNameProxy(self.image_manager)
         self.slot_actions = {}
 
         # NEW: Dictionary to store custom mask slot names (default names)
@@ -1750,6 +1751,12 @@ class AstroEditingSuite(QMainWindow):
             button.setText(f"Slot {slot}")  # Reset text
             button.setToolTip("No content available")  # Reset tooltip
 
+        if slot in self.menubar_slot_actions:
+            act = self.menubar_slot_actions[slot]
+            default_name = f"Slot {slot}"
+            act.setText(default_name)
+            act.setStatusTip("No content available")
+
         # Emit signal to update the UI and trigger the image refresh
         self.image_manager.image_changed.emit(slot, np.zeros((1, 1), dtype=np.uint8), {})
 
@@ -2026,6 +2033,12 @@ class AstroEditingSuite(QMainWindow):
             action.setText(default_name)
             action.setStatusTip(f"Open preview for {default_name}")
 
+        # --- NEW: Update Menubar Slot Names ---
+        for slot, action in self.menubar_slot_actions.items():
+            default_name = self.slot_names[slot]
+            action.setText(default_name)
+            action.setStatusTip(f"Open preview for {default_name}")
+
         # Update any open preview windows
         for slot, window in self.preview_windows.items():
             default_name = self.slot_names.get(slot, f"Slot {slot}")
@@ -2057,7 +2070,7 @@ class AstroEditingSuite(QMainWindow):
 
         # 4) clear any toolbar highlighting on slots
         self.update_slot_toolbar_highlight()
-
+        self.menuBar().update()
         print("New project created: All image, mask, and undo/redo data have been cleared.")
 
 
@@ -6113,7 +6126,30 @@ class CropTool(QDialog):
         else:
             QMessageBox.information(self, "Batch Crop", "No images were cropped.")
 
+class SlotNameProxy(MutableMapping):
+    """
+    A dict‐like view on ImageManager.slot_name metadata.
+    Reads come from get_slot_name(), writes go through rename_slot().
+    """
+    def __init__(self, manager):
+        self.manager = manager
 
+    def __getitem__(self, key):
+        # returns the display name for slot `key`
+        return self.manager.get_slot_name(key)
+
+    def __setitem__(self, key, value):
+        # ask the ImageManager to rename it
+        self.manager.rename_slot(key, value)
+
+    def __delitem__(self, key):
+        raise NotImplementedError("Cannot delete slot names")
+
+    def __iter__(self):
+        return iter(range(self.manager.max_slots))
+
+    def __len__(self):
+        return self.manager.max_slots
 
 class ImageManager(QObject):
     """
@@ -6150,6 +6186,16 @@ class ImageManager(QObject):
     def get_current_image_and_metadata(self):
         slot = self.current_slot
         return self._images[slot], self._metadata[slot]
+
+    def rename_slot(self, slot: int, new_name: str):
+        """Store a custom slot_name in metadata and emit an update."""
+        if 0 <= slot < self.max_slots:
+            self._metadata[slot]['slot_name'] = new_name
+            # re-emit image_changed so anyone listening can refresh labels
+            img = self._images[slot] or np.zeros((1,1), dtype=np.uint8)
+            self.image_changed.emit(slot, img, self._metadata[slot])
+        else:
+            print(f"ImageManager: cannot rename slot {slot}, out of range")
 
     def get_mask(self, slot=None):
         """
@@ -12297,6 +12343,7 @@ class StackingSuiteDialog(QDialog):
             try:
                 hdr0 = fits.getheader(fp, ext=0)
                 filt = hdr0.get("FILTER", "Unknown")
+                filt = self._sanitize_name(filt)  # sanitize filter name
                 exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
                 try:
                     exp = float(exp_raw)
@@ -40368,6 +40415,10 @@ class XISFViewer(QWidget):
         self.drag_start_pos = QPoint()
         self.autostretch_enabled = False
         self.current_pixmap = None
+        self.filename = ""              # ← initialize to empty string
+        self.original_header = None     # ← likewise     
+        self.image = None
+        self.preview_image = None          
         self.initUI()
 
         if self.image_manager:
@@ -40485,6 +40536,10 @@ class XISFViewer(QWidget):
         # Clear previous content
         self.image_label.clear()
         self.metadata_tree.clear()
+
+        # Pull the filename from metadata (or empty string)
+        self.filename = metadata.get('file_path', '') or ''
+        self.original_header = metadata.get('original_header', None)
 
         if image is None:
             print(f"XISFViewer: Cleared image display for slot {slot}.")
@@ -43741,7 +43796,7 @@ class CosmicClarityTab(QWidget):
         if folder:
             self.cosmic_clarity_folder = folder
             self.cosmic_clarity_folder_label.setText(f"Folder: {folder}")
-            print(f"Loaded Cosmic Clarity folder from QSettings: {folder}")
+            #print(f"Loaded Cosmic Clarity folder from QSettings: {folder}")
         else:
             print("No saved Cosmic Clarity folder found in QSettings.")
 
@@ -45434,7 +45489,7 @@ class CosmicClaritySatelliteTab(QWidget):
         if folder:
             self.cosmic_clarity_folder = folder
             self.folder_label.setText(f"Folder: {folder}")
-            print(f"Loaded Cosmic Clarity folder: {folder}")
+            #print(f"Loaded Cosmic Clarity folder: {folder}")
         else:
             print("No saved Cosmic Clarity folder found.")
 
@@ -62717,15 +62772,15 @@ class WhatsInMySky(QWidget):
         self.timezone_combo.setCurrentText(self.timezone)
         self.min_altitude_entry.setText(str(self.min_altitude))
 
-        print("Settings loaded:", {
-            "latitude": self.latitude,
-            "longitude": self.longitude,
-            "date": self.date,
-            "time": self.time,
-            "timezone": self.timezone,
-            "min_altitude": self.min_altitude,
-            "object_limit": self.object_limit,
-        })
+        #print("Settings loaded:", {
+        #    "latitude": self.latitude,
+        #    "longitude": self.longitude,
+        #    "date": self.date,
+        #    "time": self.time,
+        #    "timezone": self.timezone,
+        #    "min_altitude": self.min_altitude,
+        #    "object_limit": self.object_limit,
+        #})
 
 
 
@@ -62906,6 +62961,7 @@ if __name__ == '__main__':
 
         # Close the splash screen once the main window is ready
         splash.finish(window)
+        print(f"Seti Astro Suite v{VERSION} up and running!")
 
         sys.exit(app.exec())
     except Exception as e:
