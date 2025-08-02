@@ -6191,8 +6191,15 @@ class ImageManager(QObject):
         """Store a custom slot_name in metadata and emit an update."""
         if 0 <= slot < self.max_slots:
             self._metadata[slot]['slot_name'] = new_name
-            # re-emit image_changed so anyone listening can refresh labels
-            img = self._images[slot] or np.zeros((1,1), dtype=np.uint8)
+
+            # explicitly check for None, avoid ambiguous truth-check on ndarray
+            existing = self._images[slot]
+            if existing is None:
+                img = np.zeros((1,1), dtype=np.uint8)
+            else:
+                img = existing
+
+            # re-emit image_changed so UI labels (menus/toolbars) can refresh
             self.image_changed.emit(slot, img, self._metadata[slot])
         else:
             print(f"ImageManager: cannot rename slot {slot}, out of range")
@@ -6358,7 +6365,7 @@ class ImageManager(QObject):
         if 'slot_name' in metadata:
             return metadata['slot_name']
         else:
-            return f"Slot {slot + 1}"
+            return f"Slot {slot}"
 
 
     def set_metadata(self, metadata):
