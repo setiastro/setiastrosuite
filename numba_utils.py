@@ -1346,6 +1346,16 @@ def windsorized_sigma_clip(stack, lower=2.5, upper=2.5):
     else:
         raise ValueError(f"windsorized_sigma_clip: stack must be 3D or 4D, got {stack.shape}")
 
+def max_value_stack(stack, weights=None):
+    """
+    Stacking by taking the maximum value along the frame axis.
+    Returns (clipped, rejection_mask) for compatibility:
+      - clipped: H×W (or H×W×C)
+      - rejection_mask: same shape as stack, all False
+    """
+    clipped = np.max(stack, axis=0)
+    rej_mask = np.zeros(stack.shape, dtype=bool)
+    return clipped, rej_mask
 
 @njit(parallel=True)
 def subtract_dark_with_pedestal_3d(frames, dark_frame, pedestal):
