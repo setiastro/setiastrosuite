@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.4"
+VERSION = "2.20.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -11200,12 +11200,35 @@ class StackingSuiteDialog(QDialog):
         # Add to the main layout
         layout.addWidget(self.status_scroll)
 
-    def update_status(self, message):
+    def update_status(self, message: str):
+        """
+        Append a new status line, except if it's a '🔄 Normalizing…' message
+        and the last line was also '🔄 Normalizing…', in which case overwrite it.
+        """
+        # Temporarily block signals so we don't recurse
         old_state = self.status_text.blockSignals(True)
-        self.status_text.append(message)
-        self.status_text.verticalScrollBar().setValue(
-            self.status_text.verticalScrollBar().maximum()
-        )
+        
+        # Grab existing lines
+        lines = self.status_text.toPlainText().splitlines()
+
+        # If both this and the last message are normalization updates, overwrite
+        if (
+            message.startswith("🔄 Normalizing")
+            and lines
+            and lines[-1].startswith("🔄 Normalizing")
+        ):
+            lines[-1] = message
+        else:
+            lines.append(message)
+
+        # Rebuild the text in one go
+        self.status_text.setPlainText("\n".join(lines))
+
+        # Scroll to bottom
+        vsb = self.status_text.verticalScrollBar()
+        vsb.setValue(vsb.maximum())
+
+        # Restore signals
         self.status_text.blockSignals(old_state)
 
 
@@ -14359,12 +14382,24 @@ class StackingSuiteDialog(QDialog):
         for fn in all_files:
             data = fits.getdata(fn).astype(np.float32)
             frame_medians.append(np.median(data))
-        ref_median = float(np.median(frame_medians))
+        ref_median = float(np.max(frame_medians))
+
+        _, raw_hdr, _, _ = load_image(all_files[0])
+        if raw_hdr is not None:
+            hdr_to_use = raw_hdr.copy()
+            # Remove any NAXIS keywords other than NAXIS, NAXIS1, NAXIS2
+            for key in list(hdr_to_use):
+                if key.startswith("NAXIS") and key not in ("NAXIS", "NAXIS1", "NAXIS2"):
+                    hdr_to_use.pop(key, None)
+        else:
+            hdr_to_use = None
 
         # 3) normalize each to ref_median + write to a temp dir
         with tempfile.TemporaryDirectory(prefix="startrail_norm_") as norm_dir:
             normalized_paths = []
-            for fn in all_files:
+            for idx, fn in enumerate(all_files, start=1):
+                self.update_status(f"🔄 Normalizing frame {idx}/{n_frames}: {os.path.basename(fn)}")
+                QApplication.processEvents()                
                 img, hdr, _, _ = load_image(fn)
                 img = img.astype(np.float32)
                 # guard against divide-by-zero
@@ -14378,19 +14413,50 @@ class StackingSuiteDialog(QDialog):
                 normalized_paths.append(out_path)
 
             # 4) stack and do max-value projection
+            self.update_status(f"📊 Stacking {n_frames} frames")
+            QApplication.processEvents()
             stack = np.stack([fits.getdata(p).astype(np.float32) for p in normalized_paths], axis=0)
             trail_img, _ = max_value_stack(stack)
 
-            # 5) stretch & write final TIFF
+            # 5) stretch final image and prompt user for save location & format
             trail_img = trail_img.astype(np.float32)
-            scaled = (trail_img / (trail_img.max() + 1e-12) * 65535).astype(np.uint16)
+            # normalize to [0–1] for our save helper
+            trail_norm = trail_img / (trail_img.max() + 1e-12)
+
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = f"StarTrail_{n_frames:03d}frames_{ts}.tif"
-            out_tif = os.path.join(self.stacking_directory, fname)
-            cv2.imwrite(out_tif, scaled)
+            default_name = f"StarTrail_{n_frames:03d}frames_{ts}"
+            filters = "TIFF (*.tif);;PNG (*.png);;JPEG (*.jpg *.jpeg);;FITS (*.fits);;XISF (*.xisf')"
+            path, chosen_filter = QFileDialog.getSaveFileName(
+                self,
+                "Save Star-Trail Image",
+                os.path.join(self.stacking_directory, default_name),
+                filters
+            )
+            if not path:
+                self.update_status("✖ Star-trail save cancelled.")
+                return
+
+            # figure out extension
+            ext = os.path.splitext(path)[1].lower().lstrip('.')
+            if not ext:
+                ext = chosen_filter.split('(')[1].split(')')[0].lstrip('*.').lower()
+                path += f".{ext}"
+
+            # if user picked FITS, supply the first frame’s header; else None
+            use_hdr = hdr_to_use if ext in ('fits', 'fit') else None
+
+            # 16-bit everywhere
+            save_image(
+                img_array=trail_norm,
+                filename=path,
+                original_format=ext,
+                bit_depth="16-bit",
+                original_header=use_hdr,
+                is_mono=False
+            )
 
         # once we exit the with-block, all the _st.fit files are deleted
-        self.update_status(f"✅ Star‐Trail image written to {out_tif}")
+        self.update_status(f"✅ Star‐Trail image written to {path}")
         return
 
     def on_registration_complete(self, success, msg):
