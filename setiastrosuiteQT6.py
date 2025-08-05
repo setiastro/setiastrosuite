@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.5"
+VERSION = "2.20.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1888,13 +1888,22 @@ class AstroEditingSuite(QMainWindow):
         if not fileName:
             return
 
+        # 1) slot names
+        slot_names_dict = {
+            slot: self.slot_names[slot]
+            for slot in range(self.image_manager.max_slots)
+        }
+
+        # 2) mask slot names are already plain dicts
+        mask_slot_names_dict = dict(self.mask_slot_names)
+
         # Assemble project data into one dictionary.
         project_data = {
             # ImageManager data: images and metadata
             "images": self.image_manager._images,       # dictionary {slot: image array}
             "metadata": self.image_manager._metadata,   # dictionary {slot: metadata dict}
             # Save custom slot names
-            "slot_names": self.slot_names,
+            "slot_names": slot_names_dict,  
             # Undo/Redo stacks
             "undo_stacks": self.image_manager._undo_stacks,
             "redo_stacks": self.image_manager._redo_stacks,            
@@ -5095,7 +5104,7 @@ class AstroEditingSuite(QMainWindow):
                 }
 
                 self.image_manager.add_image(slot, image, metadata)
-                self.image_manager.set_current_slot(slot)
+
                 self.update_slot_toolbar_highlight()
                 print(f"Image loaded to slot {slot}: {file_path}")
                 slot += 1
@@ -10059,6 +10068,51 @@ class DistortionGridDialog(QDialog):
         v.addLayout(hl)
         v.addWidget(btn, 0)
 
+def make_header_from_xisf_meta(meta: dict) -> fits.Header:
+    """
+    meta is the dict you returned as original_header for XISF:
+      {
+        'file_meta': ...,
+        'image_meta': ...,
+        'astrometry': {
+           'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2',
+           'crpix1', 'crpix2',
+           'sip': {'order', 'A', 'B'}
+        }
+      }
+    This builds a real fits.Header with WCS+SIP cards.
+    """
+    hdr = fits.Header()
+    ast = meta['astrometry']
+
+    # WCS linear part
+    hdr['CTYPE1'] = 'RA---TAN-SIP'
+    hdr['CTYPE2'] = 'DEC--TAN-SIP'
+    hdr['CRPIX1'] = ast['crpix1']
+    hdr['CRPIX2'] = ast['crpix2']
+    hdr['CD1_1']  = ast['CD1_1']
+    hdr['CD1_2']  = ast['CD1_2']
+    hdr['CD2_1']  = ast['CD2_1']
+    hdr['CD2_2']  = ast['CD2_2']
+
+    # SIP coefficients
+    sip = ast['sip']
+    order = sip['order']
+    hdr['A_ORDER'] = order
+    hdr['B_ORDER'] = order
+
+    for i in range(order+1):
+        for j in range(order+1-i):
+            hdr[f'A_{i}_{j}'] = float(sip['A'][i,j])
+            hdr[f'B_{i}_{j}'] = float(sip['B'][i,j])
+
+    # If you have file_meta FITSKeywords you can also copy those here:
+    # for kw, vals in meta['file_meta'].get('FITSKeywords', {}).items():
+    #     for entry in vals:
+    #         hdr[kw] = entry['value']
+
+    return hdr
+
 def plate_solve_current_image(image_manager, settings, parent=None):
     """
     Plate-solve the current slot image *including* SIP terms,
@@ -10068,6 +10122,11 @@ def plate_solve_current_image(image_manager, settings, parent=None):
     # 1) grab pixel data + original header
     arr, meta = image_manager.get_current_image_and_metadata()
     orig_hdr  = meta.get("original_header", fits.Header())
+
+
+    # if it's our XISF‐dict, turn it into a real Header
+    if isinstance(orig_hdr, dict) and 'astrometry' in orig_hdr:
+        orig_hdr = make_header_from_xisf_meta(orig_hdr)
 
     # 2) dump to a temp FITS so ASTAP can read & inject SIP
     tmp = tempfile.NamedTemporaryFile(suffix=".fits", delete=False)
@@ -20368,6 +20427,8 @@ class StellarAlignmentDialog(QDialog):
         self.stellar_target = None
         self.aligned_image = None
         self.autostretch_enabled = False  # Default: No autostretch
+        self.source_was_mono = False
+        self.target_was_mono = False
         self.initUI()
 
     def initUI(self):
@@ -20388,7 +20449,7 @@ class StellarAlignmentDialog(QDialog):
         source_radio_layout = QHBoxLayout()
         self.source_from_file_radio = QRadioButton("From File")
         self.source_from_slot_radio = QRadioButton("From Slot")
-        self.source_from_file_radio.setChecked(True)
+        self.source_from_slot_radio.setChecked(True)
         source_radio_layout.addWidget(self.source_from_file_radio)
         source_radio_layout.addWidget(self.source_from_slot_radio)
         source_layout.addLayout(source_radio_layout)
@@ -20427,7 +20488,7 @@ class StellarAlignmentDialog(QDialog):
         target_radio_layout = QHBoxLayout()
         self.target_from_file_radio = QRadioButton("From File")
         self.target_from_slot_radio = QRadioButton("From Slot")
-        self.target_from_file_radio.setChecked(True)
+        self.target_from_slot_radio.setChecked(True)
         target_radio_layout.addWidget(self.target_from_file_radio)
         target_radio_layout.addWidget(self.target_from_slot_radio)
         target_layout.addLayout(target_radio_layout)
@@ -20698,6 +20759,7 @@ class StellarAlignmentDialog(QDialog):
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
+            self.source_was_mono = bool(is_mono)
             if image is None:
                 QMessageBox.warning(self, "Error", "Failed to load source image.")
                 return
@@ -20717,6 +20779,7 @@ class StellarAlignmentDialog(QDialog):
         )
         if path:
             image, header, bit_depth, is_mono = load_image(path)
+            self.target_was_mono = bool(is_mono)
             if image is None:
                 QMessageBox.warning(self, "Error", "Failed to load target image.")
                 return
@@ -20729,10 +20792,12 @@ class StellarAlignmentDialog(QDialog):
     def load_source_from_slot(self):
         index = self.source_slot_combo.currentData()
         image = self.image_manager._images.get(index)
+
         if image is None:
             QMessageBox.warning(self, "Error", f"Slot {index} is empty.")
             return
         if image.ndim == 2:
+            self.source_was_mono = True
             image = np.stack([image]*3, axis=-1)
         self.stellar_source = image
         self.source_file_label.setText(f"Loaded from Slot {index}")
@@ -20744,6 +20809,7 @@ class StellarAlignmentDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Slot {index} is empty.")
             return
         if image.ndim == 2:
+            self.target_was_mono = True
             image = np.stack([image]*3, axis=-1)
         self.stellar_target = image
         self.target_file_label.setText(f"Loaded from Slot {index}")
@@ -20923,8 +20989,19 @@ class StellarAlignmentDialog(QDialog):
         if self.aligned_image is None:
             QMessageBox.warning(self, "Error", "No aligned image available. Run alignment first.")
             return
-        self.image_manager.set_image(new_image=self.aligned_image, metadata={"description": "Stellar aligned image"}, step_name="Stellar Alignment")
-        self.image_manager.image_changed.emit(self.image_manager.current_slot, self.aligned_image, {"description": "Stellar aligned image"})
+        # If the target was mono, collapse back to 2D
+        img_to_push = self.aligned_image
+        if self.target_was_mono and img_to_push.ndim == 3 and img_to_push.shape[2] == 3:
+            img_to_push = img_to_push[..., 0]
+
+        metadata = {
+            "description": "Stellar aligned image",
+            "is_mono": bool(self.target_was_mono)
+        }
+        # Push through the undo-aware API:
+        self.image_manager.set_image(new_image=img_to_push,
+                                     metadata=metadata,
+                                     step_name="Stellar Alignment")
         QMessageBox.information(self, "Pushed", "Aligned image pushed to the active slot.")
         self.accept()
 
@@ -22484,92 +22561,114 @@ class PlateSolver(QDialog):
         return header
 
     def run_astap(self, image_path: str, update_manager=True) -> bool:
-        """
-        Loads the image data and metadata based on the user's selection:
-        - If the user selected a slot (self._from_slot is True), retrieve the image and metadata
-            from the ImageManager.
-        - Otherwise, use the global load_image() method to load from a file.
-        
-        The image is normalized using stretch_image(), saved as a temporary FITS file (via
-        save_temp_fits_image()), and ASTAP is run on that temporary file.
-        
-        If ASTAP is successful, the updated (solved) header is retrieved and:
-        1. The metadata dictionary for the current slot is updated with the solved header.
-        2. If the image was loaded from file (i.e. not a slot) and is a FITS file, the original
-            file is updated with the new header.
-        3. The user is prompted to save a new FITS file with the solved header.
-        
-        Returns True if ASTAP exits with exit code 0.
-        """
         if getattr(self, "debug_mode", False):
             print("DEBUG MODE: Skipping ASTAP processing.")
             return False
-        # --- Load image data and header ---
+
+        # --- Load image data + headers ---
         if getattr(self, "_from_slot", False):
-            # Use data from the ImageManager.
-            if self.parent() and hasattr(self.parent(), "image_manager"):
-                image_data, meta = self.parent().image_manager.get_current_image_and_metadata()
-                if image_data is None:
-                    print("No image data found in the selected slot.")
-                    return False
-                original_header = meta.get("original_header", meta)
-                # Save slot metadata for later merging.
-                self._slot_meta = meta
-                print("Using image data and metadata from slot.")
-            else:
-                print("No ImageManager found in parent!")
+            # 1) from slot, get image + metadata
+            image_data, meta = self.parent().image_manager.get_current_image_and_metadata()
+            if image_data is None:
+                print("No image in selected slot.")
                 return False
+
+            # raw_header = the full FITS header you saved in slot meta (camera + binning info)
+            raw_header = meta.get("original_header")
+            if not isinstance(raw_header, fits.Header):
+                print("⚠️ Slot metadata missing a full FITS.Header; seeding disabled.")
+                raw_header = None
+
+
+            # DEBUG: dump every key/value in raw_header
+            if isinstance(raw_header, fits.Header):
+                print(">>> DEBUG raw_header contents:")
+                for k, v in raw_header.items():
+                    print(f"    {k} = {v}")
+            else:
+                print(">>> DEBUG no raw_header available")
+
+            # original_header = your pruned WCS header for saving later
+            original_header = meta.get("wcs_header") or raw_header.copy() if raw_header else None
+
+            # stash for later merging
+            self._slot_meta = meta
+            print("Using slot image; raw header keys:", list(raw_header.keys()) if raw_header else None)
+
         else:
-            # Load from file using the global load_image() method.
+            # 2) from disk, load image + WCS
             image_data, original_header, bit_depth, is_mono = load_image(image_path)
             if image_data is None:
                 print("Failed to load image from file.")
                 return False
-            print("Loaded image data and header from file.")
 
-        # Keep a copy of the original image data (unsqueezed) for saving the new FITS.
+            # raw_header = full FITS header on disk
+            with fits.open(image_path, memmap=False) as hdul:
+                raw_header = hdul[0].header.copy()
+            print("Loaded file image; raw header keys:", list(raw_header.keys()))
+
+        # Keep a copy of the original pixel data for final save
         original_image_data = image_data.copy()
 
+        # Normalize/stretch for ASTAP
         image_data = image_data.astype(np.float32)
-
-        # --- Normalize the image ---
         normalized_image = self.stretch_image(image_data)
 
-        # --- 1) Copy original_header & strip any old WCS keywords before saving ---
+        # --- Write a clean FITS for ASTAP (stripping old WCS only) ---
         if original_header is None:
-            # Fallback to a minimal header if none was loaded
-            clean_header = self.create_minimal_fits_header(normalized_image, 
-                                                          normalized_image.ndim == 2 or (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
+            clean_header = self.create_minimal_fits_header(normalized_image,
+                normalized_image.ndim == 2 or (normalized_image.ndim == 3 and normalized_image.shape[2] == 1))
         else:
             clean_header = original_header.copy()
         for key in list(clean_header.keys()):
-            for prefix in (
-                "CRPIX", "CRVAL", "CDELT", "CROTA",
-                "CD1_", "CD2_", "CTYPE", "CUNIT",
-                "WCSAXES", "LATPOLE", "LONPOLE",
-                "EQUINOX", "PV1_", "PV2_",
-                "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
-                "SIP", "PLTSOLVD"
-            ):
-                if key.upper().startswith(prefix):
+            for p in ("CRPIX","CRVAL","CDELT","CROTA","CD1_","CD2_","CTYPE","CUNIT","WCSAXES"):
+                if key.upper().startswith(p):
                     clean_header.pop(key, None)
                     break
 
-        # --- 2) Write the stretched image to a temp FITS using our cleaned header ---
-        try:
-            tmp_path = self.save_temp_fits_image(
-                normalized_image,
-                image_path,
-                header_override=clean_header
-            )
-        except Exception as e:
-            print("Failed to save temporary FITS file:", e)
-            return False
+        tmp_path = self.save_temp_fits_image(normalized_image, image_path, header_override=clean_header)
 
-        # --- Run ASTAP on the temporary file ---
-        process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
+        # --- Build ASTAP seed arguments, applying binning to scale ---
+        seed_args = []
+        hdr = raw_header  # the full camera header
+
+        if isinstance(hdr, fits.Header):
+            try:
+                # RA in hours, SPD = dec+90
+                ra_h  = float(hdr["CRVAL1"]) / 15.0
+                spd   = float(hdr["CRVAL2"]) + 90.0
+
+                # plate scale from CD matrix (°/pix → ″/pix)
+                cd11  = float(hdr.get("CD1_1", hdr.get("CDELT1", 0)))
+                cd21  = float(hdr.get("CD2_1", hdr.get("CDELT2", 0)))
+                pix   = np.hypot(cd11, cd21) * 3600.0
+
+                # apply binning
+                bx = int(hdr.get("XBINNING", 1))
+                by = int(hdr.get("YBINNING", 1))
+                if bx != by:
+                    print(f"⚠️ Unequal binning: {bx}×{by}, using average.")
+                bin_factor = (bx + by) / 2.0
+                pix *= bin_factor
+
+                # final seed args
+                seed_args = [
+                    "-ra",    f"{ra_h:.6f}",
+                    "-spd",   f"{spd:.6f}",
+                    "-scale", f"{pix:.3f}",
+                ]
+                print(f"🔸 Seeding ASTAP: RA={ra_h:.6f} h, SPD={spd:.6f}°, scale={pix:.3f}\"/px (×{bin_factor} bin)")
+            except Exception as e:
+                print("Error computing seed args:", e)
+        else:
+            print("No raw_header → skipping seed")
+
+        print("Seed arguments for ASTAP:", seed_args)
+
+        # --- Launch ASTAP ---
+        args = ["-f", tmp_path] + (seed_args or ["-r", "179", "-fov", "0", "-z", "0"]) + ["-wcs", "-sip"]
         print("Running ASTAP with arguments:", args)
+        process = QProcess(self)
         process.start(self.astap_exe, args)
         if not process.waitForStarted(5000):
             print("Failed to start ASTAP process:", process.errorString())
@@ -23221,39 +23320,79 @@ class BatchPlateSolverDialog(QDialog):
         
     def run_astap_batch(self, image_path: str):
         """
-        Batch-mode version of ASTAP processing.
-        This method loads an image, normalizes it, saves a temporary FITS file,
-        runs ASTAP, retrieves the solved header, and returns it.
-        It does not update any ImageManager or prompt the user.
+        Batch‐mode version of ASTAP processing.
+        Loads an image, normalizes it, saves a temporary FITS file,
+        builds either seeded or blind‐solve arguments from the header,
+        runs ASTAP, retrieves the solved header, and returns True/False.
         """
-        # Load image from file
+        # 1) Load image + header
         image_data, original_header, bit_depth, is_mono = load_image(image_path)
         if image_data is None:
-            self.logStatus(f"Failed to load image from file: {image_path}")
+            self.logStatus(f"❌ Failed to load image: {image_path}")
             return False
 
-        # Keep a copy of original image data if needed later.
+        # Keep a copy of the original for later if you need it
         original_image_data = image_data.copy()
 
+        # 2) Normalize/stretch (you can swap in your stretch_image if you like)
         image_data = image_data.astype(np.float32)
-        # Normalize image (using your existing stretch_image method)
-        normalized_image = image_data
+        normalized_image = image_data  # or self.stretch_image(image_data)
 
-        # Save temporary FITS file
+        # 3) Write a clean FITS for ASTAP (strip old WCS)
+        #    (reuse your save_temp_fits_image helper)
+        tmp_path = self.save_temp_fits_image(normalized_image, image_path)
+
+        # 4) Pull out a “raw” header to seed ASTAP
+        if isinstance(original_header, fits.Header):
+            raw_hdr = original_header
+        else:
+            # fallback: read directly from disk
+            with fits.open(image_path, memmap=False) as hdul:
+                raw_hdr = hdul[0].header
+
+        # DEBUG: dump every header key/value
+        self.logStatus("🔍 Raw header contents:")
+        for k, v in raw_hdr.items():
+            self.logStatus(f"    {k} = {v}")
+
+        # 5) Build seed_args from RA/DEC, SPD, scale, binning
+        seed_args = []
         try:
-            tmp_path = self.save_temp_fits_image(normalized_image, image_path)
+            # RA in hours, SPD = dec + 90
+            ra_h  = float(raw_hdr["CRVAL1"]) / 15.0
+            spd   = float(raw_hdr["CRVAL2"]) + 90.0
+
+            # plate scale from CD matrix (deg/pix → ″/pix)
+            cd11 = float(raw_hdr.get("CD1_1", raw_hdr.get("CDELT1", 0)))
+            cd21 = float(raw_hdr.get("CD2_1", raw_hdr.get("CDELT2", 0)))
+            pix  = np.hypot(cd11, cd21) * 3600.0
+
+            # apply binning
+            bx = int(raw_hdr.get("XBINNING", 1))
+            by = int(raw_hdr.get("YBINNING", bx))
+            if bx != by:
+                self.logStatus(f"⚠️ Unequal binning {bx}×{by}, using average")
+            bin_factor = (bx + by) / 2.0
+            pix *= bin_factor
+
+            seed_args = [
+                "-ra",    f"{ra_h:.6f}",
+                "-spd",   f"{spd:.6f}",
+                "-scale", f"{pix:.3f}",
+            ]
+            self.logStatus(f"🔸 Seeding ASTAP: RA={ra_h:.6f}h, SPD={spd:.6f}°, scale={pix:.3f}\"/px (×{bin_factor} bin)")
+        except KeyError as e:
+            self.logStatus(f"⚠️ Missing header key: {e}, falling back to blind solve")
         except Exception as e:
-            self.logStatus(f"Failed to save temporary FITS file: {e}")
-            return False
+            self.logStatus(f"⚠️ Error computing seed args: {e}")
 
-        # Run ASTAP on temporary file
-        astap_exe = self.settings.value("astap/exe_path", "", type=str)
-        if not astap_exe or not os.path.exists(astap_exe):
-            self.logStatus("ASTAP executable not found.")
-            return False
+        # 6) Build the final ASTAP argument list
+        if seed_args:
+            args = ["-f", tmp_path] + seed_args + ["-wcs", "-sip"]
+        else:
+            args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
 
-        process = QProcess(self)
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
+        self.logStatus(f"▶️ Running ASTAP: {' '.join(args)}")
         self.logStatus(f"Running ASTAP with arguments: {args}")
         process.start(astap_exe, args)
         if not process.waitForStarted(5000):
@@ -56039,19 +56178,114 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                 else:
                     raise ValueError("Unsupported XISF image dimensions!")
 
-                # For XISF, you can choose what to set as original_header
-                # It could be a combination of file_meta and image_meta or any other relevant information
-                original_header = {
-                    "file_meta": file_meta,
-                    "image_meta": image_meta
-                }
+                # ─── Build FITS header from PixInsight XISFProperties ─────────────────
+                props = image_meta.get('XISFProperties', {})
+                hdr   = fits.Header()
 
-                if image.dtype == np.float32:
-                    max_val = image.max()
-                    if max_val > 1.0:
-                        print(f"Detected float image with max value {max_val:.3f} > 1.0; rescales to [0,1]")
-                        image = image / max_val
+                # 1) CRPIX/CRVAL + CTYPE
+                try:
+                    ref_im    = props['PCL:AstrometricSolution:ReferenceImageCoordinates']['value']
+                    ref_world = props['PCL:AstrometricSolution:ReferenceCelestialCoordinates']['value']
+                    hdr['CRPIX1'] = float(ref_im[0])
+                    hdr['CRPIX2'] = float(ref_im[1])
+                    hdr['CRVAL1'] = float(ref_world[0])
+                    hdr['CRVAL2'] = float(ref_world[1])
+                    hdr['CTYPE1'] = 'RA---TAN-SIP'
+                    hdr['CTYPE2'] = 'DEC--TAN-SIP'
+                    print("🔷 Injected CRPIX/CRVAL from XISFProperties")
+                except KeyError:
+                    print("⚠️ Missing reference coords in XISFProperties")
 
+                # 2) CD matrix
+                try:
+                    lin = np.asarray(
+                        props['PCL:AstrometricSolution:LinearTransformationMatrix']['value'],
+                        dtype=float
+                    )
+                    hdr['CD1_1'] = float(lin[0,0])
+                    hdr['CD1_2'] = float(lin[0,1])
+                    hdr['CD2_1'] = float(lin[1,0])
+                    hdr['CD2_2'] = float(lin[1,1])
+                    print("🔷 Injected CD matrix from XISFProperties")
+                except KeyError:
+                    print("⚠️ Missing CD matrix in XISFProperties")
+
+                # 3) SIP polynomial fitting
+                try:
+                    # pull the two grids
+                    gx = np.array(
+                        props['PCL:AstrometricSolution:SplineWorldTransformation:'
+                            'PointGridInterpolation:ImageToNative:GridX']['value'],
+                        dtype=float
+                    )
+                    gy = np.array(
+                        props['PCL:AstrometricSolution:SplineWorldTransformation:'
+                            'PointGridInterpolation:ImageToNative:GridY']['value'],
+                        dtype=float
+                    )
+                    offset_grid = np.stack([gx, gy], axis=-1)
+                    crpix = (hdr['CRPIX1'], hdr['CRPIX2'])
+                    # fit function
+                    def fit_sip(grid, cr, order):
+                        rows, cols, _ = grid.shape
+                        u = np.repeat(np.arange(cols), rows) - cr[0]
+                        v = np.tile(np.arange(rows), cols)   - cr[1]
+                        dx = grid[:,:,0].ravel()
+                        dy = grid[:,:,1].ravel()
+                        terms = [(i,j) for i in range(order+1)
+                                        for j in range(order+1-i)
+                                        if (i,j)!=(0,0)]
+                        M = np.vstack([(u**i)*(v**j) for (i,j) in terms]).T
+                        a, *_ = np.linalg.lstsq(M, dx, rcond=None)
+                        b, *_ = np.linalg.lstsq(M, dy, rcond=None)
+                        resid = np.hypot(dx - M.dot(a), dy - M.dot(b))
+                        return (a,b, terms, resid.std())
+                    # pick best order 2–5
+                    best = {'order': None, 'rms': np.inf}
+                    for order in (2, 3, 4, 5, 6):
+                        a_vec, b_vec, terms, rms = fit_sip(offset_grid, crpix, order)
+                        print(f"Order {order} → RMS residual = {rms:.4f} px")
+                        if rms < best['rms']:
+                            best.update({
+                                'order': order,
+                                'a': a_vec,
+                                'b': b_vec,
+                                'terms': terms,
+                                'rms': rms
+                            })
+
+                    o = best['order']
+                    hdr['A_ORDER'] = o
+                    hdr['B_ORDER'] = o
+                    # fill coefficients
+                    for (i,j), a in zip(best['terms'], best['a']):
+                        hdr[f'A_{i}_{j}'] = float(a)
+                    for (i,j), b in zip(best['terms'], best['b']):
+                        hdr[f'B_{i}_{j}'] = float(b)
+                    print(f"🔷 Injected SIP order {o}")
+                except KeyError:
+                    print("⚠️ No SIP grid in XISFProperties; skipping SIP")
+
+                # 4) copy any simple FITSKeywords from file_meta
+                for kw, vals in file_meta.get('FITSKeywords', {}).items():
+                    for entry in vals:
+                        v = entry.get('value')
+                        if isinstance(v, (int, float, str)):
+                            hdr[kw] = v
+
+                # 5) X/Y binning
+                def _get_kw(m, k):
+                    ent = m.get('FITSKeywords',{}).get(k)
+                    return ent[0]['value'] if ent else None
+                bx = int(_get_kw(image_meta,'XBINNING') or _get_kw(file_meta,'XBINNING') or 1)
+                by = int(_get_kw(image_meta,'YBINNING') or _get_kw(file_meta,'YBINNING') or bx)
+                if bx!=by:
+                    print(f"⚠️ Unequal binning: {bx}×{by}, averaging")
+                hdr['XBINNING'] = bx
+                hdr['YBINNING'] = by
+                print(f">>> DEBUG found XBINNING={bx}, YBINNING={by}")
+
+                original_header = hdr
                 print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
                 return image, original_header, bit_depth, is_mono
 
@@ -61012,48 +61246,86 @@ class MainWindow(QMainWindow):
 
     def plate_solve_image(self):
         """
-        Attempts to plate-solve the loaded image using ASTAP.
-        If no ASTAP executable is set (or the user cancels its selection),
-        it falls back to blind solving via Astrometry.net.
-        On success, the method updates self.header and initializes self.wcs.
+        Attempts to plate-solve the loaded image using ASTAP,
+        first trying a seeded solve (RA, SPD, scale, binning),
+        then falling back to a blind solve if anything is missing.
+        On success, updates self.header and self.wcs.
         """
-      
         if not hasattr(self, 'image_path') or not self.image_path:
-            #QMessageBox.warning(self, "Plate Solve", "No image loaded.")
             return
 
-        # Check if the ASTAP executable is set in settings.
+        # 1) Ensure ASTAP path
         astap_exe = self.settings.value("astap/exe_path", "", type=str)
         if not astap_exe or not os.path.exists(astap_exe):
-            if sys.platform.startswith("win"):
-                executable_filter = "Executables (*.exe);;All Files (*)"
-            else:
-                executable_filter = "Executables (astap);;All Files (*)"
-            new_path, _ = QFileDialog.getOpenFileName(
-                self, "Select ASTAP Executable", "", executable_filter
-            )
-            if new_path:
-                astap_exe = new_path
-                self.settings.setValue("astap/exe_path", astap_exe)
-                #QMessageBox.information(self, "Plate Solve", "ASTAP path updated successfully.")
-            else:
-                #QMessageBox.information(self, "Plate Solve", "No ASTAP executable provided. Falling back to blind solve.")
-                return None
+            filt = "Executables (*.exe);;All Files (*)" if sys.platform.startswith("win") else "Executables (astap);;All Files (*)"
+            new_path, _ = QFileDialog.getOpenFileName(self, "Select ASTAP Executable", "", filt)
+            if not new_path:
+                return
+            astap_exe = new_path
+            self.settings.setValue("astap/exe_path", astap_exe)
 
-        # Normalize the loaded image.
-        normalized = self.stretch_image(self.image_data)
-        
-        # Save the normalized image to a temporary FITS file.
+        # 2) Write out the normalized FITS for ASTAP
+        normalized = self.stretch_image(self.image_data.astype(np.float32))
         try:
             tmp_path = self.save_temp_fits_image(normalized, self.image_path)
         except Exception as e:
-            #QMessageBox.critical(self, "Plate Solve", f"Error saving temporary FITS: {e}")
+            QMessageBox.critical(self, "Plate Solve", f"Error saving temp FITS: {e}")
             return
 
-        # Run ASTAP on the temporary file.
-        process = QProcess()
-        args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
-        print("Running ASTAP with arguments:", args)
+        # 3) Seed arguments from header
+        raw_hdr = None
+        if isinstance(self.original_header, fits.Header):
+            raw_hdr = self.original_header
+        elif self.image_path.lower().endswith(('.fits','.fit')):
+            with fits.open(self.image_path, memmap=False) as hdul:
+                raw_hdr = hdul[0].header
+
+        seed_args = []
+        if isinstance(raw_hdr, fits.Header):
+            # debug-dump
+            print("🔍 Raw header contents:")
+            for k,v in raw_hdr.items():
+                print(f"    {k} = {v}")
+
+            try:
+                # RA→hours, SPD
+                ra_deg = float(raw_hdr["CRVAL1"])
+                dec_deg= float(raw_hdr["CRVAL2"])
+                ra_h    = ra_deg / 15.0
+                spd     = dec_deg + 90.0
+
+                # plate scale from CD matrix (°/px→″/px)
+                cd1 = float(raw_hdr.get("CD1_1", raw_hdr.get("CDELT1",0)))
+                cd2 = float(raw_hdr.get("CD2_1", raw_hdr.get("CDELT2",0)))
+                scale = np.hypot(cd1, cd2) * 3600.0
+
+                # apply XBINNING/YBINNING
+                bx = int(raw_hdr.get("XBINNING", 1))
+                by = int(raw_hdr.get("YBINNING", bx))
+                if bx != by:
+                    print(f"⚠️ Unequal binning: {bx}×{by}, averaging.")
+                binf = (bx+by)/2.0
+                scale *= binf
+
+                seed_args = [
+                    "-ra",    f"{ra_h:.6f}",
+                    "-spd",   f"{spd:.6f}",
+                    "-scale", f"{scale:.3f}"
+                ]
+                print(f"🔸 Seeding ASTAP: RA={ra_h:.6f}h, SPD={spd:.6f}°, scale={scale:.3f}\"/px (×{binf} bin)")
+            except Exception as e:
+                print("⚠️ Failed to build seed args, will do blind solve:", e)
+
+        # 4) Build ASTAP args
+        if seed_args:
+            args = ["-f", tmp_path] + seed_args + ["-wcs", "-sip"]
+        else:
+            args = ["-f", tmp_path, "-r", "179", "-fov", "0", "-z", "0", "-wcs", "-sip"]
+
+        print("▶️ Running ASTAP with arguments:", args)
+
+        # create and launch the process
+        process = QProcess(self)
         process.start(astap_exe, args)
         if not process.waitForStarted(5000):
             #QMessageBox.critical(self, "Plate Solve", "Failed to start ASTAP process.")
