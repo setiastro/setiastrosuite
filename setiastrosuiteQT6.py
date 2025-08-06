@@ -5624,19 +5624,36 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
 
 
     def mouseReleaseEvent(self, ev):
-        # if we were rotating, finish that
+        # 1) finish rotating or resizing
         if self._rotating:
             self._rotating = False
             ev.accept()
-            return
-
-        # if we were resizing, clear that flag so next click goes to move/rotate
-        if self._active_handle:
+        elif self._active_handle:
             self._active_handle = None
             ev.accept()
-            return
+        else:
+            super().mouseReleaseEvent(ev)
 
-        super().mouseReleaseEvent(ev)
+        # 2) now gather everything you want to debug
+        rect         = self.rect()
+        pos          = self.pos()
+        angle        = self.rotation()
+        pivot_scene  = self.mapToScene(rect.center())
+        corners_local  = [
+            rect.topLeft(), rect.topRight(),
+            rect.bottomRight(), rect.bottomLeft()
+        ]
+        corners_scene = [self.mapToScene(c) for c in corners_local]
+
+        # 3) print it
+        print("🔶 [DEBUG CropRect]")
+        print(f"    rect (local): {rect}")
+        print(f"    pos (item):   {pos}")
+        print(f"    rotation °:   {angle:.2f}")
+        print(f"    pivot (scene): ({pivot_scene.x():.1f}, {pivot_scene.y():.1f})")
+        for i, pt in enumerate(corners_scene, 1):
+            print(f"    corner {i} (scene): ({pt.x():.1f}, {pt.y():.1f})")
+        print("🔶 [END DEBUG]\n")
 
     def itemChange(self, change, value):
         """
@@ -5977,163 +5994,143 @@ class CropTool(QDialog):
         self.scene.addItem(self._rect_item)
 
     def apply_crop(self):
-        """Crop out exactly the rotated & moved rectangle, using the rectangle’s own center as the pivot."""
         if not self._rect_item:
             QMessageBox.warning(self, "No Selection", "Draw (and finalize) a crop first.")
             return
 
-        # 1) Grab the rotation angle and rectangle’s center in SCENE coords
-        angle = self._rect_item.rotation()                # degrees CCW positive
-        rect_local = self._rect_item.rect()
-        scene_center = self._rect_item.mapToScene(rect_local.center())
-
-        # 2) Convert scene_center → image‐pixel pivot
-        pm = self._pixmap_item.pixmap()
-        pm_w, pm_h = pm.width(), pm.height()
-        h_img, w_img = self.original_image_data.shape[:2]
-        sx = w_img / pm_w
-        sy = h_img / pm_h
-        pivot_x = scene_center.x() * sx
-        pivot_y = scene_center.y() * sy
-
-        # 3) Rotate **around that pivot**, not image center
-        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
-        rotated = cv2.warpAffine(
-            self.original_image_data,
-            M,
-            (w_img, h_img),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0
-        )
-
-        # 4) Figure out the axis‐aligned bounding box of your rect in scene coords
-        corners = [
+        # 1) Gather your four corners in SCENE coords
+        rect_local   = self._rect_item.rect()
+        corners_local = [
             rect_local.topLeft(), rect_local.topRight(),
             rect_local.bottomRight(), rect_local.bottomLeft()
         ]
-        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
-        bb = QPolygonF(scene_pts).boundingRect()
+        corners_scene = [self._rect_item.mapToScene(pt) for pt in corners_local]
 
-        # 5) Map that bounding box into **image**‐pixel coords
-        x0 = int(bb.left()   * sx)
-        y0 = int(bb.top()    * sy)
-        w0 = int(bb.width()  * sx)
-        h0 = int(bb.height() * sy)
+        # 2) Map those into **image** pixel coords
+        pm  = self._pixmap_item.pixmap()
+        pm_w, pm_h    = pm.width(), pm.height()
+        h_img, w_img  = self.original_image_data.shape[:2]
+        sx, sy        = w_img/pm_w, h_img/pm_h
 
-        # 6) Clamp to valid image range
-        x0 = max(0, min(x0, w_img-1))
-        y0 = max(0, min(y0, h_img-1))
-        w0 = max(1, min(w0, w_img - x0))
-        h0 = max(1, min(h0, h_img - y0))
+        src_pts = np.array([
+            [p.x()*sx, p.y()*sy] for p in corners_scene
+        ], dtype=np.float32)  # shape (4,2)
 
-        # 7) Crop
-        cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
+        # 3) Compute target rectangle size (edge lengths)
+        width  = np.linalg.norm(src_pts[1] - src_pts[0])
+        height = np.linalg.norm(src_pts[3] - src_pts[0])
+
+        # 4) Build your destination points for a perfect upright rect
+        dst_pts = np.array([
+            [0,      0],
+            [width,  0],
+            [width,  height],
+            [0,      height]
+        ], dtype=np.float32)
+
+        # 5) Compute perspective transform & warp
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        cropped = cv2.warpPerspective(
+            self.original_image_data,
+            M,
+            (int(np.round(width)), int(np.round(height))),
+            flags=cv2.INTER_LINEAR
+        )
+
+        # 6) Emit result & close
         self.crop_applied.emit(cropped)
-
-        # 8) Save for “Load Previous Crop”
-        rect = self._rect_item.rect()
-        pos  = self._rect_item.scenePos()
-        CropTool.previous_crop_rect = (rect, angle, pos)
-
         self.accept()
 
 
     def batch_crop_all_slots(self):
         """
-        Apply the same rotated & moved crop to all images in image_manager.
+        Apply the same rotated & moved crop to all images in image_manager,
+        using a perspective warp so the crop is exact.
         """
         # 1) Make sure we have a selection
-        rect_local = self._rect_item.rect() if self._rect_item else None
-        if rect_local is None or rect_local.isNull():
+        if not self._rect_item:
             QMessageBox.warning(self, "No Selection", "Draw & finalize a crop first.")
             return
 
-        # 2) Grab rotation angle and rect center in scene coords
-        angle = self._rect_item.rotation()
-        scene_center = self._rect_item.mapToScene(rect_local.center())
-
-        # 3) Map scene_center → image‐pixel pivot
-        pm = self._pixmap_item.pixmap()
-        pm_w, pm_h = pm.width(), pm.height()
-        img0 = self.original_image_data
-        h_img, w_img = img0.shape[:2]
-        sx, sy = w_img/pm_w, h_img/pm_h
-        pivot_x, pivot_y = scene_center.x()*sx, scene_center.y()*sy
-
-        # 4) Build rotation matrix around that pivot
-        M = cv2.getRotationMatrix2D((pivot_x, pivot_y), angle, 1.0)
-
-        # 5) Compute the axis-aligned bounding box of the rotated rect in scene coords
-        corners = [
+        # 2) Get the four corners of the rect in SCENE coords
+        rect_local    = self._rect_item.rect()
+        local_corners = [
             rect_local.topLeft(), rect_local.topRight(),
             rect_local.bottomRight(), rect_local.bottomLeft()
         ]
-        scene_pts = [self._rect_item.mapToScene(pt) for pt in corners]
-        bb = QPolygonF(scene_pts).boundingRect()
+        scene_corners = [self._rect_item.mapToScene(pt) for pt in local_corners]
 
-        # 6) Map BB → image pixels & clamp
-        x0 = int(bb.left()*sx);    y0 = int(bb.top()*sy)
-        w0 = int(bb.width()*sx);   h0 = int(bb.height()*sy)
-        x0 = max(0, min(x0, w_img-1))
-        y0 = max(0, min(y0, h_img-1))
-        w0 = max(1, min(w0, w_img - x0))
-        h0 = max(1, min(h0, h_img - y0))
+        # 3) Map scene → image‐pixel coords
+        pm      = self._pixmap_item.pixmap()
+        pm_w, pm_h = pm.width(), pm.height()
+        h_img, w_img = self.original_image_data.shape[:2]
+        sx, sy = w_img/pm_w, h_img/pm_h
 
-        # 7) Confirm
-        num_slots = sum(1 for im in self.image_manager._images.values() if im is not None)
-        if num_slots == 0:
+        src_pts = np.array([
+            [pt.x()*sx, pt.y()*sy] for pt in scene_corners
+        ], dtype=np.float32)  # shape (4,2)
+
+        # 4) Compute the width/height of the target rectangle
+        width  = np.linalg.norm(src_pts[1] - src_pts[0])
+        height = np.linalg.norm(src_pts[3] - src_pts[0])
+        w_out, h_out = int(round(width)), int(round(height))
+
+        # 5) Build destination corners (axis-aligned)
+        dst_pts = np.array([
+            [0,      0],
+            [w_out,  0],
+            [w_out,  h_out],
+            [0,      h_out]
+        ], dtype=np.float32)
+
+        # 6) Compute one perspective transform
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+
+        # 7) Gather occupied slots
+        occupied = [s for s,im in self.image_manager._images.items() if im is not None]
+        if not occupied:
             QMessageBox.information(self, "No Images", "There are no images to crop.")
             return
+
+        # 8) Confirm
         reply = QMessageBox.question(
             self, "Confirm Batch Crop",
-            f"Apply this same rotated crop to all {num_slots} images?",
+            f"Apply this rotated crop to all {len(occupied)} images?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        # 8) Rotate & crop every slot
-        any_cropped = False
-        for slot, img in self.image_manager._images.items():
-            if img is None:
-                continue
-
-            # rotate around pivot
-            rotated = cv2.warpAffine(
-                img, M, (w_img, h_img),
+        # 9) Warp & crop each slot
+        for slot in occupied:
+            img = self.image_manager._images[slot]
+            # apply the same warp
+            cropped = cv2.warpPerspective(
+                img, M, (w_out, h_out),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0
             )
 
-            # crop same box
-            cropped = rotated[y0:y0+h0, x0:x0+w0].copy()
-
             # push undo / clear redo
             self.image_manager._undo_stacks[slot].append(
-                (self.image_manager._images[slot].copy(),
-                 self.image_manager._metadata[slot].copy())
+                (img.copy(), self.image_manager._metadata[slot].copy())
             )
             self.image_manager._redo_stacks[slot].clear()
 
-            # save & emit
+            # store & emit
             self.image_manager._images[slot] = cropped
             self.image_manager.image_changed.emit(
                 slot, cropped, self.image_manager._metadata[slot]
             )
-            any_cropped = True
 
-        # 9) Wrap up
-        if any_cropped:
-            QMessageBox.information(
-                self, "Batch Crop Completed",
-                f"Successfully cropped {num_slots} images."
-            )
-            self.accept()
-        else:
-            QMessageBox.information(self, "Batch Crop", "No images were cropped.")
+        QMessageBox.information(
+            self, "Batch Crop Completed",
+            f"Successfully cropped {len(occupied)} images."
+        )
+        self.accept()
+
 
 class SlotNameProxy(MutableMapping):
     """
@@ -23276,6 +23273,7 @@ class BatchPlateSolverDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Batch Plate Solve")
+        self.astap_exe = self.settings.value("astap/exe_path", "", type=str)
         self.setMinimumWidth(500)
         self.init_ui()
 
@@ -23355,36 +23353,82 @@ class BatchPlateSolverDialog(QDialog):
         for k, v in raw_hdr.items():
             self.logStatus(f"    {k} = {v}")
 
-        # 5) Build seed_args from RA/DEC, SPD, scale, binning
+        # 5) Build seed_args from header WCS or fallback RA/DEC → scale
+        # 5) Build seed_args from header WCS or fallback keywords
         seed_args = []
-        try:
-            # RA in hours, SPD = dec + 90
-            ra_h  = float(raw_hdr["CRVAL1"]) / 15.0
-            spd   = float(raw_hdr["CRVAL2"]) + 90.0
 
-            # plate scale from CD matrix (deg/pix → ″/pix)
-            cd11 = float(raw_hdr.get("CD1_1", raw_hdr.get("CDELT1", 0)))
-            cd21 = float(raw_hdr.get("CD2_1", raw_hdr.get("CDELT2", 0)))
-            pix  = np.hypot(cd11, cd21) * 3600.0
+        if isinstance(raw_hdr, fits.Header):
+            try:
+                # —— RA & Dec in degrees ——
+                if "CRVAL1" in raw_hdr and "CRVAL2" in raw_hdr:
+                    ra_deg  = float(raw_hdr["CRVAL1"])
+                    dec_deg = float(raw_hdr["CRVAL2"])
 
-            # apply binning
-            bx = int(raw_hdr.get("XBINNING", 1))
-            by = int(raw_hdr.get("YBINNING", bx))
-            if bx != by:
-                self.logStatus(f"⚠️ Unequal binning {bx}×{by}, using average")
-            bin_factor = (bx + by) / 2.0
-            pix *= bin_factor
+                elif "RA" in raw_hdr and "DEC" in raw_hdr:
+                    # could be stored as numbers *or* sexagesimal
+                    ra_val  = raw_hdr["RA"]
+                    dec_val = raw_hdr["DEC"]
+                    if isinstance(ra_val, (int, float)):
+                        ra_deg = float(ra_val)
+                    else:
+                        from astropy.coordinates import Angle
+                        ra_deg = Angle(str(ra_val), unit="hourangle").degree
 
-            seed_args = [
-                "-ra",    f"{ra_h:.6f}",
-                "-spd",   f"{spd:.6f}",
-                "-scale", f"{pix:.3f}",
-            ]
-            self.logStatus(f"🔸 Seeding ASTAP: RA={ra_h:.6f}h, SPD={spd:.6f}°, scale={pix:.3f}\"/px (×{bin_factor} bin)")
-        except KeyError as e:
-            self.logStatus(f"⚠️ Missing header key: {e}, falling back to blind solve")
-        except Exception as e:
-            self.logStatus(f"⚠️ Error computing seed args: {e}")
+                    if isinstance(dec_val, (int, float)):
+                        dec_deg = float(dec_val)
+                    else:
+                        from astropy.coordinates import Angle
+                        dec_deg = Angle(str(dec_val), unit="deg").degree
+
+                else:
+                    raise KeyError("no RA/Dec in header")
+
+                ra_h = ra_deg / 15.0
+                spd  = dec_deg + 90.0
+
+                # —— pixel scale in ″/pixel ——
+                if "CD1_1" in raw_hdr or "CDELT1" in raw_hdr:
+                    cd11 = float(raw_hdr.get("CD1_1", raw_hdr.get("CDELT1", 0)))
+                    cd21 = float(raw_hdr.get("CD2_1", raw_hdr.get("CDELT2", 0)))
+                    pix  = np.hypot(cd11, cd21) * 3600.0
+
+                elif "PIXSCALE" in raw_hdr:
+                    pix = float(raw_hdr["PIXSCALE"])
+
+                elif "XPIXSZ" in raw_hdr and "FOCALLEN" in raw_hdr:
+                    # XPIXSZ in µm, FOCALLEN in mm → arcsec/pixel = 206.265 * (pix_size_mm / focal_mm)
+                    px_mm    = float(raw_hdr["XPIXSZ"])
+                    focal_mm = float(raw_hdr["FOCALLEN"])
+                    pix = 206.265 * px_mm / focal_mm
+
+                else:
+                    raise KeyError("no pixel-scale in header")
+
+                # —— apply binning if present ——
+                bx = int(raw_hdr.get("XBINNING", 1))
+                by = int(raw_hdr.get("YBINNING", bx))
+                if bx != by:
+                    self.logStatus(f"⚠️ Unequal binning {bx}×{by}, using average")
+                bin_factor = (bx + by) / 2.0
+                pix *= bin_factor
+
+                seed_args = [
+                    "-ra",    f"{ra_h:.6f}",
+                    "-spd",   f"{spd:.6f}",
+                    "-scale", f"{pix:.3f}",
+                ]
+                self.logStatus(
+                    f"🔸 Seeding ASTAP: RA={ra_h:.6f}h, SPD={spd:.6f}°, "
+                    f"scale={pix:.3f}\"/px (×{bin_factor} bin)"
+                )
+
+            except KeyError as e:
+                self.logStatus(f"⚠️ Missing key ({e}); falling back to blind solve.")
+            except Exception as e:
+                self.logStatus(f"⚠️ Error computing seed args: {e}; falling back to blind solve.")
+
+        else:
+            self.logStatus("⚠️ No FITS header; falling back to blind solve.")
 
         # 6) Build the final ASTAP argument list
         if seed_args:
@@ -23394,7 +23438,8 @@ class BatchPlateSolverDialog(QDialog):
 
         self.logStatus(f"▶️ Running ASTAP: {' '.join(args)}")
         self.logStatus(f"Running ASTAP with arguments: {args}")
-        process.start(astap_exe, args)
+        process = QProcess(self)
+        process.start(self.astap_exe, args)
         if not process.waitForStarted(5000):
             self.logStatus("Failed to start ASTAP process: " + process.errorString())
             return False
@@ -56179,114 +56224,136 @@ def load_image(filename, max_retries=3, wait_seconds=3):
                     raise ValueError("Unsupported XISF image dimensions!")
 
                 # ─── Build FITS header from PixInsight XISFProperties ─────────────────
+                # ─── Build FITS header from XISFProperties, then fallback to FITSKeywords & Pixel‐Scale ─────────────────
                 props = image_meta.get('XISFProperties', {})
                 hdr   = fits.Header()
+                _filled = set()
 
-                # 1) CRPIX/CRVAL + CTYPE
+                # 1) PixInsight astrometric solution
                 try:
-                    ref_im    = props['PCL:AstrometricSolution:ReferenceImageCoordinates']['value']
-                    ref_world = props['PCL:AstrometricSolution:ReferenceCelestialCoordinates']['value']
-                    hdr['CRPIX1'] = float(ref_im[0])
-                    hdr['CRPIX2'] = float(ref_im[1])
-                    hdr['CRVAL1'] = float(ref_world[0])
-                    hdr['CRVAL2'] = float(ref_world[1])
-                    hdr['CTYPE1'] = 'RA---TAN-SIP'
-                    hdr['CTYPE2'] = 'DEC--TAN-SIP'
+                    im0, im1 = props['PCL:AstrometricSolution:ReferenceImageCoordinates']['value']
+                    w0,  w1  = props['PCL:AstrometricSolution:ReferenceCelestialCoordinates']['value']
+                    hdr['CRPIX1'], hdr['CRPIX2'] = float(im0), float(im1)
+                    hdr['CRVAL1'], hdr['CRVAL2'] = float(w0), float(w1)
+                    hdr['CTYPE1'], hdr['CTYPE2'] = 'RA---TAN-SIP','DEC--TAN-SIP'
+                    _filled |= {'CRPIX1','CRPIX2','CRVAL1','CRVAL2','CTYPE1','CTYPE2'}
                     print("🔷 Injected CRPIX/CRVAL from XISFProperties")
                 except KeyError:
                     print("⚠️ Missing reference coords in XISFProperties")
 
                 # 2) CD matrix
                 try:
-                    lin = np.asarray(
-                        props['PCL:AstrometricSolution:LinearTransformationMatrix']['value'],
-                        dtype=float
-                    )
-                    hdr['CD1_1'] = float(lin[0,0])
-                    hdr['CD1_2'] = float(lin[0,1])
-                    hdr['CD2_1'] = float(lin[1,0])
-                    hdr['CD2_2'] = float(lin[1,1])
+                    lin = np.asarray(props['PCL:AstrometricSolution:LinearTransformationMatrix']['value'], float)
+                    hdr['CD1_1'], hdr['CD1_2'] = lin[0,0], lin[0,1]
+                    hdr['CD2_1'], hdr['CD2_2'] = lin[1,0], lin[1,1]
+                    _filled |= {'CD1_1','CD1_2','CD2_1','CD2_2'}
                     print("🔷 Injected CD matrix from XISFProperties")
                 except KeyError:
                     print("⚠️ Missing CD matrix in XISFProperties")
 
                 # 3) SIP polynomial fitting
                 try:
-                    # pull the two grids
-                    gx = np.array(
-                        props['PCL:AstrometricSolution:SplineWorldTransformation:'
-                            'PointGridInterpolation:ImageToNative:GridX']['value'],
-                        dtype=float
-                    )
-                    gy = np.array(
-                        props['PCL:AstrometricSolution:SplineWorldTransformation:'
-                            'PointGridInterpolation:ImageToNative:GridY']['value'],
-                        dtype=float
-                    )
-                    offset_grid = np.stack([gx, gy], axis=-1)
+                    gx = np.array(props['PCL:AstrometricSolution:SplineWorldTransformation:'
+                                        'PointGridInterpolation:ImageToNative:GridX']['value'], dtype=float)
+                    gy = np.array(props['PCL:AstrometricSolution:SplineWorldTransformation:'
+                                        'PointGridInterpolation:ImageToNative:GridY']['value'], dtype=float)
+                    grid = np.stack([gx, gy], axis=-1)
                     crpix = (hdr['CRPIX1'], hdr['CRPIX2'])
-                    # fit function
                     def fit_sip(grid, cr, order):
                         rows, cols, _ = grid.shape
                         u = np.repeat(np.arange(cols), rows) - cr[0]
                         v = np.tile(np.arange(rows), cols)   - cr[1]
-                        dx = grid[:,:,0].ravel()
-                        dy = grid[:,:,1].ravel()
-                        terms = [(i,j) for i in range(order+1)
-                                        for j in range(order+1-i)
-                                        if (i,j)!=(0,0)]
+                        dx = grid[:,:,0].ravel(); dy = grid[:,:,1].ravel()
+                        terms = [(i,j) for i in range(order+1) for j in range(order+1-i) if (i,j)!=(0,0)]
                         M = np.vstack([(u**i)*(v**j) for (i,j) in terms]).T
                         a, *_ = np.linalg.lstsq(M, dx, rcond=None)
                         b, *_ = np.linalg.lstsq(M, dy, rcond=None)
-                        resid = np.hypot(dx - M.dot(a), dy - M.dot(b))
-                        return (a,b, terms, resid.std())
-                    # pick best order 2–5
-                    best = {'order': None, 'rms': np.inf}
-                    for order in (2, 3, 4, 5, 6):
-                        a_vec, b_vec, terms, rms = fit_sip(offset_grid, crpix, order)
-                        print(f"Order {order} → RMS residual = {rms:.4f} px")
-                        if rms < best['rms']:
-                            best.update({
-                                'order': order,
-                                'a': a_vec,
-                                'b': b_vec,
-                                'terms': terms,
-                                'rms': rms
-                            })
+                        rms = np.hypot(dx - M.dot(a), dy - M.dot(b)).std()
+                        return a, b, terms, rms
 
+                    best = {'order':None, 'rms':np.inf}
+                    for order in range(2,7):
+                        a, b, terms, rms = fit_sip(grid, crpix, order)
+                        if rms < best['rms']:
+                            best.update(order=order, a=a, b=b, terms=terms, rms=rms)
                     o = best['order']
-                    hdr['A_ORDER'] = o
-                    hdr['B_ORDER'] = o
-                    # fill coefficients
-                    for (i,j), a in zip(best['terms'], best['a']):
-                        hdr[f'A_{i}_{j}'] = float(a)
-                    for (i,j), b in zip(best['terms'], best['b']):
-                        hdr[f'B_{i}_{j}'] = float(b)
+                    hdr['A_ORDER'] = o; hdr['B_ORDER'] = o
+                    _filled |= {'A_ORDER','B_ORDER'}
+                    for (i,j), coef in zip(best['terms'], best['a']):
+                        hdr[f'A_{i}_{j}'] = float(coef)
+                        _filled.add(f'A_{i}_{j}')
+                    for (i,j), coef in zip(best['terms'], best['b']):
+                        hdr[f'B_{i}_{j}'] = float(coef)
+                        _filled.add(f'B_{i}_{j}')
                     print(f"🔷 Injected SIP order {o}")
                 except KeyError:
                     print("⚠️ No SIP grid in XISFProperties; skipping SIP")
 
-                # 4) copy any simple FITSKeywords from file_meta
-                for kw, vals in file_meta.get('FITSKeywords', {}).items():
-                    for entry in vals:
-                        v = entry.get('value')
-                        if isinstance(v, (int, float, str)):
-                            hdr[kw] = v
+                # Helper: look in FITSKeywords dicts
+                def _lookup_kw(key):
+                    for meta in (image_meta, file_meta):
+                        fk = meta.get('FITSKeywords',{})
+                        if key in fk and fk[key]:
+                            return fk[key][0]['value']
+                    return None
 
-                # 5) X/Y binning
-                def _get_kw(m, k):
-                    ent = m.get('FITSKeywords',{}).get(k)
-                    return ent[0]['value'] if ent else None
-                bx = int(_get_kw(image_meta,'XBINNING') or _get_kw(file_meta,'XBINNING') or 1)
-                by = int(_get_kw(image_meta,'YBINNING') or _get_kw(file_meta,'YBINNING') or bx)
-                if bx!=by:
-                    print(f"⚠️ Unequal binning: {bx}×{by}, averaging")
-                hdr['XBINNING'] = bx
-                hdr['YBINNING'] = by
-                print(f">>> DEBUG found XBINNING={bx}, YBINNING={by}")
+                # 4) Fallback WCS/CD from FITSKeywords
+                for key in ('CRPIX1','CRPIX2','CRVAL1','CRVAL2','CTYPE1','CTYPE2',
+                            'CD1_1','CD1_2','CD2_1','CD2_2'):
+                    if key not in hdr:
+                        v = _lookup_kw(key)
+                        if v is not None:
+                            hdr[key] = v
+                            _filled.add(key)
+                            print(f"🔷 Injected {key} from FITSKeywords")
+
+                # 5) Generic RA/DEC fallback
+                if 'CRVAL1' not in hdr or 'CRVAL2' not in hdr:
+                    for ra_kw, dec_kw in (('RA','DEC'),('OBJCTRA','OBJCTDEC')):
+                        ra = _lookup_kw(ra_kw); dec = _lookup_kw(dec_kw)
+                        if ra and dec:
+                            try:
+                                ra_deg = float(ra); dec_deg = float(dec)
+                            except ValueError:
+                                from astropy.coordinates import Angle
+                                ra_deg  = Angle(str(ra), unit='hourangle').degree
+                                dec_deg = Angle(str(dec), unit='deg').degree
+                            hdr['CRVAL1'], hdr['CRVAL2'] = ra_deg, dec_deg
+                            hdr.setdefault('CTYPE1','RA---TAN'); hdr.setdefault('CTYPE2','DEC--TAN')
+                            print(f"🔷 Fallback CRVAL from {ra_kw}/{dec_kw}")
+                            break
+
+                # 6) Pixel‐scale fallback → inject CDELT if no CD or CDELT
+                if not any(k in hdr for k in ('CD1_1','CDELT1')):
+                    pix_arcsec = None
+                    for kw in ('PIXSCALE','SCALE'):
+                        val = _lookup_kw(kw)
+                        if val:
+                            pix_arcsec = float(val); break
+                    if pix_arcsec is None:
+                        xpsz = _lookup_kw('XPIXSZ'); foc = _lookup_kw('FOCALLEN')
+                        if xpsz and foc:
+                            pix_arcsec = float(xpsz)*1e-3/float(foc)*206265
+                    if pix_arcsec:
+                        degpix = pix_arcsec / 3600.0
+                        hdr['CDELT1'], hdr['CDELT2'] = -degpix, degpix
+                        print(f"🔷 Injected pixel scale {pix_arcsec:.3f}\"/px → CDELT={degpix:.6f}°")
+
+                # 7) Copy any remaining simple FITSKeywords
+                for kw, vals in file_meta.get('FITSKeywords',{}).items():
+                    if kw in hdr: continue
+                    v = vals[0].get('value')
+                    if isinstance(v, (int,float,str)):
+                        hdr[kw] = v
+
+                # 8) Binning
+                bx = int(_lookup_kw('XBINNING') or 1)
+                by = int(_lookup_kw('YBINNING') or bx)
+                if bx!=by: print(f"⚠️ Unequal binning {bx}×{by}, averaging")
+                hdr['XBINNING'], hdr['YBINNING'] = bx, by
 
                 original_header = hdr
-                print(f"Loaded XISF image: shape={image.shape}, bit depth={bit_depth}, mono={is_mono}")
+                print(f"Loaded XISF header with keys: {_filled}")
                 return image, original_header, bit_depth, is_mono
 
             elif filename.lower().endswith(('.cr2', '.cr3', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
