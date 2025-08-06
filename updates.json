@@ -1,9 +1,9 @@
 {
-  "version": "2.20.5",
+  "version": "2.20.6",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.5/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.5/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.5/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.6/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.6/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.20.6/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Star Trail stacking options in both Live Stack and Stacking Suite (under Image Integration tab). Perfect Palette Picker has the Perfect Palette Tweaker when you Push for processing that allows your to tweak H, O, and S intensities. Various bug fixes."
+  "notes": "Crop Tool Rotation bug fix.  XISF astrometric solution from PI fully parses into FITS compliant protocal for use in SAS. Metadata now used for very rapid ASTAP plate solving."
 }
