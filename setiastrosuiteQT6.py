@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.6"
+VERSION = "2.20.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -12392,102 +12392,136 @@ class StackingSuiteDialog(QDialog):
             
             return "Unknown", 0.0, "Unknown"
 
+    def _get_image_size(self, fp):
+        ext = os.path.splitext(fp)[1].lower()
+        # first try FITS
+        if ext in (".fits", ".fit"):
+            hdr0 = fits.getheader(fp, ext=0)
+            data0 = fits.getdata(fp, ext=0)
+            h, w = data0.shape[-2:]
+        else:
+            # try Pillow
+            try:
+                with Image.open(fp) as img:
+                    w, h = img.size
+            except Exception:
+                # Pillow failed on TIFF or exotic format → try tifffile
+                try:
+                    arr = tiff.imread(fp)
+                    h, w = arr.shape[:2]
+                except Exception:
+                    # last resort: OpenCV
+                    arr = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
+                    if arr is None:
+                        raise IOError(f"Cannot read image size for {fp}")
+                    h, w = arr.shape[:2]
+        return w, h
 
 
     def populate_calibrated_lights(self):
         """
         Reads both the Calibrated folder and any manually-added files,
         groups them by FILTER, EXPOSURE±tol, SIZE, and fills self.reg_tree.
+        Now supports non-FITS images too.
         """
+        from PIL import Image
+
         # 1) clear out the tree
         self.reg_tree.clear()
         self.reg_tree.setColumnCount(3)
         self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
         hdr = self.reg_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        for col in (0, 1, 2):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
 
         # 2) gather all files
         calibrated_folder = os.path.join(self.stacking_directory or "", "Calibrated")
         files = []
         if os.path.isdir(calibrated_folder):
             for fn in os.listdir(calibrated_folder):
-                if fn.lower().endswith((".fits", ".fit")):
-                    files.append(os.path.join(calibrated_folder, fn))
-        # append any manual additions
+                files.append(os.path.join(calibrated_folder, fn))
         files += getattr(self, "manual_light_files", [])
 
-        # nothing to do?
         if not files:
             return
 
-        # 3) group by header
-        grouped = {}  # key -> list of (path, exposure_float)
+        # 3) group by header (or defaults)
+        grouped = {}
         tol = self.exposure_tolerance_spin.value()
         for fp in files:
-            try:
-                hdr0 = fits.getheader(fp, ext=0)
-                filt = hdr0.get("FILTER", "Unknown")
-                filt = self._sanitize_name(filt)  # sanitize filter name
-                exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
+            ext = os.path.splitext(fp)[1].lower()
+            filt = "Unknown"
+            exp = 0.0
+            size = "Unknown"
+            # try FITS first
+            if ext in (".fits", ".fit"):
                 try:
-                    exp = float(exp_raw)
-                except (TypeError, ValueError):
-                    print(f"⚠️ Exposure missing or invalid in {fp}, defaulting to 0.0s")
-                    exp = 0.0
-                data0 = fits.getdata(fp, ext=0)
-                h, w = data0.shape[-2:]
-                size = f"{w}x{h}"
-            except Exception as e:
-                print(f"⚠️ Skipping {fp}: {e}")
-                continue
+                    hdr0 = fits.getheader(fp, ext=0)
+                    filt = hdr0.get("FILTER", "Unknown")
+                    filt = self._sanitize_name(filt)
+                    exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
+                    try:
+                        exp = float(exp_raw)
+                    except (TypeError, ValueError):
+                        print(f"⚠️ Exposure invalid in {fp}, defaulting to 0.0s")
+                        exp = 0.0
+                    data0 = fits.getdata(fp, ext=0)
+                    h, w = data0.shape[-2:]
+                    size = f"{w}x{h}"
+                except Exception as e:
+                    print(f"⚠️ Could not read FITS {fp}: {e}; treating as generic image")
+                    # fall through to generic
+            if filt == "Unknown" and ext not in (".fits", ".fit"):
+                # generic image: try PIL
+                try:
+                    w, h = self._get_image_size(fp)
+                    size = f"{w}x{h}"
+                except Exception as e:
+                    print(f"⚠️ Cannot read image size for {fp}: {e}")
+                    continue
 
+            # now we have filt, exp, size
             # find existing group
             match = None
             for key in grouped:
-                f2,e2,s2 = self.parse_group_key(key)
-                if filt==f2 and s2==size and abs(exp-e2)<=tol:
+                f2, e2, s2 = self.parse_group_key(key)
+                if filt == f2 and s2 == size and abs(exp - e2) <= tol:
                     match = key
                     break
-            if match is None:
+            if match:
+                key = match
+            else:
                 key = f"{filt} - {exp:.1f}s ({size})"
                 grouped[key] = []
-            else:
-                key = match
-
             grouped[key].append((fp, exp))
 
         # 4) populate the tree & store in self.light_files
         self.light_files = {}
         for key, lst in grouped.items():
-            paths = [p for p,_ in lst]
-            exps  = [e for _,e in lst]
+            paths = [p for p, _ in lst]
+            exps  = [e for _, e in lst]
 
             top = QTreeWidgetItem()
             top.setText(0, key)
-            # metadata: "N files, min–max s"
-            if len(exps)>1:
+            if len(exps) > 1:
                 mn, mx = min(exps), max(exps)
                 top.setText(1, f"{len(paths)} files, {mn:.0f}s–{mx:.0f}s")
             else:
                 top.setText(1, f"{len(paths)} file")
             top.setText(2, "Drizzle: False")
-            # store full list for gather_drizzle & extractor
             top.setData(0, Qt.ItemDataRole.UserRole, paths)
             self.reg_tree.addTopLevelItem(top)
 
-            for fp,_ in lst:
-                # leaf row
-                data0 = fits.getdata(fp, ext=0)
-                h, w = data0.shape[-2:]
-                leaf = QTreeWidgetItem([os.path.basename(fp), f"Size: {w}x{h}"])
-                # store absolute path
+            for fp, _ in lst:
+                # leaf row: show basename + size
+                # re-use the size we computed above
+                leaf = QTreeWidgetItem([os.path.basename(fp), f"Size: {size}"])
                 leaf.setData(0, Qt.ItemDataRole.UserRole, fp)
                 top.addChild(leaf)
 
             top.setExpanded(True)
             self.light_files[key] = paths
+
 
 
     def update_drizzle_settings(self):
@@ -12586,7 +12620,7 @@ class StackingSuiteDialog(QDialog):
             self,
             "Select Light Frames",
             last_dir,
-            "FITS Files (*.fits *.fit *.fz *.fz)"
+            "FITS Files (*.fits *.fit *.fz *.fz *.xisf *.tif *.tiff *.png *.jpg *.jpeg)"
         )
         if not files:
             return
@@ -14433,43 +14467,57 @@ class StackingSuiteDialog(QDialog):
             self.update_status("⚠️ No calibrated lights available for star trails.")
             return
 
-        # 2) compute per-frame medians, then pick the "median of medians"
-        frame_medians = []
-        for fn in all_files:
-            data = fits.getdata(fn).astype(np.float32)
-            frame_medians.append(np.median(data))
-        ref_median = float(np.max(frame_medians))
+        # 2) load every frame (once), compute its median, and remember its header
+        frames: list[tuple[np.ndarray, fits.Header]] = []
+        medians: list[float] = []
 
-        _, raw_hdr, _, _ = load_image(all_files[0])
-        if raw_hdr is not None:
-            hdr_to_use = raw_hdr.copy()
-            # Remove any NAXIS keywords other than NAXIS, NAXIS1, NAXIS2
+        for fn in all_files:
+            img, hdr, _, _ = load_image(fn)
+            if img is None:
+                self.update_status(f"⚠️ Failed to load {os.path.basename(fn)}; skipping")
+                QApplication.processEvents()
+                continue
+
+            arr = img.astype(np.float32)
+            medians.append(float(np.median(arr)))
+            frames.append((arr, hdr))
+
+        if not frames:
+            self.update_status("⚠️ No valid frames to compute reference median; aborting star-trail.")
+            return
+
+        # reference median is the median of per-frame medians
+        ref_median = float(np.median(medians))
+
+        # grab the header from the first valid frame, strip out extra NAXIS keywords
+        first_hdr = frames[0][1]
+        if first_hdr is not None:
+            hdr_to_use = first_hdr.copy()
             for key in list(hdr_to_use):
                 if key.startswith("NAXIS") and key not in ("NAXIS", "NAXIS1", "NAXIS2"):
                     hdr_to_use.pop(key, None)
         else:
             hdr_to_use = None
 
-        # 3) normalize each to ref_median + write to a temp dir
+        # 3) normalize each frame and write to a temp dir
         with tempfile.TemporaryDirectory(prefix="startrail_norm_") as norm_dir:
             normalized_paths = []
-            for idx, fn in enumerate(all_files, start=1):
-                self.update_status(f"🔄 Normalizing frame {idx}/{n_frames}: {os.path.basename(fn)}")
-                QApplication.processEvents()                
-                img, hdr, _, _ = load_image(fn)
-                img = img.astype(np.float32)
-                # guard against divide-by-zero
-                m = np.median(img)
-                scale = ref_median / (m + 1e-12)
-                img_norm = img * scale
+            for idx, (arr, hdr) in enumerate(frames, start=1):
+                self.update_status(f"🔄 Normalizing frame {idx}/{len(frames)}")
+                QApplication.processEvents()
 
-                stem = Path(fn).stem
+                # guard against divide-by-zero
+                m = float(np.median(arr))
+                scale = ref_median / (m + 1e-12)
+                img_norm = arr * scale
+
+                stem = Path(all_files[idx-1]).stem
                 out_path = os.path.join(norm_dir, f"{stem}_st.fit")
                 fits.PrimaryHDU(data=img_norm, header=hdr).writeto(out_path, overwrite=True)
                 normalized_paths.append(out_path)
 
             # 4) stack and do max-value projection
-            self.update_status(f"📊 Stacking {n_frames} frames")
+            self.update_status(f"📊 Stacking {len(normalized_paths)} frames")
             QApplication.processEvents()
             stack = np.stack([fits.getdata(p).astype(np.float32) for p in normalized_paths], axis=0)
             trail_img, _ = max_value_stack(stack)
@@ -16626,7 +16674,7 @@ class LiveStackWindow(QDialog):
         exts = (
             "*.fit", "*.fits", "*.tif", "*.tiff",
             "*.cr2", "*.cr3", "*.nef", "*.arw",
-            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf", "*.png", "*.jpg", "*.jpeg"
         )
         all_paths = []
         for ext in exts:
@@ -16716,7 +16764,8 @@ class LiveStackWindow(QDialog):
         exts = (
             "*.fit", "*.fits", "*.tif", "*.tiff",
             "*.cr2", "*.cr3", "*.nef", "*.arw",
-            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf"
+            "*.dng", "*.orf", "*.rw2", "*.pef", "*.xisf",
+            "*.png", "*.jpg", "*.jpeg"
         )
         all_paths = []
         for ext in exts:
@@ -42156,6 +42205,10 @@ class BlinkTab(QWidget):
         self.dirButton.clicked.connect(self.openDirectoryDialog)
         button_layout.addWidget(self.dirButton)
 
+        self.addButton = QPushButton("Add Additional", self)
+        self.addButton.clicked.connect(self.addAdditionalImages)
+        button_layout.addWidget(self.addButton)
+
         left_layout.addLayout(button_layout)
 
         self.metrics_button = QPushButton("Show Metrics", self)
@@ -42326,6 +42379,69 @@ class BlinkTab(QWidget):
             panel._refresh_scatter_colors()
             # update the "Flagged Items X/Y" label
             self.metrics_window._update_status()
+
+    def addAdditionalImages(self):
+        """Let the user pick more images to append to the blink list."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add Additional Images",
+            "",
+            "Images (*.png *.tif *.tiff *.fits *.fit *.xisf *.cr2 *.nef *.arw *.dng *.orf *.rw2 *.pef);;All Files (*)"
+        )
+        # filter out duplicates
+        new_paths = [p for p in file_paths if p not in self.image_paths]
+        if not new_paths:
+            QMessageBox.information(self, "No New Images", "No new images selected or already loaded.")
+            return
+        self._appendImages(new_paths)
+
+    def _appendImages(self, file_paths):
+        # decide dtype exactly as in loadImages
+        mem = psutil.virtual_memory()
+        avail = mem.available / (1024**3)
+        if avail <= 16:
+            target_dtype = np.uint8
+        elif avail <= 32:
+            target_dtype = np.uint16
+        else:
+            target_dtype = np.float32
+
+        total_new = len(file_paths)
+        self.progress_bar.setRange(0, total_new)
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+        # load one-by-one (or you could parallelize as you like)
+        for i, path in enumerate(sorted(file_paths, key=lambda p: self._natural_key(os.path.basename(p)))):
+            try:
+                _, hdr, bit_depth, is_mono, stored, back = self._load_one_image(path, target_dtype)
+            except Exception as e:
+                print(f"Failed to load {path}: {e}")
+                continue
+
+            # append to our master lists
+            self.image_paths.append(path)
+            self.loaded_images.append({
+                'file_path':      path,
+                'image_data':     stored,
+                'header':         hdr or {},
+                'bit_depth':      bit_depth,
+                'is_mono':        is_mono,
+                'flagged':        False,
+                'orig_background': back
+            })
+
+            # update progress bar
+            self.progress_bar.setValue(i+1)
+            QApplication.processEvents()
+
+            # and add it into the tree under the correct object/filter/exp
+            self.add_item_to_tree(path)
+
+        # update status
+        self.loading_label.setText(f"Loaded {len(self.loaded_images)} images.")
+        if self.metrics_window and self.metrics_window.isVisible():
+            self.metrics_window.update_metrics(self.loaded_images)
 
     def show_metrics(self):
         if self.metrics_window is None:
