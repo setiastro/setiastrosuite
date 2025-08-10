@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.20.7"
+VERSION = "2.21.0"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -460,7 +460,7 @@ class AstroEditingSuite(QMainWindow):
         self.current_theme = "dark"  # Default theme
         self.image_manager = ImageManager(max_slots=10, parent=self)  # Initialize ImageManager
         self.mask_manager = self.image_manager.mask_manager
-        self.image_manager.image_changed.connect(self.update_file_name)
+        self.image_manager.image_changed.connect(self.on_image_changed)
         self.settings = QSettings()   # Replace "Seti Astro" with your actual organization name
         self.starnet_exe_path = self.settings.value("starnet/exe_path", type=str)  # Load saved path if available
         self.preview_windows = {}
@@ -1330,6 +1330,28 @@ class AstroEditingSuite(QMainWindow):
             quicknav_menu.addAction(action)
 
         # --------------------
+        # FITS Modifier Menu + Toolbar
+        # --------------------
+        fits_menu = menubar.addMenu("FITS Modifier")
+
+        self.fits_edit_action = QAction("Edit Current Slot Header…", self)
+        self.fits_edit_action.setStatusTip("View and edit FITS header for the active image slot")
+        self.fits_edit_action.triggered.connect(self.open_fits_modifier)
+
+        #self.fits_batch_action = QAction("Batch Modify Headers…", self)
+        #self.fits_batch_action.setStatusTip("Apply a header change to many FITS files")
+        #self.fits_batch_action.triggered.connect(self.open_batch_fits_modifier)
+
+        fits_menu.addAction(self.fits_edit_action)
+        #fits_menu.addAction(self.fits_batch_action)
+
+        #self.fits_toolbar = QToolBar("FITS Modifier", self)
+        #self.fits_toolbar.setObjectName("FITSModifierToolbar")
+        #self.fits_toolbar.addAction(self.fits_edit_action)
+        #self.fits_toolbar.addAction(self.fits_batch_action)
+        #self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.fits_toolbar)
+
+        # --------------------
         # History Menu
         # --------------------
         history_menu = menubar.addMenu("History")
@@ -1372,6 +1394,43 @@ class AstroEditingSuite(QMainWindow):
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
         self.curveDock.hide()
+
+    def _is_valid_fits_path(self, path: str | None) -> bool:
+        if not path or not isinstance(path, str):
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".fits", ".fit", ".fts", ".fz"):
+            return False
+        # existence check is optional; keep it if you only want on-disk files
+        return os.path.isfile(path)
+
+    def open_fits_modifier(self):
+        img, meta = self.image_manager.get_current_image_and_metadata()
+        file_path = None
+        header_obj = None
+        if isinstance(meta, dict):
+            candidate = meta.get("file_path") or meta.get("FILE") or meta.get("path")
+            header_obj = meta.get("fits_header") or meta.get("header")
+
+            # only keep as file_path if it really looks like a FITS file
+            if self._is_valid_fits_path(candidate):
+                file_path = candidate
+            else:
+                file_path = None  # treat "Cropped Image" etc. as a label
+
+        # If we have neither a FITS path nor a header, just open the dialog empty and let them click "Open FITS…"
+        dlg = FITSModifier(file_path=file_path,
+                        header=header_obj if header_obj is not None else fits.Header(),
+                        image_manager=self.image_manager,
+                        parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def open_batch_fits_modifier(self):
+        """Open non-modal batch header modification dialog."""
+        dlg = BatchFITSHeaderDialog(parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
 
     def show_history_dialog(self):
         slot = self.image_manager.current_slot
@@ -2839,8 +2898,6 @@ class AstroEditingSuite(QMainWindow):
             print(f"Error in handle_gradient_removal: {e}")
 
 
-
-
     def check_for_updates(self):
         try:
             # URL to the JSON file on GitHub
@@ -3828,21 +3885,42 @@ class AstroEditingSuite(QMainWindow):
         else:
             print(f"No preview window found for Slot {slot} to remove.")
 
-    def on_image_changed(self, slot, image, metadata):
-        """Update the file name in the status bar and refresh preview if open."""
-        file_path = metadata.get('file_path', None)
-        if file_path:
-            self.file_name_label.setText(os.path.basename(file_path))  # Update the label with file name
-            self.update_slot_toolbar_highlight()
+    def _format_status_name(self, metadata: dict) -> str:
+        # Prefer file basename; fall back to display_name; otherwise “Untitled”
+        file_path = metadata.get("file_path") or metadata.get("FILE") or metadata.get("path")
+        if isinstance(file_path, (str, bytes, os.PathLike)):
+            base = os.path.basename(str(file_path))
         else:
-            self.file_name_label.setText("No file selected")
+            base = metadata.get("display_name") or "Untitled"
 
-        # If a preview window for this slot is open, update its image
+        step = (metadata.get("step_name") or "").strip()
+        return f"{base} — {step}" if step else base
+
+    def on_image_changed(self, slot, image, metadata):
+        """Update the status bar (file + step) and refresh any open previews."""
+        try:
+            self.file_name_label.setText(self._format_status_name(metadata or {}))
+        except Exception:
+            self.file_name_label.setText("Untitled")
+
+        # update dims (your existing logic)
+        if image is not None:
+            if image.ndim == 2:
+                h, w = image.shape
+                self.dim_label.setText(f"{w} x {h}")
+            elif image.ndim == 3:
+                h, w, c = image.shape
+                self.dim_label.setText(f"{w} x {h} x {c}")
+            else:
+                self.dim_label.setText("Unknown dimensions")
+        else:
+            self.dim_label.setText("—")
+
+        # refresh preview if open
         if slot in self.preview_windows:
             preview_window = self.preview_windows[slot]
             preview_window.update_image_data(image.copy())
             self.update_slot_toolbar_highlight()
-            print(f"Preview window for Slot {slot} updated with new image.")
 
      
 
@@ -6170,6 +6248,9 @@ class ImageManager(QObject):
     # - metadata (dict): Associated metadata for the image.
     image_changed = pyqtSignal(int, np.ndarray, dict)
     current_slot_changed = pyqtSignal(int)    
+    # Keys we always carry forward unless caller explicitly supplies a non-empty replacement
+    PRESERVE_META_KEYS = ("file_path", "FILE", "path", "fits_header", "header")
+
 
     def __init__(self, max_slots=5, parent=None):
         """
@@ -6188,6 +6269,41 @@ class ImageManager(QObject):
         self.active_previews = {}  # Track active preview windows by slot
         self.mask_manager = MaskManager(max_slots)  # Add a MaskManager
 
+    def _looks_like_path(self, v: object) -> bool:
+        if not isinstance(v, str):
+            return False
+        # treat as path if it has a separator or a known extension
+        ext_ok = v.lower().endswith((".fits", ".fit", ".fts", ".fz", ".fits.fz"))
+        return (os.path.sep in v) or ext_ok
+
+    def _attach_step_name(self, merged_meta: dict, step_name: str | None) -> dict:
+        if step_name is not None and str(step_name).strip():
+            merged_meta["step_name"] = step_name.strip()
+        return merged_meta
+
+    def _merge_metadata(self, base: dict | None, updates: dict | None) -> dict:
+        out = (base or {}).copy()
+        if not updates:
+            return out
+        for k, v in updates.items():
+            if k in ("file_path", "FILE", "path"):
+                # Only accept if it looks like a real path; ignore labels like "Cropped Image"
+                if not self._looks_like_path(v):
+                    continue
+            if k in ("fits_header", "header"):
+                # Don’t replace with None/blank
+                if v is None or (isinstance(v, str) and not v.strip()):
+                    continue
+            out[k] = v
+        return out
+
+    def _emit_change(self, slot: int):
+        """Centralized emitter to avoid passing None metadata to listeners."""
+        img = self._images[slot]
+        meta = self._metadata[slot]
+        self.image_changed.emit(slot, img, meta)
+        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
+            self.parent.update_undo_redo_action_labels()
 
     def get_current_image_and_metadata(self):
         slot = self.current_slot
@@ -6270,56 +6386,51 @@ class ImageManager(QObject):
             print(f"ImageManager: Image added to slot {slot} with metadata.")
         else:
             print(f"ImageManager: Slot {slot} is out of range. Max slots: {self.max_slots}")
+        if metadata is None:
+            metadata = {}
+        metadata.setdefault("step_name", "Loaded")
+
 
     def set_image(self, new_image, metadata, step_name=None):
         slot = self.current_slot
         if self._images[slot] is not None:
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step"))
+            self._undo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step")
+            )
             self._redo_stacks[slot].clear()
             print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
         else:
             print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
-        self._images[slot] = new_image
-        self._metadata[slot] = metadata
-        self.image_changed.emit(slot, new_image, metadata)
-        print(f"ImageManager: Image set for slot {slot} with new metadata.")
 
-        # ⬇ Update undo/redo labels
-        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
-            self.parent.update_undo_redo_action_labels()
+        merged = self._merge_metadata(self._metadata[slot], metadata)
+        merged = self._attach_step_name(merged, step_name)  # <-- add this
+        self._images[slot] = new_image
+        self._metadata[slot] = merged
+        self._emit_change(slot)
+        print(f"ImageManager: Image set for slot {slot} with merged metadata.")
 
 
     def set_image_for_slot(self, slot, new_image, metadata, step_name=None):
-        """
-        Similar to set_image, but allows specifying which slot to update,
-        and pushes the previous image to the undo stack.
-        """
         if slot < 0 or slot >= self.max_slots:
             print(f"ImageManager: Slot {slot} is out of range. Max slots={self.max_slots}")
             return
 
-        # If there's an existing image in that slot, push it to undo
         if self._images[slot] is not None:
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step"))
+            self._undo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy(), step_name or "Unnamed Step")
+            )
             self._redo_stacks[slot].clear()
             print(f"ImageManager: Previous image in slot {slot} pushed to undo stack.")
         else:
             print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
 
-        # Update the slot with the new image + metadata
+        merged = self._merge_metadata(self._metadata[slot], metadata)
+        merged = self._attach_step_name(merged, step_name)
         self._images[slot] = new_image
-        self._metadata[slot] = metadata
-
-        # Optionally set this slot as current
+        self._metadata[slot] = merged
         self.current_slot = slot
-
-        # Emit the change
-        self.image_changed.emit(slot, new_image, metadata)
-        print(f"ImageManager: Image set for slot {slot} with new metadata.")
-
-        # Update undo/redo tooltip text if the parent supports it
-        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
-            self.parent.update_undo_redo_action_labels()
+        self._emit_change(slot)
+        print(f"ImageManager: Image set for slot {slot} with merged metadata.")
 
 
     @property
@@ -6334,13 +6445,6 @@ class ImageManager(QObject):
         self.set_image_with_step_name(new_image, self._metadata[self.current_slot], step_name="Unnamed Step")
 
     def set_image_with_step_name(self, new_image, metadata, step_name="Unnamed Step"):
-        """
-        Set a new image and metadata for the current slot and push the previous state to the undo stack with a step name.
-        
-        :param new_image: New image (np.ndarray)
-        :param metadata: Metadata dictionary
-        :param step_name: Description of the operation
-        """
         slot = self.current_slot
         if self._images[slot] is not None:
             self._undo_stacks[slot].append(
@@ -6351,14 +6455,12 @@ class ImageManager(QObject):
         else:
             print(f"ImageManager: No existing image in slot {slot} to push to undo stack.")
 
+        merged = self._merge_metadata(self._metadata[slot], metadata)
+        merged = self._attach_step_name(merged, step_name)
         self._images[slot] = new_image
-        self._metadata[slot] = metadata
-        self.image_changed.emit(slot, new_image, metadata)
-        print(f"ImageManager: Image set for slot {slot} via set_image_with_step_name.")
-
-        # Update tooltips for undo/redo actions
-        if self.parent and hasattr(self.parent, "update_undo_redo_action_labels"):
-            self.parent.update_undo_redo_action_labels()
+        self._metadata[slot] = merged
+        self._emit_change(slot)
+        print(f"ImageManager: Image set for slot {slot} via set_image_with_step_name (merged).")
 
 
     def get_slot_name(self, slot):
@@ -6375,33 +6477,31 @@ class ImageManager(QObject):
 
 
     def set_metadata(self, metadata):
-        """
-        Sets new metadata for the current slot, adding the previous state to the undo stack.
-        
-        :param metadata: A dictionary containing new metadata.
-        """
         slot = self.current_slot
         if self._images[slot] is not None:
-            # Save current state to undo stack
-            self._undo_stacks[slot].append((self._images[slot].copy(), self._metadata[slot].copy()))
-            # Clear redo stack since new action invalidates the redo history
+            self._undo_stacks[slot].append(
+                (self._images[slot].copy(), self._metadata[slot].copy())
+            )
             self._redo_stacks[slot].clear()
             print(f"ImageManager: Previous metadata in slot {slot} pushed to undo stack.")
         else:
             print(f"ImageManager: No existing image in slot {slot} to set metadata.")
-        self._metadata[slot] = metadata
-        self.image_changed.emit(slot, self._images[slot], metadata)
-        print(f"ImageManager: Metadata set for slot {slot}.")
+
+        merged = self._merge_metadata(self._metadata[slot], metadata)
+        self._metadata[slot] = merged
+        self._emit_change(slot)
+        print(f"ImageManager: Metadata set for slot {slot} (merged).")
 
     def update_image(self, updated_image, metadata=None, slot=None):
         if slot is None:
             slot = self.current_slot
 
-
         self._images[slot] = updated_image
-        if metadata:
-            self._metadata[slot] = metadata
-        self.image_changed.emit(slot, updated_image, metadata)
+        if metadata is not None:
+            merged = self._merge_metadata(self._metadata[slot], metadata)
+            self._metadata[slot] = merged
+
+        self._emit_change(slot)
 
     def can_undo(self, slot=None):
         """
@@ -6504,6 +6604,611 @@ class ImageManager(QObject):
         """Return the image stored in slot, or None if empty."""
         return self._images.get(slot)
 
+class FITSModifier(QDialog):
+    """
+    Non-modal editor that shows a FITS header in a tree and lets the user edit/save.
+    If both file_path and header are provided, file takes precedence for I/O;
+    edits can also be pushed back into ImageManager metadata for the active slot.
+    """
+    def __init__(self, file_path: str | None, header, image_manager=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("FITS Header Editor")
+        self.resize(800, 600)
+
+        self.image_manager = image_manager
+        self.file_path = file_path if (file_path and os.path.isfile(file_path)) else None
+        self.hdul = None
+        self.current_hdu_index = 0
+        self._fallback_header = header
+
+        self._populating = False
+        self._dirty = False
+              
+
+        # UI
+        top = QHBoxLayout()
+        self.path_label = QLabel(self.file_path or "(no file)")
+        self.open_btn = QPushButton("Open FITS…")
+        self.reload_btn = QPushButton("Reload")
+        self.hdu_combo = QComboBox()
+        self.save_btn = QPushButton("Save")
+        self.saveas_btn = QPushButton("Save As…")
+        #self.apply_to_slot_btn = QPushButton("Apply to Slot Metadata")
+
+        top.addWidget(QLabel("File:"))
+        top.addWidget(self.path_label, 1)
+        top.addWidget(QLabel("HDU:"))
+        top.addWidget(self.hdu_combo)
+        top.addWidget(self.open_btn)
+        top.addWidget(self.reload_btn)
+        top.addWidget(self.save_btn)
+        top.addWidget(self.saveas_btn)
+        #top.addWidget(self.apply_to_slot_btn)
+
+        batch = QHBoxLayout()
+        self.batch_btn = QPushButton("Batch Modify...")
+        batch.addStretch()
+        batch.addWidget(self.batch_btn)
+        batch.addStretch()
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["Keyword", "Value", "Comment"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setEditTriggers(QTreeWidget.EditTrigger.DoubleClicked | QTreeWidget.EditTrigger.SelectedClicked)
+        self.tree.setUniformRowHeights(True)  # perf + consistent row paint
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+
+        # Strong selection + hover contrast (handles active/inactive window states)
+        self.tree.setStyleSheet("""
+        QTreeWidget::item:selected:active {
+            background-color: #1E90FF;   /* DodgerBlue */
+            color: white;
+        }
+        QTreeWidget::item:selected:!active {
+            background-color: #5AA7FF;   /* lighter when window inactive */
+            color: white;
+        }
+        QTreeWidget::item:hover {
+            background-color: rgba(30,144,255,0.18);
+        }
+        QTreeWidget::item {
+            padding: 2px 6px;            /* gives the selection a little breathing room */
+        }
+        """)
+
+
+        bottom = QHBoxLayout()
+        self.add_key_edit = QLineEdit(); self.add_key_edit.setPlaceholderText("KEYWORD")
+        self.add_val_edit = QLineEdit(); self.add_val_edit.setPlaceholderText("Value")
+        self.add_com_edit = QLineEdit(); self.add_com_edit.setPlaceholderText("Comment (optional)")
+        self.add_btn = QPushButton("Add/Update")
+        self.del_btn = QPushButton("Delete Selected")
+        self.all_hdus_chk = QCheckBox("Apply add/update/delete to all HDUs")
+        bottom.addWidget(self.add_key_edit)
+        bottom.addWidget(self.add_val_edit)
+        bottom.addWidget(self.add_com_edit)
+        bottom.addWidget(self.all_hdus_chk)
+        bottom.addWidget(self.add_btn)
+        bottom.addWidget(self.del_btn)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addLayout(batch)
+        layout.addWidget(self.tree, 1)
+        layout.addLayout(bottom)
+
+        # Signals
+        self.open_btn.clicked.connect(self._choose_file)
+        self.reload_btn.clicked.connect(self._reload)
+        self.hdu_combo.currentIndexChanged.connect(self._on_hdu_changed)
+        self.save_btn.clicked.connect(self._save_in_place)
+        self.saveas_btn.clicked.connect(self._save_as_copy)
+        #self.apply_to_slot_btn.clicked.connect(self._apply_to_slot_metadata)
+        self.add_btn.clicked.connect(self._add_or_update_keyword)
+        self.del_btn.clicked.connect(self._delete_selected)
+
+        # Initial content
+        if self.file_path:
+            ok = self._load_file(self.file_path)
+            if not ok and header is not None:
+                self._init_from_header(header)
+        elif header is not None:
+            self._init_from_header(header)
+        else:
+            # No FITS on disk and no header provided: start empty
+            self._init_from_header(fits.Header())
+
+        self.tree.itemChanged.connect(self._on_item_changed)  
+        self.tree.currentItemChanged.connect(self._on_row_selected)
+        self.batch_btn.clicked.connect(self._open_batch_modifier)
+
+    # ---- helpers ----
+    def _update_multi_hdu_ui(self):
+        n = len(self.hdul) if self.hdul else 0
+        # Only show when there are multiple HDUs
+        self.all_hdus_chk.setVisible(n > 1)    
+
+    def _on_row_selected(self, curr, prev):
+        if not curr:
+            return
+        self.add_key_edit.setText(curr.text(0))
+        self.add_val_edit.setText(curr.text(1))
+        self.add_com_edit.setText(curr.text(2))
+
+    def _selected_row_triplet(self) -> tuple[str, str, str]:
+        it = self.tree.currentItem()
+        if not it:
+            return "", "", ""
+        return (it.text(0).strip(), it.text(1), it.text(2))
+
+    def _open_batch_modifier(self):
+        key, val, com = self._selected_row_triplet()
+        # Open non-modally and prefill fields from the selected row
+        dlg = BatchFITSHeaderDialog(parent=self,
+                                    preset_keyword=key,
+                                    preset_value=val,
+                                    preset_comment=com)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def _init_from_header(self, header):
+        phdu = fits.PrimaryHDU()
+        if isinstance(header, fits.Header):
+            phdu.header = header.copy()
+        elif isinstance(header, dict):
+            for k, v in header.items():
+                try:
+                    phdu.header[k] = v
+                except Exception:
+                    pass
+        self.hdul = fits.HDUList([phdu])
+        self._refresh_hdu_combo()
+        self._populate_tree_from_header(phdu.header)
+
+    def _apply_to_slot_metadata(self):
+        if not self.image_manager:
+            QMessageBox.warning(self, "No ImageManager", "No image manager bound.")
+            return
+        self._sync_tree_to_header()
+        slot = self.image_manager.current_slot
+        img, meta = self.image_manager.get_current_image_and_metadata()
+        meta = {} if meta is None else meta
+        hdr = self.hdul[self.current_hdu_index].header.copy()
+        meta['fits_header'] = hdr
+        self.image_manager.update_image(img, metadata=meta, slot=slot)
+        #QMessageBox.information(self, "Applied", "Updated header applied to current slot metadata.")
+
+    def _set_dirty(self, dirty=True):
+        self._dirty = dirty
+        self.setWindowTitle("FITS Header Editor" + (" *" if dirty else ""))
+
+    def _sync_tree_to_header(self):
+        """Write current tree rows into the current HDU header in-memory."""
+        if not self.hdul:
+            return
+        hdr = self.hdul[self.current_hdu_index].header
+        self._collect_tree_into_header(hdr)
+
+    def _choose_file(self):
+        fn, _ = QFileDialog.getOpenFileName(self, "Open FITS", self._last_dir(), "FITS files (*.fits *.fit *.fts *.fz)")
+        if not fn:
+            return
+        self._load_file(fn)
+
+    def _load_file(self, path) -> bool:
+        try:
+            if self.hdul is not None:
+                self.hdul.close()
+        except Exception:
+            pass
+        try:
+            self.hdul = fits.open(path, mode='update', memmap=False)
+        except Exception as e:
+            QMessageBox.warning(self, "Invalid FITS",
+                                f"This file does not appear to be a valid FITS:\n\n{path}\n\n{e}\n\n"
+                                "Tip: Choose a FITS file via 'Open FITS…' or edit an in-memory header.")
+            self.hdul = None
+            self.file_path = None
+            self.path_label.setText("(no file)")
+            self.hdu_combo.clear()
+            self._update_multi_hdu_ui() if hasattr(self, "_update_multi_hdu_ui") else None
+            # Leave the tree empty; caller may fall back to provided header
+            return False
+
+        self.file_path = path
+        self.path_label.setText(path)
+        self._save_last_dir(os.path.dirname(path))
+        self._refresh_hdu_combo()
+        self._populate_tree_from_header(self.hdul[self.current_hdu_index].header)
+        return True
+
+    def _reload(self):
+        if not self.hdul and not self.file_path:
+            return
+        if self.file_path:
+            self._load_file(self.file_path)
+        else:
+            # Only transient header in memory – just repopulate from it
+            self._populate_tree_from_header(self.hdul[0].header)
+
+    def _refresh_hdu_combo(self):
+        self.hdu_combo.blockSignals(True)
+        self.hdu_combo.clear()
+        for i, hdu in enumerate(self.hdul):
+            name = getattr(hdu, 'name', 'UNKNOWN')
+            self.hdu_combo.addItem(f"{i}: {name}")
+        self.hdu_combo.setCurrentIndex(0)
+        self.current_hdu_index = 0
+        self.hdu_combo.blockSignals(False)
+        self._update_multi_hdu_ui()
+
+    def _on_hdu_changed(self, idx):
+        self.current_hdu_index = int(idx)
+        hdr = self.hdul[self.current_hdu_index].header
+        self._populate_tree_from_header(hdr)
+
+    def _populate_tree_from_header(self, header: fits.Header):
+        self._populating = True
+        try:
+            self.tree.blockSignals(True)
+            self.tree.clear()
+            for card in header.cards:
+                key = card.keyword
+                val = "" if key in ("HISTORY", "COMMENT") else self._val_to_str(card.value)
+                com = "" if key in ("HISTORY", "COMMENT") else (card.comment or "")
+                it = QTreeWidgetItem([key, val, com])
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+                self.tree.addTopLevelItem(it)
+            self.tree.resizeColumnToContents(0)
+        finally:
+            self.tree.blockSignals(False)
+            self._populating = False
+            self._set_dirty(False)
+
+    def _collect_tree_into_header(self, header: fits.Header):
+        """Overwrite FITS header from the tree contents."""
+        # Start fresh to preserve tree order
+        new_header = fits.Header()
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            key = (it.text(0) or "").strip()
+            val_txt = it.text(1)
+            com = it.text(2)
+            if not key:
+                continue
+            if key in ("HISTORY", "COMMENT"):
+                # For simplicity, store value text into HISTORY/COMMENT (one row each)
+                if key == "HISTORY" and val_txt:
+                    new_header.add_history(val_txt)
+                elif key == "COMMENT" and val_txt:
+                    new_header.add_comment(val_txt)
+                else:
+                    # keep blank entry as a simple comment line if present
+                    if key == "COMMENT" and not val_txt and com:
+                        new_header.add_comment(com)
+                continue
+            try:
+                val = self._parse_val(val_txt)
+                new_header[key] = (val, com if com else None)
+            except Exception:
+                # If parsing fails, fall back to string
+                new_header[key] = (val_txt, com if com else None)
+
+        # Overwrite provided header object in hdul
+        header.clear()
+        header.update(new_header)
+
+    def _save_in_place(self):
+        if self.hdul is None:
+            QMessageBox.warning(self, "No Header", "Nothing to save.")
+            return
+        self._sync_tree_to_header()
+        if self.file_path:
+            try:
+                self.hdul.flush()
+                self._set_dirty(False)
+                QMessageBox.information(self, "Saved", f"Header saved to: {self.file_path} and slot metadata updated!")
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", str(e))
+        else:
+            self._save_as_copy()
+
+        self._apply_to_slot_metadata()    
+
+    def _on_item_changed(self, item, column):
+        if self._populating:
+            return
+        # Any edit inside the tree updates the in-memory header and marks dirty
+        self._sync_tree_to_header()
+        self._set_dirty(True)
+
+    def _save_as_copy(self):
+        if self.hdul is None:
+            QMessageBox.warning(self, "No Header", "Nothing to save.")
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "Save FITS As", self._last_dir(), "FITS files (*.fits *.fit *.fts)")
+        if not out:
+            return
+        try:
+            self._sync_tree_to_header()
+            self.hdul.writeto(out, overwrite=True)
+            self._save_last_dir(os.path.dirname(out))
+            self._set_dirty(False)
+            QMessageBox.information(self, "Saved", f"Header saved to: {out}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+    def _add_or_update_keyword(self):
+        key = (self.add_key_edit.text() or "").strip()
+        # If no key typed but a row is selected, treat as “apply current row edits”
+        if not key and self.tree.currentItem() is not None:
+            self._sync_tree_to_header()
+            self._set_dirty(True)
+            # Optional: refresh tree to normalize formatting
+            self._populate_tree_from_header(self.hdul[self.current_hdu_index].header)
+            return
+
+        if not key:
+            return
+
+        val = self.add_val_edit.text()
+        com = self.add_com_edit.text()
+        try:
+            parsed_val = self._parse_val(val)
+        except Exception:
+            parsed_val = val
+
+        targets = range(len(self.hdul)) if self.all_hdus_chk.isChecked() and self.hdul else [self.current_hdu_index]
+        for idx in targets:
+            hdr = self.hdul[idx].header
+            hdr[key] = (parsed_val, com if com else None)
+
+        self._set_dirty(True)
+
+        # Reflect into tree for current HDU
+        if not self.all_hdus_chk.isChecked():
+            self._populate_tree_from_header(self.hdul[self.current_hdu_index].header)
+
+    def _add_or_update_keyword(self):
+        key = self.add_key_edit.text().strip()
+        if not key:
+            return
+        val = self.add_val_edit.text()
+        com = self.add_com_edit.text()
+        try:
+            parsed_val = self._parse_val(val)
+        except Exception:
+            parsed_val = val  # leave as string if parsing fails
+
+        targets = range(len(self.hdul)) if self.all_hdus_chk.isChecked() and self.hdul else [self.current_hdu_index]
+        for idx in targets:
+            hdr = self.hdul[idx].header
+            hdr[key] = (parsed_val, com if com else None)
+        # Reflect into tree for current HDU
+        if not self.all_hdus_chk.isChecked():
+            self._populate_tree_from_header(self.hdul[self.current_hdu_index].header)
+
+    def _delete_selected(self):
+        items = self.tree.selectedItems()
+        if not items:
+            return
+        targets = range(len(self.hdul)) if self.all_hdus_chk.isChecked() and self.hdul else [self.current_hdu_index]
+        for it in items:
+            key = it.text(0).strip()
+            for idx in targets:
+                hdr = self.hdul[idx].header
+                # For HISTORY/COMMENT delete this line by rebuilding without it:
+                if key in ("HISTORY", "COMMENT"):
+                    # rebuild by skipping this exact line
+                    rebuilt = fits.Header()
+                    for c in hdr.cards:
+                        if c.keyword == key:
+                            # keep others, skip if value matches this line’s value
+                            if (key == "HISTORY" and c.value == it.text(1)) or \
+                               (key == "COMMENT" and (c.value == it.text(1) or c.comment == it.text(2))):
+                                continue
+                        rebuilt.append(c)
+                    hdr.clear(); hdr.update(rebuilt)
+                else:
+                    if key in hdr:
+                        del hdr[key]
+        # Reflect in current view
+        self._populate_tree_from_header(self.hdul[self.current_hdu_index].header)
+
+    # ---- value parsing helpers ----
+    def _parse_val(self, s: str):
+        if s is None:
+            return ""
+        t = s.strip()
+        if t.lower() in ("true", "t"): return True
+        if t.lower() in ("false", "f"): return False
+        if t.lower() in ("nan",): return np.nan
+        # int?
+        try:
+            if t.startswith("0x"):
+                return int(t, 16)
+            return int(t)
+        except ValueError:
+            pass
+        # float?
+        try:
+            return float(t)
+        except ValueError:
+            pass
+        # quoted strings? remove surrounding quotes
+        if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+            return t[1:-1]
+        return t
+
+    def _val_to_str(self, v):
+        if isinstance(v, (float, np.floating)) and np.isnan(v):
+            return "nan"
+        return str(v)
+
+    def closeEvent(self, e):
+        try:
+            if self.hdul is not None:
+                self.hdul.close()
+        except Exception:
+            pass
+        super().closeEvent(e)
+
+    # ---- QSettings helpers ----
+    def _settings(self):
+        return self.parent().settings if (self.parent() and hasattr(self.parent(), "settings")) else QSettings()
+    def _last_dir(self):
+        return self._settings().value("fits_modifier/last_dir", "", type=str) or ""
+    def _save_last_dir(self, d):
+        self._settings().setValue("fits_modifier/last_dir", d)
+
+class BatchFITSHeaderDialog(QDialog):
+    def __init__(self, parent=None, preset_keyword: str = "", preset_value: str = "", preset_comment: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Modify FITS Headers")
+        self.resize(520, 220)
+
+        v = QVBoxLayout(self)
+
+        row1 = QHBoxLayout()
+        self.files_edit = QLineEdit(); self.files_edit.setPlaceholderText("No files selected")
+        self.pick_btn = QPushButton("Choose FITS Files…")
+        row1.addWidget(self.files_edit, 1); row1.addWidget(self.pick_btn)
+
+        row2 = QHBoxLayout()
+        self.key_edit = QLineEdit(); self.key_edit.setPlaceholderText("KEYWORD")
+        self.val_edit = QLineEdit(); self.val_edit.setPlaceholderText("Value (leave blank for delete)")
+        self.com_edit = QLineEdit(); self.com_edit.setPlaceholderText("Comment (optional)")
+        row2.addWidget(self.key_edit); row2.addWidget(self.val_edit); row2.addWidget(self.com_edit)
+
+        row3 = QHBoxLayout()
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Add/Update", "Delete"])
+        self.all_hdus_chk = QCheckBox("Apply to all HDUs")
+        self.add_if_missing_chk = QCheckBox("Add if missing (for Add/Update)")
+        self.add_if_missing_chk.setChecked(True)
+        row3.addWidget(self.mode_combo)
+        row3.addWidget(self.all_hdus_chk)
+        row3.addWidget(self.add_if_missing_chk)
+        row3.addStretch()
+
+        row4 = QHBoxLayout()
+        self.run_btn = QPushButton("Run")
+        self.close_btn = QPushButton("Close")
+        row4.addStretch(); row4.addWidget(self.run_btn); row4.addWidget(self.close_btn)
+
+        v.addLayout(row1)
+        v.addLayout(row2)
+        v.addLayout(row3)
+        v.addLayout(row4)
+
+        # Prefill from the single editor’s selection
+        if preset_keyword:
+            self.key_edit.setText(preset_keyword)
+        if preset_value:
+            self.val_edit.setText(preset_value)
+        if preset_comment:
+            self.com_edit.setText(preset_comment)
+
+        self.pick_btn.clicked.connect(self._pick_files)
+        self.run_btn.clicked.connect(self._run)
+        self.close_btn.clicked.connect(self.close)
+
+        self.files = []
+
+    def _settings(self):
+        return self.parent().settings if (self.parent() and hasattr(self.parent(), "settings")) else QSettings()
+
+    def _pick_files(self):
+        last = self._settings().value("fits_modifier/batch_dir", "", type=str) or ""
+        files, _ = QFileDialog.getOpenFileNames(self, "Select FITS files", last, "FITS files (*.fits *.fit *.fts *.fz)")
+        if not files:
+            return
+        self.files = files
+        self.files_edit.setText(f"{len(files)} files selected")
+        self._settings().setValue("fits_modifier/batch_dir", os.path.dirname(files[0]))
+
+    def _parse_val(self, s: str):
+        # match editor’s parser
+        t = (s or "").strip()
+        if t == "": return ""
+        if t.lower() in ("true", "t"): return True
+        if t.lower() in ("false", "f"): return False
+        if t.lower() in ("nan",): return np.nan
+        try:
+            if t.startswith("0x"):
+                return int(t, 16)
+            return int(t)
+        except ValueError:
+            pass
+        try:
+            return float(t)
+        except ValueError:
+            pass
+        if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+            return t[1:-1]
+        return t
+
+    def _run(self):
+        if not self.files:
+            QMessageBox.warning(self, "No files", "Please choose one or more FITS files.")
+            return
+        key = self.key_edit.text().strip()
+        if not key:
+            QMessageBox.warning(self, "Missing keyword", "Please enter a FITS keyword.")
+            return
+
+        mode = self.mode_combo.currentText()
+        apply_all_hdus = self.all_hdus_chk.isChecked()
+        add_if_missing = self.add_if_missing_chk.isChecked()
+        com = self.com_edit.text().strip()
+        value_txt = self.val_edit.text()
+
+        n_ok, n_err = 0, 0
+        for fp in self.files:
+            try:
+                with fits.open(fp, mode='update', memmap=False) as hdul:
+                    targets = range(len(hdul)) if apply_all_hdus else [0]
+                    if mode == "Delete":
+                        for i in targets:
+                            hdr = hdul[i].header
+                            if key in ("HISTORY", "COMMENT"):
+                                # delete all lines that match value/comment text loosely
+                                rebuilt = fits.Header()
+                                for c in hdr.cards:
+                                    if c.keyword == key:
+                                        if value_txt and str(c.value) == value_txt:
+                                            continue
+                                        if (not value_txt) and (not com):
+                                            # delete all such lines
+                                            continue
+                                        if com and (c.comment == com):
+                                            continue
+                                    rebuilt.append(c)
+                                hdr.clear(); hdr.update(rebuilt)
+                            else:
+                                if key in hdr:
+                                    del hdr[key]
+                        hdul.flush()
+                    else:
+                        # Add/Update
+                        try:
+                            val = self._parse_val(value_txt)
+                        except Exception:
+                            val = value_txt
+                        for i in targets:
+                            hdr = hdul[i].header
+                            if key in hdr or add_if_missing:
+                                hdr[key] = (val, com if com else None)
+                        hdul.flush()
+                n_ok += 1
+            except Exception as e:
+                print(f"[Batch FITS] Error on {fp}: {e}")
+                n_err += 1
+
+        QMessageBox.information(self, "Batch Complete", f"Updated {n_ok} file(s); {n_err} error(s).")
 
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
@@ -10884,6 +11589,7 @@ class StackingSuiteDialog(QDialog):
         self.reg_files = {}
         self.session_tags = {}  # 🔑 file_path => session_tag (e.g., "Session1", "Blue Flats", etc.)
         self.deleted_calibrated_files = []
+        self._norm_map = {}
 
 
         # QSettings for your app
@@ -11955,7 +12661,12 @@ class StackingSuiteDialog(QDialog):
         self.exposure_tolerance_spin.setValue(0)
         self.exposure_tolerance_spin.setSingleStep(5)
         tol_layout.addWidget(self.exposure_tolerance_spin)
+        tol_layout.addStretch()
+        self.split_dualband_cb = QCheckBox("Split dual-band OSC before integration")
+        self.split_dualband_cb.setToolTip("For OSC dual-band data: SII/OIII → R=SII, G=OIII; Ha/OIII → R=Ha, G=OIII")
+        tol_layout.addWidget(self.split_dualband_cb)
         layout.addLayout(tol_layout)
+
         self.exposure_tolerance_spin.valueChanged.connect(lambda _: self.populate_calibrated_lights())
 
         # Populate the tree from your calibrated folder
@@ -12232,8 +12943,16 @@ class StackingSuiteDialog(QDialog):
                     del file_dict[key]
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
+    def _sync_group_userrole(self, top_item: QTreeWidgetItem):
+        paths = []
+        for i in range(top_item.childCount()):
+            child = top_item.child(i)
+            fp = child.data(0, Qt.ItemDataRole.UserRole)
+            if fp:
+                paths.append(fp)
+        top_item.setData(0, Qt.ItemDataRole.UserRole, paths)
+
     def clear_tree_selection_registration(self, tree):
-        """Clears the selection in the registration tree and updates self.reg_files accordingly."""
         selected_items = tree.selectedItems()
         if not selected_items:
             return
@@ -12242,25 +12961,18 @@ class StackingSuiteDialog(QDialog):
             parent = item.parent()
 
             if parent is None:
-                # Top-level group
+                # Remove entire group
                 group_key = item.text(0)
-
-                # ✅ Delete all calibrated files inside this group
-                full_file_paths = item.data(0, Qt.ItemDataRole.UserRole)
-                if full_file_paths:
-                    for full_path in full_file_paths:
-                        if not hasattr(self, "deleted_calibrated_files"):
-                            self.deleted_calibrated_files = []
-                        if full_path not in self.deleted_calibrated_files:
-                            self.deleted_calibrated_files.append(full_path)
-
-                if group_key in self.reg_files:
-                    del self.reg_files[group_key]
-
+                # Track deleted files (optional)
+                full_paths = item.data(0, Qt.ItemDataRole.UserRole) or []
+                self.deleted_calibrated_files.extend(p for p in full_paths
+                                                    if p not in self.deleted_calibrated_files)
+                # Remove from dict + tree
+                self.reg_files.pop(group_key, None)
                 tree.takeTopLevelItem(tree.indexOfTopLevelItem(item))
 
             else:
-                # Child file under a group
+                # Remove a single child
                 group_key = parent.text(0)
                 filename = item.text(0)
 
@@ -12272,17 +12984,16 @@ class StackingSuiteDialog(QDialog):
                     if not self.reg_files[group_key]:
                         del self.reg_files[group_key]
 
-                # ✅ Delete calibrated child file
-                full_file_paths = parent.data(0, Qt.ItemDataRole.UserRole)
-                if full_file_paths:
-                    for full_path in full_file_paths:
-                        if os.path.basename(full_path) == filename:
-                            if not hasattr(self, "deleted_calibrated_files"):
-                                self.deleted_calibrated_files = []
-                            if full_path not in self.deleted_calibrated_files:
-                                self.deleted_calibrated_files.append(full_path)
+                # Track deleted path (optional)
+                fp = item.data(0, Qt.ItemDataRole.UserRole)
+                if fp and fp not in self.deleted_calibrated_files:
+                    self.deleted_calibrated_files.append(fp)
 
+                # Remove child from tree
                 parent.removeChild(item)
+
+                # 🔑 keep parent’s stored list in sync
+                self._sync_group_userrole(parent)
 
     def rebuild_flat_tree(self):
         """Regroup flat frames in the flat_tree based on the exposure tolerance."""
@@ -14080,6 +14791,302 @@ class StackingSuiteDialog(QDialog):
         )
         return new_ref if new_ref else None
 
+    def extract_light_files_from_tree(self, *, debug: bool = False):
+        """
+        Rebuild self.light_files from what's *currently shown* in reg_tree.
+        - Only uses leaf items (childCount()==0)
+        - Repairs missing leaf UserRole by matching basename against parent's cached list
+        - Filters non-existent paths
+        """
+        light_files: dict[str, list[str]] = {}
+        total_leafs = 0
+        total_paths = 0
+
+        for i in range(self.reg_tree.topLevelItemCount()):
+            top = self.reg_tree.topLevelItem(i)
+            group_key = top.text(0)
+            repaired_from_parent = 0
+
+            # Parent's cached list (may be stale but useful for repairing)
+            parent_cached = top.data(0, Qt.ItemDataRole.UserRole) or []
+
+            paths: list[str] = []
+            for j in range(top.childCount()):
+                leaf = top.child(j)
+                # Only accept real leaf rows (no grandchildren expected in this tree)
+                if leaf.childCount() != 0:
+                    continue
+
+                total_leafs += 1
+
+                fp = leaf.data(0, Qt.ItemDataRole.UserRole)
+                if not fp:
+                    # Try to repair by basename match against parent's cached list
+                    name = leaf.text(0).lstrip("⚠️ ").strip()
+                    match = next((p for p in parent_cached if os.path.basename(p) == name), None)
+                    if match:
+                        leaf.setData(0, Qt.ItemDataRole.UserRole, match)
+                        fp = match
+                        repaired_from_parent += 1
+
+                if fp and isinstance(fp, str) and os.path.exists(fp):
+                    paths.append(fp)
+
+            if paths:
+                light_files[group_key] = paths
+                # keep the parent cache in sync for future repairs
+                top.setData(0, Qt.ItemDataRole.UserRole, paths)
+                total_paths += len(paths)
+
+            if debug:
+                self.update_status(
+                    f"⤴ {group_key}: {len(paths)} files"
+                    + (f" (repaired {repaired_from_parent})" if repaired_from_parent else "")
+                )
+
+        self.light_files = light_files
+        if debug:
+            self.update_status(f"🧭 Tree snapshot → groups: {len(light_files)}, leaves seen: {total_leafs}, paths kept: {total_paths}")
+        return light_files
+
+    def _norm_filter_key(self, s: str) -> str:
+        s = (s or "").lower()
+        # map greek letters to ascii
+        s = s.replace("α", "a").replace("β", "b")
+        return re.sub(r"[^a-z0-9]+", "", s)
+
+    def _classify_filter(self, filt_str: str) -> str:
+        """
+        Return one of:
+        'DUAL_HA_OIII', 'DUAL_SII_OIII', 'DUAL_SII_HB',
+        'MONO_HA', 'MONO_SII', 'MONO_OIII', 'MONO_HB',
+        'UNKNOWN'
+        """
+        k = self._norm_filter_key(filt_str)
+        comps = set()
+
+        if "ha"   in k or "halpha" in k: comps.add("ha")
+        if "sii"  in k or "s2" in k:     comps.add("sii")
+        if "oiii" in k or "o3" in k:     comps.add("oiii")
+        if "hb"   in k or "hbeta" in k:  comps.add("hb")   # NEW
+
+        # common vendor aliases → Ha/OIII
+        for alias in ("lextreme", "lenhance", "lultimate", "nbz", "alpt", "alp", "nbzu"):
+            if alias in k:
+                comps.update({"ha", "oiii"})
+
+        if {"ha","oiii"}.issubset(comps):  return "DUAL_HA_OIII"
+        if {"sii","oiii"}.issubset(comps): return "DUAL_SII_OIII"
+        if {"sii","hb"}.issubset(comps):   return "DUAL_SII_HB"   # NEW
+
+        if comps == {"ha"}:   return "MONO_HA"
+        if comps == {"sii"}:  return "MONO_SII"
+        if comps == {"oiii"}: return "MONO_OIII"
+        if comps == {"hb"}:   return "MONO_HB"                   # NEW
+        return "UNKNOWN"
+
+    def _get_filter_name(self, path: str) -> str:
+        # Prefer FITS header 'FILTER'; fall back to filename tokens
+        try:
+            hdr = fits.getheader(path, ext=0)
+            for key in ("FILTER", "FILTER1", "HIERARCH INDI FILTER", "HIERARCH ESO INS FILT1 NAME"):
+                if key in hdr and str(hdr[key]).strip():
+                    return str(hdr[key]).strip()
+        except Exception:
+            pass
+        return os.path.basename(path)
+
+    def _current_global_drizzle(self):
+        # read from the “global” controls (used as a template)
+        return {
+            "enabled": self.drizzle_checkbox.isChecked(),
+            "scale": float(self.drizzle_scale_combo.currentText().replace("x","", 1)),
+            "drop": float(self.drizzle_drop_shrink_spin.value())
+        }
+
+    def _split_dual_band_osc(self, selected_groups=None):
+        """
+        Create mono Ha/SII/OIII frames from dual-band OSC files and
+        update self.light_files so integration sees separate channels.
+        """
+        selected_groups = selected_groups or set()
+        out_dir = os.path.join(self.stacking_directory, "DualBand_Split")
+        os.makedirs(out_dir, exist_ok=True)
+
+        ha_files, sii_files, oiii_files, hb_files = [], [], [], []
+        inherit_map = {}                      # gk -> set(parent_group names)   # <<< NEW
+        parent_of = {}                        # path -> parent_group            # <<< NEW
+
+        # Walk all groups/files you already collected
+        old_groups = list(self.light_files.items())
+        old_drizzle = dict(self.per_group_drizzle)
+        for group, files in old_groups:
+            for fp in files:
+                try:
+                    img, hdr, _, _ = load_image(fp)
+                    if img is None:
+                        self.update_status(f"⚠️ Cannot load {fp}; skipping.")
+                        continue
+
+                    if hdr and hdr.get("BAYERPAT"):
+                        img = self.debayer_image(img, fp, hdr)
+
+                    # 3-channel split; otherwise treat mono via classifier
+                    if img.ndim != 3 or img.shape[-1] < 2:
+                        filt = self._get_filter_name(fp)
+                        cls  = self._classify_filter(filt)
+                        if cls == "MONO_HA":
+                            ha_files.append(fp);   parent_of[fp] = group        # <<< NEW
+                        elif cls == "MONO_SII":
+                            sii_files.append(fp);  parent_of[fp] = group        # <<< NEW
+                        elif cls == "MONO_OIII":
+                            oiii_files.append(fp); parent_of[fp] = group        # <<< NEW
+                        elif cls == "MONO_HB":   hb_files.append(fp);  parent_of[fp] = group        # <<< NEW
+                        # else: leave in original groups
+                        continue
+
+                    filt = self._get_filter_name(fp)
+                    cls  = self._classify_filter(filt)
+
+                    R = img[..., 0]; G = img[..., 1]
+                    base = os.path.splitext(os.path.basename(fp))[0]
+
+                    if cls == "DUAL_HA_OIII":
+                        ha_path   = os.path.join(out_dir, f"{base}_Ha.fit")
+                        oiii_path = os.path.join(out_dir, f"{base}_OIII.fit")
+                        self._write_band_fit(ha_path,  R, hdr, "Ha",  src_filter=filt)
+                        self._write_band_fit(oiii_path, G, hdr, "OIII", src_filter=filt)
+                        ha_files.append(ha_path);     parent_of[ha_path]   = group   # <<< NEW
+                        oiii_files.append(oiii_path); parent_of[oiii_path] = group   # <<< NEW
+
+                    elif cls == "DUAL_SII_OIII":
+                        sii_path  = os.path.join(out_dir, f"{base}_SII.fit")
+                        oiii_path = os.path.join(out_dir, f"{base}_OIII.fit")
+                        self._write_band_fit(sii_path, R, hdr, "SII",  src_filter=filt)
+                        self._write_band_fit(oiii_path, G, hdr, "OIII", src_filter=filt)
+                        sii_files.append(sii_path);    parent_of[sii_path]  = group  # <<< NEW
+                        oiii_files.append(oiii_path);  parent_of[oiii_path] = group  # <<< NEW
+
+                    elif cls == "DUAL_SII_HB":  # NEW → R=SII, G=Hb  (G works well; we can add G+B later if you want)
+                        sii_path = os.path.join(out_dir, f"{base}_SII.fit")
+                        hb_path  = os.path.join(out_dir, f"{base}_Hb.fit")
+                        self._write_band_fit(sii_path, R, hdr, "SII", src_filter=filt)
+                        self._write_band_fit(hb_path,  G, hdr, "Hb",  src_filter=filt)
+                        sii_files.append(sii_path); parent_of[sii_path] = group
+                        hb_files.append(hb_path);   parent_of[hb_path]  = group
+
+                    else:
+                        pass
+
+                except Exception as e:
+                    self.update_status(f"⚠️ Split error on {os.path.basename(fp)}: {e}")
+
+        # Group the new files
+        def _group_key(band: str, path: str) -> str:
+            try:
+                h = fits.getheader(path, ext=0)
+                exp = h.get("EXPTIME") or h.get("EXPOSURE") or ""
+                w   = h.get("NAXIS1","?"); hgt = h.get("NAXIS2","?")
+                exp_str = f"{float(exp):.1f}s" if isinstance(exp, (int,float)) else str(exp)
+                return f"{band} - {exp_str} - {w}x{hgt}"
+            except Exception:
+                return f"{band} - ? - ?x?"
+
+        new_groups = {}
+        for band, flist in (("Ha", ha_files), ("SII", sii_files), ("OIII", oiii_files), ("Hb", hb_files)):  # NEW Hb
+            for p in flist:
+                gk = _group_key(band, p)
+                new_groups.setdefault(gk, []).append(p)
+                parent = parent_of.get(p)
+                if parent:
+                    inherit_map.setdefault(gk, set()).add(parent)
+
+        if new_groups:
+            self.light_files = new_groups
+
+            # Seed drizzle for the new groups based on parents
+            seeded = 0
+            global_template = self._current_global_drizzle()   # make sure this helper exists
+            self.per_group_drizzle = {}  # rebuild for the new groups
+
+            for gk, parents in inherit_map.items():
+                parent_cfgs = [old_drizzle.get(pg) for pg in parents if old_drizzle.get(pg)]
+                chosen = None
+                for cfg in parent_cfgs:
+                    if cfg.get("enabled"):
+                        chosen = cfg
+                        break
+                if not chosen and parent_cfgs:
+                    chosen = parent_cfgs[0]
+
+                if not chosen and (parents & selected_groups) and global_template.get("enabled"):
+                    chosen = global_template
+
+                if chosen:
+                    self.per_group_drizzle[gk] = dict(chosen)
+                    seeded += 1
+
+
+            self.update_status(
+                f"✅ Dual-band split complete: Ha={len(ha_files)}, SII={len(sii_files)}, "
+                f"OIII={len(oiii_files)}, Hb={len(hb_files)} (drizzle seeded on {seeded} new group(s))"
+            )
+        else:
+            self.update_status("ℹ️ No dual-band frames detected or split.")
+
+    def _write_band_fit(self, out_path: str, data: np.ndarray, src_header: fits.Header | None,
+                        band: str, src_filter: str):
+        arr = np.ascontiguousarray(data.astype(np.float32))
+
+        hdr = (src_header.copy() if isinstance(src_header, fits.Header) else fits.Header())
+
+        # --- strip CFA/Bayer-related cards so we never try to debayer these ---
+        cfa_like = (
+            "BAYERPAT", "BAYER_PATTERN", "DEBAYER", "DEBAYERING", "DEMAT", "DEMOSAIC",
+            "XBAYROFF", "YBAYROFF", "COLORTYP", "COLORSPACE", "HIERARCH CFA", "HIERARCH OSC",
+            "HIERARCH ASI BAYERPATTERN", "HIERARCH DNG CFA", "HIERARCH ZWO CFA"
+        )
+        for k in list(hdr.keys()):
+            kk = str(k).upper()
+            if any(token in kk for token in ("BAYER", "CFA", "DEMOSA")) or kk in cfa_like:
+                try:
+                    del hdr[k]
+                except Exception:
+                    pass
+
+        # Mark these as mono split files & set the band as the filter
+        hdr["FILTER"] = (band, "Channel from dual-band split")
+        hdr["SPLITDB"] = (True, "This frame was generated by dual-band splitting")
+        hdr.add_history(f"Dual-band split: {band} from {src_filter}")
+
+        fits.PrimaryHDU(data=arr, header=hdr).writeto(out_path, overwrite=True)
+
+    def _drizzle_text_for_group(self, group_key: str) -> str:
+        d = self.per_group_drizzle.get(group_key)
+        if not d:
+            return ""
+        return f"Drizzle: {d.get('enabled', False)}, Scale: {d.get('scale','1x')}, Drop:{d.get('drop',0.65)}"
+
+    def _refresh_reg_tree_from_light_files(self):
+        self.reg_tree.clear()
+        for group, files in self.light_files.items():
+            top = QTreeWidgetItem([group, f"{len(files)} file(s)", self._drizzle_text_for_group(group)])
+            self.reg_tree.addTopLevelItem(top)
+            for fp in files:
+                # Optional: show some header metadata
+                meta = ""
+                try:
+                    hdr = fits.getheader(fp, ext=0)
+                    filt = hdr.get("FILTER", "")
+                    exp  = hdr.get("EXPTIME") or hdr.get("EXPOSURE") or ""
+                    if isinstance(exp, (int, float)): exp = f"{exp:.1f}s"
+                    meta = f"Filter={filt}  Exp={exp}"
+                except Exception:
+                    pass
+                child = QTreeWidgetItem([os.path.basename(fp), meta, ""])
+                top.addChild(child)
+        self.reg_tree.expandAll()
+
     def register_images(self):
         """ 
         Measures all frames in small batches (to find a reference frame and weights),
@@ -14093,9 +15100,11 @@ class StackingSuiteDialog(QDialog):
             return self._make_star_trail()
                 
         self.update_status("🔄 Image Registration Started...")
+        self.extract_light_files_from_tree(debug=True)
+        # optional: assert leaf count matches flattened file count
+       
 
-        # ── 0) if the user added files “by hand”, use them
-        self.extract_light_files_from_tree()
+
         if not self.light_files:
             self.update_status("⚠️ No light files to register!")
             return
@@ -14104,8 +15113,19 @@ class StackingSuiteDialog(QDialog):
         if not self.light_files:
             self.update
 
+        selected_groups = set()
+        for it in self.reg_tree.selectedItems():
+            top = it if it.parent() is None else it.parent()
+            selected_groups.add(top.text(0))
+
+        if self.split_dualband_cb.isChecked():
+            self.update_status("🌈 Splitting dual-band OSC frames into Ha / SII / OIII...")
+            self._split_dual_band_osc(selected_groups=selected_groups)
+            self._refresh_reg_tree_from_light_files()
+
         # Flatten to get all files
-        all_files = [f for file_list in self.light_files.values() for f in file_list]
+        all_files = [f for lst in self.light_files.values() for f in lst]
+        leaf_count = sum(len(lst) for lst in self.light_files.values())
         self.update_status(f"📊 Found {len(all_files)} total frames. Now measuring in parallel batches...")
 
         self.frame_weights = {}
@@ -14153,8 +15173,15 @@ class StackingSuiteDialog(QDialog):
                         if image_data is not None:
                             # First check for Bayer pattern in the header
                             if header and header.get('BAYERPAT'):
-                                image_data = self.debayer_image(image_data, file, header)
-                                self.update_status("📦 Bayer pattern detected, Debayering")
+                                should_debayer = (
+                                    header
+                                    and header.get('BAYERPAT')
+                                    and not header.get('SPLITDB', False)
+                                    and (image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[-1] == 1))
+                                )
+                                if should_debayer:
+                                    image_data = self.debayer_image(image_data, file, header)
+                                    self.update_status("📦 Bayer pattern detected, Debayering...")
                                 QApplication.processEvents()
                             else:
                                 # If the image is 3D but has only one channel (e.g. HxWx1), squeeze it to 2D
@@ -20452,6 +21479,7 @@ class MosaicMasterDialog(QDialog):
         return image
 
 
+
 # --------------------------------------------------
 # Star Stuff
 # --------------------------------------------------      
@@ -20897,6 +21925,44 @@ class StellarAlignmentDialog(QDialog):
                 selected.append((x, y))
         return selected
 
+    def _aa_find_transform_with_backoff(self, tgt_gray: np.ndarray,
+                                        src_gray: np.ndarray):
+        """Robust wrapper around astroalign.find_transform with fallbacks."""
+        # SEP is happiest with float32 & C-contiguous arrays
+        tgt32 = np.ascontiguousarray(tgt_gray.astype(np.float32))
+        src32 = np.ascontiguousarray(src_gray.astype(np.float32))
+
+        # Optional: increase SEP's pixel stack once up front for crowded fields
+        try:
+            curr = sep.get_extract_pixstack()  # default ~300_000
+            if curr < 1_500_000:
+                sep.set_extract_pixstack(1_500_000)
+        except Exception:
+            pass
+
+        # Try normal settings first; then progressively stricter detection
+        tries = [
+            dict(detection_sigma=5,  min_area=7,  max_control_points=75),
+            dict(detection_sigma=12, min_area=9,  max_control_points=75),
+            dict(detection_sigma=20, min_area=9, max_control_points=75),
+            dict(detection_sigma=30, min_area=11, max_control_points=75),
+            dict(detection_sigma=50, min_area=11, max_control_points=75),  # your request
+        ]
+
+        last_exc = None
+        for kw in tries:
+            try:
+                return astroalign.find_transform(tgt32, src32, **kw)
+            except Exception as e:
+                last_exc = e
+                # If SEP still overflows, try bumping the pixstack more and continue
+                if "internal pixel buffer full" in str(e).lower():
+                    try:
+                        sep.set_extract_pixstack(int(sep.get_extract_pixstack() * 2))
+                    except Exception:
+                        pass
+                continue
+        raise last_exc
 
     def run_alignment(self):
         # Ensure both source and target images are loaded.
@@ -20929,7 +21995,7 @@ class StellarAlignmentDialog(QDialog):
         try:
             # Compute the transform to align the target image to the source.
             # Note: The order of arguments matters: here we find a transform that maps tgt_gray to src_gray.
-            transform_obj, (src_pts, tgt_pts) = astroalign.find_transform(tgt_gray, src_gray)
+            transform_obj, (src_pts, tgt_pts) = self._aa_find_transform_with_backoff(tgt_gray, src_gray)
             # Extract the 3x3 matrix and convert it to a 2x3 affine matrix.
             mat_3x3 = transform_obj.params
             affine_transform = mat_3x3[0:2, :]
@@ -52999,9 +54065,10 @@ class PerfectPalettePickerTab(QWidget):
         # 4) hand off to the ImageManager
         if self.image_manager:
             try:
-                self.image_manager.update_image(
-                    updated_image=final_rgb,
-                    metadata=metadata
+                self.image_manager.set_image_with_step_name(
+                    new_image=final_rgb,
+                    metadata=metadata,
+                    step_name=self.selected_palette
                 )
                 self.status_label.setText("Final palette image pushed for further processing.")
             except Exception as e:
