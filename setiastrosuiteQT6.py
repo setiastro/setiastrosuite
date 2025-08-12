@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.0"
+VERSION = "2.21.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -43225,7 +43225,12 @@ class BlinkTab(QWidget):
         self.aggressive_stretch_enabled = False
         self.current_sigma = 3.7
         self.current_pixmap = None
-
+        self._last_preview_name = None
+        self._pending_preview_timer = QTimer(self)
+        self._pending_preview_timer.setSingleShot(True)
+        self._pending_preview_timer.setInterval(40)  # 40–80ms is plenty
+        self._pending_preview_item = None
+        self._pending_preview_timer.timeout.connect(self._do_preview_update)
         self.initUI()
         self.init_shortcuts()
 
@@ -43317,10 +43322,10 @@ class BlinkTab(QWidget):
         self.fileTree.setColumnCount(1)
         self.fileTree.setHeaderLabels(["Image Files"])
         self.fileTree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)  # Allow multiple selections
-        self.fileTree.itemClicked.connect(self.on_item_clicked)
+        #self.fileTree.itemClicked.connect(self.on_item_clicked)
         self.fileTree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.fileTree.customContextMenuRequested.connect(self.on_right_click)
-        self.fileTree.currentItemChanged.connect(self.on_current_item_changed) 
+        self.fileTree.currentItemChanged.connect(self._on_current_item_changed_safe)
         self.fileTree.setStyleSheet("""
                 QTreeWidget::item:selected {
                     background-color: #3a75c4;  /* Blue background for selected items */
@@ -43417,6 +43422,25 @@ class BlinkTab(QWidget):
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def _on_current_item_changed_safe(self, current, previous):
+        if not current:
+            return
+
+        # If a mouse button is currently pressed, don't scroll now—defer a bit
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            QTimer.singleShot(120, lambda: self._center_if_no_mouse(current))
+            return
+
+        # Let selection settle, then gently ensure it's visible (no jump)
+        QTimer.singleShot(0, lambda: self.fileTree.scrollToItem(
+            current, QAbstractItemView.ScrollHint.EnsureVisible
+        ))
+
+    def _center_if_no_mouse(self, item):
+        # Only center if the mouse is up AND the item is still current
+        if QApplication.mouseButtons() == Qt.MouseButton.NoButton and item is self.fileTree.currentItem():
+            self.fileTree.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def toggle_aggressive(self):
         self.aggressive_stretch_enabled = self.aggressive_button.isChecked()
@@ -43958,7 +43982,7 @@ class BlinkTab(QWidget):
             else:
                 previous_item = all_items[-1]  # Loop back to the last item
             self.fileTree.setCurrentItem(previous_item)
-            self.on_item_clicked(previous_item, 0)  # Update the preview
+            #self.on_item_clicked(previous_item, 0)  # Update the preview
 
     def next_item(self):
         """Select the next item in the TreeWidget, looping back to the first item if at the end."""
@@ -43986,7 +44010,7 @@ class BlinkTab(QWidget):
                 next_item = all_items[0]  # Loop back to the first item
 
             self.fileTree.setCurrentItem(next_item)
-            self.on_item_clicked(next_item, 0)  # Update the preview
+            #self.on_item_clicked(next_item, 0)  # Update the preview
         else:
             print("No current item selected.")
 
@@ -44687,12 +44711,44 @@ class BlinkTab(QWidget):
         return super().eventFilter(source, event)
 
     def on_selection_changed(self, selected, deselected):
-        """Handle the selection change event."""
-        # Get the selected item from the TreeView
-        selected_items = self.fileTree.selectedItems()
-        if selected_items:
-            item = selected_items[0]  # Get the first selected item (assuming single selection)
-            self.on_item_clicked(item, 0)  # Update the preview with the selected image
+        items = self.fileTree.selectedItems()
+        if not items:
+            return
+        item = items[0]
+
+        # if a group got selected, ignore (or auto-drill to first leaf if you prefer)
+        if item.childCount() > 0:
+            return
+
+        name = item.text(0).lstrip("⚠️ ").strip()
+        if self._last_preview_name == name:
+            return  # no-op, same item
+
+        # debounce: only preview the last selection after brief idle
+        self._pending_preview_item = item
+        self._pending_preview_timer.start()
+
+    def _do_preview_update(self):
+        item = self._pending_preview_item
+        if not item:
+            return
+        # item might have changed selection; ensure it’s still selected/current
+        cur = self.fileTree.currentItem()
+        if cur is not item:
+            return
+
+        name = item.text(0).lstrip("⚠️ ").strip()
+        self._last_preview_name = name
+
+        # kick the preview (reuse your existing loader)
+        self.on_item_clicked(item, 0)
+
+    def toggle_aggressive(self):
+        self.aggressive_stretch_enabled = self.aggressive_button.isChecked()
+        cur = self.fileTree.currentItem()
+        if cur:
+            self._last_preview_name = None  # force reload even if same item
+            self.on_item_clicked(cur, 0)
 
     def convert_to_qimage(self, img_array):
         """Convert numpy image array to QImage."""
