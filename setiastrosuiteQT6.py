@@ -283,7 +283,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.1"
+VERSION = "2.21.2"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -43423,6 +43423,8 @@ class BlinkTab(QWidget):
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+
+
     def _on_current_item_changed_safe(self, current, previous):
         if not current:
             return
@@ -44313,32 +44315,34 @@ class BlinkTab(QWidget):
             print("No image loaded. Cannot fit to preview.")
             QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
+    def _is_leaf(self, item: QTreeWidgetItem | None) -> bool:
+        return bool(item and item.childCount() == 0)
+
     def on_right_click(self, pos):
-        """Allow renaming, moving, deleting, and batch operations on images."""
         item = self.fileTree.itemAt(pos)
+        if not self._is_leaf(item):
+            # Optional: expand/collapse-only menu, or just ignore
+            return
+
         menu = QMenu(self)
 
-        if item:
-            # Existing actions
-            push_action = QAction("Push Image for Processing", self)
-            push_action.triggered.connect(lambda: self.push_image_to_manager(item))
-            menu.addAction(push_action)
+        push_action = QAction("Push Image for Processing", self)
+        push_action.triggered.connect(lambda: self.push_image_to_manager(item))
+        menu.addAction(push_action)
 
-            rename_action = QAction("Rename", self)
-            rename_action.triggered.connect(lambda: self.rename_item(item))
-            menu.addAction(rename_action)
+        rename_action = QAction("Rename", self)
+        rename_action.triggered.connect(lambda: self.rename_item(item))
+        menu.addAction(rename_action)
 
-            move_action = QAction("Move Selected Items", self)
-            move_action.triggered.connect(lambda: self.move_items())
-            menu.addAction(move_action)
+        move_action = QAction("Move Selected Items", self)
+        move_action.triggered.connect(self.move_items)
+        menu.addAction(move_action)
 
-            delete_action = QAction("Delete Selected Items", self)
-            delete_action.triggered.connect(lambda: self.delete_items())
-            menu.addAction(delete_action)
+        delete_action = QAction("Delete Selected Items", self)
+        delete_action.triggered.connect(self.delete_items)
+        menu.addAction(delete_action)
 
-        # Batch operations
         menu.addSeparator()
-
         batch_delete_action = QAction("Delete All Flagged Images", self)
         batch_delete_action.triggered.connect(self.batch_delete_flagged_images)
         menu.addAction(batch_delete_action)
@@ -44913,7 +44917,7 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.nonstellar_amount_slider)
 
         # Denoise Strength Slider
-        self.denoise_strength_label = QLabel("Denoise Strength (0-1): 0.50")
+        self.denoise_strength_label = QLabel("Luminance Denoise Strength (0-1): 0.50")
         self.denoise_strength_slider = QSlider(Qt.Orientation.Horizontal)
         self.denoise_strength_slider.setMinimum(0)
         self.denoise_strength_slider.setMaximum(100)
@@ -44922,10 +44926,19 @@ class CosmicClarityTab(QWidget):
         left_layout.addWidget(self.denoise_strength_label)
         left_layout.addWidget(self.denoise_strength_slider)
 
+        self.color_denoise_strength_label = QLabel("Color Denoise Strength (0-1): 0.50")
+        self.color_denoise_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.color_denoise_strength_slider.setMinimum(0)
+        self.color_denoise_strength_slider.setMaximum(100)
+        self.color_denoise_strength_slider.setValue(50)
+        self.color_denoise_strength_slider.valueChanged.connect(self.update_color_denoise_strength_label)
+        left_layout.addWidget(self.color_denoise_strength_label)
+        left_layout.addWidget(self.color_denoise_strength_slider)
+
         # Denoise Mode dropdown
         self.denoise_mode_label = QLabel("Denoise Mode:")
         self.denoise_mode_dropdown = QComboBox()
-        self.denoise_mode_dropdown.addItems(["luminance", "full"])  # 'luminance' for luminance-only, 'full' for full YCbCr denoising
+        self.denoise_mode_dropdown.addItems(["full", "luminance"])  # 'luminance' for luminance-only, 'full' for full YCbCr denoising
         left_layout.addWidget(self.denoise_mode_label)
         left_layout.addWidget(self.denoise_mode_dropdown)
 
@@ -45550,7 +45563,9 @@ class CosmicClarityTab(QWidget):
                 self.show_sharpen_controls()
                 self.show_denoise_controls()
 
-
+    def update_color_denoise_strength_label(self):
+        val = self.color_denoise_strength_slider.value() / 100.0
+        self.color_denoise_strength_label.setText(f"Color Denoise Strength (0-1): {val:.2f}")
 
     def show_sharpen_controls(self):
         for w in (
@@ -45579,6 +45594,8 @@ class CosmicClarityTab(QWidget):
     def show_denoise_controls(self):
         self.denoise_strength_label.show()
         self.denoise_strength_slider.show()
+        self.color_denoise_strength_label.show()        # NEW
+        self.color_denoise_strength_slider.show()       # NEW
         self.denoise_mode_label.show()
         self.denoise_mode_dropdown.show()
         self.denoise_separate_checkbox.show()
@@ -45586,6 +45603,8 @@ class CosmicClarityTab(QWidget):
     def hide_denoise_controls(self):
         self.denoise_strength_label.hide()
         self.denoise_strength_slider.hide()
+        self.color_denoise_strength_label.hide()        # NEW
+        self.color_denoise_strength_slider.hide()       # NEW
         self.denoise_mode_label.hide()
         self.denoise_mode_dropdown.hide()
         self.denoise_separate_checkbox.hide()
@@ -46277,13 +46296,15 @@ class CosmicClarityTab(QWidget):
                 cmd.append("--sharpen_channels_separately")
             if self.auto_detect_psf_checkbox.isChecked():
                 cmd.append("--auto_detect_psf")
+
         elif mode == "denoise":
             cmd += [
                 "--denoise_strength", f"{self.denoise_strength_slider.value() / 100:.2f}",
+                "--color_denoise_strength", f"{self.color_denoise_strength_slider.value() / 100:.2f}",  # NEW
                 "--denoise_mode", self.denoise_mode_dropdown.currentText()
             ]
             if self.denoise_separate_checkbox.isChecked():
-                cmd.append("--separate_channels")            
+                cmd.append("--separate_channels")           
 
         # GPU option
         if self.gpu_dropdown.currentText() == "No":
