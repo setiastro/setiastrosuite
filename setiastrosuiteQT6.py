@@ -61211,8 +61211,7 @@ class MainWindow(QMainWindow):
         img_norm = np.clip((img - img.min())/(np.ptp(img)+1e-8), 0, 1)
         full_h, full_w = img.shape[:2]
         scale = min(max_res/full_h, max_res/full_w, 1.0)
-        img_ds = np.stack([zoom(img_norm[...,i], scale, order=1)
-                        for i in range(3)], axis=-1)
+        img_ds = np.stack([zoom(img_norm[..., i], scale, order=1) for i in range(3)], axis=-1)
         h_ds, w_ds, _ = img_ds.shape
 
         # ─── 4) Build plane coordinates ───────────────────────────────
@@ -61223,21 +61222,17 @@ class MainWindow(QMainWindow):
         ra_min, ra_max = float(RA.min()), float(RA.max())
         dec_min, dec_max = float(DEC.min()), float(DEC.max())
 
-        # ─── 5) Gather objects & build labels/URLs ────────────────────
-        pix_xs, pix_ys = [], []
-        world_xs, world_ys, zs_raw = [], [], []
-        labels, names, urls, lines = [], [], [], []
-        legend_qcolors = []
+        # ─── 5) Gather objects into rows (keep fields together) ───────
+        rows = []
         for obj in self.results:
             try:
-                name   = obj["name"]
-                ra     = float(obj["ra"])
-                dec    = float(obj["dec"])
+                name = obj["name"]
+                ra   = float(obj["ra"])
+                dec  = float(obj["dec"])
 
-                # --- compute distance in ly, with absolute‐value guard ---
+                # distance in ly (robust parse; always positive; +10 to avoid log10(0))
                 try:
-                    # comoving_distance stored in Gyr:
-                    d_gy = float(obj["comoving_distance"])
+                    d_gy = float(obj["comoving_distance"])  # e.g., GLy
                     d_ly = abs(d_gy) * 1e9 + 10
                 except (ValueError, TypeError):
                     raw_cd = str(obj["comoving_distance"]).strip()
@@ -61247,8 +61242,6 @@ class MainWindow(QMainWindow):
                         d_ly = abs(float(raw_cd[:-2].strip())) + 10
                     else:
                         d_ly = abs(float(raw_cd)) + 10
-
-                # skip any zero/negative after abs
                 if d_ly <= 0:
                     continue
 
@@ -61258,64 +61251,50 @@ class MainWindow(QMainWindow):
                 if not (0 <= px < full_w and 0 <= py < full_h):
                     continue
 
-                # choose log or linear
-                z = math.log10(d_ly) if z_scale == "Logarithmic" else d_ly
+                zval = math.log10(d_ly) if z_scale == "Logarithmic" else d_ly
                 ra0, dec0 = self.wcs.pixel_to_world_values(px, py)
 
-                pix_xs.append(px)
-                pix_ys.append(py)
-                world_xs.append(ra0)
-                world_ys.append(dec0)
-                zs_raw.append(z)
-                names.append(name)
-
-                labels.append(
+                label = (
                     f"<b>{name}</b><br>"
                     f"RA: {ra:.6f}<br>"
                     f"Dec: {dec:.6f}<br>"
                     f"Distance: {eng_notation(d_ly)} ly<br>"
                     f"Redshift: {zshift:.5f}"
                 )
-
                 enc = urllib.parse.quote(name)
-                urls.append(
-                    f"https://simbad.cds.unistra.fr/simbad/sim-basic?"
+                url = (
+                    "https://simbad.cds.unistra.fr/simbad/sim-basic?"
                     f"Ident={enc}&submit=SIMBAD+search"
                 )
-                legend_qcolors.append(obj.get("color", QColor(128,128,128)))
 
-                if show_lines:
-                    lines.append(go.Scatter3d(
-                        x=[ra0, ra0], y=[dec0, dec0], z=[0, z],
-                        mode="lines",
-                        line=dict(color="gray", width=1),
-                        hoverinfo="skip",
-                        showlegend=False
-                    ))
+                rows.append(dict(
+                    name=name, x=ra0, y=dec0, z=zval, url=url, label=label,
+                    px=px, py=py, legend_qcolor=obj.get("color", QColor(128, 128, 128))
+                ))
             except Exception:
                 continue
 
-        if not zs_raw:
+        if not rows:
             QMessageBox.warning(self, "No Objects", "No valid distance objects to plot.")
             return
-        zs = np.array(zs_raw, dtype=float)
-        # drop any NaNs before taking min/max
-        valid = ~np.isnan(zs)
-        if not valid.any():
+
+        # ─── 6) Filter rows by finite z (and optional range) ──────────
+        rows = [r for r in rows if math.isfinite(r["z"])]
+        if not rows:
             QMessageBox.warning(self, "No Objects", "All distance values are invalid.")
             return
-        zs = zs[valid]
-        print(f"[DEBUG] z_option = {z_option}")
-        print(f"[DEBUG] zs_raw (first 10) = {zs_raw[:10]}")
-        print(f"[DEBUG] zs array shape = {zs.shape}")
-        print(f"[DEBUG] zs.min() = {zs.min()}, zs.max() = {zs.max()}")
-        # ─── 6) Determine plane_z & z_range ──────────────────────────
-        if z_option == "Min-Max":
-            plane_z = float(np.nanmin(zs))
-            z_range = (float(np.nanmin(zs)), float(np.nanmax(zs)))
-        elif z_option == "Custom":
+
+        if z_option == "Custom":
+            rows = [r for r in rows if z_min <= r["z"] <= z_max]
+            if not rows:
+                QMessageBox.warning(self, "No Objects", "No objects fall within the custom Z range.")
+                return
             plane_z = z_min
             z_range = (z_min, z_max)
+        elif z_option == "Min-Max":
+            z_vals = np.array([r["z"] for r in rows], dtype=float)
+            plane_z = float(np.nanmin(z_vals))
+            z_range = (float(np.nanmin(z_vals)), float(np.nanmax(z_vals)))
         else:  # Default
             plane_z = 0
             z_range = None
@@ -61323,52 +61302,66 @@ class MainWindow(QMainWindow):
         if z_scale == "Linear" and z_option == "Default":
             z_range = (0, linear_max)
 
-        # ─── 7) Build image‐plane layer ──────────────────────────────
+        # ─── 7) Build image‐plane layer ───────────────────────────────
         if "Grayscale" in plane_style:
             Zp = np.full_like(RA, plane_z)
             plane = go.Surface(
                 x=RA, y=DEC, z=Zp,
                 surfacecolor=np.mean(img_ds, axis=2),
                 colorscale="gray", showscale=False, opacity=1.0,
-                contours={"x": {"show":False}, "y": {"show":False}, "z": {"show":False}}
+                contours={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}}
             )
         else:
-            flat = (img_ds*255).astype(int).reshape(-1,3)
-            cols = [f"rgb({r},{g},{b})" for r,g,b in flat]
+            flat = (img_ds * 255).astype(int).reshape(-1, 3)
+            cols = [f"rgb({r},{g},{b})" for r, g, b in flat]
             plane = go.Scatter3d(
-                x=RA.flatten(), y=DEC.flatten(), z=[plane_z]*RA.size,
-                mode="markers", marker=dict(
-                    symbol="square", size=2, line=dict(width=0),
-                    color=cols, opacity=1.0
-                ),
+                x=RA.flatten(), y=DEC.flatten(), z=[plane_z] * RA.size,
+                mode="markers",
+                marker=dict(symbol="square", size=2, line=dict(width=0), color=cols, opacity=1.0),
                 hoverinfo="skip", showlegend=False
             )
 
-        # ─── 8) Object colors ────────────────────────────────────────
+        # ─── 8) Object colors (after filtering) ───────────────────────
         H, W = img_norm.shape[:2]
         if obj_color == "Image-Based":
-            obj_cols = []
             patch_r = 5
-            for px, py in zip(pix_xs, pix_ys):
-                cx, cy = int(px), int(py)
+            def patch_color(r):
+                cx, cy = int(r["px"]), int(r["py"])
                 x0, x1 = max(0, cx - patch_r), min(W, cx + patch_r + 1)
                 y0, y1 = max(0, cy - patch_r), min(H, cy + patch_r + 1)
                 patch = img_norm[y0:y1, x0:x1]
                 if patch.size:
-                    mr, mg, mb = (patch.reshape(-1,3).mean(axis=0)*255).astype(int)
+                    mr, mg, mb = (patch.reshape(-1, 3).mean(axis=0) * 255).astype(int)
                 else:
                     mr = mg = mb = 0
-                obj_cols.append(f"rgb({mr},{mg},{mb})")
-
+                return f"rgb({mr},{mg},{mb})"
+            obj_cols = [patch_color(r) for r in rows]
         elif obj_color == "Legend Color":
-            obj_cols = [f"rgb({qc.red()},{qc.green()},{qc.blue()})" for qc in legend_qcolors]
+            obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})" for c in (r["legend_qcolor"] for r in rows)]
         elif obj_color == "Solid (Custom)":
             c = custom_col
-            obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})"] * len(zs)
+            obj_cols = [f"rgb({c.red()},{c.green()},{c.blue()})"] * len(rows)
         else:
-            obj_cols = ["red"] * len(zs)
+            obj_cols = ["red"] * len(rows)
 
-        # ─── 9) Scatter objects ───────────────────────────────────────
+        # ─── 9) Build arrays (all same length) and optional lines ─────
+        world_xs = [r["x"] for r in rows]
+        world_ys = [r["y"] for r in rows]
+        zs       = np.array([r["z"] for r in rows], dtype=float)
+        labels   = [r["label"] for r in rows]
+        urls     = [r["url"] for r in rows]
+        names    = [r["name"] for r in rows]
+
+        lines = []
+        if show_lines:
+            for r in rows:
+                lines.append(go.Scatter3d(
+                    x=[r["x"], r["x"]], y=[r["y"], r["y"]], z=[plane_z, r["z"]],
+                    mode="lines", line=dict(color="gray", width=1),
+                    hoverinfo="skip", showlegend=False
+                ))
+
+        # ─── 10) Scatter objects ───────────────────────────────────────
         scatter = go.Scatter3d(
             x=world_xs, y=world_ys, z=zs,
             mode="markers",
@@ -61377,7 +61370,7 @@ class MainWindow(QMainWindow):
             customdata=urls, name="Objects"
         )
 
-        # ─── 10) Compose figure ───────────────────────────────────────
+        # ─── 11) Compose figure ───────────────────────────────────────
         fig = go.Figure(data=[plane] + lines + [scatter])
         scene = dict(
             xaxis_title="RA (deg)",
@@ -61387,7 +61380,7 @@ class MainWindow(QMainWindow):
             aspectmode="manual",
             aspectratio=dict(x=1, y=1, z=z_height),
             zaxis=dict(
-                title=("log10(Distance in ly)" if z_scale=="Logarithmic" else "Distance (ly)"),
+                title=("log10(Distance in ly)" if z_scale == "Logarithmic" else "Distance (ly)"),
                 tickformat="~s",
                 **({"range": list(z_range)} if z_range else {}),
                 **({"autorange": "reversed"} if reverse_z else {})
@@ -61396,19 +61389,20 @@ class MainWindow(QMainWindow):
         fig.update_layout(title="3D Distance Model", autosize=True, scene=scene,
                         margin=dict(l=0, r=0, b=0, t=40))
 
-        # ─── 11) Build & inject HTML ─────────────────────────────────
+        # ─── 12) Build & inject HTML ───────────────────────────────────
         html = fig.to_html(include_plotlyjs="cdn", full_html=True)
-        items = "".join(f'<li><a href="{u}" target="_blank">{n}</a></li>'
-                        for n,u in zip(names, urls))
-        sidebar = ( '<div style="padding:10px;font-family:sans-serif;'
-                    'margin-top:20px;border-top:1px solid #ccc;">'
-                    '<h3>Objects</h3><ul>' + items + '</ul></div>' )
+        items = "".join(f'<li><a href="{u}" target="_blank">{n}</a></li>' for n, u in zip(names, urls))
+        sidebar = (
+            '<div style="padding:10px;font-family:sans-serif;'
+            'margin-top:20px;border-top:1px solid #ccc;">'
+            '<h3>Objects</h3><ul>' + items + '</ul></div>'
+        )
         js = """
         <script>
         var gd = document.getElementsByClassName('plotly-graph-div')[0];
         gd.on('plotly_click', function(e){
             var url = e.points[0].customdata;
-            if(url) window.open(url,'_blank');
+            if (url) window.open(url, '_blank');
         });
         </script>
         """
@@ -61416,18 +61410,17 @@ class MainWindow(QMainWindow):
 
         # Save & preview
         default = os.path.expanduser("~/3d_distance_model.html")
-        fn,_ = QFileDialog.getSaveFileName(self, "Save 3D Plot As",
-                                        default, "HTML Files (*.html)")
+        fn, _ = QFileDialog.getSaveFileName(self, "Save 3D Plot As", default, "HTML Files (*.html)")
         if fn:
             if not fn.lower().endswith(".html"):
                 fn += ".html"
             with open(fn, "w", encoding="utf-8") as f:
                 f.write(html)
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html",
-                                        mode="w", encoding="utf-8")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode="w", encoding="utf-8")
         tmp.write(html); tmp.close()
         webbrowser.open("file://" + tmp.name)
+
 
 
     def show_hr_diagram(self):
@@ -63288,13 +63281,13 @@ class MainWindow(QMainWindow):
         else:
             self.zoom_out()
 
-    @announce_zoom
+
     def zoom_in(self):
         self.zoom_level *= 1.2
         self.main_preview.setTransform(QTransform().scale(self.zoom_level, self.zoom_level))
         self.update_green_box()
         
-    @announce_zoom
+
     def zoom_out(self):
         self.zoom_level /= 1.2
         self.main_preview.setTransform(QTransform().scale(self.zoom_level, self.zoom_level))
