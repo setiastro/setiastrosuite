@@ -35,6 +35,7 @@ import time
 from datetime import datetime
 import pywt
 from io import BytesIO
+import io
 import re
 from collections import defaultdict
 from scipy.spatial import Delaunay, KDTree
@@ -221,7 +222,8 @@ from PyQt6.QtWidgets import (
     QSplashScreen,
     QProgressDialog, 
     QDockWidget,
-    QAbstractItemView
+    QAbstractItemView,
+    QStyledItemDelegate
 )
 
 # ----- QtGui -----
@@ -246,6 +248,8 @@ from PyQt6.QtGui import (
     QPalette, 
     QWheelEvent, 
     QDoubleValidator,
+    QFontDatabase,
+    QGuiApplication,
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -283,7 +287,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.2"
+VERSION = "2.21.3"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1332,24 +1336,19 @@ class AstroEditingSuite(QMainWindow):
         # --------------------
         # FITS Modifier Menu + Toolbar
         # --------------------
-        fits_menu = menubar.addMenu("FITS Modifier")
+        fits_menu = menubar.addMenu("Header Mod && Export")
 
-        self.fits_edit_action = QAction("Edit Current Slot Header…", self)
+        self.fits_edit_action = QAction("FITS Header Modifier…", self)
         self.fits_edit_action.setStatusTip("View and edit FITS header for the active image slot")
         self.fits_edit_action.triggered.connect(self.open_fits_modifier)
-
-        #self.fits_batch_action = QAction("Batch Modify Headers…", self)
-        #self.fits_batch_action.setStatusTip("Apply a header change to many FITS files")
-        #self.fits_batch_action.triggered.connect(self.open_batch_fits_modifier)
-
         fits_menu.addAction(self.fits_edit_action)
-        #fits_menu.addAction(self.fits_batch_action)
 
-        #self.fits_toolbar = QToolBar("FITS Modifier", self)
-        #self.fits_toolbar.setObjectName("FITSModifierToolbar")
-        #self.fits_toolbar.addAction(self.fits_edit_action)
-        #self.fits_toolbar.addAction(self.fits_batch_action)
-        #self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.fits_toolbar)
+        self.astrobin_export_action = QAction("AstroBin Acquisition Exporter…", self)
+        self.astrobin_export_action.setStatusTip("Compile FITS headers into AstroBin acquisition CSV")
+        self.astrobin_export_action.triggered.connect(self.open_astrobin_exporter)
+        fits_menu.addAction(self.astrobin_export_action)
+
+        
 
         # --------------------
         # History Menu
@@ -1395,13 +1394,12 @@ class AstroEditingSuite(QMainWindow):
         self.update_slot_toolbar_highlight()
         self.curveDock.hide()
 
-    def _is_valid_fits_path(self, path: str | None) -> bool:
+    def _is_valid_fits_path(self, path: Optional[str]) -> bool:
         if not path or not isinstance(path, str):
             return False
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".fits", ".fit", ".fts", ".fz"):
             return False
-        # existence check is optional; keep it if you only want on-disk files
         return os.path.isfile(path)
 
     def open_fits_modifier(self):
@@ -1425,6 +1423,30 @@ class AstroEditingSuite(QMainWindow):
                         parent=self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         dlg.show()
+
+    def open_astrobin_exporter(self):
+        """
+        Open the AstroBin Acquisition Exporter UI (class lives in this codebase).
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("AstroBin Acquisition Exporter")
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        lay = QVBoxLayout(dlg)
+
+        # Instantiate your exporter widget (takes only parent)
+        exporter_widget = AstrobinExportTab(parent=dlg)
+        lay.addWidget(exporter_widget)
+
+        close_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dlg)
+        close_box.rejected.connect(dlg.close)
+        lay.addWidget(close_box)
+
+        dlg.resize(1000, 720)
+        dlg.show()
+
+        # keep a reference so it isn’t GC’d
+        self._astrobin_exporter_dialog = dlg
 
     def open_batch_fits_modifier(self):
         """Open non-modal batch header modification dialog."""
@@ -5618,7 +5640,8 @@ class ResizableRotatableRectItem(QGraphicsRectItem):
         # only set origin _once_ here
         self.setTransformOriginPoint(self.rect().center())
 
-    def setFixedAspectRatio(self, ratio: float | None):
+    
+    def setFixedAspectRatio(self, ratio: Optional[float]):
         """Lock resize to this width/height ratio, or None to free‐hand."""
         self._fixed_aspect_ratio = ratio
 
@@ -6276,12 +6299,12 @@ class ImageManager(QObject):
         ext_ok = v.lower().endswith((".fits", ".fit", ".fts", ".fz", ".fits.fz"))
         return (os.path.sep in v) or ext_ok
 
-    def _attach_step_name(self, merged_meta: dict, step_name: str | None) -> dict:
+    def _attach_step_name(self, merged_meta: Dict, step_name: Optional[str]) -> Dict:
         if step_name is not None and str(step_name).strip():
             merged_meta["step_name"] = step_name.strip()
         return merged_meta
 
-    def _merge_metadata(self, base: dict | None, updates: dict | None) -> dict:
+    def _merge_metadata(self, base: Optional[Dict], updates: Optional[Dict]) -> Dict:
         out = (base or {}).copy()
         if not updates:
             return out
@@ -6610,7 +6633,8 @@ class FITSModifier(QDialog):
     If both file_path and header are provided, file takes precedence for I/O;
     edits can also be pushed back into ImageManager metadata for the active slot.
     """
-    def __init__(self, file_path: str | None, header, image_manager=None, parent=None):
+    def __init__(self, file_path: Optional[str], header, image_manager=None, parent=None):
+
         super().__init__(parent)
         self.setWindowTitle("FITS Header Editor")
         self.resize(800, 600)
@@ -6738,7 +6762,7 @@ class FITSModifier(QDialog):
         self.add_val_edit.setText(curr.text(1))
         self.add_com_edit.setText(curr.text(2))
 
-    def _selected_row_triplet(self) -> tuple[str, str, str]:
+    def _selected_row_triplet(self) -> Tuple[str, str, str]:
         it = self.tree.currentItem()
         if not it:
             return "", "", ""
@@ -7209,6 +7233,806 @@ class BatchFITSHeaderDialog(QDialog):
                 n_err += 1
 
         QMessageBox.information(self, "Batch Complete", f"Updated {n_ok} file(s); {n_err} error(s).")
+
+ASTROBIN_FILTER_URL = "https://app.astrobin.com/equipment/explorer/filter?page=1"
+
+
+class _IntOnlyDelegate(QStyledItemDelegate):
+    """Editor that only allows integers (for AstroBin ID column)."""
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setPlaceholderText("e.g. 4408")
+        editor.setValidator(QIntValidator(1, 999999999, editor))
+        return editor
+
+
+class FilterIdDialog(QDialog):
+    """
+    Editable table: local filter name ↔ AstroBin numeric ID.
+    Populates with union of:
+      - filters seen in this dataset, and
+      - previously saved mapping from QSettings.
+
+    Saves back into QSettings as "Name=ID;Name2=ID2;...".
+    """
+    BLANK_ROWS = 6  # how many empty rows to offer at the bottom
+
+
+    def __init__(self, parent, filters_in_data: list[str], settings: QSettings,
+                 current_map: dict[str, str] | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("AstroBin Filter IDs")
+        self.settings = settings
+
+        base_names = sorted({f for f in (filters_in_data or []) if f and f != "Unknown"}, key=str.lower)
+
+        # ⬇️ merge settings + current exporter map, prefer current exporter values on conflicts
+        stored_map = self._load_mapping()
+        if current_map:
+            stored_map = {**stored_map, **current_map}
+
+        all_names = sorted(set(base_names) | set(stored_map.keys()), key=str.lower)
+
+        # ---- Layout ----
+        root = QVBoxLayout(self)
+
+        # Help row with link
+        help_row = QHBoxLayout()
+        help_label = QLabel("Edit filter names and their AstroBin numeric IDs.")
+        help_btn = QToolButton(self)
+        help_btn.setText("?")
+        help_btn.setToolTip("Open AstroBin Equipment Explorer (Filters)")
+        help_btn.clicked.connect(lambda: webbrowser.open(ASTROBIN_FILTER_URL))
+        help_row.addWidget(help_label)
+        help_row.addStretch(1)
+        help_row.addWidget(help_btn)
+        root.addLayout(help_row)
+
+        # Table
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Filter name", "AstroBin ID"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
+
+        # numeric delegate on column 1 (AstroBin ID)
+        self.table.setItemDelegateForColumn(1, _IntOnlyDelegate(self.table))
+
+        # Fill rows
+        rows = len(all_names) + self.BLANK_ROWS
+        self.table.setRowCount(rows)
+        r = 0
+        for name in all_names:
+            name_item = QTableWidgetItem(name)
+            name_item.setFlags(name_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            id_item = QTableWidgetItem(str(stored_map.get(name, "")))
+            id_item.setFlags(id_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.table.setItem(r, 0, name_item)
+            self.table.setItem(r, 1, id_item)
+            r += 1
+
+        # trailing blank rows
+        while r < rows:
+            self.table.setItem(r, 0, QTableWidgetItem(""))
+            self.table.setItem(r, 1, QTableWidgetItem(""))
+            # make them editable
+            self.table.item(r, 0).setFlags(self.table.item(r, 0).flags() | Qt.ItemFlag.ItemIsEditable)
+            self.table.item(r, 1).setFlags(self.table.item(r, 1).flags() | Qt.ItemFlag.ItemIsEditable)
+            self.table.item(r, 1).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            r += 1
+
+        root.addWidget(self.table, 1)
+
+        # Row actions
+        row_actions = QHBoxLayout()
+        self.btn_add = QPushButton("Add row")
+        self.btn_add.clicked.connect(self._add_row)
+        self.btn_del = QPushButton("Delete selected")
+        self.btn_del.clicked.connect(self._delete_selected_rows)
+        row_actions.addWidget(self.btn_add)
+        row_actions.addWidget(self.btn_del)
+        row_actions.addStretch(1)
+        root.addLayout(row_actions)
+
+        # OK/Cancel buttons
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        # optional nicety: focus first cell
+        self.table.setCurrentCell(0, 0)
+
+    # ----- helpers -----
+    def _add_row(self):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(""))
+        self.table.setItem(r, 1, QTableWidgetItem(""))
+        # editable + centered
+        self.table.item(r, 0).setFlags(self.table.item(r, 0).flags() | Qt.ItemFlag.ItemIsEditable)
+        self.table.item(r, 1).setFlags(self.table.item(r, 1).flags() | Qt.ItemFlag.ItemIsEditable)
+        self.table.item(r, 1).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.scrollToBottom()
+        self.table.setCurrentCell(r, 0)
+
+    def _delete_selected_rows(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.table.removeRow(r)
+
+    def _load_mapping(self) -> dict[str, str]:
+        self.settings.beginGroup("astrobin_exporter")
+        raw = self.settings.value("filter_map", "")
+        self.settings.endGroup()
+        mapping: dict[str, str] = {}
+        if isinstance(raw, str) and raw:
+            for chunk in raw.split(";"):
+                if "=" in chunk:
+                    k, v = chunk.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    if k:
+                        mapping[k] = v
+        return mapping
+
+    def mapping(self) -> dict[str, str]:
+        """
+        Read table -> {name: id}. Keeps only rows with a non-empty name.
+        If ID is empty, the pair is skipped (you can still use the filter name as fallback elsewhere).
+        """
+        mp: dict[str, str] = {}
+        rows = self.table.rowCount()
+        for r in range(rows):
+            name_item = self.table.item(r, 0)
+            id_item = self.table.item(r, 1)
+            name = (name_item.text().strip() if name_item else "")
+            fid = (id_item.text().strip() if id_item else "")
+            if not name:
+                continue
+            # keep only numeric IDs; ignore if blank or non-numeric
+            if fid and fid.isdigit():
+                mp[name] = fid
+        return mp
+
+    def save_to_settings(self):
+        mp = self.mapping()
+        blob = ";".join(f"{k}={v}" for k, v in mp.items())
+        self.settings.beginGroup("astrobin_exporter")
+        self.settings.setValue("filter_map", blob)
+        self.settings.endGroup()
+
+
+class AstrobinExportTab(QWidget):
+    """
+    Blink-like organizer on the left; on the right, global inputs (f/number and more)
+    and a live table of aggregated rows; copy CSV to clipboard.
+
+    Aggregation key: (date, filterID, exposure)
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.settings = QSettings()
+        self.file_paths: List[str] = []
+        self.records: List[dict] = []
+        self.rows: List[dict] = []
+        self._filter_map: Dict[str, str] = self._load_filter_map()
+
+        self._build_ui()
+        self._load_defaults()
+
+    # ---------------- UI ----------------
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        root.addWidget(splitter)
+
+        # LEFT: tree + file controls
+        left = QWidget(self)
+        lyt = QVBoxLayout(left)
+        self.info_lbl = QLabel("Load FITS via 'Select Folder…' or 'Add Files…' to begin.")
+        lyt.addWidget(self.info_lbl)
+
+        btn_row = QHBoxLayout()
+        self.btn_open = QPushButton("Select Folder…")
+        self.btn_open.clicked.connect(self.open_directory)
+        btn_row.addWidget(self.btn_open)
+
+        self.btn_add_files = QPushButton("Add Files…")
+        self.btn_add_files.clicked.connect(self.open_files)
+        btn_row.addWidget(self.btn_add_files)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.clicked.connect(self.clear_images)
+        btn_row.addWidget(self.btn_clear)
+
+        btn_row.addStretch(1)
+        lyt.addLayout(btn_row)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setColumnCount(1)
+        self.tree.setHeaderLabels(["Files (Object → Filter → Exposure)"])
+
+        # make the column user-resizable, allow long text, and enable h-scrolling
+        hdr = self.tree.header()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setStretchLastSection(False)  # let the column grow wider than the viewport
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.itemChanged.connect(self._on_tree_item_changed)
+        lyt.addWidget(self.tree)
+
+        splitter.addWidget(left)
+
+        # RIGHT: inputs + table + actions
+        right = QWidget(self)
+        rlyt = QVBoxLayout(right)
+
+        # Global inputs (now a 3×3 grid)
+        form_box = QGroupBox("Global inputs (used if FITS headers are missing/zero)")
+        grid = QGridLayout(form_box)
+
+        # row 0
+        grid.addWidget(QLabel("f/number"), 0, 0)
+        self.fnum_edit = QLineEdit(self)
+        self.fnum_edit.setPlaceholderText("e.g. 4.0")
+        self.fnum_edit.setValidator(QDoubleValidator(0.0, 999.0, 2, self))
+        self.fnum_edit.textChanged.connect(self._recompute)
+        grid.addWidget(self.fnum_edit, 0, 1)
+
+        grid.addWidget(QLabel("Darks (#)"), 0, 2)
+        self.darks_edit = QLineEdit(self); self._setup_int_line(self.darks_edit, 0, 999999)
+        grid.addWidget(self.darks_edit, 0, 3)
+
+        grid.addWidget(QLabel("Flats (#)"), 0, 4)
+        self.flats_edit = QLineEdit(self); self._setup_int_line(self.flats_edit, 0, 999999)
+        grid.addWidget(self.flats_edit, 0, 5)
+
+        # row 1
+        grid.addWidget(QLabel("Flat-darks (#)"), 1, 0)
+        self.flatdarks_edit = QLineEdit(self); self._setup_int_line(self.flatdarks_edit, 0, 999999)
+        grid.addWidget(self.flatdarks_edit, 1, 1)
+
+        grid.addWidget(QLabel("Bias (#)"), 1, 2)
+        self.bias_edit = QLineEdit(self); self._setup_int_line(self.bias_edit, 0, 999999)
+        grid.addWidget(self.bias_edit, 1, 3)
+
+        grid.addWidget(QLabel("Bortle"), 1, 4)
+        self.bortle_edit = QLineEdit(self)
+        self.bortle_edit.setPlaceholderText("0–9")
+        self.bortle_edit.setValidator(QIntValidator(0, 9, self))
+        self.bortle_edit.textChanged.connect(self._recompute)
+        grid.addWidget(self.bortle_edit, 1, 5)
+
+        # row 2
+        grid.addWidget(QLabel("Mean SQM"), 2, 0)
+        self.mean_sqm_edit = QLineEdit(self)
+        self.mean_sqm_edit.setPlaceholderText("e.g. 21.30")
+        self.mean_sqm_edit.setValidator(QDoubleValidator(0.0, 25.0, 2, self))
+        self.mean_sqm_edit.textChanged.connect(self._recompute)
+        grid.addWidget(self.mean_sqm_edit, 2, 1)
+
+        grid.addWidget(QLabel("Mean FWHM"), 2, 2)
+        self.mean_fwhm_edit = QLineEdit(self)
+        self.mean_fwhm_edit.setPlaceholderText("e.g. 2.10")
+        self.mean_fwhm_edit.setValidator(QDoubleValidator(0.0, 50.0, 2, self))
+        self.mean_fwhm_edit.textChanged.connect(self._recompute)
+        grid.addWidget(self.mean_fwhm_edit, 2, 3)
+
+        # keep last 2 cells open or use a spacer
+        grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 2, 4, 1, 2)
+
+        # Filter mapping row (below the 3×3 grid, spanning full width)
+        map_row = QHBoxLayout()
+        self.filter_summary = QLabel(self._filters_summary_text())
+        map_row.addWidget(self.filter_summary)
+        self.btn_edit_filters = QPushButton("Manage Filter IDs…")
+        self.btn_edit_filters.clicked.connect(self._edit_filters)
+        map_row.addWidget(self.btn_edit_filters)
+        qmark = QToolButton(self); qmark.setText("?")
+        qmark.setToolTip("Open AstroBin Equipment Explorer (Filters)")
+        qmark.clicked.connect(lambda: webbrowser.open(ASTROBIN_FILTER_URL))
+        map_row.addWidget(qmark)
+        map_row.addStretch(1)
+        map_wrap = QWidget(self); map_wrap.setLayout(map_row)
+        grid.addWidget(map_wrap, 3, 0, 1, 6)
+
+        rlyt.addWidget(form_box)
+
+        # Aggregated table
+        self.table = QTableWidget(self)
+        cols = ['date','filter','number','duration','gain','iso','binning','sensorCooling',
+                'fNumber','darks','flats','flatDarks','bias','bortle','meanSqm','meanFwhm','temperature']
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+
+        hdr_tbl = self.table.horizontalHeader()
+        hdr_tbl.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)    # ← enable dragging
+        hdr_tbl.setStretchLastSection(False)
+        hdr_tbl.setMinimumSectionSize(50)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        rlyt.addWidget(self.table, 1)
+
+        # CSV preview
+        rlyt.addWidget(QLabel("CSV Preview:"))
+        self.csv_view = QTextEdit(self)
+        self.csv_view.setReadOnly(True)
+        try:
+            self.csv_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        except Exception:
+            pass
+        rlyt.addWidget(self.csv_view, 1)
+
+        # Actions
+        act_row = QHBoxLayout()
+        self.btn_refresh = QPushButton("Recompute")
+        self.btn_refresh.clicked.connect(self._recompute)
+        act_row.addWidget(self.btn_refresh)
+
+        self.btn_copy_csv = QPushButton("Copy CSV")
+        self.btn_copy_csv.clicked.connect(self._copy_csv_to_clipboard)
+        act_row.addWidget(self.btn_copy_csv)
+
+        act_row.addStretch(1)
+        rlyt.addLayout(act_row)
+
+        splitter.addWidget(right)
+        splitter.setSizes([350, 650])
+        self.setLayout(root)
+
+    def _setup_int_line(self, line: QLineEdit, lo: int, hi: int):
+        line.setValidator(QIntValidator(lo, hi, self))
+        line.setPlaceholderText("0")
+        line.textChanged.connect(self._recompute)
+
+    # --------------- Settings ---------------
+    def _load_defaults(self):
+        self.settings.beginGroup("astrobin_exporter")
+        self.fnum_edit.setText(str(self.settings.value("fnumber", "")))
+        self.darks_edit.setText(str(self.settings.value("darks", "")))
+        self.flats_edit.setText(str(self.settings.value("flats", "")))
+        self.flatdarks_edit.setText(str(self.settings.value("flatdarks", "")))
+        self.bias_edit.setText(str(self.settings.value("bias", "")))
+        self.bortle_edit.setText(str(self.settings.value("bortle", "")))
+        self.mean_sqm_edit.setText(str(self.settings.value("mean_sqm", "")))
+        self.mean_fwhm_edit.setText(str(self.settings.value("mean_fwhm", "")))
+        self._last_dir = str(self.settings.value("last_dir", "")) or ""
+        self.settings.endGroup()
+
+    def _save_defaults(self):
+        self.settings.beginGroup("astrobin_exporter")
+        self.settings.setValue("fnumber", self.fnum_edit.text().strip())
+        self.settings.setValue("darks", self.darks_edit.text().strip())
+        self.settings.setValue("flats", self.flats_edit.text().strip())
+        self.settings.setValue("flatdarks", self.flatdarks_edit.text().strip())
+        self.settings.setValue("bias", self.bias_edit.text().strip())
+        self.settings.setValue("bortle", self.bortle_edit.text().strip())
+        self.settings.setValue("mean_sqm", self.mean_sqm_edit.text().strip())
+        self.settings.setValue("mean_fwhm", self.mean_fwhm_edit.text().strip())
+        # last_dir is saved when you actually pick a folder/files
+        self.settings.endGroup()
+
+    def _get_last_dir(self) -> str:
+        return getattr(self, "_last_dir", "") or ""
+
+    def _save_last_dir(self, path: str):
+        if not path:
+            return
+        self._last_dir = path
+        self.settings.beginGroup("astrobin_exporter")
+        self.settings.setValue("last_dir", path)
+        self.settings.endGroup()
+
+    def clear_images(self):
+        """Clear all loaded FITS paths and UI state (tree, table, CSV preview)."""
+        self.file_paths.clear()
+        self.records.clear()
+        self.rows.clear()
+
+        # Tree
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        self.tree.blockSignals(False)
+
+        # Table
+        self.table.setRowCount(0)
+
+        # CSV preview
+        self.csv_view.clear()
+
+        # Info label
+        self.info_lbl.setText("Cleared. Load FITS via 'Select Folder…' or 'Add Files…' to begin.")
+
+    def _load_filter_map(self) -> Dict[str, str]:
+        """
+        Load the filter-name -> AstroBin-ID map.
+        - On first run (no saved map), seed with sensible defaults.
+        - After that, DO NOT merge defaults back in; use only what the user saved.
+        """
+        defaults = {"Ha":"4408", "OIII":"4413", "SII":"4418", "L":"4450", "R":"4455", "G":"4445", "B":"4440"}
+
+        self.settings.beginGroup("astrobin_exporter")
+        raw = self.settings.value("filter_map", "")
+        self.settings.endGroup()
+
+        # First run: seed settings with defaults so they appear in the editor and can be edited/removed.
+        if not raw:
+            blob = ";".join(f"{k}={v}" for k, v in defaults.items())
+            self.settings.beginGroup("astrobin_exporter")
+            self.settings.setValue("filter_map", blob)
+            self.settings.endGroup()
+            return defaults.copy()
+
+        # Subsequent runs: load ONLY the user's saved mapping.
+        mapping: Dict[str, str] = {}
+        for chunk in str(raw).split(";"):
+            if "=" in chunk:
+                k, v = chunk.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k and v.isdigit():
+                    mapping[k] = v
+        return mapping
+
+    def _filters_summary_text(self) -> str:
+        if not self._filter_map:
+            return "No mappings set"
+        pairs = sorted(self._filter_map.items(), key=lambda kv: kv[0].lower())
+        return ", ".join(f"{k}→{v}" for k, v in pairs)
+
+    def _edit_filters(self):
+        names_in_data = sorted({rec.get("FILTER","Unknown") for rec in self.records if rec.get("FILTER")}, key=str.lower)
+        # your FilterIdDialog should accept current_map, otherwise remove that kwarg
+        dlg = FilterIdDialog(self, names_in_data, self.settings, current_map=self._filter_map)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            dlg.save_to_settings()
+            self._filter_map = self._load_filter_map()
+            self.filter_summary.setText(self._filters_summary_text())
+            self._recompute()
+
+    # ---------------- Loading & tree ----------------
+    @staticmethod
+    def _natural_key(path: str):
+        name = os.path.basename(path)
+        return [int(tok) if tok.isdigit() else tok.lower()
+                for tok in re.split(r'(\d+)', name)]
+
+    def open_directory(self):
+        start = self._get_last_dir() or ""
+        directory = QFileDialog.getExistingDirectory(self, "Select Folder Containing FITS Files", start)
+        if not directory:
+            return
+        self._save_last_dir(directory)
+
+        paths = []
+        for root, _, files in os.walk(directory):
+            for fn in files:
+                if fn.lower().endswith((".fit", ".fits")):
+                    paths.append(os.path.join(root, fn))
+        paths.sort(key=self._natural_key)
+        if not paths:
+            QMessageBox.information(self, "No FITS", "No .fit/.fits files found.")
+            return
+        self.file_paths = paths
+        self._read_headers()
+        self._build_tree()
+        self._recompute()
+
+    def open_files(self):
+        """Let the user add one or more FITS files (without scanning a directory)."""
+        start = self._get_last_dir() or ""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select FITS Files", start, "FITS files (*.fit *.fits);;All Files (*)"
+        )
+        if not paths:
+            return
+        # save the directory of the first selection
+        self._save_last_dir(os.path.dirname(paths[0]))
+
+        # Deduplicate vs. what's already loaded
+        new_paths = [p for p in paths if p not in self.file_paths]
+        if not new_paths:
+            QMessageBox.information(self, "No New Files", "All selected files are already in the list.")
+            return
+
+        self.file_paths.extend(new_paths)
+        self.file_paths = sorted(set(self.file_paths), key=self._natural_key)
+
+        self._read_headers()
+        self._build_tree()
+        self._recompute()
+
+    def _read_headers(self):
+        self.records.clear()
+        ok, bad = 0, 0
+        for fp in self.file_paths:
+            try:
+                with fits.open(fp) as hdul:
+                    h = hdul[0].header
+                rec = {
+                    "PATH": fp,
+                    "NAME": os.path.basename(fp),
+                    "OBJECT": str(h.get("OBJECT", "Unknown")),
+                    "FILTER": str(h.get("FILTER", "Unknown")),
+                    "EXPOSURE": self._safe_float(h.get("EXPOSURE", 0.0)),
+                    "GAIN": str(h.get("GAIN", "0")),
+                    "ISO": str(h.get("ISO", "0")),
+                    "BINNING": self._derive_binning(h),
+                    "CCD_TEMP": self._safe_float(h.get("CCD-TEMP", 0.0)),
+                    "FOCTEMP": self._safe_float(h.get("FOCTEMP", 0.0)),
+                    "DARK": str(h.get("DARK","0")),
+                    "FLAT": str(h.get("FLAT","0")),
+                    "FLATDARK": str(h.get("FLATDARK","0")),
+                    "BIAS": str(h.get("BIAS","0")),
+                    "BORTLE": str(h.get("BORTLE","0")),
+                    "MEAN_SQM": str(h.get("MEAN_SQM","0")),
+                    "MEAN_FWHM": str(h.get("MEAN_FWHM","0")),
+                    "DATE": self._to_date_only(str(h.get("DATE-OBS","0")))
+                }
+                self.records.append(rec)
+                ok += 1
+            except Exception as e:
+                print(f"[WARN] Failed to read {fp}: {e}")
+                bad += 1
+        self.info_lbl.setText(f"Loaded {ok} FITS ({bad} failed).")
+
+    @staticmethod
+    def _safe_float(x, default=0.0) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _derive_binning(h) -> str:
+        for k in ("XBINNING", "XBIN", "CCDXBIN"):
+            if k in h:
+                try:
+                    return str(int(float(h[k])))
+                except Exception:
+                    return str(h[k])
+        return "0"
+
+    @staticmethod
+    def _to_date_only(date_obs: str) -> str:
+        if not date_obs or date_obs == "0":
+            return "0"
+        return date_obs.split("T")[0].strip()
+
+    def _build_tree(self):
+        self.tree.blockSignals(True)
+        self.tree.clear()
+
+        # Group like Blink: Object → Filter → Exposure → file
+        grouped: Dict[Tuple[str, str, float], List[dict]] = defaultdict(list)
+        for rec in self.records:
+            key = (rec["OBJECT"], rec["FILTER"], rec["EXPOSURE"])
+            grouped[key].append(rec)
+
+        by_obj: Dict[str, Dict[str, Dict[float, List[dict]]]] = defaultdict(lambda: defaultdict(dict))
+        for (obj, filt, exp), lst in grouped.items():
+            by_obj[obj].setdefault(filt, {})
+            by_obj[obj][filt][exp] = lst
+
+        for obj in sorted(by_obj, key=str.lower):
+            obj_item = QTreeWidgetItem([f"Object: {obj}"])
+            obj_item.setFlags(obj_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            obj_item.setCheckState(0, Qt.CheckState.Checked)
+            self.tree.addTopLevelItem(obj_item)
+            obj_item.setExpanded(True)
+
+            for filt in sorted(by_obj[obj], key=str.lower):
+                filt_item = QTreeWidgetItem([f"Filter: {filt}"])
+                filt_item.setFlags(filt_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                filt_item.setCheckState(0, Qt.CheckState.Checked)
+                obj_item.addChild(filt_item)
+                filt_item.setExpanded(True)
+
+                for exp in sorted(by_obj[obj][filt].keys(), key=lambda e: str(e)):
+                    exp_item = QTreeWidgetItem([f"Exposure: {exp}"])
+                    exp_item.setData(0, Qt.ItemDataRole.UserRole, float(exp))
+                    exp_item.setFlags(exp_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    exp_item.setCheckState(0, Qt.CheckState.Checked)
+                    filt_item.addChild(exp_item)
+                    for rec in by_obj[obj][filt][exp]:
+                        leaf = QTreeWidgetItem([rec["NAME"]])
+                        leaf.setData(0, Qt.ItemDataRole.UserRole, rec["PATH"])
+                        leaf.setFlags(leaf.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                        leaf.setCheckState(0, Qt.CheckState.Checked)
+                        exp_item.addChild(leaf)
+
+        self.tree.blockSignals(False)
+
+        # default-fit the column to its text, keep it resizable,
+        # and ensure h-scroll appears when the width exceeds the viewport
+        self.tree.header().setStretchLastSection(False)
+        self.tree.resizeColumnToContents(0)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideNone)
+
+    def _has_gain(self, v) -> bool:
+        s = str(v).strip()
+        if not s:
+            return False
+        try:
+            return float(s) > 0.0
+        except Exception:
+            return False
+
+    def _on_tree_item_changed(self, item: QTreeWidgetItem, _col: int):
+        state = item.checkState(0)
+        for i in range(item.childCount()):
+            ch = item.child(i)
+            ch.setCheckState(0, state)
+        self._recompute()
+
+    # ---------------- Aggregation ----------------
+    def _included_paths(self) -> set:
+        paths = set()
+        def recurse(node: QTreeWidgetItem):
+            if node.childCount() == 0:
+                if node.checkState(0) == Qt.CheckState.Checked:
+                    p = node.data(0, Qt.ItemDataRole.UserRole)
+                    if isinstance(p, str):
+                        paths.add(p)
+                return
+            for i in range(node.childCount()):
+                recurse(node.child(i))
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            recurse(root.child(i))
+        return paths
+
+    def _fallback(self, header_val: str, global_val: str) -> str:
+        """Use global_val if header_val is empty/'0'/'0.0' and global_val is non-empty."""
+        hv = (header_val or "").strip()
+        gv = (global_val or "").strip()
+        if hv in ("", "0", "0.0") and gv != "":
+            return gv
+        return hv or "0"
+
+    def _recompute(self):
+        self._save_defaults()
+
+        selected = self._included_paths()
+        if not selected:
+            self.rows = []
+            self._refresh_table()
+            self._refresh_csv_text()
+            return
+
+        agg = defaultdict(lambda: {
+            'date': '0', 'filter': '0', 'number': 0, 'duration': 0, 'gain': '0', 'iso': '0',
+            'binning': '0', 'sensorCooling': 0, 'fNumber': '0', 'darks': '0', 'flats': '0',
+            'flatDarks': '0', 'bias': '0', 'bortle': '0', 'meanSqm': '0', 'meanFwhm': '0',
+            'temperature_sum': 0.0, 'temp_count': 0
+        })
+
+        # globals
+        fnum = self.fnum_edit.text().strip() or "0"
+        g_darks = self.darks_edit.text().strip()
+        g_flats = self.flats_edit.text().strip()
+        g_flatdarks = self.flatdarks_edit.text().strip()
+        g_bias = self.bias_edit.text().strip()
+        g_bortle = self.bortle_edit.text().strip()
+        g_sqm = self.mean_sqm_edit.text().strip()
+        g_fwhm = self.mean_fwhm_edit.text().strip()
+
+        for rec in self.records:
+            if rec["PATH"] not in selected:
+                continue
+
+            date = rec["DATE"] or "0"
+            filt_name = rec["FILTER"] or "0"
+            filt_id = self._filter_map.get(filt_name, filt_name)  # fallback to name if not mapped
+            exposure = rec["EXPOSURE"] or 0.0
+            key = (date, str(filt_id), float(exposure))
+
+            item = agg[key]
+            item['date'] = date
+            item['filter'] = str(filt_id)
+            item['duration'] = exposure
+            item['gain'] = rec["GAIN"]
+            item['iso'] = rec["ISO"]
+            item['binning'] = rec["BINNING"]
+            item['sensorCooling'] = int(round(rec["CCD_TEMP"])) if rec["CCD_TEMP"] else 0
+            item['fNumber'] = fnum
+
+            # per your request: use global text when headers are missing/zero
+            item['darks'] = self._fallback(rec["DARK"], g_darks)
+            item['flats'] = self._fallback(rec["FLAT"], g_flats)
+            item['flatDarks'] = self._fallback(rec["FLATDARK"], g_flatdarks)
+            item['bias'] = self._fallback(rec["BIAS"], g_bias)
+            item['bortle'] = self._fallback(rec["BORTLE"], g_bortle)
+            item['meanSqm'] = self._fallback(rec["MEAN_SQM"], g_sqm)
+            item['meanFwhm'] = self._fallback(rec["MEAN_FWHM"], g_fwhm)
+
+            # temperature average from FOCTEMP
+            if rec["FOCTEMP"]:
+                item['temperature_sum'] += float(rec["FOCTEMP"])
+                item['temp_count'] += 1
+            item['number'] += 1
+
+        out = []
+        for (_date, _fid, _exp), v in agg.items():
+            temp = int(round(v['temperature_sum'] / v['temp_count'])) if v['temp_count'] > 0 else 0
+            row = {
+                'date': v['date'], 'filter': v['filter'], 'number': v['number'],
+                'duration': v['duration'], 'gain': v['gain'], 'iso': v['iso'],
+                'binning': v['binning'], 'sensorCooling': v['sensorCooling'], 'fNumber': v['fNumber'],
+                'darks': v['darks'], 'flats': v['flats'], 'flatDarks': v['flatDarks'],
+                'bias': v['bias'], 'bortle': v['bortle'], 'meanSqm': v['meanSqm'],
+                'meanFwhm': v['meanFwhm'], 'temperature': temp
+            }
+
+            # NEW: if gain is present/positive, blank ISO so it won’t interfere
+            if self._has_gain(row['gain']):
+                row['iso'] = ""
+
+            out.append(row)
+
+        out.sort(key=lambda r: (r['date'], r['filter'], float(r['duration'])))
+        self.rows = out
+        self._refresh_table()
+        self._refresh_csv_text()
+
+    def _refresh_table(self):
+        cols = ['date','filter','number','duration','gain','iso','binning','sensorCooling',
+                'fNumber','darks','flats','flatDarks','bias','bortle','meanSqm','meanFwhm','temperature']
+        self.table.setRowCount(len(self.rows))
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+
+        for r, row in enumerate(self.rows):
+            for c, key in enumerate(cols):
+                item = QTableWidgetItem(str(row.get(key, "")))
+                if key == "filter" and not str(row.get(key, "")).isdigit():
+                    item.setForeground(Qt.GlobalColor.red)
+                self.table.setItem(r, c, item)
+
+        # default-fit to contents, but keep columns draggable afterward
+        self.table.resizeColumnsToContents()
+
+
+    # ---------------- Export ----------------
+    def _rows_to_csv_str(self) -> str:
+        base_fields = ['date','filter','number','duration','gain','iso','binning',
+                    'sensorCooling','fNumber','darks','flats','flatDarks','bias',
+                    'bortle','meanSqm','meanFwhm','temperature']
+
+        # If ANY row has a numeric gain, remove ISO column entirely.
+        drop_iso = any(self._has_gain(r.get('gain', '')) for r in (self.rows or []))
+        fieldnames = [f for f in base_fields if f != 'iso'] if drop_iso else base_fields
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(self.rows or [])
+        return buf.getvalue()
+
+    def _refresh_csv_text(self):
+        self.csv_view.setPlainText(self._rows_to_csv_str())
+
+    def _copy_csv_to_clipboard(self):
+        txt = self._rows_to_csv_str()
+        if not txt.strip():
+            QMessageBox.information(self, "Nothing to copy", "There is no CSV content yet.")
+            return
+        QGuiApplication.clipboard().setText(txt)
+        QMessageBox.information(self, "Copied", "CSV copied to clipboard.")
+
+
 
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
@@ -15034,8 +15858,9 @@ class StackingSuiteDialog(QDialog):
         else:
             self.update_status("ℹ️ No dual-band frames detected or split.")
 
-    def _write_band_fit(self, out_path: str, data: np.ndarray, src_header: fits.Header | None,
+    def _write_band_fit(self, out_path: str, data: np.ndarray, src_header: Optional[fits.Header],
                         band: str, src_filter: str):
+
         arr = np.ascontiguousarray(data.astype(np.float32))
 
         hdr = (src_header.copy() if isinstance(src_header, fits.Header) else fits.Header())
@@ -43117,7 +43942,8 @@ class MetricsWindow(QWidget):
 
         # internal storage
         self._all_images = []
-        self._current_indices: List[int] | None = None
+        self._current_indices: Optional[List[int]] = None
+
 
     def _update_status(self, *args):
         """Recompute and show: Flagged Items X / Y (Z%)."""
@@ -43217,7 +44043,7 @@ class BlinkTab(QWidget):
         self.loaded_images = []  # Store the image objects (as numpy arrays)
         self.image_labels = []  # Store corresponding file names for the TreeWidget
         self.image_manager = image_manager  # Reference to ImageManager
-        self.metrics_window: MetricsWindow | None = None
+        self.metrics_window: Optional[MetricsWindow] = None
         self.zoom_level = 0.5  # Default zoom level
         self.dragging = False  # Track whether the mouse is dragging
         self.last_mouse_pos = None  # Store the last mouse position
@@ -44315,7 +45141,7 @@ class BlinkTab(QWidget):
             print("No image loaded. Cannot fit to preview.")
             QMessageBox.warning(self, "Warning", "No image loaded. Cannot fit to preview.")
 
-    def _is_leaf(self, item: QTreeWidgetItem | None) -> bool:
+    def _is_leaf(self, item: Optional[QTreeWidgetItem]) -> bool:
         return bool(item and item.childCount() == 0)
 
     def on_right_click(self, pos):
@@ -49328,6 +50154,45 @@ class FullCurvesTab(QWidget):
             if hasattr(self, 'current_lut'):
                 self.updatePreviewLUT(self.current_lut, self.curve_mode)
 
+    def _capture_viewport(self):
+        """
+        Snapshot current zoom + scroll positions. Returns None if no pixmap yet.
+        """
+        if not self.scrollArea or not self.imageLabel or self.imageLabel.pixmap() is None:
+            return None
+        hbar = self.scrollArea.horizontalScrollBar()
+        vbar = self.scrollArea.verticalScrollBar()
+        return {
+            "zoom": self.zoom_factor,
+            "h_val": hbar.value(),
+            "h_max": max(1, hbar.maximum()),
+            "v_val": vbar.value(),
+            "v_max": max(1, vbar.maximum()),
+        }
+
+    def _restore_viewport(self, state):
+        """
+        Restore zoom + scroll positions (scaled if content size changed).
+        """
+        if not state:
+            return
+        # 1) restore zoom (this re-scales the pixmap)
+        self.zoom_factor = state["zoom"]
+        self._update_displayed_pixmap()
+
+        # 2) restore scrollbars proportionally to new content size
+        hbar = self.scrollArea.horizontalScrollBar()
+        vbar = self.scrollArea.verticalScrollBar()
+        new_hmax = max(1, hbar.maximum())
+        new_vmax = max(1, vbar.maximum())
+
+        h_target = int((state["h_val"] / state["h_max"]) * new_hmax)
+        v_target = int((state["v_val"] / state["v_max"]) * new_vmax)
+
+        hbar.setValue(h_target)
+        vbar.setValue(v_target)
+
+
     def get_visible_region(self):
         """Retrieve the coordinates of the visible region in the image."""
         viewport = self.scrollArea.viewport()
@@ -49746,6 +50611,8 @@ class FullCurvesTab(QWidget):
         print("Started processing thread.")
 
     def finishProcessing(self, adjusted_image):
+        # snapshot the view BEFORE we change the pixmap
+        view = self._capture_viewport()
         self.hideSpinner()
 
         if adjusted_image is None:
@@ -49755,7 +50622,6 @@ class FullCurvesTab(QWidget):
         # — Blend with mask if present —
         mask = self.get_active_mask()
         if mask is not None:
-            # normalize & expand dims as before…
             if mask.dtype not in (np.float32, np.float64):
                 mask = mask.astype(np.float32) / 255.0
             if self.original_image.ndim == 3 and mask.ndim == 2:
@@ -49763,12 +50629,6 @@ class FullCurvesTab(QWidget):
             if mask.shape[:2] != self.original_image.shape[:2]:
                 QMessageBox.critical(self, "Error", "Mask dimensions do not match the image dimensions.")
                 return
-            if mask.ndim == 2 and self.original_image.ndim == 3:
-                # RGB image, need mask shape (H, W, 1) or (H, W, 3)
-                mask = mask[..., None]
-            elif mask.ndim == 3 and self.original_image.ndim == 2:
-                # mono image, but mask is (H, W, 1) — squeeze to (H, W)
-                mask = np.squeeze(mask, axis=2)
             if self.original_image.ndim == 3 and mask.shape[2] == 1:
                 mask = np.repeat(mask, self.original_image.shape[2], axis=2)
 
@@ -49781,17 +50641,17 @@ class FullCurvesTab(QWidget):
         self.original_image = blended.copy()
         self.preview_image  = self.downsample_for_preview(blended, max_width=1080)
         self.image          = self.preview_image.copy()
-        self.show_image(self.image)
 
-        # — Reset the GHS UI when in GHS mode, otherwise re-init a Bézier curve —
+        # draw without losing zoom/pan
+        self.show_image(self.image, preserve_view_state=view)
+
+        # Reset the curve UI state, but DO NOT disturb the viewport (updatePreviewLUT already restores its own)
         if self.stretchTypeGroup.checkedButton().text() == "Universal Hyperbolic":
-            # This will zero out α/β/γ/LP/HP, clear the pivot line, 
-            # and rebuild the default 20-point GHS handles.
             self.resetCurve()
         else:
             self.curveEditor.initCurve()
 
-        # finally push it back into ImageManager
+        # push back into ImageManager (this may trigger on_image_changed; that method now also preserves view)
         if self.image_manager:
             meta = dict(
                 file_path=self.loaded_image_path,
@@ -49803,6 +50663,7 @@ class FullCurvesTab(QWidget):
                 self.original_image.copy(), meta, step_name="Curves Adjustment"
             )
             print("FullCurvesTab: Image updated in ImageManager with step name.")
+
 
 
 
@@ -50030,52 +50891,43 @@ class FullCurvesTab(QWidget):
             current_slot = self.image_manager.current_slot
             image, metadata = self.image_manager.get_current_image_and_metadata()
             self.on_image_changed(current_slot, image, metadata)
-
     def on_image_changed(self, slot, image, metadata):
         """
         Slot to handle image changes from ImageManager.
-        Updates the display if the current slot is affected.
+        Keeps current zoom/pan stable.
         """
-        if not self.isVisible():
+        if not self.isVisible() or image is None:
             return
-        if image is None:
-            return                
-        if slot == self.image_manager.current_slot:
-            # Ensure the image is a numpy array before proceeding
-            if not isinstance(image, np.ndarray):
-                image = np.array(image)  # Convert to numpy array if necessary
-                
-            # Set the image and store a copy for later use
-            self.loaded_image_path = metadata.get('file_path', None)
-            self.image = image
-            self.original_image = image.copy()  # Store a copy of the original image
-            self.original_header = metadata.get('original_header', None)
-            self.bit_depth = metadata.get('bit_depth', None)
-            self.is_mono = metadata.get('is_mono', False)
+        if slot != self.image_manager.current_slot:
+            return
 
-            self.preview_image = self.downsample_for_preview(image, max_width=1080)
-            self.image = self.preview_image.copy()
-            
-            # Save the previous scroll position
-            self.previous_scroll_pos = (
-                self.scrollArea.horizontalScrollBar().value(),
-                self.scrollArea.verticalScrollBar().value()
-            )
-            
-            if not isinstance(self.loaded_image_path, str):
-                self.loaded_image_path = ""
-            #self.fileLabel.setText(self.loaded_image_path)
-            
-            # Update the UI elements (buttons, etc.)
-            self.show_image(image)
-            self.update_image_display()
+        # ensure ndarray
+        if not isinstance(image, np.ndarray):
+            image = np.array(image)
 
-            # Enable or disable buttons based on image processing state
-            self.applyButton.setEnabled(True)
+        # snapshot view BEFORE changing pixmap (if any)
+        view = self._capture_viewport()
 
-            self.undoButton.setEnabled(len(self.undo_stack) > 0)
+        # Set master images
+        self.loaded_image_path = metadata.get('file_path', "") or ""
+        self.original_image = image.copy()
+        self.original_header = metadata.get('original_header', None)
+        self.bit_depth = metadata.get('bit_depth', None)
+        self.is_mono = metadata.get('is_mono', False)
 
-            print(f"FullCurvesTab: Image updated from ImageManager slot {slot}.")
+        # build preview shown on screen
+        self.preview_image = self.downsample_for_preview(self.original_image, max_width=1080)
+        self.image = self.preview_image.copy()
+
+        # single draw; restore view
+        self.show_image(self.image, preserve_view_state=view)
+
+        # enable buttons
+        self.applyButton.setEnabled(True)
+        self.undoButton.setEnabled(len(self.undo_stack) > 0)
+
+        print(f"FullCurvesTab: Image updated from ImageManager slot {slot}.")
+
 
     def downsample_for_preview(self, image_float32, max_width=1080):
         """
@@ -50105,7 +50957,15 @@ class FullCurvesTab(QWidget):
 
 
 
-    def show_image(self, image):
+    def show_image(self, image, preserve_view_state=None):
+        """
+        Display image without losing current zoom/pan.
+        Pass in a 'preserve_view_state' captured via _capture_viewport() when you
+        know the view will change (e.g., before Apply). If None, it will capture now.
+        """
+        # capture BEFORE changing the pixmap
+        state = preserve_view_state or self._capture_viewport()
+
         try:
             # Normalize image to 0-255 and convert to uint8
             display_image = (image * 255).astype(np.uint8)
@@ -50116,7 +50976,7 @@ class FullCurvesTab(QWidget):
 
             if display_image.ndim == 3 and display_image.shape[2] == 3:
                 # RGB Image
-                height, width, channels = display_image.shape
+                height, width, _ = display_image.shape
                 bytes_per_line = 3 * width
                 q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_RGB888)
             elif display_image.ndim == 2:
@@ -50125,20 +50985,23 @@ class FullCurvesTab(QWidget):
                 bytes_per_line = width
                 q_image = QImage(display_image.tobytes(), width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
             else:
-                print("Unsupported image format for display.")
                 QMessageBox.critical(self, "Error", "Unsupported image format for display.")
                 return
 
             pixmap = QPixmap.fromImage(q_image)
-            # 2) keep the un-zoomed copy
+            # keep the un-zoomed copy
             self._base_pixmap = pixmap
 
-            # 3) actually display it scaled to current zoom
+            # draw at current zoom
             self._update_displayed_pixmap()
+
+            # restore view (zoom again & scrollbars proportionally)
+            self._restore_viewport(state)
 
         except Exception as e:
             print(f"Error displaying image: {e}")
             QMessageBox.critical(self, "Error", f"Failed to display the image: {e}")
+
 
 
     def _update_displayed_pixmap(self):
