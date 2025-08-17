@@ -7258,8 +7258,8 @@ class FilterIdDialog(QDialog):
     BLANK_ROWS = 6  # how many empty rows to offer at the bottom
 
 
-    def __init__(self, parent, filters_in_data: list[str], settings: QSettings,
-                 current_map: dict[str, str] | None = None):
+    def __init__(self, parent, filters_in_data: List[str], settings: QSettings,
+                current_map: Optional[Dict[str, str]] = None):
         super().__init__(parent)
         self.setWindowTitle("AstroBin Filter IDs")
         self.settings = settings
@@ -7369,11 +7369,12 @@ class FilterIdDialog(QDialog):
         for r in rows:
             self.table.removeRow(r)
 
-    def _load_mapping(self) -> dict[str, str]:
+    def _load_mapping(self) -> Dict[str, str]:
+
         self.settings.beginGroup("astrobin_exporter")
         raw = self.settings.value("filter_map", "")
         self.settings.endGroup()
-        mapping: dict[str, str] = {}
+        mapping: Dict[str, str] = {}
         if isinstance(raw, str) and raw:
             for chunk in raw.split(";"):
                 if "=" in chunk:
@@ -7383,12 +7384,12 @@ class FilterIdDialog(QDialog):
                         mapping[k] = v
         return mapping
 
-    def mapping(self) -> dict[str, str]:
+    def mapping(self) -> Dict[str, str]:
         """
         Read table -> {name: id}. Keeps only rows with a non-empty name.
         If ID is empty, the pair is skipped (you can still use the filter name as fallback elsewhere).
         """
-        mp: dict[str, str] = {}
+        mp: Dict[str, str] = {}
         rows = self.table.rowCount()
         for r in range(rows):
             name_item = self.table.item(r, 0)
