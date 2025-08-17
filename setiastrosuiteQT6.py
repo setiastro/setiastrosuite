@@ -223,7 +223,8 @@ from PyQt6.QtWidgets import (
     QProgressDialog, 
     QDockWidget,
     QAbstractItemView,
-    QStyledItemDelegate
+    QStyledItemDelegate,
+    QCompleter    
 )
 
 # ----- QtGui -----
@@ -250,6 +251,8 @@ from PyQt6.QtGui import (
     QDoubleValidator,
     QFontDatabase,
     QGuiApplication,
+    QStandardItemModel,
+    QStandardItem,
     QAction  # NOTE: In PyQt6, QAction is in QtGui (moved from QtWidgets)
 )
 
@@ -287,7 +290,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.3"
+VERSION = "2.21.4"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -356,6 +359,7 @@ if hasattr(sys, '_MEIPASS'):
     exoicon_path = os.path.join(sys._MEIPASS, 'exoicon.png')
     peeker_icon = os.path.join(sys._MEIPASS, 'gridicon.png')
     dse_icon_path = os.path.join(sys._MEIPASS, 'dse.png')
+    astrobin_filters_csv_path = os.path.join(sys._MEIPASS, 'astrobin_filters.csv')
 else:
     # Development path
     icon_path = 'astrosuite.png'
@@ -422,6 +426,7 @@ else:
     exoicon_path = 'exoicon.png'
     peeker_icon = 'gridicon.png'
     dse_icon_path = 'dse.png'
+    astrobin_filters_csv_path = 'astrobin_filters.csv'
 
 
 def announce_zoom(method):
@@ -7236,6 +7241,31 @@ class BatchFITSHeaderDialog(QDialog):
 
 ASTROBIN_FILTER_URL = "https://app.astrobin.com/equipment/explorer/filter?page=1"
 
+OFFLINE_FILTERS_CSV_DEFAULT = astrobin_filters_csv_path
+
+class _IdOnlyCompleter(QCompleter):
+    """
+    Shows 'ID — Brand — Name' in the popup, but when a row is chosen it inserts only the ID.
+    """
+    def pathFromIndex(self, index):
+        # Return the numeric ID stored in UserRole
+        return index.data(Qt.ItemDataRole.UserRole) or super().pathFromIndex(index)
+
+class _AstrobinIdDelegate(QStyledItemDelegate):
+    """
+    QLineEdit with int validator + optional completer for the AstroBin ID column.
+    """
+    def __init__(self, parent=None, completer: QCompleter | None = None):
+        super().__init__(parent)
+        self._completer = completer
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        editor.setPlaceholderText("e.g. 4408")
+        editor.setValidator(QIntValidator(1, 999_999_999, editor))
+        if self._completer is not None:
+            editor.setCompleter(self._completer)
+        return editor
 
 class _IntOnlyDelegate(QStyledItemDelegate):
     """Editor that only allows integers (for AstroBin ID column)."""
@@ -7277,14 +7307,21 @@ class FilterIdDialog(QDialog):
         root = QVBoxLayout(self)
 
         # Help row with link
+        # Help row with link
         help_row = QHBoxLayout()
         help_label = QLabel("Edit filter names and their AstroBin numeric IDs.")
         help_btn = QToolButton(self)
         help_btn.setText("?")
         help_btn.setToolTip("Open AstroBin Equipment Explorer (Filters)")
         help_btn.clicked.connect(lambda: webbrowser.open(ASTROBIN_FILTER_URL))
+
+        self.load_db_btn = QPushButton(self)  # <- keep a handle on it
+        self.load_db_btn.setToolTip("Search or load the offline filters database.")
+        self.load_db_btn.clicked.connect(self._on_offline_action)
+
         help_row.addWidget(help_label)
         help_row.addStretch(1)
+        help_row.addWidget(self.load_db_btn)
         help_row.addWidget(help_btn)
         root.addLayout(help_row)
 
@@ -7299,7 +7336,11 @@ class FilterIdDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
 
         # numeric delegate on column 1 (AstroBin ID)
-        self.table.setItemDelegateForColumn(1, _IntOnlyDelegate(self.table))
+        self._load_offline_db()                         # tries settings/default path automatically
+        self._id_completer = self._make_id_completer()  # may be None if no CSV found
+        self.table.setItemDelegateForColumn(1, _AstrobinIdDelegate(self.table, completer=self._id_completer))
+
+        self._update_offline_button_text()  # <- set initial text depending on DB presence
 
         # Fill rows
         rows = len(all_names) + self.BLANK_ROWS
@@ -7352,6 +7393,21 @@ class FilterIdDialog(QDialog):
         self.table.setCurrentCell(0, 0)
 
     # ----- helpers -----
+    def _update_offline_button_text(self):
+        if getattr(self, "_offline_rows", None):
+            self.load_db_btn.setText("Search offline DB…")
+        else:
+            self.load_db_btn.setText("Load offline DB…")
+
+    def _on_offline_action(self):
+        if getattr(self, "_offline_rows", None):
+            self._open_offline_search()   # search picker
+        else:
+            self._browse_offline_db()     # first-time: pick CSV
+            self._id_completer = self._make_id_completer()
+            self.table.setItemDelegateForColumn(1, _AstrobinIdDelegate(self.table, completer=self._id_completer))
+            self._update_offline_button_text()
+
     def _add_row(self):
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -7409,6 +7465,151 @@ class FilterIdDialog(QDialog):
         self.settings.beginGroup("astrobin_exporter")
         self.settings.setValue("filter_map", blob)
         self.settings.endGroup()
+
+    def _find_offline_csv(self) -> str | None:
+        # 1) user-specified path in settings
+        self.settings.beginGroup("astrobin_exporter")
+        saved = self.settings.value("offline_filters_csv", "")
+        self.settings.endGroup()
+        if isinstance(saved, str) and saved and os.path.isfile(saved):
+            return saved
+        # 2) default next to the app
+        if os.path.isfile(OFFLINE_FILTERS_CSV_DEFAULT):
+            return OFFLINE_FILTERS_CSV_DEFAULT
+        return None
+
+    def _open_offline_search(self):
+        if not getattr(self, "_offline_rows", None):
+            QMessageBox.information(self, "No DB", "Offline filters database not loaded yet.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Search AstroBin Filters (offline)")
+        v = QVBoxLayout(dlg)
+
+        q = QLineEdit(dlg)
+        q.setPlaceholderText("Search ID, brand, or name…")
+        v.addWidget(q)
+
+        tbl = QTableWidget(dlg)
+        tbl.setColumnCount(3)
+        tbl.setHorizontalHeaderLabels(["ID", "Brand", "Name"])
+        hdr = tbl.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        tbl.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tbl.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        v.addWidget(tbl, 1)
+
+        # --- fill rows ---
+        rows = sorted(self._offline_rows, key=lambda r: (r.get("brand","").lower(), r.get("name","").lower()))
+        tbl.setRowCount(len(rows))
+        for r, data in enumerate(rows):
+            for c, key in enumerate(("id","brand","name")):
+                it = QTableWidgetItem(data.get(key,""))
+                if c == 0:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                tbl.setItem(r, c, it)
+
+        dlg.resize(500, 350)              # initial dialog size
+        tbl.resizeColumnsToContents()       # let Qt compute good starting widths
+        hdr.resizeSection(0, 90)            # ID column ~90 px
+        hdr.resizeSection(1, 90)           # Brand column ~220 px
+
+        def apply_filter(text: str):
+            t = (text or "").lower()
+            for r in range(tbl.rowCount()):
+                row_txt = " ".join((tbl.item(r, c).text() if tbl.item(r, c) else "") for c in range(3)).lower()
+                tbl.setRowHidden(r, t not in row_txt)
+
+        q.textChanged.connect(apply_filter)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, parent=dlg)
+        v.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+
+        tbl.doubleClicked.connect(lambda *_: dlg.accept())
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            r = tbl.currentRow()
+            if r >= 0:
+                fid = tbl.item(r, 0).text()
+                cur = self.table.currentRow()
+                if cur < 0:
+                    cur = 0
+                item = QTableWidgetItem(fid)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(cur, 1, item)
+                self.table.setCurrentCell(cur, 1)
+                self.table.editItem(item)
+
+    def _load_offline_db(self, csv_path: str | None = None) -> list[dict]:
+        """
+        Returns list of dicts: {'id': '4413', 'brand': 'Brand', 'name': 'Filter Name'}
+        """
+        if not csv_path:
+            csv_path = self._find_offline_csv()
+        self._offline_rows = []
+        if not csv_path:
+            return self._offline_rows
+
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                rdr = csv.DictReader(f)
+                for row in rdr:
+                    fid = (row.get("id") or "").strip()
+                    if not fid.isdigit():
+                        continue
+                    self._offline_rows.append({
+                        "id": fid,
+                        "brand": (row.get("brand") or "").strip(),
+                        "name": (row.get("name") or "").strip()
+                    })
+            # remember the path
+            self.settings.beginGroup("astrobin_exporter")
+            self.settings.setValue("offline_filters_csv", csv_path)
+            self.settings.endGroup()
+        except Exception as e:
+            print(f"[WARN] Failed to load offline CSV: {e}")
+        return self._offline_rows
+
+    def _make_id_completer(self) -> QCompleter | None:
+        """
+        Build a completer from self._offline_rows that shows 'ID — Brand — Name'
+        but inserts only the ID into the editor.
+        """
+        rows = getattr(self, "_offline_rows", None) or []
+        if not rows:
+            return None
+
+        model = QStandardItemModel()
+        for r in rows:
+            fid = r["id"]
+            brand = r.get("brand") or ""
+            name  = r.get("name")  or ""
+            disp = f"{fid} — {brand} — {name}".strip(" —")
+            it = QStandardItem(disp)
+            it.setData(fid, Qt.ItemDataRole.UserRole)   # what we want to insert
+            model.appendRow(it)
+
+        comp = _IdOnlyCompleter(model, self)
+        comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchFlag.MatchContains)   # substring matches
+        comp.setCompletionRole(Qt.ItemDataRole.DisplayRole)
+        return comp
+
+    def _browse_offline_db(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select AstroBin Filters CSV", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not path:
+            return
+        self._load_offline_db(path)
+        self._id_completer = self._make_id_completer()
+        # re-attach a new delegate with the fresh completer
+        self.table.setItemDelegateForColumn(1, _AstrobinIdDelegate(self.table, completer=self._id_completer))
 
 
 class AstrobinExportTab(QWidget):
