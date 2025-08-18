@@ -224,6 +224,7 @@ from PyQt6.QtWidgets import (
     QDockWidget,
     QAbstractItemView,
     QStyledItemDelegate,
+    QListView,
     QCompleter    
 )
 
@@ -280,6 +281,7 @@ from PyQt6.QtCore import (
     QThreadPool,
     QSignalBlocker,
     QStandardPaths,
+    QModelIndex,
     QMetaObject
 )
 
@@ -1043,6 +1045,7 @@ class AstroEditingSuite(QMainWindow):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setAllowedAreas(Qt.ToolBarArea.AllToolBarAreas)
         self.addToolBar(toolbar)
+        
 
         # Add "Copy Slot" Button to Toolbar with Icon
         copy_slot_icon = QIcon(copyslot_path)  # Ensure 'copyslot.png' is the correct path
@@ -1385,6 +1388,8 @@ class AstroEditingSuite(QMainWindow):
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
 
+        self._install_command_search()
+
         # --------------------
         # Apply Default Theme
         # --------------------
@@ -1398,6 +1403,130 @@ class AstroEditingSuite(QMainWindow):
         self.check_for_updatesstartup()  # Call this in your app's init
         self.update_slot_toolbar_highlight()
         self.curveDock.hide()
+
+    def _install_command_search(self):
+        mb = self.menuBar()
+        # Harmless on Windows, required on macOS for corner widgets to show
+        mb.setNativeMenuBar(False)
+
+        # Remove any previous corner widget (just in case)
+        old = mb.cornerWidget(Qt.Corner.TopRightCorner)
+        if old is not None:
+            old.deleteLater()
+
+        # --- holder so width is respected ---
+        holder = QWidget(mb)
+        lay = QHBoxLayout(holder)
+        lay.setContentsMargins(0, 0, 6, 0)      # a little right padding
+        lay.setSpacing(6)
+
+        self._cmd_edit = QLineEdit(holder)
+        self._cmd_edit.setPlaceholderText("Search commands…  (Ctrl+Shift+P)")
+        self._cmd_edit.setClearButtonEnabled(True)
+        self._cmd_edit.setMinimumWidth(250)     # make it wide
+        self._cmd_edit.setMaximumWidth(600)     # optional cap
+        self._cmd_edit.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                    QSizePolicy.Policy.Fixed)
+        lay.addWidget(self._cmd_edit)
+
+        mb.setCornerWidget(holder, Qt.Corner.TopRightCorner)
+        holder.show()
+
+        # hook up completer/shortcut like before
+        self._cmd_model = QStandardItemModel(self)
+        self._cmd_completer = QCompleter(self._cmd_model, self)
+        self._cmd_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._cmd_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        popup = QListView(self); popup.setMinimumWidth(420); popup.setIconSize(QSize(18, 18))
+        self._cmd_completer.setPopup(popup)
+        self._cmd_edit.setCompleter(self._cmd_completer)
+        self._cmd_completer.activated[QModelIndex].connect(self._run_selected_completion)
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self, activated=self._focus_command_search)
+        self._build_command_model()
+        self._cmd_edit.returnPressed.connect(self._trigger_first_visible_completion)
+
+    def _focus_command_search(self):
+        self._cmd_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._cmd_edit.selectAll()
+
+    def _trigger_first_visible_completion(self):
+        popup = self._cmd_completer.popup()
+        # When the popup is showing, Enter will also emit activated, but this is a safety net
+        if popup and popup.model() and popup.model().rowCount() > 0:
+            idx = popup.model().index(0, 0)
+            act = idx.data(Qt.ItemDataRole.UserRole)
+            if act:
+                act.trigger()
+        self._cmd_edit.clear()
+
+    def _run_selected_completion(self, index: QModelIndex):
+        act = index.data(Qt.ItemDataRole.UserRole)
+        if act:
+            act.trigger()
+            self._cmd_edit.clear()
+
+    def _build_command_model(self):
+        """Create a list of all actions with icons and menu path."""
+        self._cmd_model.clear()
+        for action, path in self._gather_menu_actions():
+            text = (action.text() or "").replace("&", "").strip()
+            if not text:
+                continue
+            it = QStandardItem(text)
+            # Icon
+            if not action.icon().isNull():
+                it.setIcon(action.icon())
+            # Tooltip shows where it lives (Menu/Submenu/Action)
+            it.setToolTip(path)
+            # Stash the QAction itself to trigger later
+            it.setData(action, Qt.ItemDataRole.UserRole)
+            self._cmd_model.appendRow(it)
+
+    def _gather_menu_actions(self):
+        """
+        Return [(QAction, 'Menu/Submenu/Action path'), ...] with duplicates removed.
+        Includes menu actions and toolbar-only actions.
+        """
+        results = []
+        seen = set()
+
+        def walk_menu(menu: QMenu, prefix: str):
+            for a in menu.actions():
+                if a.isSeparator():
+                    continue
+                sub = a.menu()
+                title = (a.text() or "").replace("&", "").strip()
+                if sub:
+                    walk_menu(sub, f"{prefix}{title}/")
+                else:
+                    if id(a) in seen:
+                        continue
+                    seen.add(id(a))
+                    results.append((a, f"{prefix}{title}"))
+
+        # Menus
+        for top_action in self.menuBar().actions():
+            m = top_action.menu()
+            if m:
+                title = (m.title() or "").replace("&", "").strip()
+                walk_menu(m, f"{title}/")
+
+        # Toolbars (to catch actions not present in menus)
+        for tb in self.findChildren(QToolBar):
+            for a in tb.actions():
+                if a.isSeparator() or a.menu():
+                    continue
+                if id(a) in seen:
+                    continue
+                seen.add(id(a))
+                title = (a.text() or "").replace("&", "").strip()
+                results.append((a, f"Toolbar/{tb.windowTitle()}/{title}"))
+
+        # Optional: hide a few you might not want
+        blacklist = {"", "Exit"}
+        results = [(a, p) for (a, p) in results if (a.text() or "").replace("&", "") not in blacklist]
+        return results
+
 
     def _is_valid_fits_path(self, path: Optional[str]) -> bool:
         if not path or not isinstance(path, str):
@@ -7255,7 +7384,8 @@ class _AstrobinIdDelegate(QStyledItemDelegate):
     """
     QLineEdit with int validator + optional completer for the AstroBin ID column.
     """
-    def __init__(self, parent=None, completer: QCompleter | None = None):
+    def __init__(self, parent=None, completer: Optional[QCompleter] = None):
+
         super().__init__(parent)
         self._completer = completer
 
@@ -7466,7 +7596,8 @@ class FilterIdDialog(QDialog):
         self.settings.setValue("filter_map", blob)
         self.settings.endGroup()
 
-    def _find_offline_csv(self) -> str | None:
+    def _find_offline_csv(self) -> Optional[str]:
+
         # 1) user-specified path in settings
         self.settings.beginGroup("astrobin_exporter")
         saved = self.settings.value("offline_filters_csv", "")
@@ -7545,7 +7676,8 @@ class FilterIdDialog(QDialog):
                 self.table.setCurrentCell(cur, 1)
                 self.table.editItem(item)
 
-    def _load_offline_db(self, csv_path: str | None = None) -> list[dict]:
+    def _load_offline_db(self, csv_path: Optional[str] = None) -> List[Dict]:
+
         """
         Returns list of dicts: {'id': '4413', 'brand': 'Brand', 'name': 'Filter Name'}
         """
@@ -7575,7 +7707,8 @@ class FilterIdDialog(QDialog):
             print(f"[WARN] Failed to load offline CSV: {e}")
         return self._offline_rows
 
-    def _make_id_completer(self) -> QCompleter | None:
+    def _make_id_completer(self) -> Optional[QCompleter]:
+
         """
         Build a completer from self._offline_rows that shows 'ID — Brand — Name'
         but inserts only the ID into the editor.
@@ -12687,10 +12820,26 @@ class StackingSuiteDialog(QDialog):
                 background-color: #FF6347;
             }
         """)
-        layout.addWidget(self.wrench_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        header_row = QHBoxLayout()
+        header_row.addWidget(self.wrench_button)
+
+        self.stacking_path_display = QLineEdit(self.stacking_directory or "")
+        self.stacking_path_display.setReadOnly(True)
+        self.stacking_path_display.setPlaceholderText("No stacking folder selected")
+        self.stacking_path_display.setFrame(False)  # nicer, label-like look
+        self.stacking_path_display.setToolTip(self.stacking_directory or "No stacking folder selected")
+        header_row.addWidget(self.stacking_path_display, 1)  # stretch
+
+        layout.addLayout(header_row)
         self.setup_status_bar(layout)
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self.restore_saved_master_calibrations()
+        self._update_stacking_path_display()
+
+    def _update_stacking_path_display(self):
+        txt = self.stacking_directory or ""
+        self.stacking_path_display.setText(txt)
+        self.stacking_path_display.setToolTip(txt or "No stacking folder selected")
 
     def restore_saved_master_calibrations(self):
         saved_darks = self.settings.value("stacking/master_darks", [], type=list)
@@ -13227,6 +13376,7 @@ class StackingSuiteDialog(QDialog):
         print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
         print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
         self.update_status("✅ Saved stacking settings.")
+        self._update_stacking_path_display()
         dialog.accept()
 
     def select_stacking_directory(self):
@@ -13236,6 +13386,8 @@ class StackingSuiteDialog(QDialog):
             self.stacking_directory = directory
             self.dir_path_edit.setText(directory)  # No more AttributeError
             self.settings.setValue("stacking/dir", directory)  # Save the new directory
+            self._update_stacking_path_display()
+
 
 
     def create_dark_tab(self):
@@ -45905,6 +46057,7 @@ class CosmicClarityTab(QWidget):
         self.sharpen_channels_label = QLabel("Sharpen RGB Channels Separately:")
         self.sharpen_channels_dropdown = QComboBox()
         self.sharpen_channels_dropdown.addItems(["No", "Yes"])  # "No" means don't separate, "Yes" means separate
+
         left_layout.addWidget(self.sharpen_channels_label)
         left_layout.addWidget(self.sharpen_channels_dropdown)
 
@@ -46067,6 +46220,9 @@ class CosmicClarityTab(QWidget):
 
         self.setLayout(main_layout)
         self.update_ui_for_mode()
+
+        self.sharpen_channels_dropdown.hide()
+        self.sharpen_channels_label.hide()
 
     def update_image_display(self):
         """
@@ -46607,6 +46763,8 @@ class CosmicClarityTab(QWidget):
             w.show()
         # now hide or show PSF slider depending on checkbox state
         self._update_psf_visibility()
+        self.sharpen_channels_dropdown.hide()
+        self.sharpen_channels_label.hide()
 
     def hide_sharpen_controls(self):
         for w in (
@@ -46617,7 +46775,7 @@ class CosmicClarityTab(QWidget):
             self.sharpen_channels_label, self.sharpen_channels_dropdown,
             self.auto_detect_psf_checkbox
         ):
-            w.hide()
+            w.hide()            
 
     def show_denoise_controls(self):
         self.denoise_strength_label.show()
