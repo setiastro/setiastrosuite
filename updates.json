@@ -1,9 +1,9 @@
 {
-  "version": "2.21.4",
+  "version": "2.21.5",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.4/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.4/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.4/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.5/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.5/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.5/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Search Feature!!    Offline Astrobin Database available in Astrobin Exporter"
+  "notes": "New Feature: Batch Renaming under FITS Mod & Export. Quickly rename all your fits files with whatever you want out of the fits header and custom wording with filename previewing. Overwrite or copy to same or different destinations.  Added astronomical days option to Astrobin Exporter"
 }
