@@ -12,7 +12,7 @@ import time
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import getcontext
 from urllib.parse import quote
 from urllib.parse import quote_plus
@@ -245,6 +245,7 @@ from PyQt6.QtGui import (
     QBrush,
     QShortcut,
     QPolygon,
+    QFontMetrics,    
     QPolygonF,
     QKeyEvent,
     QPalette, 
@@ -292,7 +293,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.4"
+VERSION = "2.21.5"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -1356,7 +1357,10 @@ class AstroEditingSuite(QMainWindow):
         self.astrobin_export_action.triggered.connect(self.open_astrobin_exporter)
         fits_menu.addAction(self.astrobin_export_action)
 
-        
+        self.batch_rename_action = QAction("Batch Rename from FITS…", self)
+        self.batch_rename_action.setStatusTip("Rename multiple files using FITS header keywords")
+        self.batch_rename_action.triggered.connect(self.open_batch_renamer)
+        fits_menu.addAction(self.batch_rename_action)        
 
         # --------------------
         # History Menu
@@ -1586,6 +1590,12 @@ class AstroEditingSuite(QMainWindow):
         """Open non-modal batch header modification dialog."""
         dlg = BatchFITSHeaderDialog(parent=self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def open_batch_renamer(self):
+        dlg = BatchRenamerDialog(parent=self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.resize(1050, 720)
         dlg.show()
 
     def show_history_dialog(self):
@@ -7864,6 +7874,12 @@ class AstrobinExportTab(QWidget):
         self.mean_fwhm_edit.textChanged.connect(self._recompute)
         grid.addWidget(self.mean_fwhm_edit, 2, 3)
 
+        self.noon_cb = QCheckBox("Group nights noon → noon (local time)")
+        self.noon_cb.setToolTip("Prevents splitting a single observing night at midnight.")
+        self.noon_cb.setChecked(self.settings.value("astrobin_exporter/noon_to_noon", True, type=bool))
+        self.noon_cb.toggled.connect(self._recompute)
+        grid.addWidget(self.noon_cb, 2, 4, 1, 2)
+
         # keep last 2 cells open or use a spacer
         grid.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum), 2, 4, 1, 2)
 
@@ -7942,6 +7958,7 @@ class AstrobinExportTab(QWidget):
         self.bortle_edit.setText(str(self.settings.value("bortle", "")))
         self.mean_sqm_edit.setText(str(self.settings.value("mean_sqm", "")))
         self.mean_fwhm_edit.setText(str(self.settings.value("mean_fwhm", "")))
+        self.noon_cb.setChecked(self.settings.value("noon_to_noon", True, type=bool))
         self._last_dir = str(self.settings.value("last_dir", "")) or ""
         self.settings.endGroup()
 
@@ -7955,6 +7972,7 @@ class AstrobinExportTab(QWidget):
         self.settings.setValue("bortle", self.bortle_edit.text().strip())
         self.settings.setValue("mean_sqm", self.mean_sqm_edit.text().strip())
         self.settings.setValue("mean_fwhm", self.mean_fwhm_edit.text().strip())
+        self.settings.setValue("noon_to_noon", self.noon_cb.isChecked())
         # last_dir is saved when you actually pick a folder/files
         self.settings.endGroup()
 
@@ -8112,7 +8130,8 @@ class AstrobinExportTab(QWidget):
                     "BORTLE": str(h.get("BORTLE","0")),
                     "MEAN_SQM": str(h.get("MEAN_SQM","0")),
                     "MEAN_FWHM": str(h.get("MEAN_FWHM","0")),
-                    "DATE": self._to_date_only(str(h.get("DATE-OBS","0")))
+                    "DATE": self._to_date_only(str(h.get("DATE-OBS","0"))),
+                    "DATEOBS": str(h.get("DATE-OBS","")),
                 }
                 self.records.append(rec)
                 ok += 1
@@ -8143,6 +8162,36 @@ class AstrobinExportTab(QWidget):
         if not date_obs or date_obs == "0":
             return "0"
         return date_obs.split("T")[0].strip()
+
+    def _parse_date_obs(self, s: str) -> Optional[datetime]:
+
+        s = (s or "").strip()
+        if not s or s == "0":
+            return None
+        # FITS often has a trailing 'Z'
+        s = s.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            return None
+        # Assume UTC if naive
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def _night_date_str(self, date_obs: str, noon_to_noon: bool) -> str:
+        """Return YYYY-MM-DD for the 'astronomical night' using local time."""
+        dt = self._parse_date_obs(date_obs)
+        if not dt:
+            # Fallback: best effort from what's there
+            return (date_obs.split("T")[0] if date_obs else "0")
+
+        local_tz = datetime.now().astimezone().tzinfo
+        ldt = dt.astimezone(local_tz)
+        if noon_to_noon:
+            # map 00:00–11:59 to previous calendar date
+            ldt = ldt - timedelta(hours=12)
+        return ldt.date().isoformat()
 
     def _build_tree(self):
         self.tree.blockSignals(True)
@@ -8239,6 +8288,7 @@ class AstrobinExportTab(QWidget):
 
     def _recompute(self):
         self._save_defaults()
+        noon_to_noon = self.noon_cb.isChecked()
 
         selected = self._included_paths()
         if not selected:
@@ -8268,7 +8318,7 @@ class AstrobinExportTab(QWidget):
             if rec["PATH"] not in selected:
                 continue
 
-            date = rec["DATE"] or "0"
+            date = self._night_date_str(rec.get("DATEOBS",""), noon_to_noon)
             filt_name = rec["FILTER"] or "0"
             filt_id = self._filter_map.get(filt_name, filt_name)  # fallback to name if not mapped
             exposure = rec["EXPOSURE"] or 0.0
@@ -8367,7 +8417,430 @@ class AstrobinExportTab(QWidget):
         QGuiApplication.clipboard().setText(txt)
         QMessageBox.information(self, "Copied", "CSV copied to clipboard.")
 
+class BatchRenamerDialog(QDialog):
+    """
+    Batch rename files using a template like:
+      LIGHT_{FILTER}_{EXPOSURE:.0f}s_{DATE-OBS:%Y%m%d}_{#03}.{ext}
 
+    Supports:
+      - Any FITS keyword in braces: {FILTER}, {EXPOSURE}, {OBJECT}, …
+      - Optional format spec: {EXPOSURE:.1f}, {DATE-OBS:%Y%m%d}
+      - Counter: {#} or {#03} (zero-padded width)
+      - Extension placeholder: {ext} (original extension, no dot)
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Rename from FITS")
+        self.settings = QSettings()
+        self.files: list[str] = []
+        self.headers: dict[str, fits.Header] = {}
+        self.union_keys: list[str] = []
+        self._build_ui()
+        self._load_settings()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        # Top: source and destination
+        io_row = QHBoxLayout()
+        self.src_edit = QLineEdit(self)
+        self.src_edit.setPlaceholderText("Select a folder or add files…")
+        btn_scan = QPushButton("Scan Folder…", self); btn_scan.clicked.connect(self._scan_folder)
+        btn_add = QPushButton("Add Files…", self); btn_add.clicked.connect(self._add_files)
+        io_row.addWidget(QLabel("Source:"))
+        io_row.addWidget(self.src_edit, 1)
+        io_row.addWidget(btn_scan)
+        io_row.addWidget(btn_add)
+
+        self.dest_edit = QLineEdit(self)
+        self.dest_edit.setPlaceholderText("(optional) Rename into this folder; leave empty to rename in place")
+        btn_dest = QPushButton("Browse…", self); btn_dest.clicked.connect(self._pick_dest)
+        io_row2 = QHBoxLayout()
+        io_row2.addWidget(QLabel("Destination:"))
+        io_row2.addWidget(self.dest_edit, 1)
+        io_row2.addWidget(btn_dest)
+
+        root.addLayout(io_row); root.addLayout(io_row2)
+
+        # Middle: template & options
+        pat_box = QGroupBox("Filename pattern")
+        pat_lay = QHBoxLayout(pat_box)
+
+        self.pattern_edit = QLineEdit(self)
+        self.pattern_edit.setPlaceholderText("e.g. LIGHT_{FILTER}_{EXPOSURE:.0f}s_{DATE-OBS:%Y%m%d}_{#03}.{ext}")
+        self.pattern_edit.textChanged.connect(self._refresh_preview)
+
+        self.lower_cb = QCheckBox("lowercase", self);     self.lower_cb.toggled.connect(self._refresh_preview)
+        self.slug_cb  = QCheckBox("spaces→_", self);      self.slug_cb.toggled.connect(self._refresh_preview)
+        self.keep_ext_cb = QCheckBox("append .{ext} if missing", self); self.keep_ext_cb.setChecked(True)
+        self.index_start = QSpinBox(self); self.index_start.setRange(0, 999999); self.index_start.setValue(1)
+        self.index_start.valueChanged.connect(self._refresh_preview)
+
+        self.token_combo = QComboBox(self)
+        self.token_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.token_combo.setMinimumContentsLength(12)
+        self.token_combo.setEditable(False)
+        self.token_combo.setToolTip("Insert token")
+        self.token_combo.activated.connect(
+                lambda idx: self._insert_token(self.token_combo.itemText(idx))
+            )
+
+        insert_btn = QPushButton("Insert", self)
+        insert_btn.clicked.connect(lambda: self._insert_token(self.token_combo.currentText()))
+
+        pat_lay.addWidget(QLabel("Template:")); pat_lay.addWidget(self.pattern_edit, 1)
+        pat_lay.addWidget(self.token_combo); pat_lay.addWidget(insert_btn)
+        pat_lay.addWidget(self.lower_cb); pat_lay.addWidget(self.slug_cb)
+        pat_lay.addWidget(QLabel("Index start:")); pat_lay.addWidget(self.index_start)
+        pat_lay.addWidget(self.keep_ext_cb)
+
+        root.addWidget(pat_box)
+
+        # Splitter: keys list | table
+        split = QSplitter(Qt.Orientation.Horizontal, self)
+
+        # Keys list
+        left = QWidget(self); lyt = QVBoxLayout(left)
+        self.keys_list = QListWidget(self)
+        self.keys_list.itemDoubleClicked.connect(self._insert_key_from_list)
+        lyt.addWidget(QLabel("Available FITS keywords (double-click to insert):"))
+        lyt.addWidget(self.keys_list, 1)
+        split.addWidget(left)
+
+        # Table
+        right = QWidget(self); rlyt = QVBoxLayout(right)
+        self.table = QTableWidget(self); self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Old path", "→", "New name", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        rlyt.addWidget(QLabel("Preview"))
+        rlyt.addWidget(self.table, 1)
+        split.addWidget(right)
+        split.setSizes([250, 700])
+
+        root.addWidget(split, 1)
+
+        # Buttons
+        btns = QDialogButtonBox(self)
+        self.btn_preview = btns.addButton("Preview", QDialogButtonBox.ButtonRole.ActionRole)
+        self.btn_rename  = btns.addButton("Rename", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.btn_close   = btns.addButton(QDialogButtonBox.StandardButton.Close)
+        self.btn_preview.clicked.connect(self._refresh_preview)
+        self.btn_rename.clicked.connect(self._do_rename)
+        self.btn_close.clicked.connect(self.close)
+        root.addWidget(btns)
+
+        self._populate_token_keywords()
+
+    # ---------- settings ----------
+    def _load_settings(self):
+        self.settings.beginGroup("batchrename")
+        self.src_edit.setText(self.settings.value("last_dir", "", type=str) or "")
+        self.dest_edit.setText(self.settings.value("dest_dir", "", type=str) or "")
+        self.pattern_edit.setText(self.settings.value("pattern",
+            "LIGHT_{FILTER}_{EXPOSURE:.0f}s_{DATE-OBS:%Y%m%d}_{#03}.{ext}", type=str))
+        self.lower_cb.setChecked(self.settings.value("lower", False, type=bool))
+        self.slug_cb.setChecked(self.settings.value("slug", True, type=bool))
+        self.keep_ext_cb.setChecked(self.settings.value("keep_ext", True, type=bool))
+        self.index_start.setValue(self.settings.value("index_start", 1, type=int))
+        self.settings.endGroup()
+        if self.src_edit.text():
+            self._scan_existing(self.src_edit.text())
+
+    def _save_settings(self):
+        self.settings.beginGroup("batchrename")
+        self.settings.setValue("last_dir", self.src_edit.text().strip())
+        self.settings.setValue("dest_dir", self.dest_edit.text().strip())
+        self.settings.setValue("pattern", self.pattern_edit.text().strip())
+        self.settings.setValue("lower", self.lower_cb.isChecked())
+        self.settings.setValue("slug", self.slug_cb.isChecked())
+        self.settings.setValue("keep_ext", self.keep_ext_cb.isChecked())
+        self.settings.setValue("index_start", self.index_start.value())
+        self.settings.endGroup()
+
+    # ---------- file loading ----------
+    def _scan_folder(self):
+        start = self.src_edit.text().strip()
+        path = QFileDialog.getExistingDirectory(self, "Select Folder", start or "")
+        if not path: return
+        self.src_edit.setText(path)
+        self._scan_existing(path)
+        self._save_settings()
+
+
+    def _scan_existing(self, path: str):
+        paths = []
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.lower().endswith((".fits", ".fit", ".fts", ".fz")):
+                    paths.append(os.path.join(root, f))
+        paths.sort()
+        self._set_files(paths)
+
+
+    def _add_files(self):
+        start = self.src_edit.text().strip() or ""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Add FITS files", start, "FITS files (*.fit *.fits *.fts *.fz);;All files (*)"
+        )
+        if not files: return
+        new = sorted(set(self.files) | set(files))
+        self._set_files(new)
+        if not self.src_edit.text() and files:
+            self.src_edit.setText(os.path.dirname(files[0]))
+        self._save_settings()
+
+
+    def _set_files(self, paths: List[str]):
+        self.files = paths
+        self.headers.clear()
+        union = set()
+        ok, bad = 0, 0
+        for p in self.files:
+            try:
+                with fits.open(p, memmap=False) as hdul:
+                    h = hdul[0].header
+                self.headers[p] = h
+                union.update([str(k) for k in h.keys()])
+                ok += 1
+            except Exception:
+                bad += 1
+        self.union_keys = sorted(union)
+        self._rebuild_keys_list()
+        self._fill_table_rows()
+        self._refresh_preview()
+
+
+    def _pick_dest(self):
+        start = self.dest_edit.text().strip() or self.src_edit.text().strip()
+        d = QFileDialog.getExistingDirectory(self, "Choose Destination Folder", start or "")
+        if not d: return
+        self.dest_edit.setText(d)
+        self._save_settings()
+
+    def _autosize_combo(self, combo: QComboBox, base_padding: int = 36):
+        """
+        Resize a QComboBox so its line edit shows the longest item without clipping,
+        and widen the popup to match. Call after adding items.
+        """
+        if combo.count() == 0:
+            combo.setMinimumWidth(160)
+            return
+
+        fm = QFontMetrics(combo.font())
+        maxw = 0
+        for i in range(combo.count()):
+            w = fm.horizontalAdvance(combo.itemText(i))
+            if not combo.itemIcon(i).isNull():
+                w += combo.iconSize().width() + 8
+            if w > maxw:
+                maxw = w
+
+        # + padding for left/right margins + arrow
+        width = maxw + base_padding
+        combo.setMinimumWidth(width)
+        # also widen the popup list
+        if combo.view() is not None:
+            combo.view().setMinimumWidth(width)
+        combo.updateGeometry()
+
+    # ---------- keys & template insertion ----------
+    def _rebuild_keys_list(self):
+        self.keys_list.clear()
+        for k in self.union_keys:
+            self.keys_list.addItem(QListWidgetItem(k))
+        # (Re)build the token combo based on self.union_keys
+        self._populate_token_keywords()
+
+
+    def _insert_key_from_list(self, item: QListWidgetItem):
+        if not item: return
+        self._insert_text("{"+item.text()+"}")
+
+    def _insert_token(self, token: str):
+        # token is like "{FILTER}" or "{#03}"
+        if not token: return
+        self._insert_text(token)
+
+    def _populate_token_keywords(self):
+        """
+        Rebuild the token dropdown from current union_keys.
+        Always includes special tokens first.
+        """
+        tokens = ["{#}", "{#03}", "{ext}"] + [f"{{{k}}}" for k in self.union_keys]
+
+        self.token_combo.blockSignals(True)
+        self.token_combo.clear()
+        # sort for stability; keeps the specials at top if you prefer not to sort them
+        self.token_combo.addItems(sorted(tokens, key=str.lower))
+        self.token_combo.blockSignals(False)
+
+        # Let layout settle, then autosize the combo and its popup
+        QTimer.singleShot(0, lambda: self._autosize_combo(self.token_combo))
+
+    def _insert_text(self, text: str):
+        e = self.pattern_edit
+        pos = e.cursorPosition()
+        s = e.text()
+        e.setText(s[:pos] + text + s[pos:])
+        e.setCursorPosition(pos + len(text))
+        self._refresh_preview()
+
+    # ---------- preview/rename ----------
+    def _fill_table_rows(self):
+        self.table.setRowCount(len(self.files))
+        for r, p in enumerate(self.files):
+            self.table.setItem(r, 0, QTableWidgetItem(p))
+            self.table.setItem(r, 1, QTableWidgetItem("→"))
+            self.table.setItem(r, 2, QTableWidgetItem(""))
+            self.table.setItem(r, 3, QTableWidgetItem(""))
+
+    def _refresh_preview(self):
+        pat = self.pattern_edit.text().strip()
+        if not pat: return
+        dest = (self.dest_edit.text().strip() or None)
+        start_idx = self.index_start.value()
+        lower = self.lower_cb.isChecked()
+        slug  = self.slug_cb.isChecked()
+        keep_ext = self.keep_ext_cb.isChecked()
+
+        # generate names
+        names = []
+        for i, p in enumerate(self.files):
+            hdr = self.headers.get(p, fits.Header())
+            base = self._render_pattern(pat, hdr, i, start_idx, p)
+            if keep_ext and "{ext}" not in pat:
+                # append original ext if user forgot
+                ext = os.path.splitext(p)[1]
+                if ext:
+                    base = f"{base}{ext}"
+            if lower: base = base.lower()
+            if slug:  base = self._slugify(base)
+            # target path
+            folder = dest if dest else os.path.dirname(p)
+            target = os.path.join(folder, base)
+            names.append(target)
+
+        # collisions
+        seen = defaultdict(int)
+        for t in names: seen[t] += 1
+
+        # fill table
+        for r, p in enumerate(self.files):
+            newp = names[r]
+            self._set_table_preview_row(r, p, newp, seen[newp])
+
+    def _set_table_preview_row(self, r: int, old: str, new: str, count: int):
+        self.table.item(r, 0).setText(old)
+        self.table.item(r, 2).setText(new)
+        status = ""
+        conflict = (count > 1)
+        if conflict: status = "name collision"
+        elif os.path.exists(new): status = "will overwrite"
+        else: status = "ok"
+        it = QTableWidgetItem(status)
+        if conflict or status == "will overwrite":
+            it.setForeground(Qt.GlobalColor.red)
+        self.table.setItem(r, 3, it)
+
+    def _do_rename(self):
+        # check collisions first
+        n = self.table.rowCount()
+        targets = [self.table.item(r, 2).text() for r in range(n)]
+        counts = defaultdict(int)
+        for t in targets: counts[t] += 1
+        collisions = [t for t,c in counts.items() if c > 1]
+        if collisions:
+            QMessageBox.warning(self, "Collisions",
+                "Two or more files would map to the same name. Adjust your pattern.")
+            return
+
+        # go
+        failures = []
+        for r in range(n):
+            oldp = self.table.item(r, 0).text()
+            newp = self.table.item(r, 2).text()
+            if oldp == newp:  # nothing to do
+                continue
+            os.makedirs(os.path.dirname(newp), exist_ok=True)
+            try:
+                shutil.move(oldp, newp)
+                self.table.item(r, 3).setText("renamed")
+            except Exception as e:
+                self.table.item(r, 3).setText(f"ERROR: {e}")
+                self.table.item(r, 3).setForeground(Qt.GlobalColor.red)
+                failures.append((oldp, str(e)))
+
+        if failures:
+            QMessageBox.warning(self, "Done with errors",
+                f"Some files could not be renamed ({len(failures)} errors).")
+        else:
+            QMessageBox.information(self, "Done", "All files renamed.")
+        self._save_settings()
+        # rescan to refresh paths if we renamed in place
+        src = self.src_edit.text().strip()
+        if src and not self.dest_edit.text().strip():
+            self._scan_existing(src)
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _slugify(s: str) -> str:
+        # replace spaces with underscores, keep alnum, dash, underscore, dot
+        s = s.replace(" ", "_")
+        return re.sub(r"[^A-Za-z0-9._-]+", "", s)
+
+    def _render_pattern(self, pat: str, hdr: fits.Header, i: int, start_idx: int, file_path: str) -> str:
+        """Replace {KEY[:fmt]} / {#NN} / {ext}."""
+        def repl(m):
+            body = m.group(1)  # token content
+            # counter?
+            if body.startswith("#"):
+                w = body[1:]
+                try:
+                    pad = int(w) if w else 0
+                except Exception:
+                    pad = 0
+                num = i + start_idx
+                return f"{num:0{pad}d}" if pad else str(num)
+
+            # extension?
+            if body.lower() == "ext":
+                ext = os.path.splitext(file_path)[1]
+                return ext.lstrip(".")  # without dot
+
+            # FITS key (possible :fmt)
+            key, fmt = (body.split(":", 1) + [""])[:2]
+            key_up = key.upper()
+            val = hdr.get(key_up, "")
+            if val is None: val = ""
+
+            # DATE-OBS with datetime fmt
+            if key_up in ("DATE-OBS", "DATE", "TIME-OBS") and fmt:
+                # normalize ISO forms like 2024-08-17T03:12:00.123Z
+                s = str(val).strip().replace("Z", "+00:00")
+                try:
+                    dt = datetime.fromisoformat(s)
+                    # naive? assume UTC to be safe
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt.strftime(fmt)
+                except Exception:
+                    return str(val)
+
+            # numeric general fmt (e.g. .1f)
+            if fmt:
+                try:
+                    return format(float(val), fmt)
+                except Exception:
+                    pass
+            return str(val)
+
+        return re.sub(r"\{([^{}]+)\}", repl, pat)
 
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
