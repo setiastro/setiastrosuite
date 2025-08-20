@@ -14359,7 +14359,7 @@ class StackingSuiteDialog(QDialog):
         return (x0, y0, x1, y1)
 
 
-    def _compute_autocrop_rect(self, file_list: list[str], transforms_path: str, coverage_pct: float):
+    def _compute_autocrop_rect(self, file_list: List[str], transforms_path: str, coverage_pct: float):
         """
         Build a coverage-count image (aligned canvas), threshold at pct, and extract largest rectangle.
         Returns (x0, y0, x1, y1) or None.
