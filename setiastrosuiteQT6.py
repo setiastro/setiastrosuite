@@ -293,7 +293,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.5"
+VERSION = "2.21.6"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13845,6 +13845,8 @@ class StackingSuiteDialog(QDialog):
         self.settings.setValue("stacking/modz_threshold", self.modz_threshold)
         self.settings.setValue("stacking/chunk_height", self.chunk_height)
         self.settings.setValue("stacking/chunk_width", self.chunk_width)
+        self.settings.setValue("stacking/autocrop_enabled", self.autocrop_cb.isChecked())
+        self.settings.setValue("stacking/autocrop_pct", float(self.autocrop_pct.value()))        
 
         print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
         print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
@@ -14274,6 +14276,168 @@ class StackingSuiteDialog(QDialog):
         # ✅ Reassign matching master flats/darks per leaf
         self.assign_best_master_files()
 
+    def _quad_coverage_add(self, cov: np.ndarray, quad: np.ndarray):
+        """
+        Rasterize a convex quad (4x2 float array of (x,y) in aligned coords) into 'cov' by +1 filling.
+        Bounds/clipping are handled. Small, robust scanline fill.
+        """
+        H, W = cov.shape
+        pts = quad.astype(np.float32)
+
+        ymin = max(int(np.floor(np.min(pts[:,1]))), 0)
+        ymax = min(int(np.ceil (np.max(pts[:,1]))), H-1)
+        if ymin > ymax: return
+
+        # Edges (x0,y0)->(x1,y1), 4 of them
+        edges = []
+        for i in range(4):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i+1) % 4]
+            edges.append((x0, y0, x1, y1))
+
+        for y in range(ymin, ymax+1):
+            xs = []
+            yf = float(y) + 0.5  # sample at pixel center
+            for (x0, y0, x1, y1) in edges:
+                # Skip horizontal edges
+                if (y0 <= yf < y1) or (y1 <= yf < y0):
+                    # Linear interpolate X at scanline yf
+                    t = (yf - y0) / (y1 - y0)
+                    xs.append(x0 + t * (x1 - x0))
+
+            if len(xs) < 2:
+                continue
+            xs.sort()
+            # Fill between pairs
+            for i in range(0, len(xs), 2):
+                xL = int(np.floor(min(xs[i], xs[i+1])))
+                xR = int(np.ceil (max(xs[i], xs[i+1])))
+                if xR < 0 or xL > W-1: 
+                    continue
+                xL = max(xL, 0); xR = min(xR, W)
+                if xR > xL:
+                    cov[y, xL:xR] += 1
+
+
+    def _max_rectangle_in_binary(self, mask: np.ndarray):
+        """
+        Largest axis-aligned rectangle of 1s in a binary mask (H×W, dtype=bool).
+        Returns (x0, y0, x1, y1) where x1,y1 are exclusive, or None if empty.
+        O(H*W) using 'largest rectangle in histogram' per row.
+        """
+        H, W = mask.shape
+        heights = np.zeros(W, dtype=np.int32)
+        best = (0, 0, 0, 0, 0)  # (area, x0, y0, x1, y1)
+
+        for y in range(H):
+            row = mask[y]
+            heights[row] += 1
+            heights[~row] = 0
+
+            # Largest rectangle in histogram 'heights'
+            stack = []
+            i = 0
+            while i <= W:
+                h = heights[i] if i < W else 0
+                if not stack or h >= heights[stack[-1]]:
+                    stack.append(i); i += 1
+                else:
+                    top = stack.pop()
+                    height = heights[top]
+                    left = stack[-1] + 1 if stack else 0
+                    right = i
+                    area = height * (right - left)
+                    if area > best[0]:
+                        # rectangle spans rows [y-height+1 .. y], columns [left .. right-1]
+                        y0 = y - height + 1
+                        y1 = y + 1
+                        best = (area, left, y0, right, y1)
+
+        if best[0] == 0:
+            return None
+        _, x0, y0, x1, y1 = best
+        return (x0, y0, x1, y1)
+
+
+    def _compute_autocrop_rect(self, file_list: list[str], transforms_path: str, coverage_pct: float):
+        """
+        Build a coverage-count image (aligned canvas), threshold at pct, and extract largest rectangle.
+        Returns (x0, y0, x1, y1) or None.
+        """
+        if not file_list:
+            return None
+
+        # Load aligned reference to get canvas size
+        ref_img, ref_hdr, _, _ = load_image(file_list[0])
+        if ref_img is None:
+            return None
+        if ref_img.ndim == 2:
+            H, W = ref_img.shape
+        else:
+            H, W = ref_img.shape[:2]
+
+        # Load transforms (raw _n path -> 2x3 matrix mapping raw->aligned)
+        if not os.path.exists(transforms_path):
+            return None
+        transforms = self.load_alignment_matrices_custom(transforms_path)
+
+        # We need the raw (normalized) image size for each file to transform its corners
+        # From aligned name "..._n_r.fit" get raw name "..._n.fit" (like in your drizzle code)
+        cov = np.zeros((H, W), dtype=np.uint16)
+        for aligned_path in file_list:
+            base = os.path.basename(aligned_path)
+            if base.endswith("_n_r.fit"):
+                raw_base = base.replace("_n_r.fit", "_n.fit")
+            elif base.endswith("_r.fit"):
+                raw_base = base.replace("_r.fit", ".fit")  # fallback
+            else:
+                raw_base = base  # fallback
+
+            raw_path = os.path.join(self.stacking_directory, "Normalized_Images", raw_base)
+            # Fallback if normalized folder differs:
+            raw_key = os.path.normpath(raw_path)
+            M = transforms.get(raw_key, None)
+            if M is None:
+                # Try direct key (some pipelines use normalized path equal to aligned key)
+                M = transforms.get(os.path.normpath(aligned_path), None)
+            if M is None:
+                continue
+
+            # Determine raw size
+            raw_img, _, _, _ = load_image(raw_key) if os.path.exists(raw_key) else (None, None, None, None)
+            if raw_img is None:
+                # last resort: assume same canvas; still yields a conservative crop
+                h_raw, w_raw = H, W
+            else:
+                if raw_img.ndim == 2:
+                    h_raw, w_raw = raw_img.shape
+                else:
+                    h_raw, w_raw = raw_img.shape[:2]
+
+            # Transform raw rectangle corners into aligned coords
+            corners = np.array([
+                [0,       0      ],
+                [w_raw-1, 0      ],
+                [w_raw-1, h_raw-1],
+                [0,       h_raw-1]
+            ], dtype=np.float32)
+
+            # Apply affine: [x' y']^T = A*[x y]^T + t
+            A = M[:, :2]; t = M[:, 2]
+            quad = (corners @ A.T) + t  # shape (4,2)
+
+            # Rasterize into coverage
+            self._quad_coverage_add(cov, quad)
+
+        # Threshold at requested coverage
+        N = len(file_list)
+        need = int(np.ceil((coverage_pct / 100.0) * N))
+        mask = (cov >= need)
+
+        # Largest rectangle of 1s
+        rect = self._max_rectangle_in_binary(mask)
+        return rect
+
 
     def create_image_registration_tab(self):
         """
@@ -14379,6 +14543,20 @@ class StackingSuiteDialog(QDialog):
         ref_layout.addWidget(self.select_ref_frame_btn)
         layout.addLayout(ref_layout)
 
+        crop_row = QHBoxLayout()
+        self.autocrop_cb = QCheckBox("Auto-crop output")
+        self.autocrop_cb.setToolTip("Crop the final image to pixels covered by ≥ Coverage % of frames")
+        self.autocrop_pct = QDoubleSpinBox()
+        self.autocrop_pct.setRange(50.0, 100.0)
+        self.autocrop_pct.setSingleStep(1.0)
+        self.autocrop_pct.setSuffix(" %")
+        self.autocrop_pct.setValue(self.settings.value("stacking/autocrop_pct", 95.0, type=float))
+        self.autocrop_cb.setChecked(self.settings.value("stacking/autocrop_enabled", True, type=bool))
+        crop_row.addWidget(self.autocrop_cb)
+        crop_row.addWidget(QLabel("Coverage:"))
+        crop_row.addWidget(self.autocrop_pct)
+        crop_row.addStretch(1)
+        layout.addLayout(crop_row)
 
         # ★★ Star-Trail Mode ★★
         trail_layout = QHBoxLayout()
@@ -17242,6 +17420,80 @@ class StackingSuiteDialog(QDialog):
         self.update_status(f"✅ Star‐Trail image written to {path}")
         return
 
+
+    def _apply_autocrop(self, arr, file_list, header, scale=1.0):
+        """
+        Crop 'arr' to the largest rectangle covered by ≥ coverage% of frames.
+        'file_list' must be the aligned (_r) files used for this integration.
+        'scale' = 1.0 for normal; = drizzle scale for drizzle images.
+        Preserves mono vs color shape (mono stays (H,W); color stays (H,W,3)).
+        """
+        # Is it enabled?
+        try:
+            enabled = self.autocrop_cb.isChecked()
+            pct = float(self.autocrop_pct.value())
+        except Exception:
+            enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
+            pct = float(self.settings.value("stacking/autocrop_pct", 95.0, type=float))
+
+        if not enabled or not file_list:
+            return arr, header
+
+        transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        rect = self._compute_autocrop_rect(file_list, transforms_path, pct)
+        if not rect:
+            self.update_status("✂️ Auto-crop: no common area found; skipping.")
+            return arr, header
+
+        x0, y0, x1, y1 = rect
+        if scale != 1.0:
+            # scale rect to drizzle resolution
+            x0 = int(math.floor(x0 * scale))
+            y0 = int(math.floor(y0 * scale))
+            x1 = int(math.ceil (x1 * scale))
+            y1 = int(math.ceil (y1 * scale))
+
+        # Clamp to image bounds
+        H, W = arr.shape[:2]
+        x0 = max(0, min(W, x0)); x1 = max(x0, min(W, x1))
+        y0 = max(0, min(H, y0)); y1 = max(y0, min(H, y1))
+
+        # --- Crop while preserving channels ---
+        if arr.ndim == 2:
+            arr = arr[y0:y1, x0:x1]
+        else:
+            arr = arr[y0:y1, x0:x1, :]
+            # If this is actually mono stored as (H,W,1), squeeze back to (H,W)
+            if arr.shape[-1] == 1:
+                arr = arr[..., 0]
+
+        # Update header dims (+ shift CRPIX if present)
+        if header is None:
+            header = fits.Header()
+
+        # NAXIS / sizes consistent with the new array
+        if arr.ndim == 2:
+            header["NAXIS"]  = 2
+            header["NAXIS1"] = arr.shape[1]
+            header["NAXIS2"] = arr.shape[0]
+            # Remove any stale NAXIS3
+            if "NAXIS3" in header:
+                del header["NAXIS3"]
+        else:
+            header["NAXIS"]  = 3
+            header["NAXIS1"] = arr.shape[1]
+            header["NAXIS2"] = arr.shape[0]
+            header["NAXIS3"] = arr.shape[2]
+
+        if "CRPIX1" in header:
+            header["CRPIX1"] = float(header["CRPIX1"]) - x0
+        if "CRPIX2" in header:
+            header["CRPIX2"] = float(header["CRPIX2"]) - y0
+
+        self.update_status(f"✂️ Auto-cropped to [{x0}:{x1}]×[{y0}:{y1}] (scale {scale}×)")
+        return arr, header
+
+
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
 
@@ -17411,49 +17663,88 @@ class StackingSuiteDialog(QDialog):
         QApplication.processEvents()
         group_integration_data = {}
         summary_lines = []
-
+        # NEW: where we collect any saved _autocrop files
+        autocrop_outputs = []
+        # let drizzle push into this from inside its method
+        self._autocrop_outputs = []
         for group_key, file_list in grouped_files.items():
             self.update_status(f"Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
             integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
                 group_key, file_list, frame_weights
             )
 
+            # --- SAVE ORIGINAL (no crop yet) ---
             if integrated_image is None:
                 continue
 
             if ref_header is None:
                 ref_header = fits.Header()
 
-            ref_header["IMAGETYP"] = "MASTER STACK"
-            ref_header["BITPIX"] = -32
-            ref_header["STACKED"] = (True, "Stacked using normal_integration_with_rejection")
-            ref_header["CREATOR"] = "SetiAstroSuite"
-            ref_header["DATE-OBS"] = datetime.utcnow().isoformat()
+            # Common header keys
+            hdr_orig = ref_header.copy()
+            hdr_orig["IMAGETYP"] = "MASTER STACK"
+            hdr_orig["BITPIX"]   = -32
+            hdr_orig["STACKED"]  = (True, "Stacked using normal_integration_with_rejection")
+            hdr_orig["CREATOR"]  = "SetiAstroSuite"
+            hdr_orig["DATE-OBS"] = datetime.utcnow().isoformat()
 
-            is_mono = (integrated_image.ndim == 2)
-            if is_mono:
-                ref_header["NAXIS"] = 2
-                ref_header["NAXIS1"] = integrated_image.shape[1]
-                ref_header["NAXIS2"] = integrated_image.shape[0]
+            is_mono_orig = (integrated_image.ndim == 2)
+            if is_mono_orig:
+                hdr_orig["NAXIS"]  = 2
+                hdr_orig["NAXIS1"] = integrated_image.shape[1]
+                hdr_orig["NAXIS2"] = integrated_image.shape[0]
+                if "NAXIS3" in hdr_orig: del hdr_orig["NAXIS3"]
             else:
-                ref_header["NAXIS"] = 3
-                ref_header["NAXIS1"] = integrated_image.shape[1]
-                ref_header["NAXIS2"] = integrated_image.shape[0]
-                ref_header["NAXIS3"] = 3
+                hdr_orig["NAXIS"]  = 3
+                hdr_orig["NAXIS1"] = integrated_image.shape[1]
+                hdr_orig["NAXIS2"] = integrated_image.shape[0]
+                hdr_orig["NAXIS3"] = integrated_image.shape[2]
 
             n_frames = len(file_list)
-            out_path = os.path.join(self.stacking_directory, f"MasterLight_{group_key}_{n_frames}stacked.fit")
+            base_name = f"MasterLight_{group_key}_{n_frames}stacked"
+            out_path_orig = os.path.join(self.stacking_directory, f"{base_name}.fit")
+
             save_image(
                 img_array=integrated_image,
-                filename=out_path,
+                filename=out_path_orig,
                 original_format="fit",
                 bit_depth="32-bit floating point",
-                original_header=ref_header,
-                is_mono=is_mono
+                original_header=hdr_orig,
+                is_mono=is_mono_orig
             )
-            self.update_status(f"✅ Saved integrated image for '{group_key}' using {n_frames} frame(s): {out_path}")
+            self.update_status(f"✅ Saved integrated image (original) for '{group_key}': {out_path_orig}")
             QApplication.processEvents()
 
+            # --- OPTIONAL: AUTOCROP SECOND COPY ---
+            cropped_img, hdr_crop = self._apply_autocrop(
+                integrated_image, file_list, ref_header.copy(), scale=1.0
+            )
+
+            # If auto-crop is disabled, _apply_autocrop returns the input unchanged;
+            # only write a second file when auto-crop actually changed bounds or is enabled.
+            autocrop_enabled = False
+            try:
+                autocrop_enabled = self.autocrop_cb.isChecked()
+            except Exception:
+                autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
+
+            if autocrop_enabled:
+                # _apply_autocrop already fixed NAXIS*, CRPIX*; ensure mono flag matches final array
+                is_mono_crop = (cropped_img.ndim == 2)
+                out_path_crop = os.path.join(self.stacking_directory, f"{base_name}_autocrop.fit")
+                save_image(
+                    img_array=cropped_img,
+                    filename=out_path_crop,
+                    original_format="fit",
+                    bit_depth="32-bit floating point",
+                    original_header=hdr_crop,
+                    is_mono=is_mono_crop
+                )
+                self.update_status(f"✂️ Saved auto-cropped image for '{group_key}': {out_path_crop}")
+                QApplication.processEvents()
+                autocrop_outputs.append((group_key, out_path_crop))
+
+            # Keep bookkeeping as before
             dconf = drizzle_dict.get(group_key, {})
             if dconf.get("drizzle_enabled", False):
                 sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
@@ -17494,15 +17785,25 @@ class StackingSuiteDialog(QDialog):
                     drop_shrink=drop_shrink,
                     rejection_map=rejections_for_group
                 )
+                
             else:
                 self.update_status(f"✅ Group '{group_key}' not set for drizzle. Integrated image already saved.")
                 QApplication.processEvents()
+
+        autocrop_outputs.extend(getattr(self, "_autocrop_outputs", []))
 
         # 🧾 Summary message box
         for group_key, info in group_integration_data.items():
             n_frames = info["n_frames"]
             drizzled = info["drizzled"]
             summary_lines.append(f"• {group_key}: {n_frames} stacked{' + drizzle' if drizzled else ''}")
+
+        # NEW: list auto-cropped outputs if any
+        if autocrop_outputs:
+            summary_lines.append("")  # blank line separator
+            summary_lines.append("Auto-cropped files saved:")
+            for g, p in autocrop_outputs:
+                summary_lines.append(f"  • {g} → {p}")
 
         summary_text = "\n".join(summary_lines)
         QMessageBox.information(
@@ -18084,43 +18385,68 @@ class StackingSuiteDialog(QDialog):
         final_drizzle = np.zeros_like(drizzle_buffer, dtype=np.float32)
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
+
+
         # 8) Save final drizzle image
-        out_filename = f"MasterLight_{group_key}_{len(file_list)}stacked_drizzle.fit"
+        # 8) Save final drizzle image (original first)
+        base_name = f"MasterLight_{group_key}_{len(file_list)}stacked_drizzle"
+        out_path_orig = os.path.join(self.stacking_directory, f"{base_name}.fit")
 
-        out_path = os.path.join(self.stacking_directory, out_filename)
-        if hdr is None:
-            hdr = fits.Header()
-        hdr["IMAGETYP"]  = "MASTER STACK - DRIZZLE"
-        hdr["DRIZFACTOR"] = (scale_factor, "Drizzle scale factor")
-        hdr["DROPFRAC"]   = (drop_shrink, "Drizzle drop shrink/pixfrac")
-        hdr["CREATOR"]    = "SetiAstroSuite"
-        hdr["DATE-OBS"]   = datetime.utcnow().isoformat()
+        hdr_orig = hdr.copy() if hdr is not None else fits.Header()
+        hdr_orig["IMAGETYP"]   = "MASTER STACK - DRIZZLE"
+        hdr_orig["DRIZFACTOR"] = (scale_factor, "Drizzle scale factor")
+        hdr_orig["DROPFRAC"]   = (drop_shrink,  "Drizzle drop shrink/pixfrac")
+        hdr_orig["CREATOR"]    = "SetiAstroSuite"
+        hdr_orig["DATE-OBS"]   = datetime.utcnow().isoformat()
 
-        if final_drizzle.ndim == 3 and final_drizzle.shape[-1] == 3:
-            is_mono = False
+        is_mono_orig = not (final_drizzle.ndim == 3 and final_drizzle.shape[-1] == 3)
+        if is_mono_orig:
+            hdr_orig["NAXIS"]  = 2
+            hdr_orig["NAXIS1"] = final_drizzle.shape[1]
+            hdr_orig["NAXIS2"] = final_drizzle.shape[0]
+            if "NAXIS3" in hdr_orig: del hdr_orig["NAXIS3"]
         else:
-            is_mono = True
-
-        if is_mono:
-            hdr["NAXIS"] = 2
-            hdr["NAXIS1"] = final_drizzle.shape[1]
-            hdr["NAXIS2"] = final_drizzle.shape[0]
-        else:
-            hdr["NAXIS"] = 3
-            hdr["NAXIS1"] = final_drizzle.shape[1]
-            hdr["NAXIS2"] = final_drizzle.shape[0]
-            hdr["NAXIS3"] = 3
+            hdr_orig["NAXIS"]  = 3
+            hdr_orig["NAXIS1"] = final_drizzle.shape[1]
+            hdr_orig["NAXIS2"] = final_drizzle.shape[0]
+            hdr_orig["NAXIS3"] = final_drizzle.shape[2]
 
         save_image(
             img_array=final_drizzle,
-            filename=out_path,
+            filename=out_path_orig,
             original_format="fit",
             bit_depth="32-bit floating point",
-            original_header=hdr,
-            is_mono=is_mono
+            original_header=hdr_orig,
+            is_mono=is_mono_orig
         )
+        self.update_status(f"✅ Drizzle (original) saved: {out_path_orig}")
 
-        self.update_status(f"✅ Drizzle group '{group_key}' done! Stacked {len(file_list)} frame(s). Saved: {out_path}")
+        # 9) Optional auto-crop copy (scaled rect)
+        autocrop_enabled = False
+        try:
+            autocrop_enabled = self.autocrop_cb.isChecked()
+        except Exception:
+            autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
+
+        if autocrop_enabled:
+            cropped_drizzle, hdr_crop = self._apply_autocrop(
+                final_drizzle, file_list, hdr.copy() if hdr is not None else fits.Header(),
+                scale=scale_factor
+            )
+            is_mono_crop = (cropped_drizzle.ndim == 2)
+            out_path_crop = os.path.join(self.stacking_directory, f"{base_name}_autocrop.fit")
+            save_image(
+                img_array=cropped_drizzle,
+                filename=out_path_crop,
+                original_format="fit",
+                bit_depth="32-bit floating point",
+                original_header=hdr_crop,
+                is_mono=is_mono_crop
+            )
+            if not hasattr(self, "_autocrop_outputs"):
+                self._autocrop_outputs = []
+            self._autocrop_outputs.append((group_key, out_path_crop))
+            self.update_status(f"✂️ Drizzle (auto-cropped) saved: {out_path_crop}")
 
 
 
@@ -18291,6 +18617,7 @@ class StackingSuiteDialog(QDialog):
         # 9) If mono, squeeze away channel axis
         if channels == 1:
             integrated_image = integrated_image[..., 0]
+
 
         # 10) Final status
         self.update_status(f"Integration complete for group '{group_key}'.")
@@ -25007,6 +25334,75 @@ class PlateSolver(QDialog):
         self.stacked.setCurrentIndex(0)
         self.image_path = ""
 
+    def _coerce_header_types(self, hdr_like) -> fits.Header:
+        """
+        Build a clean astropy.io.fits.Header from a dict/Header,
+        forcing correct numeric types for WCS/SIP keys.
+        """
+        import re
+        h = fits.Header()
+        it = dict(hdr_like).items() if not isinstance(hdr_like, fits.Header) else hdr_like.items()
+
+        int_keys = {
+            "NAXIS", "NAXIS1", "NAXIS2", "NAXIS3",
+            "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER",
+            "WCSAXES"
+        }
+        float_prefixes = ("CRPIX", "CRVAL", "CDELT", "CD", "PC", "CROTA", "LATPOLE", "LONPOLE", "EQUINOX", "EPOCH")
+        str_keys = {"RADECSYS", "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2"}
+        sip_re = re.compile(r"^(A|B|AP|BP)_(\d+)_(\d+)$", re.IGNORECASE)
+
+        for k, v in it:
+            key = k.upper()
+
+            # Integer-only keys
+            if key in int_keys:
+                s = str(v).strip().strip("'\"")
+                try:
+                    h[key] = int(s)
+                except Exception:
+                    try:
+                        h[key] = int(float(s))
+                    except Exception:
+                        continue
+                continue
+
+            # SIP coefficients
+            if sip_re.match(key):
+                try:
+                    h[key] = float(str(v).strip())
+                except Exception:
+                    pass
+                continue
+
+            # Common float keys/prefixes
+            if any(key.startswith(p) for p in float_prefixes):
+                try:
+                    h[key] = float(str(v).strip())
+                except Exception:
+                    pass
+                continue
+
+            # Common string keys
+            if key in str_keys or key.startswith("CTYPE") or key.startswith("CUNIT"):
+                h[key] = str(v).strip().strip("'\"")
+                continue
+
+            # Anything else (copy if astropy accepts)
+            try:
+                h[key] = v
+            except Exception:
+                pass
+
+        # Mirror SIP order if only one present
+        if "A_ORDER" in h and "B_ORDER" not in h:
+            h["B_ORDER"] = int(h["A_ORDER"])
+        if "B_ORDER" in h and "A_ORDER" not in h:
+            h["A_ORDER"] = int(h["B_ORDER"])
+
+        return h
+
+
     def openBatchPlateSolver(self):
         # Directly create an instance of BatchPlateSolverDialog
         dialog = BatchPlateSolverDialog(self.settings, parent=self)
@@ -25209,12 +25605,11 @@ class PlateSolver(QDialog):
             QMessageBox.critical(self, "Plate Solve", "Plate solve failed with both ASTAP and astrometry.net.")
 
     def update_status(self, message: str):
-        """Update the status label on the current page."""
-        index = self.stacked.currentIndex()
-        if index == 0:
-            self.file_status_label.setText(message)
-        else:
+        idx = self.stacked.currentIndex()
+        if idx == 0:   # Slot page
             self.slot_status_label.setText(message)
+        else:          # File page
+            self.file_status_label.setText(message)
 
     def save_temp_fits_image(self, normalized_image: np.ndarray, image_path: str, header_override: fits.Header = None) -> str:
         """
@@ -25308,21 +25703,185 @@ class PlateSolver(QDialog):
     def create_minimal_fits_header(self, img_array, is_mono=False):
         """
         Creates a minimal FITS header when the original header is missing.
+        Assumes channel-last if 3D (H, W, C).
         """
+        H = int(img_array.shape[0]) if img_array.ndim >= 2 else 1
+        W = int(img_array.shape[1]) if img_array.ndim >= 2 else 1
+        C = int(img_array.shape[2]) if (img_array.ndim == 3) else 1
 
         header = Header()
         header['SIMPLE'] = (True, 'Standard FITS file')
-        header['BITPIX'] = -32  # 32-bit floating-point data
-        header['NAXIS'] = 2 if is_mono else 3
-        header['NAXIS1'] = img_array.shape[2] if img_array.ndim == 3 and not is_mono else img_array.shape[1]  # Image width
-        header['NAXIS2'] = img_array.shape[1] if img_array.ndim == 3 and not is_mono else img_array.shape[0]  # Image height
+        header['BITPIX'] = -32                       # float32
+        header['NAXIS']  = 2 if is_mono else 3
+        header['NAXIS1'] = W                         # X width
+        header['NAXIS2'] = H                         # Y height
         if not is_mono:
-            header['NAXIS3'] = img_array.shape[0] if img_array.ndim == 3 else 1  # Number of color channels
-        header['BZERO'] = 0.0  # No offset
-        header['BSCALE'] = 1.0  # No scaling
+            header['NAXIS3'] = C                     # channels (usually 3)
+        header['BZERO']  = 0.0
+        header['BSCALE'] = 1.0
         header.add_comment("Minimal FITS header generated by AstroEditingSuite.")
-
         return header
+
+    def _first_float(self, v):
+        """Return the first float found in v (str/int/float). None if not found."""
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v)
+        m = re.search(r"[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?", s)
+        return float(m.group(0)) if m else None
+
+    def _first_int(self, v):
+        """Return the first int found in v (str/int/float). None if not found."""
+        if v is None:
+            return None
+        if isinstance(v, (int,)):
+            return int(v)
+        if isinstance(v, float):
+            return int(round(v))
+        s = str(v)
+        m = re.search(r"[+-]?\d+", s)
+        return int(m.group(0)) if m else None
+
+    def _parse_ra_deg(self, h):
+        """
+        RA in degrees.
+        Try CRVAL1 (deg) -> RA (maybe deg) -> OBJCTRA/RA sexagesimal (hh:mm:ss or variants).
+        """
+        # CRVAL1 in degrees
+        ra = self._first_float(h.get("CRVAL1"))
+        if ra is not None:
+            return ra
+
+        # RA in degrees if clearly numeric degrees (0..360)
+        ra = self._first_float(h.get("RA"))
+        if ra is not None and 0.0 <= ra < 360.0:
+            return ra
+
+        # Sexagesimal RA (hours)
+        for key in ("OBJCTRA", "RA"):
+            val = h.get(key)
+            if not val:
+                continue
+            s = str(val).strip()
+            # Accept forms like HH:MM:SS.s, HH MM SS.s
+            parts = re.split(r"[:\s]+", s)
+            try:
+                if len(parts) >= 3:
+                    hh = float(parts[0]); mm = float(parts[1]); ss = float(parts[2])
+                    ra_h = abs(hh) + mm/60.0 + ss/3600.0
+                    return ra_h * 15.0  # hours -> degrees
+                elif len(parts) == 2:
+                    hh = float(parts[0]); mm = float(parts[1]); ss = 0.0
+                    return (abs(hh) + mm/60.0) * 15.0
+                elif len(parts) == 1:
+                    # If single token but > 24, probably already degrees
+                    x = float(parts[0])
+                    return x if x > 24.0 else x * 15.0
+            except Exception:
+                pass
+        return None
+
+    def _parse_dec_deg(self, h):
+        """
+        Dec in degrees.
+        Try CRVAL2 (deg) -> DEC (maybe deg) -> OBJCTDEC/DEC sexagesimal (±dd:mm:ss).
+        """
+        dec = self._first_float(h.get("CRVAL2"))
+        if dec is not None:
+            return dec
+
+        dec = self._first_float(h.get("DEC"))
+        if dec is not None and -90.0 <= dec <= 90.0:
+            return dec
+
+        for key in ("OBJCTDEC", "DEC"):
+            val = h.get(key)
+            if not val:
+                continue
+            s = str(val).strip()
+            # Handle leading sign and sexagesimal
+            sign = -1.0 if s.startswith("-") else 1.0
+            s_clean = s.lstrip("+-")
+            parts = re.split(r"[:\s]+", s_clean)
+            try:
+                if len(parts) >= 3:
+                    dd = float(parts[0]); mm = float(parts[1]); ss = float(parts[2])
+                    return sign * (abs(dd) + mm/60.0 + ss/3600.0)
+                elif len(parts) == 2:
+                    dd = float(parts[0]); mm = float(parts[1]); ss = 0.0
+                    return sign * (abs(dd) + mm/60.0)
+                elif len(parts) == 1:
+                    return sign * float(parts[0])
+            except Exception:
+                pass
+        return None
+
+    def _compute_scale_arcsec_per_pix(self, h):
+        """
+        Prefer CD matrix; else pixel size (μm) + focal length (mm) [+ binning].
+        """
+        cd11 = self._first_float(h.get("CD1_1"))
+        cd21 = self._first_float(h.get("CD2_1"))
+        if cd11 is None and cd21 is None:
+            # try CDELT
+            cd11 = self._first_float(h.get("CDELT1"))
+            cd21 = self._first_float(h.get("CDELT2"))
+        if cd11 is not None or cd21 is not None:
+            cd11 = cd11 or 0.0
+            cd21 = cd21 or 0.0
+            # degrees/pixel -> arcsec/pixel
+            return ( (cd11**2 + cd21**2) ** 0.5 ) * 3600.0
+
+        # Pixel size / focal length path
+        px_um_x = self._first_float(h.get("XPIXSZ"))
+        px_um_y = self._first_float(h.get("YPIXSZ"))
+        focal_mm = self._first_float(h.get("FOCALLEN"))
+        if focal_mm and (px_um_x or px_um_y):
+            px_um = px_um_x if (px_um_x and px_um_y is None) else px_um_y if (px_um_y and px_um_x is None) else None
+            if px_um is None:
+                px_um = (px_um_x + px_um_y) / 2.0
+            bx = self._first_int(h.get("XBINNING")) or self._first_int(h.get("XBIN")) or 1
+            by = self._first_int(h.get("YBINNING")) or self._first_int(h.get("YBIN")) or 1
+            bin_factor = (bx + by) / 2.0
+            px_um_eff = px_um * bin_factor
+            # arcsec/px ≈ 206.265 * pixel_size(μm) / focal_length(mm)
+            return 206.264806 * px_um_eff / focal_mm
+
+        return None
+
+    def _build_astap_seed(self, h):
+        """
+        Returns (seed_args, debug_str). If cannot seed, returns ([], reason).
+        """
+        ra_deg  = self._parse_ra_deg(h)
+        dec_deg = self._parse_dec_deg(h)
+        scale   = self._compute_scale_arcsec_per_pix(h)
+
+        dbg = []
+
+        if ra_deg is None:
+            dbg.append("RA unknown")
+        if dec_deg is None:
+            dbg.append("Dec unknown")
+        if scale is None or not np.isfinite(scale) or scale <= 0:
+            dbg.append("scale unknown")
+
+        if dbg:
+            return [], " / ".join(dbg)
+
+        ra_h  = ra_deg / 15.0
+        spd   = dec_deg + 90.0  # ASTAP wants SPD = Dec + 90
+
+        seed_args = [
+            "-ra",    f"{ra_h:.6f}",
+            "-spd",   f"{spd:.6f}",
+            "-scale", f"{scale:.3f}",
+        ]
+        dbg.append(f"RA={ra_h:.6f} h, SPD={spd:.6f}°, scale={scale:.3f}\"/px")
+        return seed_args, " | ".join(dbg)
+
 
     def run_astap(self, image_path: str, update_manager=True) -> bool:
         if getattr(self, "debug_mode", False):
@@ -25393,37 +25952,19 @@ class PlateSolver(QDialog):
         tmp_path = self.save_temp_fits_image(normalized_image, image_path, header_override=clean_header)
 
         # --- Build ASTAP seed arguments, applying binning to scale ---
+
         seed_args = []
-        hdr = raw_header  # the full camera header
+        hdr = raw_header if isinstance(raw_header, fits.Header) else None
 
-        if isinstance(hdr, fits.Header):
+        if hdr is not None:
             try:
-                # RA in hours, SPD = dec+90
-                ra_h  = float(hdr["CRVAL1"]) / 15.0
-                spd   = float(hdr["CRVAL2"]) + 90.0
-
-                # plate scale from CD matrix (°/pix → ″/pix)
-                cd11  = float(hdr.get("CD1_1", hdr.get("CDELT1", 0)))
-                cd21  = float(hdr.get("CD2_1", hdr.get("CDELT2", 0)))
-                pix   = np.hypot(cd11, cd21) * 3600.0
-
-                # apply binning
-                bx = int(hdr.get("XBINNING", 1))
-                by = int(hdr.get("YBINNING", 1))
-                if bx != by:
-                    print(f"⚠️ Unequal binning: {bx}×{by}, using average.")
-                bin_factor = (bx + by) / 2.0
-                pix *= bin_factor
-
-                # final seed args
-                seed_args = [
-                    "-ra",    f"{ra_h:.6f}",
-                    "-spd",   f"{spd:.6f}",
-                    "-scale", f"{pix:.3f}",
-                ]
-                print(f"🔸 Seeding ASTAP: RA={ra_h:.6f} h, SPD={spd:.6f}°, scale={pix:.3f}\"/px (×{bin_factor} bin)")
+                seed_args, dbg = self._build_astap_seed(hdr)
+                if seed_args:
+                    print(f"🔸 Seeding ASTAP: {dbg}")
+                else:
+                    print(f"⚠️ Not seeding ASTAP: {dbg}")
             except Exception as e:
-                print("Error computing seed args:", e)
+                print("Error computing seed args (robust):", e)
         else:
             print("No raw_header → skipping seed")
 
@@ -25560,6 +26101,7 @@ class PlateSolver(QDialog):
         for key, value in solved_header.items():
             print(f"{key} = {value}")
 
+        solved_header = self._coerce_header_types(solved_header)
 
         # --- Directly update the metadata dictionary for the current slot ---
         # --- Directly update the metadata dictionary for the current slot ---
@@ -63747,6 +64289,90 @@ class MainWindow(QMainWindow):
         if path:
             self._load_image(path)
 
+    def _sanitize_wcs_header(self, header):
+        """
+        Coerce WCS/SIP keywords to proper numeric types and fix common SIP issues.
+        If SIP remains inconsistent, drop SIP keywords so astropy WCS can still load.
+        """
+        from copy import deepcopy
+        import numpy as np
+
+        hdr = deepcopy(header)
+
+        def _to_int(key):
+            if key in hdr:
+                try:
+                    v = hdr[key]
+                    if isinstance(v, (int, np.integer)):
+                        return
+                    # handle strings like '2' or '2.0'
+                    hdr[key] = int(float(str(v).strip().strip("'\"")))
+                except Exception:
+                    # if it's garbage, remove it so we can fall back cleanly
+                    del hdr[key]
+
+        def _to_float(key):
+            if key in hdr:
+                try:
+                    v = hdr[key]
+                    if isinstance(v, (float, int, np.floating, np.integer)):
+                        hdr[key] = float(v)
+                    else:
+                        hdr[key] = float(str(v).strip().strip("'\""))
+                except Exception:
+                    # if it's truly bad, just leave it; astropy may ignore it
+                    pass
+
+        # 1) Ensure core integer fields
+        for k in ("NAXIS", "NAXIS1", "NAXIS2", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"):
+            _to_int(k)
+
+        # 2) Mirror missing A/B order if only one is present
+        a_order = hdr.get("A_ORDER")
+        b_order = hdr.get("B_ORDER")
+        if (a_order is None) ^ (b_order is None):
+            try:
+                val = int(a_order if a_order is not None else b_order)
+                hdr["A_ORDER"] = val
+                hdr["B_ORDER"] = val
+            except Exception:
+                # will be handled by SIP drop step below
+                pass
+
+        # 3) Coerce SIP coefficients to float
+        for key in list(hdr.keys()):
+            if key in ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"):
+                continue
+            if key.startswith(("A_", "B_", "AP_", "BP_")):
+                try:
+                    _to_float(key)
+                except Exception:
+                    # if a specific coeff is junk, remove it
+                    try:
+                        del hdr[key]
+                    except Exception:
+                        pass
+
+        # 4) Coerce standard WCS numeric keywords to float
+        for key in list(hdr.keys()):
+            if key.startswith(("CD", "PC", "CDELT", "CRVAL", "CRPIX", "CROTA")) or key in ("EQUINOX", "EPOCH", "LONPOLE", "LATPOLE"):
+                _to_float(key)
+
+        # 5) If SIP is still inconsistent, drop SIP so WCS loads without distortion
+        a_order = hdr.get("A_ORDER")
+        b_order = hdr.get("B_ORDER")
+        sip_ok = (a_order is not None and b_order is not None)
+        if not sip_ok:
+            for key in list(hdr.keys()):
+                if key in ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER") or key.startswith(("A_", "B_", "AP_", "BP_")):
+                    del hdr[key]
+            # Also remove "-SIP" tag from CTYPE if present to avoid implying SIP
+            for c in ("CTYPE1", "CTYPE2"):
+                if c in hdr and isinstance(hdr[c], str) and "SIP" in hdr[c]:
+                    hdr[c] = hdr[c].replace("-SIP", "")
+
+        return hdr
+
     def _load_image(self, path: str):
         img_array, original_header, bit_depth, is_mono = load_image(path)
         self.image_path = path
@@ -63784,7 +64410,8 @@ class MainWindow(QMainWindow):
             # Initialize WCS from FITS header if it is a FITS file
             if self.image_path.lower().endswith(('.fits', '.fit')):
                 with fits.open(self.image_path) as hdul:
-                    self.header = hdul[0].header
+                    raw_header = hdul[0].header
+                    self.header = self._sanitize_wcs_header(raw_header) 
                     
                     try:
                         # Use only the first two dimensions for WCS
@@ -63842,6 +64469,7 @@ class MainWindow(QMainWindow):
                 header = self.construct_fits_header_from_xisf(xisf_meta)
                 if header:
                     try:
+                        header = self._sanitize_wcs_header(header)
                         self.initialize_wcs_from_header(header)
                     except ValueError as e:
                         print("Error initializing WCS from XISF:", e)
