@@ -293,7 +293,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.6"
+VERSION = "2.21.7"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -8428,6 +8428,8 @@ class BatchRenamerDialog(QDialog):
       - Counter: {#} or {#03} (zero-padded width)
       - Extension placeholder: {ext} (original extension, no dot)
     """
+
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Rename from FITS")
@@ -8435,6 +8437,20 @@ class BatchRenamerDialog(QDialog):
         self.files: list[str] = []
         self.headers: dict[str, fits.Header] = {}
         self.union_keys: list[str] = []
+        # Make sure the dialog has a system menu + title so min/max can appear
+        def _wflag(name):
+            try:
+                # PyQt6
+                return getattr(Qt.WindowType, name)
+            except AttributeError:
+                # PyQt5
+                return getattr(Qt, name)
+
+        self.setWindowFlag(_wflag("WindowSystemMenuHint"), True)
+        self.setWindowFlag(_wflag("WindowTitleHint"), True)
+        self.setWindowFlag(_wflag("WindowMinMaxButtonsHint"), True)
+        self.setWindowFlag(_wflag("WindowContextHelpButtonHint"), False)
+        self.setSizeGripEnabled(True)  
         self._build_ui()
         self._load_settings()
 
@@ -8502,10 +8518,12 @@ class BatchRenamerDialog(QDialog):
 
         # Keys list
         left = QWidget(self); lyt = QVBoxLayout(left)
+        left.setFixedWidth(180)  # pick a width you like
         self.keys_list = QListWidget(self)
         self.keys_list.itemDoubleClicked.connect(self._insert_key_from_list)
         lyt.addWidget(QLabel("Available FITS keywords (double-click to insert):"))
         lyt.addWidget(self.keys_list, 1)
+  
         split.addWidget(left)
 
         # Table
@@ -8518,12 +8536,23 @@ class BatchRenamerDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+
+        # Ellipsize long cell text in the middle (e.g., C:\...\filename.fits)
+        try:
+            self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)  # PyQt6
+        except AttributeError:
+            self.table.setTextElideMode(Qt.ElideMiddle)                # PyQt5        
         rlyt.addWidget(QLabel("Preview"))
         rlyt.addWidget(self.table, 1)
         split.addWidget(right)
         split.setSizes([250, 700])
 
         root.addWidget(split, 1)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setCollapsible(0, False)  
+
 
         # Buttons
         btns = QDialogButtonBox(self)
@@ -8747,6 +8776,15 @@ class BatchRenamerDialog(QDialog):
         if conflict or status == "will overwrite":
             it.setForeground(Qt.GlobalColor.red)
         self.table.setItem(r, 3, it)
+        # after setting items
+        it_old = self.table.item(r, 0)
+        it_new = self.table.item(r, 2)
+        if it_old:
+            it_old.setToolTip(old)   # full original path
+        if it_new:
+            it_new.setToolTip(new)   # full new path        
+
+
 
     def _do_rename(self):
         # check collisions first
@@ -8795,12 +8833,69 @@ class BatchRenamerDialog(QDialog):
         return re.sub(r"[^A-Za-z0-9._-]+", "", s)
 
     def _render_pattern(self, pat: str, hdr: fits.Header, i: int, start_idx: int, file_path: str) -> str:
-        """Replace {KEY[:fmt]} / {#NN} / {ext}."""
+        import re
+        def apply_filters(text: str, filters: list[str]) -> str:
+            out = str(text)
+            for f in filters:
+                f = f.strip()
+                if f.startswith("re:"):
+                    pattern = f[3:]
+                    m = re.search(pattern, out)
+                    if not m:
+                        out = ""  # no match => empty (or keep original if you prefer)
+                    else:
+                        if m.lastindex:           # has capture groups
+                            out = m.group(1)      # first capturing group
+                        else:
+                            out = m.group(0)      # whole match
+                elif f == "lower":
+                    out = out.lower()
+                elif f == "upper":
+                    out = out.upper()
+                elif f.startswith("slice:"):
+                    # usage: |slice:start:stop   (like Python slicing)
+                    try:
+                        _, a, b = f.split(":", 2)
+                        a = int(a) if a else None
+                        b = int(b) if b else None
+                        out = out[a:b]
+                    except Exception:
+                        pass
+
+                elif f == "strip":
+                    out = out.strip()                    
+                # you can add more filters like 'strip', 'title', 'slice:a:b', etc.
+            return out
+
+        def _split_top_level_pipes(s: str) -> List[str]:
+            parts, buf = [], []
+            depth = 0
+            esc = False
+            for ch in s:
+                if esc:
+                    buf.append(ch); esc = False; continue
+                if ch == '\\':
+                    buf.append(ch); esc = True; continue
+                if ch in '([{':
+                    depth += 1
+                elif ch in ')]}':
+                    depth = max(0, depth-1)
+                if ch == '|' and depth == 0:
+                    parts.append(''.join(buf)); buf = []
+                else:
+                    buf.append(ch)
+            parts.append(''.join(buf))
+            return parts
+
         def repl(m):
-            body = m.group(1)  # token content
+            body = m.group(1)  # e.g. "INSTRUME|re:(\d{4}\S{2})" or "DATE-OBS:%Y%m%d|lower"
+            parts = _split_top_level_pipes(body)
+            key_fmt = parts[0]
+            filters = parts[1:] if len(parts) > 1 else []
+
             # counter?
-            if body.startswith("#"):
-                w = body[1:]
+            if key_fmt.startswith("#"):
+                w = key_fmt[1:]
                 try:
                     pad = int(w) if w else 0
                 except Exception:
@@ -8809,38 +8904,61 @@ class BatchRenamerDialog(QDialog):
                 return f"{num:0{pad}d}" if pad else str(num)
 
             # extension?
-            if body.lower() == "ext":
+            if key_fmt.lower() == "ext":
                 ext = os.path.splitext(file_path)[1]
-                return ext.lstrip(".")  # without dot
+                return ext.lstrip(".")
 
-            # FITS key (possible :fmt)
-            key, fmt = (body.split(":", 1) + [""])[:2]
+            # key[:fmt]
+            if ":" in key_fmt:
+                key, fmt = key_fmt.split(":", 1)
+            else:
+                key, fmt = key_fmt, ""
             key_up = key.upper()
             val = hdr.get(key_up, "")
-            if val is None: val = ""
+            if val is None:
+                val = ""
 
-            # DATE-OBS with datetime fmt
-            if key_up in ("DATE-OBS", "DATE", "TIME-OBS") and fmt:
-                # normalize ISO forms like 2024-08-17T03:12:00.123Z
+            # DATE-like with datetime fmt
+            if fmt and key_up in ("DATE-OBS", "DATE"):
                 s = str(val).strip().replace("Z", "+00:00")
                 try:
                     dt = datetime.fromisoformat(s)
-                    # naive? assume UTC to be safe
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
-                    return dt.strftime(fmt)
+                    out = dt.strftime(fmt)
                 except Exception:
-                    return str(val)
+                    out = str(val)
+                return apply_filters(out, filters)
 
-            # numeric general fmt (e.g. .1f)
+            # TIME-only keys with time fmt
+            if fmt and key_up in ("TIME-OBS", "UTSTART", "UTC-START"):
+                s = str(val).strip()
+                try:
+                    tt = datetime.strptime(s, "%H:%M:%S").time() if s.count(":") == 2 else datetime.strptime(s, "%H:%M").time()
+                    out = tt.strftime(fmt)
+                except Exception:
+                    # try fromisoformat for fractional seconds
+                    try:
+                        tt = datetime.fromisoformat(f"1970-01-01T{s}").time()
+                        out = tt.strftime(fmt)
+                    except Exception:
+                        out = str(val)
+                return apply_filters(out, filters)
+
+            # numeric with fmt (e.g. .1f)
             if fmt:
                 try:
-                    return format(float(val), fmt)
+                    out = format(float(val), fmt)
+                    return apply_filters(out, filters)
                 except Exception:
                     pass
-            return str(val)
 
-        return re.sub(r"\{([^{}]+)\}", repl, pat)
+            # default: string value + filters
+            return apply_filters(str(val), filters)
+
+        token_re = re.compile(r"\{((?:[^{}]|\{[^{}]*\})+)\}")
+        return token_re.sub(repl, pat)
+
 
 class HistoryExplorerDialog(QDialog):
     def __init__(self, image_manager, slot, parent=None):
@@ -14361,7 +14479,7 @@ class StackingSuiteDialog(QDialog):
 
     def _compute_autocrop_rect(self, file_list: List[str], transforms_path: str, coverage_pct: float):
         """
-        Build a coverage-count image (aligned canvas), threshold at pct, and extract largest rectangle.
+        Build a coverage-count image (aligned canvas), threshold at pct, and extract largest rectangle.e
         Returns (x0, y0, x1, y1) or None.
         """
         if not file_list:
@@ -33488,7 +33606,7 @@ class StarSpikeTool(QDialog):
         basic_form.addRow(self.num_vanes_label, self.num_vanes_spin)
 
         self.vane_width_label = QLabel("Vane Width:")
-        self.vane_width_spin = CustomDoubleSpinBox(minimum=0.1, maximum=50.0, initial=4.0, step=0.5)
+        self.vane_width_spin = CustomDoubleSpinBox(minimum=0.0, maximum=50.0, initial=4.0, step=0.5)
         basic_form.addRow(self.vane_width_label, self.vane_width_spin)
 
         # New: Rotation angle.
