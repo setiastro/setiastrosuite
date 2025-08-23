@@ -92,6 +92,7 @@ datas=[
     ('spcc.png', '.'),
     ('SASP_data.fits', '.'),
     ('convo.png', '.'),
+    ('astrobin_filters.csv', '.'),
     ('slot9.png', '.'),
     ('numba_utils.py', '.'),
     ('livestacking.png', '.'),
