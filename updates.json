@@ -1,9 +1,9 @@
 {
-  "version": "2.21.7",
+  "version": "2.21.8",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.7/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.7/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.7/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_linux.tar.xz"
   },
-  "notes": "Batch Renamer now allows RegEx style parsing and other niceties."
+  "notes": "AutoCrop for Stacking Suite bug update and settings update. Blink Tab speed control.."
 }
