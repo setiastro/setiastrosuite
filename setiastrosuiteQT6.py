@@ -1,4 +1,65 @@
+# fix_importlib_metadata.py
 import sys
+import importlib
+
+if getattr(sys, 'frozen', False):
+    # 1) Attempt to import both metadata modules
+    try:
+        std_md = importlib.import_module('importlib.metadata')
+    except ImportError:
+        std_md = None
+
+    try:
+        back_md = importlib.import_module('importlib_metadata')
+    except ImportError:
+        back_md = None
+
+    # 2) Ensure that any "import importlib.metadata" or
+    #    "import importlib_metadata" picks up our loaded module
+    if std_md:
+        sys.modules['importlib.metadata'] = std_md
+        setattr(importlib, 'metadata', std_md)
+    if back_md:
+        sys.modules['importlib_metadata'] = back_md
+
+    # 3) Pick whichever is available for defaults (prefer stdlib)
+    meta = std_md or back_md
+    if not meta:
+        # nothing to patch
+        sys.exit(0)
+
+    # 4) Save originals
+    orig_version      = getattr(meta, 'version', None)
+    orig_distribution = getattr(meta, 'distribution', None)
+
+    # 5) Define safe fallbacks
+    def safe_version(pkg, *args, **kwargs):
+        try:
+            return orig_version(pkg, *args, **kwargs)
+        except Exception:
+            return "0.0.0"
+
+    class DummyDist:
+        version = "0.0.0"
+        metadata = {}
+
+    def safe_distribution(pkg, *args, **kwargs):
+        try:
+            return orig_distribution(pkg, *args, **kwargs)
+        except Exception:
+            return DummyDist()
+
+    # 6) Patch both modules (stdlib and back-port) if they exist
+    for m in (std_md, back_md):
+        if not m:
+            continue
+        if orig_version:
+            m.version = safe_version
+        if orig_distribution:
+            m.distribution = safe_distribution
+
+
+import typing_extensions
 import urllib
 # Standard library imports
 from itertools import combinations
@@ -293,7 +354,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.21.7"
+VERSION = "2.21.8"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -13327,9 +13388,12 @@ def compute_safe_chunk(height, width, N, channels, dtype, pref_h, pref_w):
     print(f"[DEBUG] final chunk: {ch}×{cw}")
     return ch, cw
 
+_DIM_RE = re.compile(r"\s*\(\d+\s*x\s*\d+\)\s*")
+
 class StackingSuiteDialog(QDialog):
-    def __init__(self):
-        super().__init__()
+    requestRelaunch = pyqtSignal(str, str)  # old_dir, new_dir
+    def __init__(self, parent=None):  # <-- accept parent
+        super().__init__(parent) 
         self.setWindowTitle("Stacking Suite")
         self.setGeometry(300, 200, 800, 600)
         self.per_group_drizzle = {}
@@ -13426,6 +13490,13 @@ class StackingSuiteDialog(QDialog):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self.restore_saved_master_calibrations()
         self._update_stacking_path_display()
+
+
+
+    def _label_with_dims(self, label: str, width: int, height: int) -> str:
+        """Replace or append (WxH) in a human label."""
+        clean = _DIM_RE.sub("", label).rstrip()
+        return f"{clean} ({width}x{height})"
 
     def _update_stacking_path_display(self):
         txt = self.stacking_directory or ""
@@ -13760,20 +13831,37 @@ class StackingSuiteDialog(QDialog):
         self.status_text.blockSignals(old_state)
 
 
+    def _norm_dir(self, p: str) -> str:
+        if not p:
+            return ""
+        p = os.path.expanduser(os.path.expandvars(p))
+        p = os.path.abspath(p)
+        p = os.path.normpath(p)
+        if os.name == "nt":
+            p = p.lower()
+        return p
+
+    def _choose_dir_into(self, line_edit: QLineEdit):
+        d = QFileDialog.getExistingDirectory(self, "Select Stacking Directory",
+                                            line_edit.text() or self.stacking_directory or "")
+        if d:
+            line_edit.setText(d)
+
     def open_stacking_settings(self):
         """ Opens a dialog to set the stacking directory, sigma values, rejection algorithm, and algorithm parameters. """
         dialog = QDialog(self)
         dialog.setWindowTitle("Stacking Settings")
         layout = QVBoxLayout(dialog)
 
-        # Stacking directory selection
+        # --- Stacking directory selection (DIALOG-SCOPED, no collisions) ---
         dir_layout = QHBoxLayout()
         dir_label = QLabel("Stacking Directory:")
-        self.dir_path_edit = QLineEdit(self.stacking_directory)
+        dir_edit = QLineEdit(self.stacking_directory or "")       # <<< changed: local, not self.dir_path_edit
+        dialog._dir_edit = dir_edit                               # <<< changed: actually assign the defined variable
         dir_button = QPushButton("Browse")
-        dir_button.clicked.connect(self.select_stacking_directory)
+        dir_button.clicked.connect(lambda: self._choose_dir_into(dir_edit))  # <<< changed
         dir_layout.addWidget(dir_label)
-        dir_layout.addWidget(self.dir_path_edit)
+        dir_layout.addWidget(dir_edit)                            # <<< changed
         dir_layout.addWidget(dir_button)
         layout.addLayout(dir_layout)
 
@@ -13796,7 +13884,7 @@ class StackingSuiteDialog(QDialog):
         chunk_layout = QHBoxLayout()
         chunk_layout.addWidget(QLabel("Chunk Height:"))
         self.chunkHeightSpinBox = QSpinBox()
-        self.chunkHeightSpinBox.setRange(128, 8192)  # or whatever range you want
+        self.chunkHeightSpinBox.setRange(128, 8192)
         self.chunkHeightSpinBox.setValue(self.settings.value("stacking/chunk_height", 2048, type=int))
         chunk_layout.addWidget(self.chunkHeightSpinBox)
 
@@ -13805,7 +13893,6 @@ class StackingSuiteDialog(QDialog):
         self.chunkWidthSpinBox.setRange(128, 8192)
         self.chunkWidthSpinBox.setValue(self.settings.value("stacking/chunk_width", 2048, type=int))
         chunk_layout.addWidget(self.chunkWidthSpinBox)
-
         layout.addLayout(chunk_layout)
 
         # Rejection algorithm selection
@@ -13935,9 +14022,29 @@ class StackingSuiteDialog(QDialog):
 
         dialog.exec()
 
+    def closeEvent(self, e):
+        # Graceful shutdown for any running workers
+        try:
+            if hasattr(self, "alignment_thread") and self.alignment_thread and self.alignment_thread.isRunning():
+                self.alignment_thread.requestInterruption()
+                self.alignment_thread.wait(1500)
+        except Exception:
+            pass
+        super().closeEvent(e)
+
     def save_stacking_settings(self, dialog):
-        """ Saves stacking directory, sigma values, rejection algorithm, and algorithm parameters to QSettings. """
-        self.stacking_directory = self.dir_path_edit.text()
+        """
+        Save settings and restart the Stacking Suite if the directory changed.
+        Uses dialog-scoped dir_edit and normalized path comparison.
+        """
+        prev_dir_raw = self.stacking_directory or ""
+        dir_edit = getattr(dialog, "_dir_edit", None)
+        new_dir_raw = (dir_edit.text() if dir_edit else prev_dir_raw)
+
+        prev_dir = self._norm_dir(prev_dir_raw)
+        new_dir  = self._norm_dir(new_dir_raw)
+
+        # Persist the rest
         self.sigma_high = self.sigma_high_spinbox.value()
         self.sigma_low = self.sigma_low_spinbox.value()
         self.rejection_algorithm = self.rejection_algo_combo.currentText()
@@ -13948,10 +14055,11 @@ class StackingSuiteDialog(QDialog):
         self.trim_fraction = self.trim_spinbox.value()
         self.modz_threshold = self.modz_spinbox.value()
         self.chunk_height = self.chunkHeightSpinBox.value()
-        self.chunk_width = self.chunkWidthSpinBox.value()
+        self.chunk_width  = self.chunkWidthSpinBox.value()
 
-        # Store in QSettings
-        self.settings.setValue("stacking/dir", self.stacking_directory)
+        # Update instance + QSettings with RAW path (human-friendly); use normalized just for comparison
+        self.stacking_directory = new_dir_raw
+        self.settings.setValue("stacking/dir", new_dir_raw)
         self.settings.setValue("stacking/sigma_high", self.sigma_high)
         self.settings.setValue("stacking/sigma_low", self.sigma_low)
         self.settings.setValue("stacking/rejection_algorithm", self.rejection_algorithm)
@@ -13964,13 +14072,210 @@ class StackingSuiteDialog(QDialog):
         self.settings.setValue("stacking/chunk_height", self.chunk_height)
         self.settings.setValue("stacking/chunk_width", self.chunk_width)
         self.settings.setValue("stacking/autocrop_enabled", self.autocrop_cb.isChecked())
-        self.settings.setValue("stacking/autocrop_pct", float(self.autocrop_pct.value()))        
+        self.settings.setValue("stacking/autocrop_pct", float(self.autocrop_pct.value()))
+        self.settings.sync()
 
+        changed = (new_dir != prev_dir)
         print(f"✅ Saved settings - Directory: {self.stacking_directory}, Sigma High: {self.sigma_high}, Sigma Low: {self.sigma_low}, Algorithm: {self.rejection_algorithm}")
         print(f"    Kappa: {self.kappa}, Iterations: {self.iterations}, ESD Threshold: {self.esd_threshold}, Biweight Constant: {self.biweight_constant}, Trim Fraction: {self.trim_fraction}, Modified Z-Score Threshold: {self.modz_threshold}")
         self.update_status("✅ Saved stacking settings.")
         self._update_stacking_path_display()
+
+        if changed:
+            self.update_status("🔁 Restarting Stacking Suite to apply folder change…")
+            dialog.accept()
+            self._restart_self()
+            return
+
         dialog.accept()
+
+    def _restart_self(self):
+        from PyQt6.QtCore import QTimer
+        geom = self.saveGeometry()
+        cur_tab = None
+        try:
+            cur_tab = self.tabs.currentIndex()
+        except Exception:
+            pass
+
+        parent = self.parent()  # keep same parent so Qt retains ownership
+
+        def spawn():
+            new = StackingSuiteDialog(parent=parent)
+            if geom: new.restoreGeometry(geom)
+            if cur_tab is not None:
+                try: new.tabs.setCurrentIndex(cur_tab)
+                except Exception: pass
+            new.show()
+
+        QTimer.singleShot(0, spawn)
+        self.close()
+
+    def _on_stacking_directory_changed(self, old_dir: str, new_dir: str):
+        # Stop any running worker safely
+        if hasattr(self, "alignment_thread") and self.alignment_thread:
+            try:
+                if self.alignment_thread.isRunning():
+                    self.alignment_thread.requestInterruption()
+                    self.alignment_thread.wait(1500)
+            except Exception:
+                pass
+
+        self._ensure_stacking_subdirs(new_dir)
+        self._clear_integration_state()
+
+        # 🔁 RESCAN + REPOPULATE (the key bit you’re missing)
+        self._reload_lists_for_new_dir()
+
+        # If your tabs populate on change, poke the active one:
+        if hasattr(self, "on_tab_changed"):
+            self.on_tab_changed(self.tabs.currentIndex())
+
+        # Update any path labels
+        self._update_stacking_path_display()
+
+        # Reload any persisted master selections
+        try:
+            self.restore_saved_master_calibrations()
+        except Exception:
+            pass
+
+        self.update_status(f"📂 Stacking directory changed:\n    {old_dir or '(none)'} → {new_dir}")
+
+    def _reload_lists_for_new_dir(self):
+        """
+        Re-scan the new stacking directory and repopulate internal dicts AND UI.
+        """
+        base = self.stacking_directory or ""
+        self.conversion_output_directory = os.path.join(base, "Converted_Images")
+
+        # Rebuild dictionaries from disk
+        self.dark_files  = self._discover_grouped(os.path.join(base, "Calibrated_Darks"))
+        self.flat_files  = self._discover_grouped(os.path.join(base, "Calibrated_Flats"))
+        self.light_files = self._discover_grouped(os.path.join(base, "Calibrated_Lights"))
+
+        # If you store master lists/sizes by path, clear/reseed minimally
+        self.master_files.clear()
+        self.master_sizes.clear()
+
+        # 🔄 Update the tab UIs if you have builders; try common method names safely
+        # Darks
+        if hasattr(self, "rebuild_dark_tree"):
+            self.rebuild_dark_tree(self.dark_files)
+        elif hasattr(self, "populate_dark_tab"):
+            self.populate_dark_tab()
+
+        # Flats
+        if hasattr(self, "rebuild_flat_tree"):
+            self.rebuild_flat_tree(self.flat_files)
+        elif hasattr(self, "populate_flat_tab"):
+            self.populate_flat_tab()
+
+        # Lights
+        if hasattr(self, "rebuild_light_tree"):
+            self.rebuild_light_tree(self.light_files)
+        elif hasattr(self, "populate_light_tab"):
+            self.populate_light_tab()
+
+        # Image Integration (registration) tab often shows counts/paths
+        if hasattr(self, "refresh_integration_tab"):
+            self.refresh_integration_tab()
+
+        self.update_status(f"🔄 Re-scanned calibrated sets in: {base}")
+
+    def _discover_grouped(self, root_dir: str) -> dict:
+        """
+        Walk 'root_dir' and return {group_name: [file_paths,...]}.
+        Group = immediate subfolder name; if files are directly in root, group 'Ungrouped'.
+        """
+        groups = {}
+        if not root_dir or not os.path.isdir(root_dir):
+            return groups
+
+        valid_ext = (".fit", ".fits", ".xisf", ".tif", ".tiff")
+        root_dir = os.path.normpath(root_dir)
+
+        for dirpath, _, files in os.walk(root_dir):
+            for fn in files:
+                if not fn.lower().endswith(valid_ext):
+                    continue
+                fpath = os.path.normpath(os.path.join(dirpath, fn))
+                parent = os.path.basename(os.path.dirname(fpath))
+                group  = parent if os.path.dirname(fpath) != root_dir else "Ungrouped"
+                groups.setdefault(group, []).append(fpath)
+
+        # Stable ordering helps
+        for g in groups:
+            groups[g].sort()
+        return groups
+
+    def _refresh_all_tabs_once(self):
+        current = self.tabs.currentIndex()
+        if hasattr(self, "on_tab_changed"):
+            for idx in range(self.tabs.count()):
+                self.on_tab_changed(idx)
+        self.tabs.setCurrentIndex(current)
+
+    def _ensure_stacking_subdirs(self, base_dir: str):
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+            for sub in (
+                "Aligned_Images",
+                "Normalized_Images",
+                "Calibrated_Darks",
+                "Calibrated_Flats",
+                "Calibrated_Lights",
+                "Converted_Images",
+                "Masters",
+            ):
+                os.makedirs(os.path.join(base_dir, sub), exist_ok=True)
+        except Exception as e:
+            self.update_status(f"⚠️ Could not ensure subfolders in '{base_dir}': {e}")
+
+    def _clear_integration_state(self):
+        # wipe per-run state so we don't “blend” two directories
+        self.per_group_drizzle.clear()
+        self.manual_dark_overrides.clear()
+        self.manual_flat_overrides.clear()
+        self.reg_files.clear()
+        self.session_tags.clear()
+        self.deleted_calibrated_files.clear()
+        self._norm_map.clear()
+        setattr(self, "valid_transforms", {})
+        setattr(self, "frame_weights", {})
+        setattr(self, "_global_autocrop_rect", None)
+
+    def _rebuild_tabs_after_dir_change(self):
+        # Rebuild the tab widgets so any path assumptions inside them reset to the new dir
+        current = self.tabs.currentIndex()
+
+        # Remove all tabs & delete widgets
+        while self.tabs.count():
+            w = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+
+        # Recreate against the new base path
+        self.conversion_tab = self.create_conversion_tab()
+        self.dark_tab       = self.create_dark_tab()
+        self.flat_tab       = self.create_flat_tab()
+        self.light_tab      = self.create_light_tab()
+        self.image_integration_tab = self.create_image_registration_tab()
+
+        self.tabs.addTab(self.conversion_tab, "Convert Non-FITS Formats")
+        self.tabs.addTab(self.dark_tab,       "Darks")
+        self.tabs.addTab(self.flat_tab,       "Flats")
+        self.tabs.addTab(self.light_tab,      "Lights")
+        self.tabs.addTab(self.image_integration_tab, "Image Integration")
+
+        # Restore previously active tab if possible
+        if 0 <= current < self.tabs.count():
+            self.tabs.setCurrentIndex(current)
+        else:
+            self.tabs.setCurrentIndex(1)  # Darks by default
 
     def select_stacking_directory(self):
         """ Opens a dialog to choose a stacking directory. """
@@ -14476,6 +14781,130 @@ class StackingSuiteDialog(QDialog):
         _, x0, y0, x1, y1 = best
         return (x0, y0, x1, y1)
 
+    def _compute_common_autocrop_rect(self, grouped_files: dict, coverage_pct: float):
+        transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+        common_mask = None
+        for group_key, file_list in grouped_files.items():
+            if not file_list:
+                continue
+            mask = self._compute_coverage_mask(file_list, transforms_path, coverage_pct)
+            if mask is None:
+                self.update_status(f"✂️ Global crop: no mask for '{group_key}' → disabling global crop.")
+                return None
+            if common_mask is None:
+                common_mask = mask.astype(bool, copy=True)
+            else:
+                if mask.shape != common_mask.shape:
+                    self.update_status("✂️ Global crop: mask shapes differ across groups.")
+                    return None
+                np.logical_and(common_mask, mask, out=common_mask)
+
+        if common_mask is None or not common_mask.any():
+            return None
+
+        rect = self._max_rectangle_in_binary(common_mask)
+        if rect:
+            x0,y0,x1,y1 = rect
+            self.update_status(f"✂️ Global crop rect={rect} → size {x1-x0}×{y1-y0}")
+        return rect
+
+    def _first_non_none(self, *vals):
+        for v in vals:
+            if v is not None:
+                return v
+        return None
+
+    def _compute_coverage_mask(self, file_list: List[str], transforms_path: str, coverage_pct: float):
+        """
+        Build a coverage-count image on the aligned canvas for 'file_list'.
+        Threshold at coverage_pct, but use the number of frames we ACTUALLY rasterized (N_eff).
+        Returns a bool mask (H×W) or None if nothing rasterized.
+        """
+        if not file_list:
+            return None
+
+        # Canvas from first aligned image
+        ref_img, _, _, _ = load_image(file_list[0])
+        if ref_img is None:
+            self.update_status("✂️ Auto-crop: could not load first aligned ref.")
+            return None
+        H, W = (ref_img.shape if ref_img.ndim == 2 else ref_img.shape[:2])
+
+        if not os.path.exists(transforms_path):
+            self.update_status(f"✂️ Auto-crop: no transforms file at {transforms_path}")
+            return None
+
+        transforms = self.load_alignment_matrices_custom(transforms_path)
+
+        # --- Robust transform lookup: key by normalized full path AND by basename ---
+        def _normcase(p):  # windows-insensitive
+            p = os.path.normpath(os.path.abspath(p))
+            return p.lower() if os.name == "nt" else p
+
+        xforms_by_full = { _normcase(k): v for k, v in transforms.items() }
+        xforms_by_name = {}
+        for k, v in transforms.items():
+            xforms_by_name.setdefault(os.path.basename(k), v)
+
+        cov = np.zeros((H, W), dtype=np.uint16)
+        used = 0
+
+        for aligned_path in file_list:
+            base = os.path.basename(aligned_path)
+            if base.endswith("_n_r.fit"):
+                raw_base = base.replace("_n_r.fit", "_n.fit")
+            elif base.endswith("_r.fit"):
+                raw_base = base.replace("_r.fit", ".fit")
+            else:
+                raw_base = base
+
+            # try normalized-Images location first
+            raw_path_guess = os.path.join(self.stacking_directory, "Normalized_Images", raw_base)
+
+            # find transform
+            M = self._first_non_none(
+                xforms_by_full.get(_normcase(raw_path_guess)),
+                xforms_by_full.get(_normcase(aligned_path)),
+                transforms.get(raw_path_guess),
+                transforms.get(os.path.normpath(aligned_path)),
+                xforms_by_name.get(raw_base),
+            )
+
+            if M is None:
+                # Can't rasterize this frame
+                continue
+
+            # raw size
+            h_raw = w_raw = None
+            if os.path.exists(raw_path_guess):
+                raw_img, _, _, _ = load_image(raw_path_guess)
+                if raw_img is not None:
+                    h_raw, w_raw = (raw_img.shape if raw_img.ndim == 2 else raw_img.shape[:2])
+
+            if h_raw is None or w_raw is None:
+                # fallback to aligned canvas size (still okay; affine provides placement)
+                h_raw, w_raw = H, W
+
+            corners = np.array([[0,0],[w_raw-1,0],[w_raw-1,h_raw-1],[0,h_raw-1]], dtype=np.float32)
+            A = M[:, :2]; t = M[:, 2]
+            quad = (corners @ A.T) + t
+
+            self._quad_coverage_add(cov, quad)
+            used += 1
+
+        if used == 0:
+            self.update_status("✂️ Auto-crop: 0/{} frames had usable transforms; skipping.".format(len(file_list)))
+            return None
+
+        need = int(np.ceil((coverage_pct / 100.0) * used))
+        mask = (cov >= need)
+        self.update_status(f"✂️ Auto-crop: rasterized {used}/{len(file_list)} frames; need {need} per-pixel.")
+        if not mask.any():
+            self.update_status("✂️ Auto-crop: threshold produced empty mask.")
+            return None
+        return mask
+
+
 
     def _compute_autocrop_rect(self, file_list: List[str], transforms_path: str, coverage_pct: float):
         """
@@ -14602,8 +15031,6 @@ class StackingSuiteDialog(QDialog):
 
         self.exposure_tolerance_spin.valueChanged.connect(lambda _: self.populate_calibrated_lights())
 
-        # Populate the tree from your calibrated folder
-        self.populate_calibrated_lights()
 
 
         # ─────────────────────────────────────────
@@ -14627,13 +15054,13 @@ class StackingSuiteDialog(QDialog):
         drizzle_layout = QHBoxLayout()
 
         self.drizzle_checkbox = QCheckBox("Enable Drizzle (beta)")
-        self.drizzle_checkbox.stateChanged.connect(self.update_drizzle_settings)  # <─ connect signal
+        self.drizzle_checkbox.toggled.connect(self._on_drizzle_checkbox_toggled) # <─ connect signal
         drizzle_layout.addWidget(self.drizzle_checkbox)
 
         drizzle_layout.addWidget(QLabel("Scale:"))
         self.drizzle_scale_combo = QComboBox()
         self.drizzle_scale_combo.addItems(["1x", "2x", "3x"])
-        self.drizzle_scale_combo.currentIndexChanged.connect(self.update_drizzle_settings)  # <─ connect
+        self.drizzle_scale_combo.currentIndexChanged.connect(self._on_drizzle_param_changed)  # <─ connect
         drizzle_layout.addWidget(self.drizzle_scale_combo)
 
         drizzle_layout.addWidget(QLabel("Drop Shrink:"))
@@ -14641,7 +15068,7 @@ class StackingSuiteDialog(QDialog):
         self.drizzle_drop_shrink_spin.setRange(0.0, 1.0)
         self.drizzle_drop_shrink_spin.setSingleStep(0.05)
         self.drizzle_drop_shrink_spin.setValue(0.65)
-        self.drizzle_drop_shrink_spin.valueChanged.connect(self.update_drizzle_settings)  # <─ connect
+        self.drizzle_drop_shrink_spin.valueChanged.connect(self._on_drizzle_param_changed)  # <─ connect
         drizzle_layout.addWidget(self.drizzle_drop_shrink_spin)
 
         layout.addLayout(drizzle_layout)
@@ -14728,6 +15155,8 @@ class StackingSuiteDialog(QDialog):
         """)
         layout.addWidget(self.integrate_registered_btn)
 
+        # Populate the tree from your calibrated folder
+        self.populate_calibrated_lights()
         tab.setLayout(layout)
         return tab
 
@@ -15080,11 +15509,17 @@ class StackingSuiteDialog(QDialog):
         """
         Reads both the Calibrated folder and any manually-added files,
         groups them by FILTER, EXPOSURE±tol, SIZE, and fills self.reg_tree.
-        Now supports non-FITS images too.
+        Also sets each group's Drizzle column from saved per-group state,
+        or from the current global controls if none exists yet.
         """
         from PIL import Image
 
-        # 1) clear out the tree
+        # Fallback in case helper wasn't added
+        def _fmt(enabled, scale, drop):
+            return (f"Drizzle: True, Scale: {scale:g}x, Drop: {drop:.2f}"
+                    if enabled else "Drizzle: False")
+
+        # 1) clear tree
         self.reg_tree.clear()
         self.reg_tree.setColumnCount(3)
         self.reg_tree.setHeaderLabels(["Filter - Exposure - Size", "Metadata", "Drizzle"])
@@ -15092,7 +15527,7 @@ class StackingSuiteDialog(QDialog):
         for col in (0, 1, 2):
             hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
 
-        # 2) gather all files
+        # 2) gather files
         calibrated_folder = os.path.join(self.stacking_directory or "", "Calibrated")
         files = []
         if os.path.isdir(calibrated_folder):
@@ -15104,19 +15539,19 @@ class StackingSuiteDialog(QDialog):
             return
 
         # 3) group by header (or defaults)
-        grouped = {}
+        grouped = {}  # key -> list of dicts: {"path", "exp", "size"}
         tol = self.exposure_tolerance_spin.value()
+
         for fp in files:
             ext = os.path.splitext(fp)[1].lower()
             filt = "Unknown"
             exp = 0.0
             size = "Unknown"
-            # try FITS first
+
             if ext in (".fits", ".fit"):
                 try:
                     hdr0 = fits.getheader(fp, ext=0)
-                    filt = hdr0.get("FILTER", "Unknown")
-                    filt = self._sanitize_name(filt)
+                    filt = self._sanitize_name(hdr0.get("FILTER", "Unknown"))
                     exp_raw = hdr0.get("EXPOSURE", hdr0.get("EXPTIME", None))
                     try:
                         exp = float(exp_raw)
@@ -15128,9 +15563,9 @@ class StackingSuiteDialog(QDialog):
                     size = f"{w}x{h}"
                 except Exception as e:
                     print(f"⚠️ Could not read FITS {fp}: {e}; treating as generic image")
-                    # fall through to generic
+
             if filt == "Unknown" and ext not in (".fits", ".fit"):
-                # generic image: try PIL
+                # generic image via PIL/utility
                 try:
                     w, h = self._get_image_size(fp)
                     size = f"{w}x{h}"
@@ -15138,26 +15573,31 @@ class StackingSuiteDialog(QDialog):
                     print(f"⚠️ Cannot read image size for {fp}: {e}")
                     continue
 
-            # now we have filt, exp, size
             # find existing group
-            match = None
+            match_key = None
             for key in grouped:
                 f2, e2, s2 = self.parse_group_key(key)
                 if filt == f2 and s2 == size and abs(exp - e2) <= tol:
-                    match = key
+                    match_key = key
                     break
-            if match:
-                key = match
-            else:
-                key = f"{filt} - {exp:.1f}s ({size})"
-                grouped[key] = []
-            grouped[key].append((fp, exp))
 
-        # 4) populate the tree & store in self.light_files
+            key = match_key or f"{filt} - {exp:.1f}s ({size})"
+            grouped.setdefault(key, []).append({"path": fp, "exp": exp, "size": size})
+
+        # 4) populate tree & self.light_files
         self.light_files = {}
-        for key, lst in grouped.items():
-            paths = [p for p, _ in lst]
-            exps  = [e for _, e in lst]
+
+        # read current global drizzle controls (used as default)
+        global_enabled = self.drizzle_checkbox.isChecked()
+        try:
+            global_scale = float(self.drizzle_scale_combo.currentText().replace("x", "", 1))
+        except Exception:
+            global_scale = 1.0
+        global_drop = self.drizzle_drop_shrink_spin.value()
+
+        for key, entries in grouped.items():
+            paths = [d["path"] for d in entries]
+            exps  = [d["exp"]  for d in entries]
 
             top = QTreeWidgetItem()
             top.setText(0, key)
@@ -15166,21 +15606,58 @@ class StackingSuiteDialog(QDialog):
                 top.setText(1, f"{len(paths)} files, {mn:.0f}s–{mx:.0f}s")
             else:
                 top.setText(1, f"{len(paths)} file")
-            top.setText(2, "Drizzle: False")
+
+            # Use saved per-group drizzle state if present; else default to global controls
+            state = self.per_group_drizzle.get(key)
+            if state is None:
+                state = {
+                    "enabled": bool(global_enabled),
+                    "scale":   float(global_scale),
+                    "drop":    float(global_drop),
+                }
+                self.per_group_drizzle[key] = state  # persist default for this group
+
+            # Show in column 2
+            try:
+                top.setText(2, self._format_drizzle_text(state["enabled"], state["scale"], state["drop"]))
+            except AttributeError:
+                top.setText(2, _fmt(state["enabled"], state["scale"], state["drop"]))
+
             top.setData(0, Qt.ItemDataRole.UserRole, paths)
             self.reg_tree.addTopLevelItem(top)
 
-            for fp, _ in lst:
-                # leaf row: show basename + size
-                # re-use the size we computed above
-                leaf = QTreeWidgetItem([os.path.basename(fp), f"Size: {size}"])
+            # leaf rows: show basename + *per-file* size (fixes the old "same size for all leaves" issue)
+            for d in entries:
+                fp = d["path"]
+                leaf = QTreeWidgetItem([os.path.basename(fp), f"Size: {d['size']}"])
                 leaf.setData(0, Qt.ItemDataRole.UserRole, fp)
                 top.addChild(leaf)
 
             top.setExpanded(True)
             self.light_files[key] = paths
 
+    def _iter_group_items(self):
+        for i in range(self.reg_tree.topLevelItemCount()):
+            yield self.reg_tree.topLevelItem(i)
 
+    def _format_drizzle_text(self, enabled: bool, scale: float, drop: float) -> str:
+        return (f"Drizzle: True, Scale: {scale:g}x, Drop: {drop:.2f}"
+                if enabled else "Drizzle: False")
+
+    def _set_drizzle_on_items(self, items, enabled: bool, scale: float, drop: float):
+        txt_on  = self._format_drizzle_text(True,  scale, drop)
+        txt_off = self._format_drizzle_text(False, scale, drop)
+        for it in items:
+            # dedupe child selection → parent group
+            if it.parent() is not None:
+                it = it.parent()
+            group_key = it.text(0)
+            it.setText(2, txt_on if enabled else txt_off)
+            self.per_group_drizzle[group_key] = {
+                "enabled": bool(enabled),
+                "scale": float(scale),
+                "drop":  float(drop),
+            }
 
     def update_drizzle_settings(self):
         """
@@ -15224,6 +15701,31 @@ class StackingSuiteDialog(QDialog):
                 "drop": drop_val
             }
 
+    def _on_drizzle_checkbox_toggled(self, checked: bool):
+        scale = float(self.drizzle_scale_combo.currentText().replace("x","",1))
+        drop  = self.drizzle_drop_shrink_spin.value()
+        targets = list(self._iter_group_items())  # ALWAYS all groups
+        self._set_drizzle_on_items(targets, checked, scale, drop)
+
+    def _on_drizzle_param_changed(self, *_):
+        enabled = self.drizzle_checkbox.isChecked()
+        scale   = float(self.drizzle_scale_combo.currentText().replace("x","",1))
+        drop    = self.drizzle_drop_shrink_spin.value()
+
+        sel = self.reg_tree.selectedItems()
+        if sel:
+            # update selected groups
+            seen, targets = set(), []
+            for it in sel:
+                top = it if it.parent() is None else it.parent()
+                key = top.text(0)
+                if key not in seen:
+                    seen.add(key); targets.append(top)
+        else:
+            # no selection → update ALL groups (keeps UI intuitive)
+            targets = list(self._iter_group_items())
+
+        self._set_drizzle_on_items(targets, enabled, scale, drop)
 
     def gather_drizzle_settings_from_tree(self):
         """
@@ -17539,14 +18041,10 @@ class StackingSuiteDialog(QDialog):
         return
 
 
-    def _apply_autocrop(self, arr, file_list, header, scale=1.0):
+    def _apply_autocrop(self, arr, file_list, header, scale=1.0, rect_override=None):
         """
-        Crop 'arr' to the largest rectangle covered by ≥ coverage% of frames.
-        'file_list' must be the aligned (_r) files used for this integration.
-        'scale' = 1.0 for normal; = drizzle scale for drizzle images.
-        Preserves mono vs color shape (mono stays (H,W); color stays (H,W,3)).
+        If rect_override is provided, use it; else compute per-file_list.
         """
-        # Is it enabled?
         try:
             enabled = self.autocrop_cb.isChecked()
             pct = float(self.autocrop_pct.value())
@@ -17557,8 +18055,11 @@ class StackingSuiteDialog(QDialog):
         if not enabled or not file_list:
             return arr, header
 
-        transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
-        rect = self._compute_autocrop_rect(file_list, transforms_path, pct)
+        rect = rect_override
+        if rect is None:
+            transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
+            rect = self._compute_autocrop_rect(file_list, transforms_path, pct)
+
         if not rect:
             self.update_status("✂️ Auto-crop: no common area found; skipping.")
             return arr, header
@@ -17780,6 +18281,22 @@ class StackingSuiteDialog(QDialog):
         self.update_status("🔄 Running normal integration to record rejected pixel positions...")
         QApplication.processEvents()
         group_integration_data = {}
+        # Decide if global auto-crop is enabled and determine pct
+        try:
+            _autocrop_enabled = self.autocrop_cb.isChecked()
+            _autocrop_pct     = float(self.autocrop_pct.value())
+        except Exception:
+            _autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
+            _autocrop_pct     = float(self.settings.value("stacking/autocrop_pct", 95.0, type=float))
+
+        self._global_autocrop_rect = None
+        if _autocrop_enabled:
+            self._global_autocrop_rect = self._compute_common_autocrop_rect(grouped_files, _autocrop_pct)
+            if self._global_autocrop_rect is None:
+                self.update_status("✂️ Global crop disabled; falling back to per-group.")
+        else:
+            self.update_status("✂️ Auto-crop disabled.")    
+
         summary_lines = []
         # NEW: where we collect any saved _autocrop files
         autocrop_outputs = []
@@ -17819,7 +18336,9 @@ class StackingSuiteDialog(QDialog):
                 hdr_orig["NAXIS3"] = integrated_image.shape[2]
 
             n_frames = len(file_list)
-            base_name = f"MasterLight_{group_key}_{n_frames}stacked"
+            H, W = integrated_image.shape[:2]
+            display_group = self._label_with_dims(group_key, W, H)
+            base_name = f"MasterLight_{display_group}_{n_frames}stacked"
             out_path_orig = os.path.join(self.stacking_directory, f"{base_name}.fit")
 
             save_image(
@@ -17835,7 +18354,8 @@ class StackingSuiteDialog(QDialog):
 
             # --- OPTIONAL: AUTOCROP SECOND COPY ---
             cropped_img, hdr_crop = self._apply_autocrop(
-                integrated_image, file_list, ref_header.copy(), scale=1.0
+                integrated_image, file_list, ref_header.copy(), scale=1.0,
+                rect_override=self._global_autocrop_rect
             )
 
             # If auto-crop is disabled, _apply_autocrop returns the input unchanged;
@@ -17849,7 +18369,10 @@ class StackingSuiteDialog(QDialog):
             if autocrop_enabled:
                 # _apply_autocrop already fixed NAXIS*, CRPIX*; ensure mono flag matches final array
                 is_mono_crop = (cropped_img.ndim == 2)
-                out_path_crop = os.path.join(self.stacking_directory, f"{base_name}_autocrop.fit")
+                Hc, Wc = (cropped_img.shape[:2] if cropped_img.ndim >= 2 else (H, W))
+                display_group_crop = self._label_with_dims(group_key, Wc, Hc)
+                base_name_crop = f"MasterLight_{display_group_crop}_{n_frames}stacked"
+                out_path_crop = os.path.join(self.stacking_directory, f"{base_name_crop}_autocrop.fit")
                 save_image(
                     img_array=cropped_img,
                     filename=out_path_crop,
@@ -18507,7 +19030,9 @@ class StackingSuiteDialog(QDialog):
 
         # 8) Save final drizzle image
         # 8) Save final drizzle image (original first)
-        base_name = f"MasterLight_{group_key}_{len(file_list)}stacked_drizzle"
+        Hd, Wd = final_drizzle.shape[:2] if final_drizzle.ndim >= 2 else (0, 0)
+        display_group_driz = self._label_with_dims(group_key, Wd, Hd)
+        base_name = f"MasterLight_{display_group_driz}_{len(file_list)}stacked_drizzle"
         out_path_orig = os.path.join(self.stacking_directory, f"{base_name}.fit")
 
         hdr_orig = hdr.copy() if hdr is not None else fits.Header()
@@ -18549,10 +19074,13 @@ class StackingSuiteDialog(QDialog):
         if autocrop_enabled:
             cropped_drizzle, hdr_crop = self._apply_autocrop(
                 final_drizzle, file_list, hdr.copy() if hdr is not None else fits.Header(),
-                scale=scale_factor
+                scale=scale_factor,
+                rect_override=self._global_autocrop_rect
             )
             is_mono_crop = (cropped_drizzle.ndim == 2)
-            out_path_crop = os.path.join(self.stacking_directory, f"{base_name}_autocrop.fit")
+            display_group_driz_crop = self._label_with_dims(group_key, cropped_drizzle.shape[1], cropped_drizzle.shape[0])
+            base_name_crop = f"MasterLight_{display_group_driz_crop}_{len(file_list)}stacked_drizzle"
+            out_path_crop = os.path.join(self.stacking_directory, f"{base_name_crop}_autocrop.fit")
             save_image(
                 img_array=cropped_drizzle,
                 filename=out_path_crop,
@@ -45544,6 +46072,7 @@ class BlinkTab(QWidget):
         self._pending_preview_timer.setInterval(40)  # 40–80ms is plenty
         self._pending_preview_item = None
         self._pending_preview_timer.timeout.connect(self._do_preview_update)
+        self.play_fps = 1  # default fps (200 ms/frame)
         self.initUI()
         self.init_shortcuts()
 
@@ -45629,6 +46158,40 @@ class BlinkTab(QWidget):
         playback_controls_layout.addWidget(self.right_arrow_button)
 
         left_layout.addLayout(playback_controls_layout)
+
+        # ----- Playback speed controls -----
+        # ----- Playback speed controls (0.1–10.0 fps) -----
+        speed_layout = QHBoxLayout()
+
+        speed_label = QLabel("Speed:", self)
+        speed_layout.addWidget(speed_label)
+
+        # Slider maps 1..100 -> 0.1..10.0 fps
+        self.speed_slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.speed_slider.setRange(1, 100)
+        self.speed_slider.setValue(int(round(self.play_fps * 10)))  # play_fps is float
+        self.speed_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.speed_slider.setToolTip("Playback speed (0.1–10.0 fps)")
+        speed_layout.addWidget(self.speed_slider, 1)
+
+        # Custom float spin (your class)
+        self.speed_spin = CustomDoubleSpinBox(
+            minimum=0.1, maximum=10.0, initial=self.play_fps, step=0.1, suffix=" fps", parent=self
+        )
+        speed_layout.addWidget(self.speed_spin)
+
+        # IMPORTANT: remove any old direct connects like:
+        # self.speed_slider.valueChanged.connect(self.speed_spin.setValue)
+        # self.speed_spin.valueChanged.connect(self.speed_slider.setValue)
+
+        # Use lambdas to cast types correctly
+        self.speed_slider.valueChanged.connect(lambda v: self.speed_spin.setValue(v / 10.0))          # int -> float
+        self.speed_spin.valueChanged.connect(lambda f: self.speed_slider.setValue(int(round(f * 10))))  # float -> int
+
+        self.speed_slider.valueChanged.connect(self._apply_playback_interval)
+        self.speed_spin.valueChanged.connect(self._apply_playback_interval)
+
+        left_layout.addLayout(speed_layout)
 
         # Tree view for file names
         self.fileTree = QTreeWidget(self)
@@ -45729,14 +46292,19 @@ class BlinkTab(QWidget):
 
         # Initialize playback timer
         self.playback_timer = QTimer(self)
-        self.playback_timer.setInterval(200)  # Set the playback interval to 500ms
+        self._apply_playback_interval()  # sets interval based on self.play_fps
         self.playback_timer.timeout.connect(self.next_item)
 
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-
+    def _apply_playback_interval(self, *_):
+        # read from custom spin if present
+        fps = float(self.speed_spin.value()) if hasattr(self, "speed_spin") else float(getattr(self, "play_fps", 1.0))
+        fps = max(0.1, min(10.0, fps))
+        self.play_fps = fps
+        self.playback_timer.setInterval(int(round(1000.0 / fps)))  # 0.1 fps -> 10000 ms
 
     def _on_current_item_changed_safe(self, current, previous):
         if not current:
@@ -45974,6 +46542,13 @@ class BlinkTab(QWidget):
 
     def init_shortcuts(self):
         """Initialize keyboard shortcuts."""
+        toggle_shortcut = QShortcut(QKeySequence("Space"), self.fileTree)
+        def _toggle_play():
+            if self.playback_timer.isActive():
+                self.stop_playback()
+            else:
+                self.start_playback()
+        toggle_shortcut.activated.connect(_toggle_play)        
         # Create a shortcut for the "F" key to flag images
         flag_shortcut = QShortcut(QKeySequence("F"), self.fileTree)
         flag_shortcut.activated.connect(self.flag_current_image)
@@ -46346,8 +46921,22 @@ class BlinkTab(QWidget):
 
     def start_playback(self):
         """Start playing through the items in the TreeWidget."""
-        if not self.playback_timer.isActive():
-            self.playback_timer.start()
+        if self.playback_timer.isActive():
+            return
+
+        leaves = self.get_all_leaf_items()
+        if not leaves:
+            QMessageBox.information(self, "No Images", "Load some images first.")
+            return
+
+        # Ensure a current leaf item is selected
+        cur = self.fileTree.currentItem()
+        if cur is None or cur.childCount() > 0:
+            self.fileTree.setCurrentItem(leaves[0])
+
+        # Honor current fps setting
+        self._apply_playback_interval()
+        self.playback_timer.start()
 
     def stop_playback(self):
         """Stop playing through the items."""
