@@ -37273,9 +37273,16 @@ class FloatSlider(QWidget):
     """Labeled horizontal slider that emits/accepts float values, with fixed-width value label."""
     valueChanged = pyqtSignal(float)
 
-    def __init__(self, minimum: float, maximum: float, value: float,
-                 decimals: int = 2, unit: str = "", tick: float | None = None,
-                 parent=None):
+    def __init__(
+        self,
+        minimum: float,
+        maximum: float,
+        value: float,
+        decimals: int = 2,
+        unit: str = "",
+        tick: Optional[float] = None,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._scale = 10 ** decimals
         self._decimals = decimals
@@ -37531,8 +37538,13 @@ class _FitWorker(QObject):
 class IsophoteModelerDialog(QDialog):
     pushRequested = pyqtSignal(str, int, object)  # which ∈ {"model","resid"}, slot index, np.ndarray
 
-    def __init__(self, mono_image: np.ndarray, parent=None, title_hint: str | None = None,
-                 image_manager=None):
+    def __init__(
+        self,
+        mono_image: np.ndarray,
+        parent: Optional[QWidget] = None,
+        title_hint: Optional[str] = None,
+        image_manager=None,
+    ):
         super().__init__(parent)
         self.image_manager = image_manager
         self._ellipse_item = None       # seed (sma0)
