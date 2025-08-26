@@ -37588,14 +37588,17 @@ class IsophoteModelerDialog(QDialog):
         self._wedge_item = None
 
         # Load initial pix
-        lpix = self._np_to_qpix_linear01(self._img)
-        self.left.setSceneImage(lpix, self._img.shape)
-        self.right.setSceneImage(lpix, self._img.shape)
+        self._in01 = self._compute_input01()
+        lpix = self._np_to_qpix_linear01(self._in01)
+        self.left.setSceneImage(lpix, self._in01.shape)
+        self.right.setSceneImage(lpix, self._in01.shape)
         self.right.setPeerView(
             self.left.transform(),
             self.left.horizontalScrollBar().value(),
             self.left.verticalScrollBar().value()
         )
+
+
         # ---- Controls ----
         ctl = QWidget()
         form = QFormLayout(ctl)
@@ -37646,6 +37649,13 @@ class IsophoteModelerDialog(QDialog):
 
 
         # layout
+        self.normalize_input = QCheckBox("Normalize before fitting (Linear Data)")
+        self.normalize_input.setToolTip(
+            "Apply global statistical stretch to the input before fitting/preview.\n"
+            "Uses mono median target of 0.25."
+        )
+        self.normalize_input.setChecked(False)  # OFF by default for visual discovery
+        form.addRow(self.normalize_input)
         form.addRow(QLabel("<b>Geometry & Start</b>"))
         form.addRow("sma0", self.sma0)
         form.addRow("min sma", self.minsma)
@@ -37781,9 +37791,46 @@ class IsophoteModelerDialog(QDialog):
         self._update_lowres_hints()
         self.quick_preview.stateChanged.connect(lambda _=None: self._update_lowres_hints())
 
-
+        # If user toggles normalization after opening, rebuild preview base
+        self.normalize_input.stateChanged.connect(lambda _=None: self._recompute_input_view())
 
     # ---------- event/utility ----------
+    def _compute_input01(self) -> np.ndarray:
+        """
+        Returns the input image mapped to [0,1] for fitting/preview.
+        If 'normalize_input' is checked, uses your global statistical stretch.
+        Otherwise assumes image is already roughly 0..1 and clamps.
+        """
+        x = self._img.astype(np.float32, copy=False)
+        try:
+            if self.normalize_input.isChecked():
+                # Your global stretch for mono images (strictly monotonic)
+                x = stretch_mono_image(
+                    x,
+                    target_median=0.25,
+                    normalize=False,
+                    apply_curves=False,
+                    curves_boost=0.0,
+                ).astype(np.float32, copy=False)
+            else:
+                # Trust caller’s domain; just clamp to display-friendly range
+                x = np.clip(x, 0.0, 1.0).astype(np.float32, copy=False)
+        except Exception:
+            # Failsafe: clamp
+            x = np.clip(x, 0.0, 1.0).astype(np.float32, copy=False)
+        return x
+
+    def _recompute_input_view(self):
+        """Rebuild left/right base image when the normalization toggle changes."""
+        self._in01 = self._compute_input01()
+        pix = self._np_to_qpix_linear01(self._in01)
+        self.left.setSceneImage(pix, self._in01.shape)
+        if self._resid is None:
+            # No fit yet → mirror left
+            self.right.setSceneImage(pix, self._in01.shape)
+        else:
+            # We have a residual; rebuild the blended preview with new background
+            self._rebuild_right_preview()
 
     def _humanize_secs(self, secs: float) -> str:
         secs = max(0.0, float(secs))
@@ -38343,8 +38390,9 @@ class IsophoteModelerDialog(QDialog):
         self._busy.show()
 
         # launch worker thread
+        fit_img = self._in01  # already float32 in [0,1]
         self._thread = QThread(self)
-        self._worker = _FitWorker(self._img, p)
+        self._worker = _FitWorker(fit_img, p)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(lambda pct, msg: (self._busy.setValue(pct), self._busy.setLabelText(msg)))
@@ -38387,33 +38435,45 @@ class IsophoteModelerDialog(QDialog):
         if self._resid is None:
             return
 
-        # 1) boundary from the *fit*, not the UI
+        import numpy as np
+
+        # Ensure the display base exists (normalized/stretched copy)
+        if getattr(self, "_in01", None) is None:
+            self._in01 = self._compute_input01()
+
+        # 1) boundary from the fit (falls back to UI if needed)
         cx, cy, sma, eps, pa_deg = self._fit_boundary()
 
-        # 2) alpha with a soft feather
-        alpha, m = self._elliptical_alpha(self._resid.shape, cx, cy, sma, eps, pa_deg, feather_frac=0.04)
+        # 2) feathered alpha + normalized radius m
+        alpha, m = self._elliptical_alpha(
+            self._resid.shape, cx, cy, sma, eps, pa_deg, feather_frac=0.04
+        )
 
-        # 3) scale the residual symmetrically about 0, using *inside* pixels only
+        # 3) symmetric scaling about 0 using *inside* pixels (optionally excluding wedge)
         r = np.nan_to_num(self._resid, 0.0, 0.0, 0.0).astype(np.float32)
-        inside = (m <= 1.0)  # strictly inside the fitted boundary
-        abs_in = np.abs(r[inside])
+        inside = (m <= 1.0)
+        if self.use_wedge.isChecked():
+            inside &= ~self._make_wedge_mask(*self._resid.shape)  # exclude wedge from stats
+
+        abs_in = np.abs(r[inside]) if inside.any() else np.abs(r)
         S = float(np.percentile(abs_in, 99.5)) if abs_in.size else 1.0
         if not np.isfinite(S) or S <= 0:
             S = float(np.max(np.abs(r)) or 1.0)
+        self._last_preview_scale_S = S  # handy for metadata / pushes
 
         resid01 = np.clip(0.5 + (r / (2.0 * S)), 0.0, 1.0)
-        orig01  = np.clip(self._img, 0.0, 1.0)
+        orig01  = self._in01  # normalized/stretched base outside
 
-        # 4) Choose what “outside” means:
-        if self.preview_blend.isChecked():
-            # Blend residual (inside) toward original (outside) with feather
-            disp01 = alpha * resid01 + (1.0 - alpha) * orig01
-        else:
-            # Pure residual everywhere (no ring by definition)
-            disp01 = resid01
+        # 4) blend vs pure residual
+        disp01 = alpha * resid01 + (1.0 - alpha) * orig01 if self.preview_blend.isChecked() else resid01
+
+        # Cache exact right-pane preview for "Push (visible) → Slot"
         self._preview_right01 = disp01.astype(np.float32, copy=True)
+
+        # Paint
         rpix = self._pix_from_01(disp01)
         self.right.setSceneImage(rpix, self._resid.shape)
+
 
 
     def _fit_boundary(self):
