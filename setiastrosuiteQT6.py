@@ -430,7 +430,7 @@ if hasattr(sys, '_MEIPASS'):
     peeker_icon = os.path.join(sys._MEIPASS, 'gridicon.png')
     dse_icon_path = os.path.join(sys._MEIPASS, 'dse.png')
     astrobin_filters_csv_path = os.path.join(sys._MEIPASS, 'astrobin_filters.csv')
-    isophote_path = os.path.join(sys._MEIPSS, 'isophote.png')
+    isophote_path = os.path.join(sys._MEIPASS, 'isophote.png')
 else:
     # Development path
     icon_path = 'astrosuite.png'
