@@ -1,9 +1,9 @@
 {
-  "version": "2.21.8",
+  "version": "2.22.0",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.21.8/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_linux.tar.xz"
   },
-  "notes": "AutoCrop for Stacking Suite bug update and settings update. Blink Tab speed control.."
+  "notes": "New Star Stuff Function: GLIMR! Glimmer stand for GaLaxy Isophote Modeler & Residual Revealer. A very precise way to discover new structure in the cores of galaxies, especially elliptical galaxies.  Blink scroll fix: There was redundant stretching causing slow Blink scrolling. Blink is now very snappy when changing images like it used to be!"
 }
