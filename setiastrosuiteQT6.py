@@ -47926,6 +47926,14 @@ class BlinkTab(QWidget):
         panel._refresh_scatter_colors()
         self.metrics_window._update_status()
 
+    def _as_float01(self, arr):
+        """Fast conversion to float [0..1] without any new stretching logic."""
+        if arr.dtype == np.uint8:
+            return arr.astype(np.float32) / 255.0
+        if arr.dtype == np.uint16:
+            return arr.astype(np.float32) / 65535.0
+        # assume float already in [0..1]
+        return np.asarray(arr, dtype=np.float32)
 
     def on_threshold_change(self, metric_idx, threshold):
         panel = self.metrics_window.metrics_panel
@@ -48602,7 +48610,6 @@ class BlinkTab(QWidget):
     
 
     def on_item_clicked(self, item, column):
-        """Handle click on a file name in the tree to preview the image."""
         self.fileTree.setFocus()
 
         name = item.text(0).lstrip("⚠️ ").strip()
@@ -48611,32 +48618,33 @@ class BlinkTab(QWidget):
             return
 
         idx = self.image_paths.index(file_path)
-        raw = self.loaded_images[idx]['image_data']
+        entry = self.loaded_images[idx]
+        stored = entry['image_data']  # already stretched & clipped at load time
 
-        # bring raw into float [0..1]
-        if raw.dtype == np.uint16:
-            imgf = raw.astype(np.float32) / 65535.0
-        elif raw.dtype == np.uint8:
-            imgf = raw.astype(np.float32) / 255.0
-        else:
-            imgf = raw.astype(np.float32).clip(0,1)
+        # --- Fast path: just display what we cached in RAM ---
+        if not self.aggressive_stretch_enabled:
+            # Convert to 8-bit only if needed (no additional stretch)
+            if stored.dtype == np.uint8:
+                disp8 = stored
+            elif stored.dtype == np.uint16:
+                disp8 = (stored >> 8).astype(np.uint8)   # ~ /257, quick & vectorized
+            else:  # float32 in [0..1]
+                disp8 = (np.clip(stored, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-        # choose stretch
-        if self.aggressive_stretch_enabled:
-            disp = siril_style_autostretch(imgf, sigma=self.current_sigma)
         else:
-            # your existing SEP‐based or linked stretch; e.g.:
-            if imgf.ndim == 2:
-                disp = stretch_mono_image(imgf, target_median=0.25, normalize=True)
+            # Aggressive mode: compute only here (from float01)
+            base01 = self._as_float01(stored)
+            if base01.ndim == 2:
+                disp = siril_style_autostretch(base01, sigma=self.current_sigma)
             else:
-                disp = stretch_color_image(imgf, target_median=0.25, linked=False)
+                # apply per-channel or linked, your choice; keeping it simple here
+                disp = siril_style_autostretch(base01, sigma=self.current_sigma)
+            disp8 = (np.clip(disp, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-        # convert back to uint8 for display
-        disp8 = (disp * 255.0).clip(0,255).astype(np.uint8)
         qimage = self.convert_to_qimage(disp8)
-        pixmap = QPixmap.fromImage(qimage)
-        self.current_pixmap = pixmap
+        self.current_pixmap = QPixmap.fromImage(qimage)
         self.apply_zoom()
+
 
     def apply_zoom(self):
         """Apply the current zoom level to the pixmap and update the display."""
@@ -48964,50 +48972,28 @@ class BlinkTab(QWidget):
 
 
     def push_image_to_manager(self, item):
-        """Push the selected image to the ImageManager."""
         file_name = item.text(0).lstrip("⚠️ ")
-        file_path = next((path for path in self.image_paths if os.path.basename(path) == file_name), None)
+        file_path = next((p for p in self.image_paths if os.path.basename(p) == file_name), None)
+        if not (file_path and self.image_manager):
+            return
 
-        if file_path and self.image_manager:
-            # Load the image into ImageManager
-            image, header, bit_depth, is_mono = load_image(file_path)
+        idx = self.image_paths.index(file_path)
+        entry = self.loaded_images[idx]
 
-            # Check for Bayer pattern or RAW image type (For FITS and RAW images)
-            if file_path.lower().endswith(('.fits', '.fit')):
-                # For FITS, check the header for Bayer pattern
-                bayer_pattern = header.get('BAYERPAT', None) if header else None
-                if bayer_pattern:
-                    print(f"Bayer pattern detected in FITS image: {bayer_pattern}")
-                    # Debayer the FITS image based on the Bayer pattern
-                    image = self.debayer_fits(image, bayer_pattern)
-                    is_mono = False  # After debayering, the image is no longer mono
+        # If downstream tools expect linear (not stretched), consider also storing a
+        # 'linear01' version at load time and use that here. For now, push what we have:
+        image   = entry['image_data']
+        header  = entry.get('header', {})
+        bit_depth = entry.get('bit_depth')
+        is_mono = entry.get('is_mono')
 
-            elif file_path.lower().endswith(('.cr2', '.nef', '.arw', '.dng', '.orf', '.rw2', '.pef')):
-                # For RAW images, debayer directly using the raw image data
-                print(f"Debayering RAW image: {file_path}")
-                # We assume `header` contains the Bayer pattern info from rawpy
-                bayer_pattern = header.get('BAYERPAT', None) if header else None
-                if bayer_pattern:
-                    # Debayer the RAW image based on the Bayer pattern
-                    image = self.debayer_raw(image, bayer_pattern)
-                    is_mono = False  # After debayering, the image is no longer mono
-                else:
-                    # If no Bayer pattern in the header, default to RGGB for debayering
-                    print("No Bayer pattern found in RAW header. Defaulting to RGGB.")
-                    image = self.debayer_raw(image, 'RGGB')
-                    is_mono = False  # After debayering, the image is no longer mono
-
-            # Create metadata for the image
-            metadata = {
-                'file_path': file_path,
-                'original_header': header,
-                'bit_depth': bit_depth,
-                'is_mono': is_mono
-            }
-
-            # Add the debayered image to ImageManager (use the current slot)
-            self.image_manager.add_image(self.image_manager.current_slot, image, metadata)
-            print(f"Image {file_path} pushed to ImageManager for processing.")
+        metadata = {
+            'file_path': file_path,
+            'original_header': header,
+            'bit_depth': bit_depth,
+            'is_mono': is_mono
+        }
+        self.image_manager.add_image(self.image_manager.current_slot, image, metadata)
 
     def delete_items(self):
         """Delete the selected items from the tree, the loaded images list, and the file system."""
