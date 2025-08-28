@@ -61156,6 +61156,7 @@ class ContinuumProcessingThread(QThread):
         
         return np.clip(result_image, 0, 1)  # Ensure values stay within [0, 1]
 
+_LUMA_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 class ImageCombineTab(QWidget):
     def __init__(self, image_manager=None):
@@ -61202,6 +61203,14 @@ class ImageCombineTab(QWidget):
         blend_row.addWidget(self.opacity)
         layout.addLayout(blend_row)
 
+        # 2b) Luminance-only toggle
+        lum_row = QHBoxLayout()
+        self.lumaOnly_cb = QCheckBox("Combine Luminance only (keep A's color)")
+        self.lumaOnly_cb.setToolTip("Blend only the luminance of A & B, then reinsert into A's color (A must be RGB).")
+        lum_row.addWidget(self.lumaOnly_cb)
+        lum_row.addStretch(1)
+        layout.addLayout(lum_row)
+
         # 3) Preview widget
         # 3) Preview in scroll area
         self.scrollArea = QScrollArea(self)
@@ -61224,6 +61233,24 @@ class ImageCombineTab(QWidget):
         zoom_row.addWidget(zoom_in_btn)
         layout.addLayout(zoom_row)
 
+        # 3b) Mask overlay controls
+        overlay_row = QHBoxLayout()
+        self.showMaskOverlay = QCheckBox("Show mask overlay")
+        self.showMaskOverlay.setToolTip("Overlay the active mask as a translucent color wash.")
+        self.overlayInvert = QCheckBox("Invert Mask")
+        self.overlayInvert.setToolTip("Show protected region instead (1→0).")
+
+        overlay_row.addWidget(self.showMaskOverlay)
+        overlay_row.addWidget(self.overlayInvert)
+
+        overlay_row.addWidget(QLabel("Opacity:"))
+        self.overlayAlpha = QSlider(Qt.Orientation.Horizontal)
+        self.overlayAlpha.setRange(5, 95)          # 5%..95%
+        self.overlayAlpha.setValue(40)              # default 40%
+        overlay_row.addWidget(self.overlayAlpha, 1)
+
+        layout.addLayout(overlay_row)
+
         # 5) Output & apply
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("Output →"))
@@ -61238,6 +61265,12 @@ class ImageCombineTab(QWidget):
         self.srcB     .currentIndexChanged.connect(self.updatePreview)
         self.blendMode.currentIndexChanged.connect(self.updatePreview)
         self.opacity  .valueChanged     .connect(self.updatePreview)
+
+        self.showMaskOverlay.toggled.connect(self.updatePreview)
+        self.overlayInvert.toggled.connect(self.updatePreview)
+        self.overlayAlpha.valueChanged.connect(self.updatePreview)
+
+        self.lumaOnly_cb.toggled.connect(self.updatePreview)
 
         self.applyBtn.clicked.connect(self.commitCombination)
         self.scrollArea.viewport().installEventFilter(self)
@@ -61274,8 +61307,7 @@ class ImageCombineTab(QWidget):
         self.updatePreview()
 
     def updatePreview(self, *_):
-        # bail out if we're not the current tab
-        tabwidget = self.parent()  # should be the QTabWidget
+        tabwidget = self.parent()
         if hasattr(tabwidget, "currentWidget") and tabwidget.currentWidget() is not self:
             return
 
@@ -61294,55 +61326,76 @@ class ImageCombineTab(QWidget):
         alpha = self.opacity.value() / 100.0
         mode  = self.blendMode.currentText()
 
-
-        # right after loading A and B...
-        orig_ndim = A.ndim
-
-        # if grayscale, make them H×W×1 so Numba will be happy
-        if A.ndim == 2:
-            A = A[..., None]
-            B = B[..., None]
-
-        # now you can safely do the Numba blend
-        result = self.dispatch_blend(A, B, mode, alpha)
-
-        # if you originally had a 2-D image, squeeze the channel back out
-        if orig_ndim == 2:
-            result = result[..., 0]
-
-        blended = result
-        # — Blend with mask if present —
-        mask = self.get_active_mask()
-        if mask is not None:
-            h, w = blended.shape[:2]
-
-            # expand 2D → 3D if needed
-            if mask.ndim == 2:
-                mask = mask[..., None]
-
-            # check shape
-            if mask.shape[0] != h or mask.shape[1] != w:
-                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+        if self.lumaOnly_cb.isChecked():
+            # --- LUMINANCE-ONLY PREVIEW ---
+            # A must be RGB to accept luma recombination
+            if A.ndim != 3 or A.shape[2] != 3:
+                QMessageBox.warning(self, "Luminance Blend",
+                                    "Source A must be RGB to recombine luminance into its color.")
                 return
 
-            # if it's single-channel but blended is 3-channel, replicate
-            if blended.ndim == 3 and mask.shape[2] == 1:
-                mask = np.repeat(mask, blended.shape[2], axis=2)
+            YA = self._rgb_to_luma(A)
+            YB = self._rgb_to_luma(B)
 
-            # blend: inside mask use `blended`, outside use original A
-            blended = blended * mask + A * (1.0 - mask)
-            blended = np.clip(blended, 0.0, 1.0)
+            # blend luminances via same dispatch (use extra channel to reuse code)
+            Ya = YA[..., None]
+            Yb = YB[..., None]
+            Ymix = self.dispatch_blend(Ya, Yb, mode, alpha)[..., 0]  # back to 2D
 
-        # convert to 8-bit preview
+            # apply mask on luminance (inside mask = Ymix, outside = YA)
+            m = self._mask01_effective()
+            if m is not None:
+                if m.shape[:2] != Ymix.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                    return
+                Ymix = Ymix * m + YA * (1.0 - m)
+
+            blended = self._recombine_luma_into_rgb(Ymix, A)
+
+        else:
+            # --- EXISTING RGB/mono BLEND PREVIEW ---
+            orig_ndim = A.ndim
+            if A.ndim == 2:
+                A = A[..., None]
+                B = B[..., None]
+            result = self.dispatch_blend(A, B, mode, alpha)
+            if orig_ndim == 2:
+                result = result[..., 0]
+            blended = result
+
+            # mask: inside = blended, outside = A
+            m = self._mask01_effective()
+            if m is not None:
+                if m.ndim == 2 and blended.ndim == 3:
+                    m = m[..., None]               # broadcast to channels
+                if m.shape[:2] != blended.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                    return
+                blended = np.clip(blended * m + A * (1.0 - m), 0.0, 1.0)
+
+        # --- optional visual mask overlay (preview-only) ---
+        if self.showMaskOverlay.isChecked():
+            m = self._mask01_effective()
+            if m is not None:
+                if m.ndim == 2 and blended.ndim == 3:
+                    m = m  # 2D is fine; overlay helper will handle it
+                if m.shape[:2] != blended.shape[:2]:
+                    QMessageBox.critical(self, "Mask Overlay", "Mask dimensions do not match image.")
+                else:
+                    over_opacity = self.overlayAlpha.value() / 100.0
+                    # _apply_mask_overlay should color the *protected* area: vis = 1 - m
+                    blended = self._apply_mask_overlay(
+                        blended, m, color=(255, 64, 64), opacity=over_opacity, invert=False
+                    )
+
+        # --- preview render (unchanged) ---
         h, w = blended.shape[:2]
-        arr8 = (blended*255).astype(np.uint8)
+        arr8 = (np.clip(blended, 0.0, 1.0) * 255).astype(np.uint8)
         if arr8.ndim == 2:
             qimg = QImage(arr8.data, w, h, w, QImage.Format.Format_Grayscale8)
         else:
             qimg = QImage(arr8.data, w, h, 3*w, QImage.Format.Format_RGB888)
-
         pix = QPixmap.fromImage(qimg)
-        # store for zoom/pan, then just reapply the current zoom
         self.current_pixmap = pix
         self.apply_zoom()
 
@@ -61428,89 +61481,132 @@ class ImageCombineTab(QWidget):
             mask = mask.astype(np.float32) / 255.0
         return mask
 
+    def _ensure_rgb(self, img: np.ndarray) -> np.ndarray:
+        """Return H×W×3 float32 [0..1] copy for overlay work."""
+        f = np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
+        if f.ndim == 2:
+            return np.repeat(f[..., None], 3, axis=2)
+        if f.ndim == 3 and f.shape[2] == 1:
+            return np.repeat(f, 3, axis=2)
+        return f
+
+    def _apply_mask_overlay(self, img, mask, color=(255,64,64), opacity=0.4, invert=False):
+        # ignore `invert` now; the mask is already “effective”
+        m = mask.astype(np.float32)
+        if m.max() > 1.0: m /= 255.0
+        if m.ndim == 3:   m = m[..., 0]
+
+        # show protected area (A) → 1 - m
+        vis = 1.0 - np.clip(m, 0.0, 1.0)
+
+        if img.ndim == 2:
+            rgb = np.stack([img, img, img], axis=-1)
+        else:
+            rgb = img
+
+        overlay = np.zeros_like(rgb, dtype=np.float32)
+        overlay[..., 0] = color[0] / 255.0
+        overlay[..., 1] = color[1] / 255.0
+        overlay[..., 2] = color[2] / 255.0
+
+        if vis.ndim == 2:
+            vis = vis[..., None]
+        return np.clip(rgb * (1.0 - vis * opacity) + overlay * (vis * opacity), 0.0, 1.0)
+
+    def _mask01_effective(self):
+        m = self.get_active_mask()
+        if m is None:
+            return None
+        m = m.astype(np.float32)
+        if m.max() > 1.0:      # handle uint8 0..255 masks
+            m /= 255.0
+        if m.ndim == 3:        # collapse to single channel if needed
+            m = m[..., 0]
+        if self.overlayInvert.isChecked():
+            m = 1.0 - m
+        return np.clip(m, 0.0, 1.0)
+
     def commitCombination(self):
-        """Run the exact same blend (full-res, njit) and shove into outSlot."""
         idxA   = self.srcA.currentData()
         idxB   = self.srcB.currentData()
         outIdx = self.outSlot.currentData()
         if None in (idxA, idxB, outIdx):
             return
 
-        # 1) fetch & prepare
         A     = self.image_manager.get_image_for_slot(idxA).astype(np.float32, copy=False)
         B     = self.image_manager.get_image_for_slot(idxB).astype(np.float32, copy=False)
         alpha = self.opacity.value() / 100.0
         mode  = self.blendMode.currentText()
 
-        # right after loading A and B...
-        orig_ndim = A.ndim
-
-        # if grayscale, make them H×W×1 so Numba will be happy
-        if A.ndim == 2:
-            A = A[..., None]
-            B = B[..., None]
-
-        # now you can safely do the Numba blend
-        result = self.dispatch_blend(A, B, mode, alpha)
-
-        # if you originally had a 2-D image, squeeze the channel back out
-        if orig_ndim == 2:
-            result = result[..., 0]
-
-        blended = result
-
-        # 3) mask post-processing
-        mask = self.get_active_mask()
-        if mask is not None:
-            m = mask.astype(np.float32)
-            # normalize
-            if m.max() > 1.0:
-                m /= 255.0
-            # make it (H,W,1) if needed
-            if m.ndim == 2:
-                m = m[..., None]
-            # broadcast to all channels
-            if result.ndim == 3 and m.shape[2] == 1:
-                m = np.repeat(m, result.shape[2], axis=2)
-            # shape check
-            if m.shape[:2] != result.shape[:2]:
-                QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+        if self.lumaOnly_cb.isChecked():
+            # A must be RGB
+            if A.ndim != 3 or A.shape[2] != 3:
+                QMessageBox.warning(self, "Luminance Blend",
+                                    "Source A must be RGB to recombine luminance into its color.")
                 return
-            # inside mask = blended, outside = original A
-            result = result * m + A * (1.0 - m)
-            result = np.clip(result, 0.0, 1.0)
 
-        # 4) build metadata
+            YA = self._rgb_to_luma(A)
+            YB = self._rgb_to_luma(B)
+
+            # blend luminances with same engine
+            Ya = YA[..., None]
+            Yb = YB[..., None]
+            Ymix = self.dispatch_blend(Ya, Yb, mode, alpha)[..., 0]
+
+            # mask on luminance
+            m = self._mask01_effective()
+            if m is not None:
+                if m.shape[:2] != Ymix.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                    return
+                Ymix = Ymix * m + YA * (1.0 - m)
+
+            result = self._recombine_luma_into_rgb(Ymix, A)
+            meta_name = f"Luminance {mode}"
+
+        else:
+            # existing full-res combine (unchanged)
+            orig_ndim = A.ndim
+            if A.ndim == 2:
+                A = A[..., None]
+                B = B[..., None]
+            result = self.dispatch_blend(A, B, mode, alpha)
+            if orig_ndim == 2:
+                result = result[..., 0]
+
+            # mask on RGB/mono result
+            m = self._mask01_effective()
+            if m is not None:
+                if m.ndim == 2 and result.ndim == 3:
+                    m = m[..., None]
+                if m.shape[:2] != result.shape[:2]:
+                    QMessageBox.critical(self, "Error", "Mask dimensions do not match image.")
+                    return
+                result = np.clip(result * m + A * (1.0 - m), 0.0, 1.0)
+            meta_name = f"{mode} Combine"
+
         meta = {
-            'file_path': f"Combined_{mode}",
+            'file_path': f"Combined_{meta_name}",
             'is_mono':   (result.ndim == 2),
             'bit_depth': "32-bit floating point",
-            'source':    f"Combine: {mode}"
+            'source':    f"Combine: {meta_name}"
         }
-
-        # 5) store into slot (emits image_changed)
         self.image_manager.set_image_for_slot(outIdx, result, meta)
 
-        # 6) rename that slot in the UI, just like ContinuumSubtract
-        mw   = self.window()  # AstroEditingSuite
-        name = f"{mode} Combine"
-        mw.slot_names[outIdx] = name
-
-        # toolbar
+        mw   = self.window()
+        mw.slot_names[outIdx] = meta_name
         if outIdx in mw.slot_actions:
             btn = mw.slot_actions[outIdx]
-            btn.setText(name)
-            btn.setStatusTip(f"Open preview for {name}")
-
-        # menubar
+            btn.setText(meta_name)
+            btn.setStatusTip(f"Open preview for {meta_name}")
         if outIdx in mw.menubar_slot_actions:
             act = mw.menubar_slot_actions[outIdx]
-            act.setText(name)
-            act.setStatusTip(f"Open preview for {name}")
-
+            act.setText(meta_name)
+            act.setStatusTip(f"Open preview for {meta_name}")
         mw.menuBar().update()
 
-        print(f"Combined → slot {outIdx+1}: {name}")
+        print(f"Combined → slot {outIdx+1}: {meta_name}")
+
 
 
     def dispatch_blend(self, A, B, mode, alpha):
@@ -61541,6 +61637,34 @@ class ImageCombineTab(QWidget):
 
         # Fallback: simple add-blend
         out = A * (1.0 - alpha) + B * alpha
+        return np.clip(out, 0.0, 1.0)
+
+
+
+    def _to_float01(self, img):
+        return np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
+
+    def _rgb_to_luma(self, img):
+        """Return 2D luminance. If mono, passthrough."""
+        f = self._to_float01(img)
+        if f.ndim == 2:
+            return f
+        if f.ndim == 3 and f.shape[2] == 1:
+            return f[..., 0]
+        if f.ndim == 3 and f.shape[2] == 3:
+            w = _LUMA_WEIGHTS
+            return f[..., 0]*w[0] + f[..., 1]*w[1] + f[..., 2]*w[2]
+        raise ValueError(f"Unsupported image shape for luma: {img.shape}")
+
+    def _recombine_luma_into_rgb(self, Y, RGB):
+        """Preserve chroma of RGB, replace luminance by Y (all float32 in [0,1])."""
+        rgb = self._to_float01(RGB)
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError("Recombine requires RGB target (A).")
+        w = _LUMA_WEIGHTS
+        orig_Y = rgb[..., 0]*w[0] + rgb[..., 1]*w[1] + rgb[..., 2]*w[2]
+        chroma = rgb / (orig_Y[..., None] + 1e-6)
+        out = chroma * Y[..., None]
         return np.clip(out, 0.0, 1.0)
 
 def preprocess_narrowband_image(image):
