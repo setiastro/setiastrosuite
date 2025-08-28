@@ -1,9 +1,9 @@
 {
-  "version": "2.22.0",
+  "version": "2.22.1",
   "downloads": {
-    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_windows.zip",
-    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_mac.tar.gz",
-    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.0/setiastrosuite_linux.tar.xz"
+    "Windows": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.1/setiastrosuite_windows.zip",
+    "macOS": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.1/setiastrosuite_mac.tar.gz",
+    "Linux": "https://github.com/setiastro/setiastrosuite/releases/download/V2.22.1/setiastrosuite_linux.tar.xz"
   },
-  "notes": "New Star Stuff Function: GLIMR! Glimmer stand for GaLaxy Isophote Modeler & Residual Revealer. A very precise way to discover new structure in the cores of galaxies, especially elliptical galaxies.  Blink scroll fix: There was redundant stretching causing slow Blink scrolling. Blink is now very snappy when changing images like it used to be!"
+  "notes": "Stacking Suite - Lots of fixes and updates! Astrobin Exporter - XISF support. Blink - scroll position fixed when changing images"
 }
