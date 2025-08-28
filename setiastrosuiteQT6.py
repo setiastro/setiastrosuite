@@ -360,7 +360,7 @@ import math
 from copy import deepcopy
 
 
-VERSION = "2.22.0"
+VERSION = "2.22.1"
 
 
 if hasattr(sys, '_MEIPASS'):
@@ -8045,6 +8045,8 @@ class AstrobinExportTab(QWidget):
         splitter.setSizes([350, 650])
         self.setLayout(root)
 
+        self.info_lbl.setText("Load FITS/XISF via 'Select Folder…' or 'Add Files…' to begin.")
+
     def _setup_int_line(self, line: QLineEdit, lo: int, hi: int):
         line.setValidator(QIntValidator(lo, hi, self))
         line.setPlaceholderText("0")
@@ -8165,7 +8167,7 @@ class AstrobinExportTab(QWidget):
 
     def open_directory(self):
         start = self._get_last_dir() or ""
-        directory = QFileDialog.getExistingDirectory(self, "Select Folder Containing FITS Files", start)
+        directory = QFileDialog.getExistingDirectory(self, "Select Folder Containing FITS/XISF Files", start)
         if not directory:
             return
         self._save_last_dir(directory)
@@ -8173,26 +8175,26 @@ class AstrobinExportTab(QWidget):
         paths = []
         for root, _, files in os.walk(directory):
             for fn in files:
-                if fn.lower().endswith((".fit", ".fits")):
+                if fn.lower().endswith((".fit", ".fits", ".xisf")):
                     paths.append(os.path.join(root, fn))
         paths.sort(key=self._natural_key)
         if not paths:
-            QMessageBox.information(self, "No FITS", "No .fit/.fits files found.")
+            QMessageBox.information(self, "No Images", "No .fit/.fits/.xisf files found.")
             return
         self.file_paths = paths
         self._read_headers()
         self._build_tree()
         self._recompute()
 
+
     def open_files(self):
-        """Let the user add one or more FITS files (without scanning a directory)."""
+        """Let the user add one or more FITS/XISF files."""
         start = self._get_last_dir() or ""
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select FITS Files", start, "FITS files (*.fit *.fits);;All Files (*)"
+            self, "Select FITS/XISF Files", start, "FITS/XISF (*.fit *.fits *.xisf);;All Files (*)"
         )
         if not paths:
             return
-        # save the directory of the first selection
         self._save_last_dir(os.path.dirname(paths[0]))
 
         # Deduplicate vs. what's already loaded
@@ -8208,40 +8210,159 @@ class AstrobinExportTab(QWidget):
         self._build_tree()
         self._recompute()
 
+    def _xisf_first_kw(self, image_meta: dict, key: str, default=None):
+        """Return the first FITSKeyword 'value' for key from an XISF image_meta."""
+        try:
+            vals = (image_meta.get("FITSKeywords") or {}).get(key, [])
+            if vals:
+                return vals[0].get("value", default)
+        except Exception:
+            pass
+        return default
+
+    def _xisf_search_props(self, image_meta: dict, substrings, default=None):
+        """
+        Fuzzy search XISFProperties by substring(s) in the property name.
+        substrings: str or iterable[str]
+        """
+        props = image_meta.get("XISFProperties") or {}
+        if isinstance(substrings, str):
+            substrings = [substrings]
+        for k, v in props.items():
+            lk = k.lower()
+            if any(s in lk for s in substrings):
+                return v.get("value", default)
+        return default
+
+    def _xisf_flatten_fits_keywords(self, image_meta: dict) -> dict:
+        """
+        Flatten image_meta['FITSKeywords'] into a {key: first_value} dict so we can reuse
+        existing FITS helper logic (e.g., _derive_binning).
+        """
+        out = {}
+        try:
+            kmap = image_meta.get("FITSKeywords") or {}
+            for k, arr in kmap.items():
+                if arr:
+                    out[k] = arr[0].get("value", None)
+        except Exception:
+            pass
+        return out
+
+
     def _read_headers(self):
+        """
+        Populate self.records with a uniform dict per file, supporting FITS and XISF.
+        For XISF, FITS-like keywords are taken from image_meta['FITSKeywords'].
+        """
+        from pathlib import Path
         self.records.clear()
         ok, bad = 0, 0
+
         for fp in self.file_paths:
             try:
-                with fits.open(fp) as hdul:
-                    h = hdul[0].header
-                rec = {
-                    "PATH": fp,
-                    "NAME": os.path.basename(fp),
-                    "OBJECT": str(h.get("OBJECT", "Unknown")),
-                    "FILTER": str(h.get("FILTER", "Unknown")),
-                    "EXPOSURE": self._safe_float(h.get("EXPOSURE", 0.0)),
-                    "GAIN": str(h.get("GAIN", "0")),
-                    "ISO": str(h.get("ISO", "0")),
-                    "BINNING": self._derive_binning(h),
-                    "CCD_TEMP": self._safe_float(h.get("CCD-TEMP", 0.0)),
-                    "FOCTEMP": self._safe_float(h.get("FOCTEMP", 0.0)),
-                    "DARK": str(h.get("DARK","0")),
-                    "FLAT": str(h.get("FLAT","0")),
-                    "FLATDARK": str(h.get("FLATDARK","0")),
-                    "BIAS": str(h.get("BIAS","0")),
-                    "BORTLE": str(h.get("BORTLE","0")),
-                    "MEAN_SQM": str(h.get("MEAN_SQM","0")),
-                    "MEAN_FWHM": str(h.get("MEAN_FWHM","0")),
-                    "DATE": self._to_date_only(str(h.get("DATE-OBS","0"))),
-                    "DATEOBS": str(h.get("DATE-OBS","")),
-                }
-                self.records.append(rec)
-                ok += 1
+                ext = Path(fp).suffix.lower()
+                if ext in (".fit", ".fits"):
+                    # --- FITS path (unchanged) ---
+                    with fits.open(fp) as hdul:
+                        h = hdul[0].header
+
+                    # Be a bit more forgiving on exposure naming
+                    exposure = h.get("EXPOSURE", h.get("EXPTIME", 0.0))
+                    binning = self._derive_binning(h)
+
+                    rec = {
+                        "PATH": fp,
+                        "NAME": os.path.basename(fp),
+                        "OBJECT": str(h.get("OBJECT", "Unknown")),
+                        "FILTER": str(h.get("FILTER", "Unknown")),
+                        "EXPOSURE": self._safe_float(exposure),
+                        "GAIN": str(h.get("GAIN", "0")),
+                        "ISO": str(h.get("ISO", "0")),
+                        "BINNING": binning,
+                        "CCD_TEMP": self._safe_float(h.get("CCD-TEMP", 0.0)),
+                        "FOCTEMP": self._safe_float(h.get("FOCTEMP", 0.0)),
+                        "DARK": str(h.get("DARK", "0")),
+                        "FLAT": str(h.get("FLAT", "0")),
+                        "FLATDARK": str(h.get("FLATDARK", "0")),
+                        "BIAS": str(h.get("BIAS", "0")),
+                        "BORTLE": str(h.get("BORTLE", "0")),
+                        "MEAN_SQM": str(h.get("MEAN_SQM", "0")),
+                        "MEAN_FWHM": str(h.get("MEAN_FWHM", "0")),
+                        "DATE": self._to_date_only(str(h.get("DATE-OBS", "0"))),
+                        "DATEOBS": str(h.get("DATE-OBS", "")),
+                    }
+                    self.records.append(rec)
+                    ok += 1
+
+                elif ext == ".xisf":
+                    # --- XISF path ---
+                    # Make sure your XISF class is importable here
+                    xisf = XISF(fp)
+                    image_meta = xisf.get_images_metadata()[0]  # use the first image
+                    flat = self._xisf_flatten_fits_keywords(image_meta)  # pseudo-FITS header
+
+                    # Try typical keyword names with sane fallbacks
+                    exposure = (
+                        flat.get("EXPOSURE", flat.get("EXPTIME", 0.0))
+                    )
+
+                    # Filter name: try FITSKeywords first, then props like *Filter* or *Channel*
+                    filt_name = str(flat.get("FILTER", "")) or \
+                                str(self._xisf_search_props(image_meta, ["filter", "channel", "band"], default="Unknown"))
+
+                    # Gain/ISO occasionally appear as properties; keep robust fallbacks
+                    gain_val = flat.get("GAIN", None)
+                    if gain_val is None:
+                        gain_val = self._xisf_search_props(image_meta, "gain", default="0")
+                    iso_val = flat.get("ISO", None)
+                    if iso_val is None:
+                        iso_val = self._xisf_search_props(image_meta, "iso", default="0")
+
+                    # Binning: reuse our FITS helper via flattened map
+                    binning = self._derive_binning(flat)
+
+                    # Temps from FITSKeywords if present; also allow fuzzy property matches
+                    ccd_temp = self._safe_float(
+                        flat.get("CCD-TEMP", self._xisf_search_props(image_meta, ["ccd-temp", "sensor", "temperature"], default=0.0))
+                    )
+                    foc_temp = self._safe_float(flat.get("FOCTEMP", 0.0))
+
+                    dateobs = str(flat.get("DATE-OBS", "")) or ""
+                    rec = {
+                        "PATH": fp,
+                        "NAME": os.path.basename(fp),
+                        "OBJECT": str(flat.get("OBJECT", self._xisf_search_props(image_meta, "object", default="Unknown"))),
+                        "FILTER": filt_name or "Unknown",
+                        "EXPOSURE": self._safe_float(exposure),
+                        "GAIN": str(gain_val if gain_val is not None else "0"),
+                        "ISO": str(iso_val if iso_val is not None else "0"),
+                        "BINNING": binning,
+                        "CCD_TEMP": ccd_temp,
+                        "FOCTEMP": foc_temp,
+                        "DARK": str(flat.get("DARK", "0")),
+                        "FLAT": str(flat.get("FLAT", "0")),
+                        "FLATDARK": str(flat.get("FLATDARK", "0")),
+                        "BIAS": str(flat.get("BIAS", "0")),
+                        "BORTLE": str(flat.get("BORTLE", "0")),
+                        "MEAN_SQM": str(flat.get("MEAN_SQM", "0")),
+                        "MEAN_FWHM": str(flat.get("MEAN_FWHM", "0")),
+                        "DATE": self._to_date_only(dateobs) if dateobs else "0",
+                        "DATEOBS": dateobs,
+                    }
+                    self.records.append(rec)
+                    ok += 1
+
+                else:
+                    # Ignore other extensions silently
+                    continue
+
             except Exception as e:
                 print(f"[WARN] Failed to read {fp}: {e}")
                 bad += 1
-        self.info_lbl.setText(f"Loaded {ok} FITS ({bad} failed).")
+
+        self.info_lbl.setText(f"Loaded {ok} file(s) ({bad} failed).")
+
 
     @staticmethod
     def _safe_float(x, default=0.0) -> float:
@@ -13449,8 +13570,49 @@ def compute_safe_chunk(height, width, N, channels, dtype, pref_h, pref_w):
 
 _DIM_RE = re.compile(r"\s*\(\d+\s*x\s*\d+\)\s*")
 
+
+class AfterAlignWorker(QObject):
+    progress = pyqtSignal(str)                 # emits status lines
+    finished = pyqtSignal(bool, str)           # (success, message)
+
+    def __init__(self, dialog, *,
+                 light_files,
+                 frame_weights,
+                 transforms_dict,
+                 drizzle_dict,
+                 autocrop_enabled,
+                 autocrop_pct):
+        super().__init__()
+        self.dialog = dialog                    # we will call pure methods on it
+        self.light_files = light_files
+        self.frame_weights = frame_weights
+        self.transforms_dict = transforms_dict
+        self.drizzle_dict = drizzle_dict
+        self.autocrop_enabled = autocrop_enabled
+        self.autocrop_pct = autocrop_pct
+
+    @pyqtSlot()
+    def run(self):
+        dlg = self.dialog  # the StackingSuiteDialog you passed in
+
+        try:
+            result = dlg.stack_images_mixed_drizzle(
+                grouped_files=self.light_files,
+                frame_weights=self.frame_weights,
+                transforms_dict=self.transforms_dict,
+                drizzle_dict=self.drizzle_dict,
+                autocrop_enabled=self.autocrop_enabled,
+                autocrop_pct=self.autocrop_pct,
+                status_cb=self.progress.emit,   # stream status back to UI
+            )
+            summary = "\n".join(result["summary_lines"])
+            self.finished.emit(True, f"Post-alignment complete.\n\n{summary}")
+        except Exception as e:
+            self.finished.emit(False, f"Post-alignment failed: {e}")
+
 class StackingSuiteDialog(QDialog):
     requestRelaunch = pyqtSignal(str, str)  # old_dir, new_dir
+    status_signal = pyqtSignal(str)
     def __init__(self, parent=None):  # <-- accept parent
         super().__init__(parent) 
         self.setWindowTitle("Stacking Suite")
@@ -13463,7 +13625,8 @@ class StackingSuiteDialog(QDialog):
         self.session_tags = {}  # 🔑 file_path => session_tag (e.g., "Session1", "Blue Flats", etc.)
         self.deleted_calibrated_files = []
         self._norm_map = {}
-
+        self._gui_thread = QThread.currentThread()        # remember GUI thread
+        self.status_signal.connect(self._update_status_gui)  # queued to GUI
 
         # QSettings for your app
         self.settings = QSettings() 
@@ -13847,25 +14010,44 @@ class StackingSuiteDialog(QDialog):
         """ Sets up a scrollable status log at the bottom of the UI. """
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
-        self.status_text.setMaximumHeight(100)  # Limits visible lines (~5 lines)
-        self.status_text.setStyleSheet("background-color: black; color: white; font-family: Monospace; padding: 4px;")
-        
-        # Wrap in a scroll area for scrolling
+        self.status_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.status_text.setStyleSheet(
+            "background-color: black; color: white; font-family: Monospace; padding: 4px;"
+        )
+
         self.status_scroll = QScrollArea()
         self.status_scroll.setWidgetResizable(True)
         self.status_scroll.setWidget(self.status_text)
-        
-        # Add to the main layout
+        # Make the scroll area respect a fixed height
+        self.status_scroll.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         layout.addWidget(self.status_scroll)
 
-    def update_status(self, message: str):
+        # show ~10 lines
+        self.set_status_visible_lines(6)
+
+    def set_status_visible_lines(self, n_lines: int):
+        fm = QFontMetrics(self.status_text.font())
+        line_h = fm.lineSpacing()
+
+        # Add margins/frames (a small fudge keeps things from clipping)
+        frame = self.status_text.frameWidth()
+        docm  = int(self.status_text.document().documentMargin())
+        extra = 2 * frame + 2 * docm + 8
+
+        self.status_scroll.setFixedHeight(int(n_lines * line_h + extra))
+
+    @pyqtSlot(str)
+    def _update_status_gui(self, message: str):
         """
-        Append a new status line, except if it's a '🔄 Normalizing…' message
-        and the last line was also '🔄 Normalizing…', in which case overwrite it.
+        (GUI thread only) Append a new status line, except if it's a
+        '🔄 Normalizing…' message and the last line was also '🔄 Normalizing…',
+        in which case overwrite it.
         """
         # Temporarily block signals so we don't recurse
         old_state = self.status_text.blockSignals(True)
-        
+
         # Grab existing lines
         lines = self.status_text.toPlainText().splitlines()
 
@@ -13884,10 +14066,21 @@ class StackingSuiteDialog(QDialog):
 
         # Scroll to bottom
         vsb = self.status_text.verticalScrollBar()
-        vsb.setValue(vsb.maximum())
+        if vsb is not None:
+            vsb.setValue(vsb.maximum())
 
         # Restore signals
         self.status_text.blockSignals(old_state)
+
+
+    def update_status(self, message: str):
+        """
+        Safe to call from any thread. Routes to GUI thread if needed.
+        """
+        if QThread.currentThread() is self._gui_thread:
+            self._update_status_gui(message)
+        else:
+            self.status_signal.emit(message)
 
 
     def _norm_dir(self, p: str) -> str:
@@ -14149,23 +14342,30 @@ class StackingSuiteDialog(QDialog):
         dialog.accept()
 
     def _restart_self(self):
-        from PyQt6.QtCore import QTimer
         geom = self.saveGeometry()
-        cur_tab = None
         try:
             cur_tab = self.tabs.currentIndex()
         except Exception:
-            pass
+            cur_tab = None
 
-        parent = self.parent()  # keep same parent so Qt retains ownership
+        parent = self.parent()  # may be None
+
+        app = QApplication.instance()
+        # Keep a global strong ref so GC can't collect the new dialog
+        if not hasattr(app, "_stacking_suite_ref"):
+            app._stacking_suite_ref = None
 
         def spawn():
             new = StackingSuiteDialog(parent=parent)
-            if geom: new.restoreGeometry(geom)
+            if geom:
+                new.restoreGeometry(geom)
             if cur_tab is not None:
-                try: new.tabs.setCurrentIndex(cur_tab)
-                except Exception: pass
+                try:
+                    new.tabs.setCurrentIndex(cur_tab)
+                except Exception:
+                    pass
             new.show()
+            app._stacking_suite_ref = new  # <<< strong ref lives for app lifetime
 
         QTimer.singleShot(0, spawn)
         self.close()
@@ -17373,24 +17573,48 @@ class StackingSuiteDialog(QDialog):
         k = self._norm_filter_key(filt_str)
         comps = set()
 
-        if "ha"   in k or "halpha" in k: comps.add("ha")
-        if "sii"  in k or "s2" in k:     comps.add("sii")
-        if "oiii" in k or "o3" in k:     comps.add("oiii")
-        if "hb"   in k or "hbeta" in k:  comps.add("hb")   # NEW
+        # explicit component tokens
+        if "ha"    in k or "halpha" in k: comps.add("ha")
+        if "sii"   in k or "s2"     in k: comps.add("sii")
+        if "oiii"  in k or "o3"     in k: comps.add("oiii")
+        if "hb"    in k or "hbeta"  in k: comps.add("hb")
 
         # common vendor aliases → Ha/OIII
-        for alias in ("lextreme", "lenhance", "lultimate", "nbz", "alpt", "alp", "nbzu"):
-            if alias in k:
-                comps.update({"ha", "oiii"})
+        vendor_aliases = (
+            "lextreme", "lenhance", "lultimate",
+            "nbz", "nbzu", "alpt", "alp",
+            "duo-band", "duoband", "dual band", "dual-band", "dualband"
+        )
+        if any(alias in k for alias in vendor_aliases):
+            comps.update({"ha", "oiii"})
 
+        # generic dual/duo/bicolor markers → assume Ha/OIII (most OSC duals)
+        dual_markers = (
+            "dual", "duo", "2band", "2-band", "two band",
+            "bicolor", "bi-color", "bicolour", "bi-colour",
+            "dualnb", "dual-nb", "duo-nb", "duonb",
+            "duo narrow", "dual narrow"
+        )
+        if any(m in k for m in dual_markers):
+            comps.update({"ha", "oiii"})
+
+        # decide
         if {"ha","oiii"}.issubset(comps):  return "DUAL_HA_OIII"
         if {"sii","oiii"}.issubset(comps): return "DUAL_SII_OIII"
-        if {"sii","hb"}.issubset(comps):   return "DUAL_SII_HB"   # NEW
+        if {"sii","hb"}.issubset(comps):   return "DUAL_SII_HB"
 
         if comps == {"ha"}:   return "MONO_HA"
         if comps == {"sii"}:  return "MONO_SII"
         if comps == {"oiii"}: return "MONO_OIII"
-        if comps == {"hb"}:   return "MONO_HB"                   # NEW
+        if comps == {"hb"}:   return "MONO_HB"
+
+        # NEW: if user explicitly asked to split dual-band, default to Ha/OIII
+        try:
+            if hasattr(self, "split_dualband_cb") and self.split_dualband_cb.isChecked():
+                return "DUAL_HA_OIII"
+        except Exception:
+            pass
+
         return "UNKNOWN"
 
     def _get_filter_name(self, path: str) -> str:
@@ -17597,31 +17821,20 @@ class StackingSuiteDialog(QDialog):
         self.reg_tree.expandAll()
 
     def register_images(self):
-        """ 
-        Measures all frames in small batches (to find a reference frame and weights),
-        then normalizes each entire frame (again in small batches) using the Numba
-        normalize_images function, saves them with a '_n.fit' suffix, and finally
-        starts the alignment thread on those normalized files.
-        """
+        """Measure → choose reference → DEBAYER ref → DEBAYER+normalize all → align."""
         if self.star_trail_mode:
             self.update_status("🌠 Star-Trail Mode enabled: skipping registration & using max-value stack")
             QApplication.processEvents()
             return self._make_star_trail()
-                
+
         self.update_status("🔄 Image Registration Started...")
         self.extract_light_files_from_tree(debug=True)
-        # optional: assert leaf count matches flattened file count
-       
-
 
         if not self.light_files:
             self.update_status("⚠️ No light files to register!")
             return
 
-        # ── 1) bail if still nothing
-        if not self.light_files:
-            self.update
-
+        # Which groups are selected? (used for optional dual-band split)
         selected_groups = set()
         for it in self.reg_tree.selectedItems():
             top = it if it.parent() is None else it.parent()
@@ -17634,95 +17847,89 @@ class StackingSuiteDialog(QDialog):
 
         # Flatten to get all files
         all_files = [f for lst in self.light_files.values() for f in lst]
-        leaf_count = sum(len(lst) for lst in self.light_files.values())
         self.update_status(f"📊 Found {len(all_files)} total frames. Now measuring in parallel batches...")
 
+        # ─────────────────────────────────────────────────────────────────────
+        # Helpers
+        # ─────────────────────────────────────────────────────────────────────
+        def mono_preview_for_stats(img: np.ndarray, hdr) -> np.ndarray:
+            """
+            2D float32 preview without full demosaic:
+            - If color (HxWx3): return luma.
+            - If raw CFA 2D with BAYERPAT: 2x2 superpixel average.
+            - Else: return mono as float32.
+            """
+            if img is None:
+                return None
+            if img.ndim == 3 and img.shape[-1] == 3:
+                img = img.astype(np.float32, copy=False)
+                r = img[..., 0]; g = img[..., 1]; b = img[..., 2]
+                return 0.2126 * r + 0.7152 * g + 0.0722 * b
+            if hdr and hdr.get('BAYERPAT') and not hdr.get('SPLITDB', False) and img.ndim == 2:
+                h, w = img.shape
+                h2, w2 = h - (h % 2), w - (w % 2)
+                cfa = img[:h2, :w2].astype(np.float32, copy=False)
+                return (cfa[0:h2:2, 0:w2:2] + cfa[0:h2:2, 1:w2:2] +
+                        cfa[1:h2:2, 0:w2:2] + cfa[1:h2:2, 1:w2:2]) * 0.25
+            return img.astype(np.float32, copy=False)
+
+        def chunk_list(lst, size):
+            for i in range(0, len(lst), size):
+                yield lst[i:i+size]
+
+        # ─────────────────────────────────────────────────────────────────────
+        # PHASE 1: measure (NO demosaic here)
+        # ─────────────────────────────────────────────────────────────────────
         self.frame_weights = {}
         mean_values = {}
         star_counts = {}
         measured_frames = []
 
         max_workers = os.cpu_count() or 4
-        chunk_size = max_workers  # or bigger if you prefer
+        chunk_size = max_workers
+        chunks = list(chunk_list(all_files, chunk_size))
+        total_chunks = len(chunks)
 
-        def chunk_list(lst, size):
-            for i in range(0, len(lst), size):
-                yield lst[i : i + size]
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        chunked_files = list(chunk_list(all_files, chunk_size))
-        total_chunks = len(chunked_files)
-
-        # ---------------------------------------------------------------------
-        # PHASE 1: Load & Measure Each Chunk (to pick reference frame & weights)
-        # ---------------------------------------------------------------------
-        chunk_index = 0
-        for chunk in chunked_files:
-            chunk_index += 1
-            self.update_status(f"📦 Measuring chunk {chunk_index}/{total_chunks} ({len(chunk)} frames)")
-
+        for idx, chunk in enumerate(chunks, 1):
+            self.update_status(f"📦 Measuring chunk {idx}/{total_chunks} ({len(chunk)} frames)")
             chunk_images = []
             chunk_valid_files = []
 
-            # -------------------------------
-            # Multi-threaded loading of chunk
-            # -------------------------------
             self.update_status(f"🌍 Loading {len(chunk)} images in parallel (up to {max_workers} threads)...")
-
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Build the dictionary mapping futures to file names
-                future_to_file = {}
-                for file in chunk:
-                    future = executor.submit(load_image, file)
-                    future_to_file[future] = file
-
-                for future in as_completed(future_to_file):
-                    file = future_to_file[future]
+                future_to_file = {executor.submit(load_image, fp): fp for fp in chunk}
+                for fut in as_completed(future_to_file):
+                    fp = future_to_file[fut]
                     try:
-                        image_data, header, _, _ = future.result()
-                        if image_data is not None:
-                            # First check for Bayer pattern in the header
-                            if header and header.get('BAYERPAT'):
-                                should_debayer = (
-                                    header
-                                    and header.get('BAYERPAT')
-                                    and not header.get('SPLITDB', False)
-                                    and (image_data.ndim == 2 or (image_data.ndim == 3 and image_data.shape[-1] == 1))
-                                )
-                                if should_debayer:
-                                    image_data = self.debayer_image(image_data, file, header)
-                                    self.update_status("📦 Bayer pattern detected, Debayering...")
-                                QApplication.processEvents()
-                            else:
-                                # If the image is 3D but has only one channel (e.g. HxWx1), squeeze it to 2D
-                                if image_data.ndim == 3 and image_data.shape[-1] == 1:
-                                    image_data = np.squeeze(image_data, axis=-1)
-                            chunk_images.append(image_data)
-                            chunk_valid_files.append(file)
-                            self.update_status(f"  Loaded {file}")
-                            QApplication.processEvents()
+                        img, hdr, _, _ = fut.result()
+                        if img is None:
+                            continue
+                        preview = mono_preview_for_stats(img, hdr)
+                        if preview is None:
+                            continue
+                        chunk_images.append(preview)
+                        chunk_valid_files.append(fp)
+                        self.update_status(f"  Loaded {fp}")
                     except Exception as e:
-                        self.update_status(f"⚠️ Error loading {file}: {e}")
-                        QApplication.processEvents()
-
-
+                        self.update_status(f"⚠️ Error loading {fp}: {e}")
+                    QApplication.processEvents()
 
             if not chunk_images:
                 self.update_status("⚠️ No valid images in this chunk.")
                 continue
 
-            # measure means in parallel
             self.update_status("🌍 Measuring global means in parallel...")
-            means = parallel_measure_frames(chunk_images)
+            means = parallel_measure_frames(chunk_images)  # expects list/stack of 2D previews
 
-            # star counts
-            for i, file in enumerate(chunk_valid_files):
-                mean_val = means[i]
-                mean_values[file] = mean_val
-
-                c, ecc = compute_star_count(chunk_images[i])
-                star_counts[file] = {"count": c, "eccentricity": ecc}
-
-                measured_frames.append(file)
+            # star counts per preview
+            for i, fp in enumerate(chunk_valid_files):
+                mv = float(means[i])
+                mean_values[fp] = mv
+                c, ecc = compute_star_count(chunk_images[i])  # 2D preview
+                star_counts[fp] = {"count": c, "eccentricity": ecc}
+                measured_frames.append(fp)
 
             del chunk_images
 
@@ -17732,151 +17939,176 @@ class StackingSuiteDialog(QDialog):
 
         self.update_status(f"✅ All chunks complete! Measured {len(measured_frames)} frames total.")
 
-        # ------------------------------------------------
-        # 2) Compute Weights & Pick Reference
-        # ------------------------------------------------
+        # ─────────────────────────────────────────────────────────────────────
+        # Pick reference & compute weights
+        # ─────────────────────────────────────────────────────────────────────
         self.update_status("⚖️ Computing frame weights...")
         debug_log = "\n📊 **Frame Weights Debug Log:**\n"
-        for file in measured_frames:
-            c = star_counts[file]["count"]
-            ecc = star_counts[file]["eccentricity"]
-            m = mean_values[file]
-
+        for fp in measured_frames:
+            c = star_counts[fp]["count"]
+            ecc = star_counts[fp]["eccentricity"]
+            m = mean_values[fp]
             c = max(c, 1)
             m = max(m, 1e-6)
-            raw_w = (c * min(1, max(1.0 - ecc, 0.0))) / m
-            self.frame_weights[file] = raw_w
-
-            debug_log += (
-                f"📂 {os.path.basename(file)} → "
-                f"StarCount={c}, Ecc={ecc:.4f}, Mean={m:.4f}, Weight={raw_w:.4f}\n"
-            )
-
+            raw_w = (c * min(1.0, max(1.0 - ecc, 0.0))) / m
+            self.frame_weights[fp] = raw_w
+            debug_log += f"📂 {os.path.basename(fp)} → StarCount={c}, Ecc={ecc:.4f}, Mean={m:.4f}, Weight={raw_w:.4f}\n"
         self.update_status(debug_log)
 
-        max_w = max(self.frame_weights.values()) if self.frame_weights else 0
+        max_w = max(self.frame_weights.values()) if self.frame_weights else 0.0
         if max_w > 0:
             for k in self.frame_weights:
                 self.frame_weights[k] /= max_w
 
-        # Choose reference
-        if hasattr(self, "reference_frame") and self.reference_frame:
+        # Choose reference (path)
+        if getattr(self, "reference_frame", None):
             self.update_status(f"📌 Using user-specified reference: {self.reference_frame}")
         else:
             self.reference_frame = self.select_reference_frame_robust(self.frame_weights, sigma_threshold=2.0)
             self.update_status(f"📌 Auto-selected robust reference frame: {self.reference_frame}")
 
-        # ------------------------------------------------
-        # 3) Load the reference, get ref_median
-        # ------------------------------------------------
-        ref_data, _, _, _ = load_image(self.reference_frame)
-        if ref_data is None:
+        # Stats for the chosen reference from the measurement pass
+        ref_stats_meas = star_counts.get(self.reference_frame, {"count": 0, "eccentricity": 0.0})
+        ref_count = ref_stats_meas["count"]
+        ref_ecc   = ref_stats_meas["eccentricity"]
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Debayer the reference ONCE and compute ref_median from debayered ref
+        # ─────────────────────────────────────────────────────────────────────
+        ref_img_raw, ref_hdr, _, _ = load_image(self.reference_frame)
+        if ref_img_raw is None:
             self.update_status(f"🚨 Could not load reference {self.reference_frame}. Aborting.")
             return
-        ref_median = np.median(ref_data)
-        self.update_status(f"📊 Reference median: {ref_median:.4f}")
 
-        stats = {
-            "star_count": c,         # Replace with the actual star count
-            "eccentricity": ecc,        # Replace with the computed eccentricity
-            "mean": ref_median
-        }
+        # If CFA, debayer; if already color, keep; if mono but 3D with last=1, squeeze.
+        if ref_hdr and ref_hdr.get('BAYERPAT') and not ref_hdr.get('SPLITDB', False) and (ref_img_raw.ndim == 2 or (ref_img_raw.ndim == 3 and ref_img_raw.shape[-1] == 1)):
+            self.update_status("📦 Debayering reference frame…")
+            ref_img = self.debayer_image(ref_img_raw, self.reference_frame, ref_hdr)  # HxWx3
+        else:
+            ref_img = ref_img_raw
+            if ref_img.ndim == 3 and ref_img.shape[-1] == 1:
+                ref_img = np.squeeze(ref_img, axis=-1)
 
+        # Use luma median if color, else direct median
+        if ref_img.ndim == 3 and ref_img.shape[-1] == 3:
+            r, g, b = ref_img[..., 0], ref_img[..., 1], ref_img[..., 2]
+            ref_luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            ref_median = float(np.median(ref_luma))
+        else:
+            ref_median = float(np.median(ref_img))
 
-        # Show the review dialog (pausing further processing until user responds)
-        dialog = ReferenceFrameReviewDialog(self.reference_frame, stats, parent=self)
+        self.update_status(f"📊 Reference (debayered) median: {ref_median:.4f}")
+
+        # Show review dialog; if user changes reference, redo debayer+median
+        stats_payload = {"star_count": ref_count, "eccentricity": ref_ecc, "mean": ref_median}
+        dialog = ReferenceFrameReviewDialog(self.reference_frame, stats_payload, parent=self)
         result = dialog.exec()
-        user_choice = dialog.getUserChoice()  # This returns "use", "select_other", or None
+        user_choice = dialog.getUserChoice()  # "use", "select_other", or None
 
         if result == QDialog.DialogCode.Accepted:
-            # User chose to use the auto-selected reference via the "Use This Reference Frame" button.
-            self.update_status("User accepted the auto-selected reference frame.")
+            self.update_status("User accepted the reference frame.")
         elif user_choice == "select_other":
-            # User actively clicked "Select Other Reference Frame"
-            new_ref = self.prompt_for_reference_frame()  # Open a file dialog or list of frames
+            new_ref = self.prompt_for_reference_frame()
             if new_ref:
                 self.reference_frame = new_ref
                 self.update_status(f"User selected a new reference frame: {new_ref}")
+                # re-load and debayer/median the new reference
+                ref_img_raw, ref_hdr, _, _ = load_image(self.reference_frame)
+                if ref_img_raw is None:
+                    self.update_status(f"🚨 Could not load reference {self.reference_frame}. Aborting.")
+                    return
+                if ref_hdr and ref_hdr.get('BAYERPAT') and not ref_hdr.get('SPLITDB', False) and (ref_img_raw.ndim == 2 or (ref_img_raw.ndim == 3 and ref_img_raw.shape[-1] == 1)):
+                    self.update_status("📦 Debayering reference frame…")
+                    ref_img = self.debayer_image(ref_img_raw, self.reference_frame, ref_hdr)
+                else:
+                    ref_img = ref_img_raw
+                    if ref_img.ndim == 3 and ref_img.shape[-1] == 1:
+                        ref_img = np.squeeze(ref_img, axis=-1)
+                if ref_img.ndim == 3 and ref_img.shape[-1] == 3:
+                    r, g, b = ref_img[..., 0], ref_img[..., 1], ref_img[..., 2]
+                    ref_luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                    ref_median = float(np.median(ref_luma))
+                else:
+                    ref_median = float(np.median(ref_img))
+                self.update_status(f"📊 (New) reference median: {ref_median:.4f}")
             else:
-                self.update_status("No new reference frame selected. Using auto-selected frame.")
+                self.update_status("No new reference selected; using previous reference.")
         else:
-            # The dialog was closed (e.g. via the window’s close button) without an active selection.
-            self.update_status("Dialog closed without selection. Using auto-selected frame.")
+            self.update_status("Dialog closed without explicit choice; using selected reference.")
 
-        # ------------------------------------------------
-        # 4) Normalize Each Frame to ref_median in Batches
-        # ------------------------------------------------
+        # ─────────────────────────────────────────────────────────────────────
+        # PHASE 2: normalize (DEBAYER everything once here)
+        # ─────────────────────────────────────────────────────────────────────
         norm_dir = os.path.join(self.stacking_directory, "Normalized_Images")
         os.makedirs(norm_dir, exist_ok=True)
 
-        chunked_files = list(chunk_list(measured_frames, chunk_size))
-        total_chunks = len(chunked_files)
         normalized_files = []
+        chunks = list(chunk_list(measured_frames, chunk_size))
+        total_chunks = len(chunks)
 
-        chunk_index = 0
-        for chunk in chunked_files:
-            chunk_index += 1
-            self.update_status(f"🌀 Normalizing chunk {chunk_index}/{total_chunks} ({len(chunk)} frames)...")
+        for idx, chunk in enumerate(chunks, 1):
+            self.update_status(f"🌀 Normalizing chunk {idx}/{total_chunks} ({len(chunk)} frames)…")
             QApplication.processEvents()
 
-            # --------------
-            # Multi-threaded loading again
-            # --------------
             loaded_images = []
             valid_paths = []
 
-            self.update_status(f"🌍 Loading {len(chunk)} images in parallel for normalization (up to {max_workers} threads)...")
-
+            self.update_status(f"🌍 Loading {len(chunk)} images in parallel for normalization (up to {max_workers} threads)…")
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_file = {}
-                for file in chunk:
-                    future = executor.submit(load_image, file)
-                    future_to_file[future] = file
-
-                for future in as_completed(future_to_file):
-                    file = future_to_file[future]
+                future_to_file = {executor.submit(load_image, fp): fp for fp in chunk}
+                for fut in as_completed(future_to_file):
+                    fp = future_to_file[fut]
                     try:
-                        img, hdr, _, _ = future.result()
-                        if img is not None:
-                            # Check for Bayer pattern first – debayer if needed
-                            if hdr and hdr.get('BAYERPAT'):
-                                img = self.debayer_image(img, file, hdr)
-                            else:
-                                # Only squeeze if the image has an extra singleton dimension
-                                if img.ndim == 3 and img.shape[-1] == 1:
-                                    img = np.squeeze(img, axis=-1)
-                            loaded_images.append(img)
-                            valid_paths.append(file)
-                        else:
-                            self.update_status(f"⚠️ No data for {file}")
-                    except Exception as e:
-                        self.update_status(f"⚠️ Error loading {file} for normalization: {e}")
-                    QApplication.processEvents()
+                        img, hdr, _, _ = fut.result()
+                        if img is None:
+                            self.update_status(f"⚠️ No data for {fp}")
+                            continue
 
+                        # Debayer ONCE here if CFA
+                        if hdr and hdr.get('BAYERPAT') and not hdr.get('SPLITDB', False) and (img.ndim == 2 or (img.ndim == 3 and img.shape[-1] == 1)):
+                            img = self.debayer_image(img, fp, hdr)  # → HxWx3
+                        else:
+                            if img.ndim == 3 and img.shape[-1] == 1:
+                                img = np.squeeze(img, axis=-1)
+
+                        loaded_images.append(img)
+                        valid_paths.append(fp)
+                    except Exception as e:
+                        self.update_status(f"⚠️ Error loading {fp} for normalization: {e}")
+                    QApplication.processEvents()
 
             if not loaded_images:
                 continue
 
-            # shape=(F,H,W) or (F,H,W,C)
-            stack = np.array(loaded_images, dtype=np.float32)
+            stack = np.array(loaded_images, dtype=np.float32)  # (F,H,W) or (F,H,W,3)
             normalized_stack = normalize_images(stack, ref_median)
 
             # Save each with "_n.fit"
             for i, orig_file in enumerate(valid_paths):
                 base = os.path.basename(orig_file)
+                # normalize suffix handling for .fit/.fits
                 if base.endswith("_n.fit"):
                     base = base.replace("_n.fit", ".fit")
-                out_name = base.replace(".fit", "_n.fit")
+                if base.lower().endswith(".fits"):
+                    out_name = base[:-5] + "_n.fit"
+                elif base.lower().endswith(".fit"):
+                    out_name = base[:-4] + "_n.fit"
+                else:
+                    out_name = base + "_n.fit"
+
                 out_path = os.path.join(norm_dir, out_name)
-
                 frame_data = normalized_stack[i]
-                is_mono = (frame_data.ndim == 2)
 
-                # Reuse original header but don't load image data again
                 try:
                     orig_header = fits.getheader(orig_file, ext=0)
-                except:
+                except Exception:
                     orig_header = fits.Header()
+
+                # Mark representation to avoid re-debayering later
+                if isinstance(frame_data, np.ndarray) and frame_data.ndim == 3 and frame_data.shape[-1] == 3:
+                    orig_header["DEBAYERED"] = (True, "Color debayered normalized")
+                else:
+                    orig_header["DEBAYERED"] = (False, "Mono normalized")
 
                 hdu = fits.PrimaryHDU(data=frame_data.astype(np.float32), header=orig_header)
                 hdu.writeto(out_path, overwrite=True)
@@ -17884,38 +18116,52 @@ class StackingSuiteDialog(QDialog):
 
             del loaded_images, stack, normalized_stack
 
-        # ---------------------------------------------------------
-        # 5) ***Update self.light_files to reference *_n.fit***
-        # ---------------------------------------------------------
+        # Update self.light_files to *_n.fit
         for group, file_list in self.light_files.items():
             new_list = []
             for old_path in file_list:
                 base = os.path.basename(old_path)
                 if base.endswith("_n.fit"):
-                    # It's already _n
                     new_list.append(os.path.join(norm_dir, base))
                 else:
-                    n_name = base.replace(".fit", "_n.fit")
-                    new_path = os.path.join(norm_dir, n_name)
-                    new_list.append(new_path)
-
+                    if base.lower().endswith(".fits"):
+                        n_name = base[:-5] + "_n.fit"
+                    elif base.lower().endswith(".fit"):
+                        n_name = base[:-4] + "_n.fit"
+                    else:
+                        n_name = base + "_n.fit"
+                    new_list.append(os.path.join(norm_dir, n_name))
             self.light_files[group] = new_list
 
-        self.update_status("✅ Updated self.light_files to use _n.fit paths for all frames.")
+        self.update_status("✅ Updated self.light_files to use debayered, normalized *_n.fit frames.")
 
-        # ------------------------------------------------
-        # 6) Start Alignment on the normalized files
-        # ------------------------------------------------
+        # Pick normalized reference path to align against
+        ref_base = os.path.basename(self.reference_frame)
+        if ref_base.endswith("_n.fit"):
+            norm_ref_path = os.path.join(norm_dir, ref_base)
+        else:
+            if ref_base.lower().endswith(".fits"):
+                norm_ref_base = ref_base[:-5] + "_n.fit"
+            elif ref_base.lower().endswith(".fit"):
+                norm_ref_base = ref_base[:-4] + "_n.fit"
+            else:
+                norm_ref_base = ref_base + "_n.fit"
+            norm_ref_path = os.path.join(norm_dir, norm_ref_base)
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Start alignment on the normalized files
+        # ─────────────────────────────────────────────────────────────────────
         align_dir = os.path.join(self.stacking_directory, "Aligned_Images")
         os.makedirs(align_dir, exist_ok=True)
 
         self.alignment_thread = StarRegistrationThread(
-            self.reference_frame,
-            normalized_files,  # the entire list of _n.fit files
+            norm_ref_path,          # align against normalized, debayered reference
+            normalized_files,       # all *_n.fit files
             align_dir
         )
         self.alignment_thread.progress_update.connect(self.update_status)
         self.alignment_thread.registration_complete.connect(self.on_registration_complete)
+
         self.align_progress = QProgressDialog("Aligning stars…", None, 0, 0, self)
         self.align_progress.setWindowModality(Qt.WindowModality.WindowModal)
         self.align_progress.setMinimumDuration(0)
@@ -17925,8 +18171,9 @@ class StackingSuiteDialog(QDialog):
         self.align_progress.show()
 
         self.alignment_thread.progress_step.connect(self._on_align_progress)
-        self.alignment_thread.registration_complete.connect(self._on_align_done)        
+        self.alignment_thread.registration_complete.connect(self._on_align_done)
         self.alignment_thread.start()
+
         
     @pyqtSlot(int, int)
     def _on_align_progress(self, done, total):
@@ -18174,117 +18421,155 @@ class StackingSuiteDialog(QDialog):
 
     def on_registration_complete(self, success, msg):
         self.update_status(msg)
+        if not success:
+            return
 
         alignment_thread = self.alignment_thread
         if alignment_thread is None:
             self.update_status("⚠️ Error: No alignment data available.")
             return
 
-        # Copy the final transforms
+        # ----------------------------
+        # Build valid transform sets
+        # ----------------------------
         all_transforms = alignment_thread.alignment_matrices.copy()
-
-        # Get final shift values
         if not alignment_thread.transform_deltas:
             self.update_status("⚠️ No shift data available. Skipping filtering.")
             final_shifts = [0.0] * len(all_transforms)
         else:
             final_shifts = alignment_thread.transform_deltas[-1]
 
-        # Pair filenames with shift values
         file_shift_pairs = list(zip(all_transforms.keys(), final_shifts))
 
-        # 1) Build numeric transforms for valid frames
+        # keep only good transforms (e.g. <= 2 px shift)
         valid_matrices = {
             orig_path: all_transforms[orig_path]
-            for orig_path, shift in zip(all_transforms.keys(), final_shifts)
+            for orig_path, shift in file_shift_pairs
             if all_transforms[orig_path] is not None and shift <= 2.0
         }
 
-        # 2) Build dictionary from the normalized `_n.fit` or `_n.fits` → final aligned `_n_r.fit`
+        # Map normalized → aligned path
         self.valid_transforms = {}
         for norm_path, shift in file_shift_pairs:
-            transform = all_transforms[norm_path]
-            if transform is not None and shift <= 2.0:
-                base = os.path.basename(norm_path)
-                # Check for both .fits and .fit extensions for normalized files.
-                if base.endswith("_n.fits"):
-                    aligned_name = base.replace("_n.fits", "_n_r.fit")
-                elif base.endswith("_n.fit"):
-                    aligned_name = base.replace("_n.fit", "_n_r.fit")
-                elif base.endswith(".fits"):
-                    aligned_name = base.replace(".fits", "_r.fit")
-                elif base.endswith(".fit"):
-                    aligned_name = base.replace(".fit", "_r.fit")
-                else:
-                    # Fallback if unexpected extension
-                    aligned_name = base + "_r"
+            M = all_transforms[norm_path]
+            if M is None or shift > 2.0:
+                continue
 
-                aligned_path = os.path.join(
-                    self.stacking_directory, "Aligned_Images", aligned_name
-                )
-                # Key the dictionary by the *same* normalized path used by the alignment
-                self.valid_transforms[os.path.normpath(norm_path)] = aligned_path
+            base = os.path.basename(norm_path)
+            if base.endswith("_n.fits"):
+                aligned_name = base.replace("_n.fits", "_n_r.fit")
+            elif base.endswith("_n.fit"):
+                aligned_name = base.replace("_n.fit", "_n_r.fit")
+            elif base.endswith(".fits"):
+                aligned_name = base.replace(".fits", "_r.fit")
+            elif base.endswith(".fit"):
+                aligned_name = base.replace(".fit", "_r.fit")
+            else:
+                aligned_name = base + "_r"
 
-        # Identify rejected
-        rejected_files = [path for path, shift in file_shift_pairs if shift > 2.0]
-        self.alignment_thread = None  # done with the thread
+            aligned_path = os.path.join(self.stacking_directory, "Aligned_Images", aligned_name)
+            self.valid_transforms[os.path.normpath(norm_path)] = aligned_path
 
-        # Status
+        # finalize alignment phase
+        rejected_files = [p for p, s in file_shift_pairs if s > 2.0]
+        self.alignment_thread = None
+
         n_valid = len(self.valid_transforms)
         n_total = len(all_transforms)
         self.update_status(f"Alignment summary: {n_valid} succeeded, {n_total - n_valid} rejected.")
-
         if n_valid == 0:
             self.update_status("⚠️ No frames to stack; aborting.")
             return
-
         if rejected_files:
             self.update_status(f"🚨 Rejected {len(rejected_files)} frames due to shift > 2px.")
             for rf in rejected_files:
                 self.update_status(f"  ❌ {os.path.basename(rf)}")
 
-        # 3) Save numeric transforms
+        # Persist numeric transforms for drizzle
         self.save_alignment_matrices_sasd(valid_matrices)
 
-        # Gather drizzle settings
-        drizzle_dict = self.gather_drizzle_settings_from_tree()
-
-        # ===========================
-        # DEBUG PRINTS BEFORE FILTER
-        # ===========================
-
-        # 4) Filter `light_files`
+        # ----------------------------
+        # Build aligned file groups
+        # ----------------------------
         filtered_light_files = {}
         for group, file_list in self.light_files.items():
-            filtered_light_files[group] = [
-                f for f in file_list if os.path.normpath(f) in self.valid_transforms
-            ]
-            self.update_status(
-                f"Group '{group}' has {len(filtered_light_files[group])} file(s) after filtering."
-            )
+            filtered = [f for f in file_list if os.path.normpath(f) in self.valid_transforms]
+            filtered_light_files[group] = filtered
+            self.update_status(f"Group '{group}' has {len(filtered)} file(s) after filtering.")
 
-        # 5) **Build a second dict** that replaces each normalized file with its aligned counterpart.
         aligned_light_files = {}
         for group, file_list in filtered_light_files.items():
-            
             new_list = []
             for f in file_list:
-                normed_f = os.path.normpath(f)
-                aligned_f = self.valid_transforms.get(normed_f, None)
-                
-                if aligned_f and os.path.exists(aligned_f):
-                    new_list.append(aligned_f)
+                normed = os.path.normpath(f)
+                aligned = self.valid_transforms.get(normed)
+                if aligned and os.path.exists(aligned):
+                    new_list.append(aligned)
                 else:
-                    self.update_status(f"DEBUG: File '{aligned_f}' does not exist on disk.")
+                    self.update_status(f"DEBUG: File '{aligned}' does not exist on disk.")
             aligned_light_files[group] = new_list
 
-        # Finally, pass the aligned_light_files to stacking
-        self.stack_images_mixed_drizzle(
-            grouped_files=aligned_light_files,  # Now we pass the aligned _r.fit paths
-            frame_weights=self.frame_weights,
-            transforms_dict=self.valid_transforms,
-            drizzle_dict=drizzle_dict
+        # ----------------------------
+        # Snapshot UI-dependent settings
+        # ----------------------------
+        drizzle_dict = self.gather_drizzle_settings_from_tree()
+        try:
+            autocrop_enabled = self.autocrop_cb.isChecked()
+            autocrop_pct = float(self.autocrop_pct.value())
+        except Exception:
+            autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
+            autocrop_pct = float(self.settings.value("stacking/autocrop_pct", 95.0, type=float))
+
+        # ----------------------------
+        # Kick off post-align worker
+        # ----------------------------
+        self.post_thread = QThread(self)
+        self.post_worker = AfterAlignWorker(
+            self,
+            light_files=aligned_light_files,
+            frame_weights=dict(self.frame_weights),
+            transforms_dict=dict(self.valid_transforms),
+            drizzle_dict=drizzle_dict,
+            autocrop_enabled=autocrop_enabled,
+            autocrop_pct=autocrop_pct,
         )
+        self.post_worker.progress.connect(self.update_status)
+        self.post_worker.finished.connect(self._on_post_pipeline_finished)
+
+        self.post_worker.moveToThread(self.post_thread)
+        self.post_thread.started.connect(self.post_worker.run)
+        self.post_thread.start()
+
+        # Optional progress dialog for this phase
+        self.post_progress = QProgressDialog("Stacking & drizzle (if enabled)…", None, 0, 0, self)
+        self.post_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.post_progress.setCancelButton(None)
+        self.post_progress.setMinimumDuration(0)
+        self.post_progress.setWindowTitle("Post-Alignment")
+        self.post_progress.show()
+
+    @pyqtSlot(bool, str)
+    def _on_post_pipeline_finished(self, ok: bool, message: str):
+        if hasattr(self, "post_progress") and self.post_progress:
+            try:
+                self.post_progress.close()
+            except Exception:
+                pass
+            self.post_progress = None
+
+        try:
+            self.post_thread.quit()
+            self.post_thread.wait()
+        except Exception:
+            pass
+        try:
+            self.post_worker.deleteLater()
+            self.post_thread.deleteLater()
+        except Exception:
+            pass
+
+        self.update_status(message)
+
 
     def save_rejection_map_sasr(self, rejection_map, out_file):
         """
@@ -18336,45 +18621,57 @@ class StackingSuiteDialog(QDialog):
                 rejections[raw_path] = coords
         return rejections
 
-    def stack_images_mixed_drizzle(self, grouped_files, frame_weights, transforms_dict, drizzle_dict):
-        self.update_status("🔄 Running normal integration to record rejected pixel positions...")
-        QApplication.processEvents()
+    def stack_images_mixed_drizzle(
+        self,
+        grouped_files,           # { group_key: [aligned _n_r.fit paths] }
+        frame_weights,           # { file_path: weight }
+        transforms_dict,         # { normalized_path -> aligned_path } (kept for compatibility)
+        drizzle_dict,            # { group_key: {drizzle_enabled, scale_factor, drop_shrink} }
+        *,
+        autocrop_enabled: bool,
+        autocrop_pct: float,
+        status_cb=None
+    ):
+        """Runs normal integration (to get rejection coords), saves masters,
+        and (optionally) runs drizzle. Designed to run in a worker thread.
+
+        Returns:
+            {
+            "summary_lines": [str, ...],
+            "autocrop_outputs": [(group_key, out_path_crop), ...]
+            }
+        """
+        log = status_cb or (lambda *_: None)
+
+        log("🔄 Running normal integration to record rejected pixel positions...")
+
+        # Precompute a single global crop rect if enabled (pure computation, no UI).
+        global_rect = None
+        if autocrop_enabled:
+            log("✂️ Auto Crop Enabled. Calculating bounding box…")
+            global_rect = self._compute_common_autocrop_rect(grouped_files, autocrop_pct)
+            if global_rect is None:
+                log("✂️ Global crop disabled; falling back to per-group.")
+            else:
+                log("✂️ Auto Crop Bounding Box Calculated")
+
         group_integration_data = {}
-        # Decide if global auto-crop is enabled and determine pct
-        try:
-            _autocrop_enabled = self.autocrop_cb.isChecked()
-            _autocrop_pct     = float(self.autocrop_pct.value())
-        except Exception:
-            _autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
-            _autocrop_pct     = float(self.settings.value("stacking/autocrop_pct", 95.0, type=float))
-
-        self._global_autocrop_rect = None
-        if _autocrop_enabled:
-            self._global_autocrop_rect = self._compute_common_autocrop_rect(grouped_files, _autocrop_pct)
-            if self._global_autocrop_rect is None:
-                self.update_status("✂️ Global crop disabled; falling back to per-group.")
-        else:
-            self.update_status("✂️ Auto-crop disabled.")    
-
         summary_lines = []
-        # NEW: where we collect any saved _autocrop files
         autocrop_outputs = []
-        # let drizzle push into this from inside its method
-        self._autocrop_outputs = []
-        for group_key, file_list in grouped_files.items():
-            self.update_status(f"Integration for group '{group_key}' with {len(file_list)} file(s): {file_list}")
-            integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
-                group_key, file_list, frame_weights
-            )
 
-            # --- SAVE ORIGINAL (no crop yet) ---
+        for group_key, file_list in grouped_files.items():
+            log(f"Integration for group '{group_key}' with {len(file_list)} file(s).")
+
+            integrated_image, rejection_map, ref_header = self.normal_integration_with_rejection(
+                group_key, file_list, frame_weights, status_cb=log
+            )
             if integrated_image is None:
                 continue
 
             if ref_header is None:
                 ref_header = fits.Header()
 
-            # Common header keys
+            # --- Save the non-cropped master ---
             hdr_orig = ref_header.copy()
             hdr_orig["IMAGETYP"] = "MASTER STACK"
             hdr_orig["BITPIX"]   = -32
@@ -18387,7 +18684,8 @@ class StackingSuiteDialog(QDialog):
                 hdr_orig["NAXIS"]  = 2
                 hdr_orig["NAXIS1"] = integrated_image.shape[1]
                 hdr_orig["NAXIS2"] = integrated_image.shape[0]
-                if "NAXIS3" in hdr_orig: del hdr_orig["NAXIS3"]
+                if "NAXIS3" in hdr_orig:
+                    del hdr_orig["NAXIS3"]
             else:
                 hdr_orig["NAXIS"]  = 3
                 hdr_orig["NAXIS1"] = integrated_image.shape[1]
@@ -18408,30 +18706,23 @@ class StackingSuiteDialog(QDialog):
                 original_header=hdr_orig,
                 is_mono=is_mono_orig
             )
-            self.update_status(f"✅ Saved integrated image (original) for '{group_key}': {out_path_orig}")
-            QApplication.processEvents()
+            log(f"✅ Saved integrated image (original) for '{group_key}': {out_path_orig}")
 
-            # --- OPTIONAL: AUTOCROP SECOND COPY ---
-            cropped_img, hdr_crop = self._apply_autocrop(
-                integrated_image, file_list, ref_header.copy(), scale=1.0,
-                rect_override=self._global_autocrop_rect
-            )
-
-            # If auto-crop is disabled, _apply_autocrop returns the input unchanged;
-            # only write a second file when auto-crop actually changed bounds or is enabled.
-            autocrop_enabled = False
-            try:
-                autocrop_enabled = self.autocrop_cb.isChecked()
-            except Exception:
-                autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
-
+            # --- Optional: auto-cropped copy (uses global_rect if provided) ---
             if autocrop_enabled:
-                # _apply_autocrop already fixed NAXIS*, CRPIX*; ensure mono flag matches final array
+                cropped_img, hdr_crop = self._apply_autocrop(
+                    integrated_image,
+                    file_list,
+                    ref_header.copy(),
+                    scale=1.0,
+                    rect_override=global_rect
+                )
                 is_mono_crop = (cropped_img.ndim == 2)
                 Hc, Wc = (cropped_img.shape[:2] if cropped_img.ndim >= 2 else (H, W))
                 display_group_crop = self._label_with_dims(group_key, Wc, Hc)
                 base_name_crop = f"MasterLight_{display_group_crop}_{n_frames}stacked"
                 out_path_crop = os.path.join(self.stacking_directory, f"{base_name_crop}_autocrop.fit")
+
                 save_image(
                     img_array=cropped_img,
                     filename=out_path_crop,
@@ -18440,16 +18731,15 @@ class StackingSuiteDialog(QDialog):
                     original_header=hdr_crop,
                     is_mono=is_mono_crop
                 )
-                self.update_status(f"✂️ Saved auto-cropped image for '{group_key}': {out_path_crop}")
-                QApplication.processEvents()
+                log(f"✂️ Saved auto-cropped image for '{group_key}': {out_path_crop}")
                 autocrop_outputs.append((group_key, out_path_crop))
 
-            # Keep bookkeeping as before
+            # Bookkeeping for drizzle
             dconf = drizzle_dict.get(group_key, {})
             if dconf.get("drizzle_enabled", False):
                 sasr_path = os.path.join(self.stacking_directory, f"{group_key}_rejections.sasr")
                 self.save_rejection_map_sasr(rejection_map, sasr_path)
-                self.update_status(f"✅ Saved rejection map to {sasr_path}")
+                log(f"✅ Saved rejection map to {sasr_path}")
                 group_integration_data[group_key] = {
                     "integrated_image": integrated_image,
                     "rejection_map": rejection_map,
@@ -18463,54 +18753,51 @@ class StackingSuiteDialog(QDialog):
                     "n_frames": n_frames,
                     "drizzled": False
                 }
-                self.update_status(f"ℹ️ Skipping rejection map save for '{group_key}' (drizzle disabled).")
+                log(f"ℹ️ Skipping rejection map save for '{group_key}' (drizzle disabled).")
 
+        # Drizzle pass (only for groups with drizzle enabled)
         for group_key, file_list in grouped_files.items():
-            dconf = drizzle_dict.get(group_key, None)
-            if dconf and dconf.get("drizzle_enabled", False):
-                scale_factor = dconf["scale_factor"]
-                drop_shrink = dconf["drop_shrink"]
-                rejections_for_group = group_integration_data[group_key]["rejection_map"]
-                n_frames = group_integration_data[group_key]["n_frames"]
+            dconf = drizzle_dict.get(group_key)
+            if not (dconf and dconf.get("drizzle_enabled", False)):
+                log(f"✅ Group '{group_key}' not set for drizzle. Integrated image already saved.")
+                continue
 
-                self.update_status(f"📐 Drizzle for '{group_key}' at {scale_factor}× (drop={drop_shrink}) using {n_frames} frame(s).")
-                QApplication.processEvents()
+            scale_factor = float(dconf["scale_factor"])
+            drop_shrink  = float(dconf["drop_shrink"])
+            rejections_for_group = group_integration_data[group_key]["rejection_map"]
+            n_frames = group_integration_data[group_key]["n_frames"]
 
-                self.drizzle_stack_one_group(
-                    group_key=group_key,
-                    file_list=file_list,
-                    transforms_dict=transforms_dict,
-                    frame_weights=frame_weights,
-                    scale_factor=scale_factor,
-                    drop_shrink=drop_shrink,
-                    rejection_map=rejections_for_group
-                )
-                
-            else:
-                self.update_status(f"✅ Group '{group_key}' not set for drizzle. Integrated image already saved.")
-                QApplication.processEvents()
+            log(f"📐 Drizzle for '{group_key}' at {scale_factor}× (drop={drop_shrink}) using {n_frames} frame(s).")
 
-        autocrop_outputs.extend(getattr(self, "_autocrop_outputs", []))
+            self.drizzle_stack_one_group(
+                group_key=group_key,
+                file_list=file_list,
+                transforms_dict=transforms_dict,   # kept for compatibility; method reloads from disk
+                frame_weights=frame_weights,
+                scale_factor=scale_factor,
+                drop_shrink=drop_shrink,
+                rejection_map=rejections_for_group,
+                autocrop_enabled=autocrop_enabled,
+                rect_override=global_rect,
+                status_cb=log
+            )
 
-        # 🧾 Summary message box
+        # Build summary lines
         for group_key, info in group_integration_data.items():
             n_frames = info["n_frames"]
             drizzled = info["drizzled"]
             summary_lines.append(f"• {group_key}: {n_frames} stacked{' + drizzle' if drizzled else ''}")
 
-        # NEW: list auto-cropped outputs if any
         if autocrop_outputs:
-            summary_lines.append("")  # blank line separator
+            summary_lines.append("")
             summary_lines.append("Auto-cropped files saved:")
             for g, p in autocrop_outputs:
                 summary_lines.append(f"  • {g} → {p}")
 
-        summary_text = "\n".join(summary_lines)
-        QMessageBox.information(
-            self,
-            "Integration Summary",
-            f"The following groups were successfully integrated:\n\n{summary_text}"
-        )
+        return {
+            "summary_lines": summary_lines,
+            "autocrop_outputs": autocrop_outputs
+        }
 
     def save_registered_images(self, success, msg, frame_weights):
         if not success:
@@ -18942,125 +19229,93 @@ class StackingSuiteDialog(QDialog):
         self,
         group_key,
         file_list,
-        transforms_dict,
+        transforms_dict,   # kept for API compatibility; transforms reloaded from disk
         frame_weights,
         scale_factor=2.0,
         drop_shrink=0.65,
-        rejection_map=None
+        rejection_map=None,
+        *,
+        autocrop_enabled: bool = False,
+        rect_override=None,
+        status_cb=None
     ):
         """
-        Drizzle a single group. Now, we only skip the pixels that are actually rejected for
-        each file (based on the per-file rejection_map).
-        
-        'rejection_map' is a dict: { file_path: [(x_r, y_r), (x_r, y_r), ...], ... }
-        where (x_r, y_r) are coordinates in the aligned (_n_r) space that were rejected
-        for THAT particular file.
+        Drizzle a single group. Skips only per-file rejected pixels.
+        Designed to run in a worker thread (no UI calls).
         """
-        # Count how many total rejections across all files (for debug)
-        total_rej = 0
-        if rejection_map is not None:
-            total_rej = sum(len(v) for v in rejection_map.values())
-        self.update_status(
-            f"🔭 Drizzle stacking for group '{group_key}' with {total_rej} total rejected pixels across files."
-        )
-        QApplication.processEvents()
+        log = status_cb or (lambda *_: None)
 
-        # 1) Check we have enough frames
+        total_rej = sum(len(v) for v in (rejection_map or {}).values())
+        log(f"🔭 Drizzle stacking for group '{group_key}' with {total_rej} total rejected pixels.")
+
         if len(file_list) < 2:
-            self.update_status(f"⚠️ Group '{group_key}' does not have enough frames to drizzle.")
+            log(f"⚠️ Group '{group_key}' does not have enough frames to drizzle.")
             return
 
-        # 2) Load transforms from disk
         transforms_path = os.path.join(self.stacking_directory, "alignment_transforms.sasd")
         if not os.path.exists(transforms_path):
-            self.update_status(f"⚠️ No alignment_transforms.sasd found at {transforms_path}!")
+            log(f"⚠️ No alignment_transforms.sasd found at {transforms_path}!")
             return
 
         new_transforms_dict = self.load_alignment_matrices_custom(transforms_path)
-        self.update_status(f"✅ Loaded {len(new_transforms_dict)} transforms from disk for drizzle.")
-        QApplication.processEvents()
+        log(f"✅ Loaded {len(new_transforms_dict)} transforms from disk for drizzle.")
 
-        # 3) Load the first file to determine shape + color/mono
         first_file = file_list[0]
         first_img, hdr, _, _ = load_image(first_file)
         if first_img is None:
-            self.update_status(f"⚠️ Could not load {first_file} to determine drizzle shape!")
+            log(f"⚠️ Could not load {first_file} to determine drizzle shape!")
             return
 
         if first_img.ndim == 2:
             is_mono = True
             h, w = first_img.shape
+            c = 1
         else:
             is_mono = False
             h, w, c = first_img.shape
 
-        # 4) Decide deposit function (naive vs footprint)
+        # Choose depositor
         if drop_shrink >= 0.99:
-            if is_mono:
-                deposit_func = drizzle_deposit_numba_naive
-                self.update_status("Using naive drizzle deposit (mono).")
-            else:
-                deposit_func = drizzle_deposit_color_naive
-                self.update_status("Using naive drizzle deposit (color).")
+            deposit_func = drizzle_deposit_numba_naive if is_mono else drizzle_deposit_color_naive
+            log(f"Using naive drizzle deposit ({'mono' if is_mono else 'color'}).")
         else:
-            if is_mono:
-                deposit_func = drizzle_deposit_numba_footprint
-                self.update_status("Using footprint drizzle deposit (mono).")
-            else:
-                deposit_func = drizzle_deposit_color_footprint
-                self.update_status("Using footprint drizzle deposit (color).")
-        QApplication.processEvents()
+            deposit_func = drizzle_deposit_numba_footprint if is_mono else drizzle_deposit_color_footprint
+            log(f"Using footprint drizzle deposit ({'mono' if is_mono else 'color'}).")
 
-        # 5) Prepare drizzle buffers
         out_h = int(h * scale_factor)
         out_w = int(w * scale_factor)
-        if is_mono:
-            drizzle_buffer = np.zeros((out_h, out_w), dtype=np.float64)
-            coverage_buffer = np.zeros((out_h, out_w), dtype=np.float64)
-            finalize_func = finalize_drizzle_2d
-        else:
-            drizzle_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
-            coverage_buffer = np.zeros((out_h, out_w, c), dtype=np.float64)
-            finalize_func = finalize_drizzle_3d
+        drizzle_buffer  = np.zeros((out_h, out_w) if is_mono else (out_h, out_w, c), dtype=np.float64)
+        coverage_buffer = np.zeros_like(drizzle_buffer, dtype=np.float64)
+        finalize_func   = finalize_drizzle_2d if is_mono else finalize_drizzle_3d
 
-        # 6) For each aligned file, deposit raw pixels—skipping only that file's rejections
         for aligned_file in file_list:
             aligned_base = os.path.basename(aligned_file)
-            if aligned_base.endswith("_n_r.fit"):
-                raw_base = aligned_base.replace("_n_r.fit", "_n.fit")
-            else:
-                raw_base = aligned_base
-
+            raw_base = aligned_base.replace("_n_r.fit", "_n.fit") if aligned_base.endswith("_n_r.fit") else aligned_base
             raw_file = os.path.join(self.stacking_directory, "Normalized_Images", raw_base)
+
             raw_img_data, _, _, _ = load_image(raw_file)
             if raw_img_data is None:
-                self.update_status(f"⚠️ Could not load raw file '{raw_file}' for drizzle!")
+                log(f"⚠️ Could not load raw file '{raw_file}' for drizzle!")
                 continue
 
-            # Look up transform
             raw_key = os.path.normpath(raw_file)
             transform = new_transforms_dict.get(raw_key, None)
             if transform is None:
-                self.update_status(f"⚠️ No transform found for raw '{raw_base}'! Skipping drizzle.")
+                log(f"⚠️ No transform found for raw '{raw_base}'! Skipping drizzle.")
                 continue
 
-            self.update_status(f"🧩 Drizzling (raw): {raw_base}")
-            self.update_status(
+            log(f"🧩 Drizzling (raw): {raw_base}")
+            log(
                 f"    Matrix: [[{transform[0,0]:.4f}, {transform[0,1]:.4f}, {transform[0,2]:.4f}], "
                 f"[{transform[1,0]:.4f}, {transform[1,1]:.4f}, {transform[1,2]:.4f}]]"
             )
-            QApplication.processEvents()
 
             weight = frame_weights.get(aligned_file, 1.0)
             if transform.dtype != np.float32:
                 transform = transform.astype(np.float32)
 
-            # Only skip rejections for THIS file
-            coords_for_this_file = []
-            if rejection_map is not None:
-                coords_for_this_file = rejection_map.get(aligned_file, [])
+            coords_for_this_file = rejection_map.get(aligned_file, []) if rejection_map else []
 
-            # Mask out those pixels in the raw image
             if coords_for_this_file:
                 inv_transform = self.invert_affine_transform(transform)
                 for (x_r, y_r) in coords_for_this_file:
@@ -19070,25 +19325,15 @@ class StackingSuiteDialog(QDialog):
                     if 0 <= x_raw < raw_img_data.shape[1] and 0 <= y_raw < raw_img_data.shape[0]:
                         raw_img_data[y_raw, x_raw] = 0.0
 
-            # Deposit raw pixels using the transform
             drizzle_buffer, coverage_buffer = deposit_func(
-                raw_img_data,
-                transform,
-                drizzle_buffer,
-                coverage_buffer,
-                scale_factor,
-                drop_shrink,
-                weight
+                raw_img_data, transform, drizzle_buffer, coverage_buffer,
+                scale_factor, drop_shrink, weight
             )
 
-        # 7) Finalize drizzle
         final_drizzle = np.zeros_like(drizzle_buffer, dtype=np.float32)
         final_drizzle = finalize_func(drizzle_buffer, coverage_buffer, final_drizzle)
 
-
-
-        # 8) Save final drizzle image
-        # 8) Save final drizzle image (original first)
+        # Save original drizzle
         Hd, Wd = final_drizzle.shape[:2] if final_drizzle.ndim >= 2 else (0, 0)
         display_group_driz = self._label_with_dims(group_key, Wd, Hd)
         base_name = f"MasterLight_{display_group_driz}_{len(file_list)}stacked_drizzle"
@@ -19096,17 +19341,17 @@ class StackingSuiteDialog(QDialog):
 
         hdr_orig = hdr.copy() if hdr is not None else fits.Header()
         hdr_orig["IMAGETYP"]   = "MASTER STACK - DRIZZLE"
-        hdr_orig["DRIZFACTOR"] = (scale_factor, "Drizzle scale factor")
-        hdr_orig["DROPFRAC"]   = (drop_shrink,  "Drizzle drop shrink/pixfrac")
+        hdr_orig["DRIZFACTOR"] = (float(scale_factor), "Drizzle scale factor")
+        hdr_orig["DROPFRAC"]   = (float(drop_shrink),  "Drizzle drop shrink/pixfrac")
         hdr_orig["CREATOR"]    = "SetiAstroSuite"
         hdr_orig["DATE-OBS"]   = datetime.utcnow().isoformat()
 
-        is_mono_orig = not (final_drizzle.ndim == 3 and final_drizzle.shape[-1] == 3)
-        if is_mono_orig:
+        if final_drizzle.ndim == 2:
             hdr_orig["NAXIS"]  = 2
             hdr_orig["NAXIS1"] = final_drizzle.shape[1]
             hdr_orig["NAXIS2"] = final_drizzle.shape[0]
-            if "NAXIS3" in hdr_orig: del hdr_orig["NAXIS3"]
+            if "NAXIS3" in hdr_orig:
+                del hdr_orig["NAXIS3"]
         else:
             hdr_orig["NAXIS"]  = 3
             hdr_orig["NAXIS1"] = final_drizzle.shape[1]
@@ -19119,27 +19364,24 @@ class StackingSuiteDialog(QDialog):
             original_format="fit",
             bit_depth="32-bit floating point",
             original_header=hdr_orig,
-            is_mono=is_mono_orig
+            is_mono=(final_drizzle.ndim == 2)
         )
-        self.update_status(f"✅ Drizzle (original) saved: {out_path_orig}")
+        log(f"✅ Drizzle (original) saved: {out_path_orig}")
 
-        # 9) Optional auto-crop copy (scaled rect)
-        autocrop_enabled = False
-        try:
-            autocrop_enabled = self.autocrop_cb.isChecked()
-        except Exception:
-            autocrop_enabled = self.settings.value("stacking/autocrop_enabled", False, type=bool)
-
+        # Optional auto-crop (respects global rect if provided)
         if autocrop_enabled:
             cropped_drizzle, hdr_crop = self._apply_autocrop(
-                final_drizzle, file_list, hdr.copy() if hdr is not None else fits.Header(),
-                scale=scale_factor,
-                rect_override=self._global_autocrop_rect
+                final_drizzle,
+                file_list,
+                hdr.copy() if hdr is not None else fits.Header(),
+                scale=float(scale_factor),
+                rect_override=rect_override
             )
             is_mono_crop = (cropped_drizzle.ndim == 2)
             display_group_driz_crop = self._label_with_dims(group_key, cropped_drizzle.shape[1], cropped_drizzle.shape[0])
             base_name_crop = f"MasterLight_{display_group_driz_crop}_{len(file_list)}stacked_drizzle"
             out_path_crop = os.path.join(self.stacking_directory, f"{base_name_crop}_autocrop.fit")
+
             save_image(
                 img_array=cropped_drizzle,
                 filename=out_path_crop,
@@ -19151,36 +19393,29 @@ class StackingSuiteDialog(QDialog):
             if not hasattr(self, "_autocrop_outputs"):
                 self._autocrop_outputs = []
             self._autocrop_outputs.append((group_key, out_path_crop))
-            self.update_status(f"✂️ Drizzle (auto-cropped) saved: {out_path_crop}")
+            log(f"✂️ Drizzle (auto-cropped) saved: {out_path_crop}")
 
-
-
-    def normal_integration_with_rejection(self, group_key, file_list, frame_weights):
+    def normal_integration_with_rejection(self, group_key, file_list, frame_weights, status_cb=None):
         """
-        Performs chunked stacking integration of aligned (_n_r) images using the current
-        rejection algorithm. Returns:
-        - integrated_image: Final integrated (stacked) image as a NumPy array.
-        - per_file_rejections: dict mapping each file in 'file_list' to a list of (x,y)
-            coordinates that were rejected for THAT file only.
-        - ref_header: the header from the reference file (or a new one if missing)
+        Chunked integration of aligned (_n_r) images with outlier rejection.
+        Returns: (integrated_image, per_file_rejections, ref_header)
         """
-        # 0) Initial status
-        self.update_status(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
-        QApplication.processEvents()
+        log = status_cb or (lambda *_: None)
 
-        # 1) Sanity checks
+        log(f"Starting integration for group '{group_key}' with {len(file_list)} files.")
+
         if not file_list:
-            self.update_status(f"DEBUG: Empty file_list for group '{group_key}'.")
+            log(f"DEBUG: Empty file_list for group '{group_key}'.")
             return None, {}, None
 
-        # 2) Load a reference image to determine dimensions and channels
         ref_file = file_list[0]
         if not os.path.exists(ref_file):
-            self.update_status(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
+            log(f"⚠️ Reference file '{ref_file}' not found for group '{group_key}'.")
             return None, {}, None
+
         ref_data, ref_header, _, _ = load_image(ref_file)
         if ref_data is None:
-            self.update_status(f"⚠️ Could not load reference '{ref_file}' for group '{group_key}'.")
+            log(f"⚠️ Could not load reference '{ref_file}' for group '{group_key}'.")
             return None, {}, None
         if ref_header is None:
             ref_header = fits.Header()
@@ -19189,15 +19424,12 @@ class StackingSuiteDialog(QDialog):
         height, width = ref_data.shape[:2]
         channels = 3 if is_color else 1
 
-        self.update_status(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
-        QApplication.processEvents()
+        log(f"📊 Stacking group '{group_key}' with {self.rejection_algorithm}")
 
-        # 3) Allocate output and rejections dict
         N = len(file_list)
         integrated_image = np.zeros((height, width, channels), dtype=np.float64)
         per_file_rejections = {f: [] for f in file_list}
 
-        # 4) Compute chunk size
         DTYPE  = np.float64
         pref_h = self.chunk_height
         pref_w = self.chunk_width
@@ -19205,19 +19437,18 @@ class StackingSuiteDialog(QDialog):
             chunk_h, chunk_w = compute_safe_chunk(
                 height, width, N, channels, DTYPE, pref_h, pref_w
             )
-            self.update_status(f"🔧 Using chunk size {chunk_h}×{chunk_w} for float64")
-            QApplication.processEvents()
+            log(f"🔧 Using chunk size {chunk_h}×{chunk_w} for float64")
         except MemoryError as e:
-            self.update_status(f"⚠️ {e}")
+            log(f"⚠️ {e}")
             return None, {}, None
 
-        # 5) Precompute total tile count for progress
-        n_rows     = math.ceil(height / chunk_h)
-        n_cols     = math.ceil(width  / chunk_w)
+        n_rows  = math.ceil(height / chunk_h)
+        n_cols  = math.ceil(width  / chunk_w)
         total_tiles = n_rows * n_cols
-        tile_idx    = 0
+        tile_idx = 0
 
-        # 6) Loop over tiles
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         for y_start in range(0, height, chunk_h):
             y_end  = min(y_start + chunk_h, height)
             tile_h = y_end - y_start
@@ -19226,16 +19457,13 @@ class StackingSuiteDialog(QDialog):
                 x_end  = min(x_start + chunk_w, width)
                 tile_w = x_end - x_start
 
-                # --- Update progress ---
                 tile_idx += 1
-                self.update_status(f"Integrating tile {tile_idx}/{total_tiles}...")
-                QApplication.processEvents()
+                log(f"Integrating tile {tile_idx}/{total_tiles}…")
 
-                # 6a) Build tile stack
-                tile_stack    = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
-                weights_list  = []
-                num_cores     = os.cpu_count() or 4
+                tile_stack   = np.zeros((N, tile_h, tile_w, channels), dtype=np.float64)
+                weights_list = []
 
+                num_cores = os.cpu_count() or 4
                 with ThreadPoolExecutor(max_workers=num_cores) as executor:
                     future_to_i = {}
                     for i, fpath in enumerate(file_list):
@@ -19244,12 +19472,11 @@ class StackingSuiteDialog(QDialog):
                         weights_list.append(frame_weights.get(fpath, 1.0))
 
                     for fut in as_completed(future_to_i):
-                        i       = future_to_i[fut]
+                        i = future_to_i[fut]
                         sub_img = fut.result()
                         if sub_img is None:
-                            self.update_status(f"DEBUG: Tile load returned None for file: {file_list[i]}")
+                            log(f"DEBUG: Tile load returned None for file: {file_list[i]}")
                             continue
-                        # Normalize shape → (tile_h, tile_w, channels)
                         if sub_img.ndim == 2:
                             sub_img = sub_img[:, :, np.newaxis]
                             if channels == 3:
@@ -19260,7 +19487,7 @@ class StackingSuiteDialog(QDialog):
 
                 weights_array = np.array(weights_list, dtype=np.float32)
 
-                # 6b) Apply rejection algorithm
+                # Rejection
                 algo = self.rejection_algorithm
                 if algo == "Simple Median (No Rejection)":
                     tile_result  = np.median(tile_stack, axis=0)
@@ -19308,10 +19535,10 @@ class StackingSuiteDialog(QDialog):
                         lower=self.sigma_low, upper=self.sigma_high
                     )
 
-                # 7) Place the integrated tile into the final image
+                # Commit tile
                 integrated_image[y_start:y_end, x_start:x_end, :] = tile_result
 
-                # 8) Record per-file rejections
+                # Collect per-file rejections
                 if tile_rej_map.ndim == 4:
                     tile_rej_map = np.any(tile_rej_map, axis=-1)
                 for i, fpath in enumerate(file_list):
@@ -19319,16 +19546,12 @@ class StackingSuiteDialog(QDialog):
                     for dy, dx in zip(ys, xs):
                         per_file_rejections[fpath].append((x_start + dx, y_start + dy))
 
-        # 9) If mono, squeeze away channel axis
         if channels == 1:
             integrated_image = integrated_image[..., 0]
 
-
-        # 10) Final status
-        self.update_status(f"Integration complete for group '{group_key}'.")
-        QApplication.processEvents()
-
+        log(f"Integration complete for group '{group_key}'.")
         return integrated_image, per_file_rejections, ref_header
+
 
 
 
@@ -37775,9 +37998,9 @@ class IsophoteModelerDialog(QDialog):
             else:
                 self.ring_est_label.setText(f"≈ {n:,} rings")
 
-            # (optional) soft cap to ~5000 rings like you had
-            if n > 5000:
-                new_step = max(st, (mx - mn) / 5000.0)
+            # (optional) soft cap to ~10000 rings like you had
+            if n > 10000:
+                new_step = max(st, (mx - mn) / 10000.0)
                 if abs(new_step - st) > 1e-12:
                     self.step.setValue(new_step)
 
@@ -37852,8 +38075,8 @@ class IsophoteModelerDialog(QDialog):
         rings = int(max(0, (mx - mn) / st))
 
         # soft guard
-        if rings > 5000:
-            new_step = (mx - mn) / 5000.0
+        if rings > 10000:
+            new_step = (mx - mn) / 10000.0
             if new_step > st:  # only bump upward
                 self.step.setValue(new_step)
                 st = new_step
@@ -47556,6 +47779,7 @@ class BlinkTab(QWidget):
         self._pending_preview_item = None
         self._pending_preview_timer.timeout.connect(self._do_preview_update)
         self.play_fps = 1  # default fps (200 ms/frame)
+        self._view_center_norm = None
         self.initUI()
         self.init_shortcuts()
 
@@ -47781,6 +48005,10 @@ class BlinkTab(QWidget):
         # Connect the selection change signal to update the preview when arrow keys are used
         self.fileTree.selectionModel().selectionChanged.connect(self.on_selection_changed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self.scroll_area.horizontalScrollBar().valueChanged.connect(lambda _: self._capture_view_center_norm())
+        self.scroll_area.verticalScrollBar().valueChanged.connect(lambda _: self._capture_view_center_norm())
+
 
     def _apply_playback_interval(self, *_):
         # read from custom spin if present
@@ -48617,6 +48845,8 @@ class BlinkTab(QWidget):
         if not file_path:
             return
 
+        self._capture_view_center_norm()
+
         idx = self.image_paths.index(file_path)
         entry = self.loaded_images[idx]
         stored = entry['image_data']  # already stretched & clipped at load time
@@ -48645,28 +48875,69 @@ class BlinkTab(QWidget):
         self.current_pixmap = QPixmap.fromImage(qimage)
         self.apply_zoom()
 
+    def _capture_view_center_norm(self):
+        """Remember the current viewport center as a fraction of the content size."""
+        sa = self.scroll_area
+        vp = sa.viewport()
+        content_w = max(1, self.preview_label.width())
+        content_h = max(1, self.preview_label.height())
+        if content_w <= 1 or content_h <= 1:
+            return
+        hbar = sa.horizontalScrollBar()
+        vbar = sa.verticalScrollBar()
+        cx = hbar.value() + vp.width()  / 2.0
+        cy = vbar.value() + vp.height() / 2.0
+        self._view_center_norm = (cx / content_w, cy / content_h)
+
+    def _restore_view_center_norm(self):
+        """Restore the viewport center captured earlier (if any)."""
+        if not self._view_center_norm:
+            return
+        sa = self.scroll_area
+        vp = sa.viewport()
+        content_w = max(1, self.preview_label.width())
+        content_h = max(1, self.preview_label.height())
+        cx = self._view_center_norm[0] * content_w
+        cy = self._view_center_norm[1] * content_h
+        hbar = sa.horizontalScrollBar()
+        vbar = sa.verticalScrollBar()
+        h_target = int(round(cx - vp.width()  / 2.0))
+        v_target = int(round(cy - vp.height() / 2.0))
+        h_target = max(hbar.minimum(), min(hbar.maximum(), h_target))
+        v_target = max(vbar.minimum(), min(vbar.maximum(), v_target))
+        # Set after layout settles to avoid fighting size changes
+        QTimer.singleShot(0, lambda: (hbar.setValue(h_target), vbar.setValue(v_target)))
 
     def apply_zoom(self):
-        """Apply the current zoom level to the pixmap and update the display."""
+        """Apply current zoom to pixmap without losing scroll position."""
         if not self.current_pixmap:
             return
 
-        # 1) scale & show it
+        # keep current center if we already showed something
+        had_content = (self.preview_label.pixmap() is not None) and (self.preview_label.width() > 0)
+
+        if had_content:
+            self._capture_view_center_norm()
+        else:
+            # first time: default center
+            self._view_center_norm = (0.5, 0.5)
+
+        # scale and show
+        base_w = self.current_pixmap.width()
+        base_h = self.current_pixmap.height()
+        scaled_w = max(1, int(round(base_w * self.zoom_level)))
+        scaled_h = max(1, int(round(base_h * self.zoom_level)))
+
         scaled = self.current_pixmap.scaled(
-            self.current_pixmap.size() * self.zoom_level,
+            scaled_w, scaled_h,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         self.preview_label.setPixmap(scaled)
         self.preview_label.resize(scaled.size())
 
-        # 2) center scrollbars
-        self.scroll_area.horizontalScrollBar().setValue(
-            (scaled.width() - self.scroll_area.viewport().width()) // 2
-        )
-        self.scroll_area.verticalScrollBar().setValue(
-            (scaled.height() - self.scroll_area.viewport().height()) // 2
-        )
+        # restore the center we captured (or 0.5,0.5 for first time)
+        self._restore_view_center_norm()
 
     def wheelEvent(self, event: QWheelEvent):
         # Check the vertical delta to determine zoom direction.
@@ -49080,8 +49351,8 @@ class BlinkTab(QWidget):
                 self.last_mouse_pos = event.pos()
                 return True
             elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-                # Stop dragging
                 self.dragging = False
+                self._capture_view_center_norm()  # remember where the user panned to
                 return True
         return super().eventFilter(source, event)
 
